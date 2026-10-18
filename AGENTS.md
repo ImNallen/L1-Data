@@ -64,6 +64,10 @@ The bridge has three limits. It runs in Chromium, not WKWebView. It has no nativ
 
 The environment variables that change the data directory, the credential store, and the test databases are listed in the README.
 
+## Desktop
+
+A virtual XFCE desktop runs on `DISPLAY=:1`. When the user asks to see the desktop, or when you launch a GUI app, open `http://localhost:6080/vnc.html?autoconnect=true&resize=scale` in the T3 preview pane.
+
 ## Keep the docs true
 
 - When you add or change a user-visible feature or shortcut, update the "What it does" list in `README.md`.
