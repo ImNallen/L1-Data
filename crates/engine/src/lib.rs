@@ -719,6 +719,11 @@ impl Engine {
         text::script_outline(text, cursor)
     }
 
+    /// The editor's format action. Pure, so the sync command never needs the runtime.
+    pub fn editor_format(&self, text: &str, target: RunTarget) -> Result<FormatEdit, FormatError> {
+        text::format_edit(text, target)
+    }
+
     pub async fn test_connection(&self, d: ConnectionDraft) -> Result<ServerInfo, ConnectError> {
         let s = &self.shared;
         let password = match (&d.password, d.id) {
@@ -973,12 +978,7 @@ impl Engine {
 
         let (text, spans) = match r {
             RunRequest::Script { text, target } => {
-                let map = text::OffsetMap::new(&text);
-                let target = match target {
-                    RunTarget::All => sql::ByteTarget::All,
-                    RunTarget::Cursor { offset } => sql::ByteTarget::Cursor(map.from_utf16(offset)),
-                    RunTarget::Selection { from, to } => sql::ByteTarget::Selection { from: map.from_utf16(from), to: map.from_utf16(to) },
-                };
+                let target = text::OffsetMap::new(&text).target(target);
                 let spans = sql::pick(&sql::split_statements(&text), &text, target);
                 (text, spans)
             }
@@ -1443,6 +1443,39 @@ mod tests {
         let err = engine.save_connection(ConnectionDraft { port: 0, ..draft("x") }).await.unwrap_err();
         assert!(matches!(err, SaveError::Invalid { .. }));
         assert!(engine.boot().connections.is_empty());
+    }
+
+    #[tokio::test]
+    async fn format_edits_are_in_utf16_units_past_non_ascii_text() {
+        let (engine, _dir) = engine().await;
+        assert_eq!(
+            engine.editor_format("select 'café 😀';\nselect a,b from t;\n", RunTarget::Cursor { offset: DocOffset(20) }),
+            Ok(FormatEdit { from: DocOffset(18), to: DocOffset(35), insert: "SELECT a,\n  b\nFROM t".into() })
+        );
+        assert_eq!(
+            engine.editor_format("-- café 😀\nselect a,b from t", RunTarget::Cursor { offset: DocOffset(13) }),
+            Ok(FormatEdit { from: DocOffset(0), to: DocOffset(28), insert: "-- café 😀\nSELECT a,\n  b\nFROM t".into() }),
+            "a leading comment is part of its statement"
+        );
+        assert_eq!(
+            engine.editor_format("select '漢字';\nselect 'é', x from t; select 2", RunTarget::Cursor { offset: DocOffset(15) }),
+            Ok(FormatEdit { from: DocOffset(13), to: DocOffset(33), insert: "SELECT 'é',\n  x\nFROM t".into() })
+        );
+    }
+
+    #[tokio::test]
+    async fn format_covers_the_statements_a_selection_touches_and_keeps_the_text_between() {
+        let (engine, _dir) = engine().await;
+        let text = "select 1;\nselect a,b from t;";
+        let both = FormatEdit { from: DocOffset(0), to: DocOffset(27), insert: "SELECT 1;\nSELECT a,\n  b\nFROM t".into() };
+        assert_eq!(engine.editor_format(text, RunTarget::Selection { from: DocOffset(3), to: DocOffset(12) }), Ok(both.clone()));
+        assert_eq!(engine.editor_format(text, RunTarget::All), Ok(both));
+        assert_eq!(
+            engine.editor_format(text, RunTarget::Selection { from: DocOffset(8), to: DocOffset(10) }),
+            Err(FormatError::NothingToFormat),
+            "only the semicolon and the newline"
+        );
+        assert_eq!(engine.editor_format("select 1;\n\nselect 2", RunTarget::Cursor { offset: DocOffset(10) }), Err(FormatError::NothingToFormat));
     }
 
     #[tokio::test]

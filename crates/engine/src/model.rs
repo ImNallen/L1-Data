@@ -569,6 +569,24 @@ pub struct ScriptOutline {
     pub at_cursor: Option<u16>,
 }
 
+/// Replace `from..to` with `insert`: the formatted statements and the original text between them.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct FormatEdit {
+    pub from: DocOffset,
+    pub to: DocOffset,
+    pub insert: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Type)]
+#[serde(tag = "kind")]
+pub enum FormatError {
+    /// No statement at the cursor or in the selection.
+    NothingToFormat,
+    /// The laid-out text would lex differently from the original, so the engine refused it.
+    Unsafe,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Type)]
 #[serde(rename_all = "camelCase")]
 pub struct ResultRef {

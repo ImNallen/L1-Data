@@ -24,6 +24,7 @@ L1 Data is a desktop IDE for PostgreSQL, built with Tauri 2, Rust, and React. Th
 ### Query tabs
 
 - Every tab is a query editor. A tab opened from a table also browses that table. Tabs complete table and column names from the live catalog, including the columns after a table alias such as `o.`. The editor draws a rounded box behind the statement `⌘↵` will run. A statement ends at `;`, or at a blank line when the next line starts a new statement. `⌘↵` or **Run** runs the selection as written, or the marked statement when nothing is selected. On a blank line nothing is marked, and `⌘↵` opens a list of the tab's statements instead. `⌘⇧↵` opens the list whenever the tab holds several statements. The list has an **All** row when there are several, and highlights in the editor what the row under the pointer or the arrow keys would run. `Enter`, a click, or a statement's number runs it and moves the cursor to its end. `Esc` closes the list. `Esc` or **Cancel** stops a running query.
+- `⌘⌥L` or **Format** formats the marked statement, or every statement the selection touches. Each clause starts a line, each list item and each `AND` or `OR` of a condition gets its own line, subqueries indent, and keywords are uppercase. Strings, comments, and function bodies stay byte for byte, and a column named like a keyword, such as `day`, keeps its case. Statements other than queries, `INSERT`, `UPDATE`, `DELETE`, and `CREATE TABLE` change only their keyword case. One `⌘Z` undoes the format. When the result might not mean the same, the editor keeps the text and says so.
 - Each tab has its own session, so `SET` and temp tables stay with the tab. The connection name in the top bar picks the tab's connection. The **Auto-commit** menu switches the tab between auto-commit and manual-transaction mode. It also shows when a lost connection rolled back the open transaction. Double-click a tab to rename it.
 - In manual mode, **Commit** and **Rollback** appear while a transaction is open, and the tab shows a dot. Closing that tab or disconnecting asks before it rolls back.
 - An error shows its detail, hint, and SQLSTATE, and the editor underlines the error position.
@@ -66,6 +67,7 @@ L1 Data is a desktop IDE for PostgreSQL, built with Tauri 2, Rust, and React. Th
 | `⌘W` | Close the tab, or close Settings |
 | `⌘↵` | Run the selection, or the marked statement under the cursor |
 | `⌘⇧↵` | Choose which statement to run, or all of them |
+| `⌘⌥L` | Format the marked statement, or the statements the selection touches |
 | `Esc` | Cancel the running query |
 | `Enter` | Edit the selected cell in an editable table, or show its full value elsewhere |
 | `F2` | Edit the selected cell |

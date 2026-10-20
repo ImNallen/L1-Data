@@ -1583,3 +1583,74 @@ async fn a_schema_choice_made_while_the_catalog_loads_is_not_reset() {
     let reporting = h.wait_database("reporting", |d| matches!(d.catalog, CatalogStatus::Ready { .. }) && !d.shown_schemas.is_empty()).await;
     assert_eq!(reporting.shown_schemas, ["public"], "shown again with nothing else said, the empty selection resets to the default");
 }
+
+/// Literals whose value depends on the lexer agreeing with Postgres's `scan.l`. A tag, a continued
+/// string, or a number the lexer misreads lets the formatter change the value or break the query.
+const AWKWARD_LITERALS: &[&str] = &[
+    "$é$select from t where x$é$",
+    "$ü$line one\n    indented  line$ü$",
+    "$a$ $b$ $b$ $a$",
+    "'a;b' || $é$ ; $é$",
+    "E'it\\'s'\n'\\'  two  spaces'",
+    "E'a\\\\'\n'b\\'c'",
+    "'one'\n'  two  '",
+    "'one' -- between the parts\n  'two'",
+    "'one'\r'two'",
+    "X'1F'\n'F'",
+    "U&'d!0061t' UESCAPE '!'",
+    "U&'d!0061t'\n'  !0061' UESCAPE '!'",
+    "1_000.5",
+    "1_000.25e-3",
+    "0x1F + 0b1010 + 0o17",
+    "1. + .5",
+];
+
+const BACKSLASH_LITERALS: &[&str] = &["'a\\'b'", "n'a\\'b'", "'C:\\path'", "'tab\\there'", "'x' -- c\n'y\\'z'"];
+
+async fn text_rows(client: &tokio_postgres::Client, sql: &str) -> Vec<Vec<Option<String>>> {
+    let messages = client.simple_query(sql).await.unwrap_or_else(|e| panic!("{sql:?}: {}", e.as_db_error().map_or(e.to_string(), |d| d.message().to_owned())));
+    messages
+        .iter()
+        .filter_map(|m| match m {
+            tokio_postgres::SimpleQueryMessage::Row(r) => Some((0..r.len()).map(|i| r.get(i).map(str::to_owned)).collect()),
+            _ => None,
+        })
+        .collect()
+}
+
+fn apply(text: &str, edit: &FormatEdit) -> String {
+    let units: Vec<u16> = text.encode_utf16().collect();
+    let (from, to) = (edit.from.0 as usize, edit.to.0 as usize);
+    String::from_utf16(&units[..from]).unwrap() + &edit.insert + &String::from_utf16(&units[to..]).unwrap()
+}
+
+#[tokio::test]
+async fn formatting_keeps_the_value_of_every_awkward_literal() {
+    let h = Harness::start().await;
+    let oracle = h.oracle().await;
+    for literal in AWKWARD_LITERALS {
+        let sql = format!("select {literal} as v");
+        let formatted = match h.engine.editor_format(&sql, RunTarget::All) {
+            Ok(edit) => apply(&sql, &edit),
+            Err(FormatError::Unsafe) => continue,
+            Err(e) => panic!("{sql:?}: {e:?}"),
+        };
+        assert_eq!(text_rows(&oracle, &formatted).await, text_rows(&oracle, &sql).await, "{sql:?} formatted as {formatted:?}");
+    }
+}
+
+#[tokio::test]
+async fn formatting_keeps_the_value_of_a_backslash_literal_with_standard_strings_off() {
+    let h = Harness::start().await;
+    let oracle = h.oracle().await;
+    oracle.batch_execute("set standard_conforming_strings = off; set escape_string_warning = off").await.unwrap();
+    for literal in BACKSLASH_LITERALS {
+        let sql = format!("select {literal} as v");
+        let formatted = match h.engine.editor_format(&sql, RunTarget::All) {
+            Ok(edit) => apply(&sql, &edit),
+            Err(FormatError::Unsafe) => continue,
+            Err(e) => panic!("{sql:?}: {e:?}"),
+        };
+        assert_eq!(text_rows(&oracle, &formatted).await, text_rows(&oracle, &sql).await, "{sql:?} formatted as {formatted:?}");
+    }
+}

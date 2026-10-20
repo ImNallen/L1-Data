@@ -21,5 +21,15 @@ list() {
   echo "pub(crate) const OTHER_KEYWORDS: &[&str] = &["
   list "'T', 'U'"
   echo "];"
+  echo
+  echo "/// Reserved keywords: never a column name or a function name."
+  echo "pub(crate) const RESERVED: &[&str] = &["
+  list "'R'"
+  echo "];"
+  echo
+  echo '/// Type-or-function-name keywords: never a column name, but `left(` can be a call.'
+  echo "pub(crate) const TYPE_OR_FUNCTION_NAME: &[&str] = &["
+  list "'T'"
+  echo "];"
 } >"$OUT"
 echo "wrote $OUT"

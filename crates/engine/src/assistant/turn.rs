@@ -265,12 +265,7 @@ impl Turn {
         };
         let tab_text = self.tab.as_ref().map_or("", |t| t.text.as_str());
         let picked = self.tab.as_ref().and_then(|t| {
-            let map = OffsetMap::new(&t.text);
-            let target = match t.target {
-                RunTarget::All => sql::ByteTarget::All,
-                RunTarget::Cursor { offset } => sql::ByteTarget::Cursor(map.from_utf16(offset)),
-                RunTarget::Selection { from, to } => sql::ByteTarget::Selection { from: map.from_utf16(from), to: map.from_utf16(to) },
-            };
+            let target = OffsetMap::new(&t.text).target(t.target);
             let spans = sql::pick(&sql::split_statements(&t.text), &t.text, target);
             Some(sql::StmtSpan { start: spans.first()?.start, end: spans.last()?.end })
         });

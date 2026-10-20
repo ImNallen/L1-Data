@@ -1,4 +1,4 @@
-import { Prec } from "@codemirror/state";
+import { Prec, type EditorState } from "@codemirror/state";
 import { EditorView, keymap } from "@codemirror/view";
 import {
   commands,
@@ -20,6 +20,7 @@ import { isRunning } from "../../state/status";
 import { pendingCount, toChanges, useTableEdits, type TableEdits } from "../../state/tableEdits";
 import { EMPTY_QUERY, isTableTab, nextUntitled, tabTarget, useWorkspace, type ConsoleTarget, type RelationRef, type Tab, type TableTab } from "../../state/workspace";
 import {
+  applyFormatEdit,
   cursorAnchor,
   cursorOf,
   dropEditor,
@@ -71,6 +72,29 @@ export function isBrowsing(tab: Tab): tab is TableTab {
   return isTableTab(tab) && textOf(tab.id).trim().replace(/;$/, "") === browseQuery(tab.table.schema, tab.table.table);
 }
 
+function selectionTarget(state: EditorState): RunTarget {
+  const sel = state.selection.main;
+  return sel.empty ? { kind: "cursor", offset: sel.head } : { kind: "selection", from: sel.from, to: sel.to };
+}
+
+/** Formats the statements the selection touches, or the statement ⌘↵ would run, as one undoable edit. */
+export async function formatActive(): Promise<void> {
+  const id = ws().active;
+  const tab = id ? ws().tabs[id] : undefined;
+  if (!id || !tab || isBrowsing(tab)) return;
+  const state = editorStateOf(id);
+  const res = await commands.editorFormat(state.doc.toString(), selectionTarget(state));
+  if (res.status === "error") {
+    if (res.error.kind === "Unsafe") notify("Couldn't format this statement safely.");
+    return;
+  }
+  const { from, to, insert } = res.data;
+  const stale = editorStateOf(id).doc !== state.doc;
+  const unchanged = state.doc.sliceString(from, to) === insert;
+  if (stale || unchanged) return;
+  applyFormatEdit(id, res.data);
+}
+
 type PageTarget = { page: number; exactRowCount?: number };
 
 // A page change is saved on the tab only once the engine accepts the run. One that arrives mid-run waits for that
@@ -94,13 +118,8 @@ async function runTab(tabId: TabId, target?: PageTarget, script?: RunTarget): Pr
     request = { kind: "tablePage", schema, table, page: target?.page ?? page, query };
   } else {
     const state = editorStateOf(tabId);
-    const sel = state.selection.main;
     text = state.doc.toString();
-    request = {
-      kind: "script",
-      text,
-      target: script ?? (sel.empty ? { kind: "cursor", offset: sel.head } : { kind: "selection", from: sel.from, to: sel.to }),
-    };
+    request = { kind: "script", text, target: script ?? selectionTarget(state) };
     showDiagnostics(tabId, []);
   }
 
@@ -437,6 +456,7 @@ export function installRunBehavior(): void {
       keymap.of([
         { key: "Mod-Enter", run: () => (void runOrChoose(), true) },
         { key: "Mod-Shift-Enter", run: () => (void runOrChoose(true), true) },
+        { key: "Mod-Alt-l", run: () => (void formatActive(), true) },
         { key: "Escape", run: () => cancelActive() },
       ]),
     ),

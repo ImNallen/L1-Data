@@ -7,7 +7,7 @@ import {
   type Completion,
   type CompletionSource,
 } from "@codemirror/autocomplete";
-import { defaultKeymap, history, historyKeymap, indentWithTab } from "@codemirror/commands";
+import { defaultKeymap, history, historyKeymap, indentWithTab, isolateHistory } from "@codemirror/commands";
 import { PostgreSQL, sql } from "@codemirror/lang-sql";
 import { bracketMatching, indentOnInput } from "@codemirror/language";
 import { setDiagnostics, type Diagnostic } from "@codemirror/lint";
@@ -25,7 +25,7 @@ import {
   type DecorationSet,
   type LayerMarker,
 } from "@codemirror/view";
-import type { DocRange, TabId } from "../../ipc/bindings";
+import type { DocRange, FormatEdit, TabId } from "../../ipc/bindings";
 import type { CatalogView } from "../../state/catalog";
 import { editorHighlighting, editorTheme, functionCallStyle, LINE_PADDING_LEFT } from "./theme";
 
@@ -318,6 +318,17 @@ export function insertAtCursor(id: TabId, text: string): void {
     const { from, to } = state.selection.main;
     return { changes: { from, to, insert: text }, selection: { anchor: from + text.length } };
   });
+}
+
+/** Applies a format in one transaction that history keeps apart from typing, so one undo restores the old text. */
+export function applyFormatEdit(id: TabId, { from, to, insert }: FormatEdit): void {
+  updateEditor(id, () => ({
+    changes: { from, to, insert },
+    selection: { anchor: from + insert.length },
+    annotations: isolateHistory.of("full"),
+    userEvent: "input.format",
+    scrollIntoView: true,
+  }));
 }
 
 /** Swaps the whole document in one transaction. Its userEvent keeps history from joining it with recent typing, so one undo restores the old text. */

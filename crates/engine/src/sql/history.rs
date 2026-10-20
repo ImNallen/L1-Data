@@ -1,4 +1,5 @@
-use super::split::{dollar_tag, skip_block_comment, skip_dollar_quoted, skip_quoted};
+use super::lex::{LexKind, Lexeme, is_ident_cont, lex, run};
+use super::split::skip_block_comment;
 
 #[derive(Debug, PartialEq)]
 pub(super) enum Token<'a> {
@@ -15,92 +16,70 @@ pub(super) enum Token<'a> {
     Other,
 }
 
-fn is_operator_char(c: u8) -> bool {
-    b"+-*/<>=~!@#%^&|`?".contains(&c)
-}
-
+/// The lexemes without comments and whitespace, in the shape `vet` and `history_is_write` read:
+/// a string's prefix is a word of its own, and a number splits at its dots, signs, and letters.
 pub(super) fn tokens(sql: &str) -> Vec<Token<'_>> {
-    let bytes = sql.as_bytes();
     let mut out = Vec::new();
-    let mut i = 0;
-    while i < bytes.len() {
-        match bytes[i] {
-            b'-' if bytes.get(i + 1) == Some(&b'-') => {
-                i = sql[i..].find('\n').map_or(bytes.len(), |n| i + n)
-            }
-            b'/' if bytes.get(i + 1) == Some(&b'*') => i = skip_block_comment(bytes, i),
-            b'"' => {
-                let end = skip_quoted(bytes, i, b'"');
-                let closed = end > i + 1 && bytes[end - 1] == b'"';
-                out.push(Token::Quoted(&sql[i + 1..if closed { end - 1 } else { end }]));
-                i = end;
-            }
-            b'\'' => {
-                out.push(Token::Other);
-                i = skip_quoted(bytes, i, b'\'');
-            }
-            b'$' if dollar_tag(bytes, i).is_some() => {
-                out.push(Token::Other);
-                i = skip_dollar_quoted(bytes, i, dollar_tag(bytes, i).unwrap());
-            }
-            c if c.is_ascii_alphabetic() || c == b'_' || c >= 0x80 => {
-                let start = i;
-                i += 1;
-                while i < bytes.len()
-                    && (bytes[i].is_ascii_alphanumeric()
-                        || bytes[i] == b'_'
-                        || bytes[i] == b'$'
-                        || bytes[i] >= 0x80)
-                {
-                    i += 1;
-                }
-                let word = &sql[start..i];
-                if word.eq_ignore_ascii_case("u") && bytes.get(i) == Some(&b'&') && matches!(bytes.get(i + 1), Some(b'"' | b'\'')) {
-                    out.push(Token::UnicodeEscape);
-                    i += 1;
-                } else {
-                    out.push(Token::Word(word));
-                }
-            }
-            c if c.is_ascii_digit() => {
-                let start = i;
-                while i < bytes.len() && bytes[i].is_ascii_digit() {
-                    i += 1;
-                }
-                out.push(Token::Number(&sql[start..i]));
-            }
-            c if is_operator_char(c) => {
-                let start = i;
-                i += 1;
-                while i < bytes.len() && is_operator_char(bytes[i]) && !sql[i..].starts_with("--") && !sql[i..].starts_with("/*") {
-                    i += 1;
-                }
-                // A multi-character operator ends in + or - only when it also has one of ~ ! @ # % ^ & | ` ?
-                if !bytes[start..i].iter().any(|b| b"~!@#%^&|`?".contains(b)) {
-                    while i - start > 1 && matches!(bytes[i - 1], b'+' | b'-') {
-                        i -= 1;
+    for Lexeme { kind, span } in lex(sql) {
+        let text = &sql[span];
+        match kind {
+            LexKind::Space | LexKind::LineComment | LexKind::BlockComment => {}
+            LexKind::Word => out.push(Token::Word(text)),
+            LexKind::QuotedIdent => {
+                let quoted = match text.strip_prefix(['U', 'u']) {
+                    Some(rest) => {
+                        out.push(Token::UnicodeEscape);
+                        &rest[1..]
                     }
+                    None => text,
+                };
+                let closed = quoted.len() > 1 && quoted.ends_with('"');
+                out.push(Token::Quoted(&quoted[1..if closed { quoted.len() - 1 } else { quoted.len() }]));
+            }
+            LexKind::String => {
+                match &text[..text.find('\'').unwrap_or(0)] {
+                    "" => {}
+                    "U&" | "u&" => out.push(Token::UnicodeEscape),
+                    prefix => out.push(Token::Word(prefix)),
                 }
-                out.push(match &sql[start..i] {
-                    "=>" => Token::Other,
-                    "!=" => Token::Operator("<>"),
-                    op => Token::Operator(op),
-                });
+                out.push(Token::Other);
             }
-            c if c.is_ascii_whitespace() => i += 1,
-            c => {
-                out.push(match c {
-                    b'.' => Token::Dot,
-                    b'(' => Token::Open,
-                    b')' => Token::Close,
-                    b',' => Token::Comma,
-                    _ => Token::Other,
-                });
-                i += 1;
-            }
+            LexKind::Number | LexKind::Param => split_number(text, &mut out),
+            LexKind::Operator => match text {
+                "::" => out.extend([Token::Other, Token::Other]),
+                "=>" => out.push(Token::Other),
+                "!=" => out.push(Token::Operator("<>")),
+                op => out.push(Token::Operator(op)),
+            },
+            LexKind::Dot => out.push(Token::Dot),
+            LexKind::Comma => out.push(Token::Comma),
+            LexKind::Open => out.push(Token::Open),
+            LexKind::Close => out.push(Token::Close),
+            LexKind::DollarString | LexKind::OpenBracket | LexKind::CloseBracket | LexKind::Semicolon | LexKind::Other => out.push(Token::Other),
         }
     }
     out
+}
+
+fn split_number<'a>(text: &'a str, out: &mut Vec<Token<'a>>) {
+    let bytes = text.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        let start = i;
+        i = match bytes[i] {
+            c if c.is_ascii_digit() => run(bytes, i, |c| c.is_ascii_digit()),
+            b'$' | b'.' | b'+' | b'-' => i + 1,
+            _ => run(bytes, i + 1, is_ident_cont),
+        };
+        let text = &text[start..i];
+        out.push(match bytes[start] {
+            b'$' => Token::Other,
+            b'.' => Token::Dot,
+            b'+' | b'-' => Token::Operator(text),
+            c if c.is_ascii_digit() => Token::Number(text),
+            _ => Token::Word(text),
+        });
+    }
 }
 
 fn word(token: Option<&Token<'_>>, expected: &str) -> bool {
@@ -280,6 +259,50 @@ mod tests {
         assert!(!history_is_write(
             "WITH café AS (SELECT 1) SELECT * FROM café"
         ));
+    }
+
+    #[test]
+    fn tokens_keep_the_shape_vet_reads() {
+        use Token::*;
+        assert_eq!(
+            tokens(r#"select E'\'', U&"d!0061" , u&'x', $1::int, 1.5e-3, a != b, f(x => 1) -- c"#),
+            vec![
+                Word("select"),
+                Word("E"),
+                Other,
+                Comma,
+                UnicodeEscape,
+                Quoted("d!0061"),
+                Comma,
+                UnicodeEscape,
+                Other,
+                Comma,
+                Other,
+                Number("1"),
+                Other,
+                Other,
+                Word("int"),
+                Comma,
+                Number("1"),
+                Dot,
+                Number("5"),
+                Word("e"),
+                Operator("-"),
+                Number("3"),
+                Comma,
+                Word("a"),
+                Operator("<>"),
+                Word("b"),
+                Comma,
+                Word("f"),
+                Open,
+                Word("x"),
+                Other,
+                Number("1"),
+                Close,
+            ]
+        );
+        assert_eq!(tokens("x #>> 'p' /* c */ .. \"open"), vec![Word("x"), Operator("#>>"), Other, Other, Quoted("open")]);
     }
 
     #[test]

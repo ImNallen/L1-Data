@@ -1,3 +1,5 @@
+use super::lex::{is_ident_cont, is_ident_start, run};
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct StmtSpan {
     pub start: usize,
@@ -115,12 +117,13 @@ pub fn split_statements(sql: &str) -> Vec<StmtSpan> {
     while i < bytes.len() {
         let c = bytes[i];
         match c {
-            b'-' if bytes.get(i + 1) == Some(&b'-') => {
-                i = sql[i..].find('\n').map_or(bytes.len(), |n| i + n);
-            }
+            b'-' if bytes.get(i + 1) == Some(&b'-') => i = line_comment_end(bytes, i),
             b'/' if bytes.get(i + 1) == Some(&b'*') => i = skip_block_comment(bytes, i),
-            b'\'' => i = skip_quoted(bytes, i, b'\''),
-            b'"' => i = skip_quoted(bytes, i, b'"'),
+            b'\'' => {
+                let escapes = i > 0 && matches!(bytes[i - 1], b'E' | b'e') && (i < 2 || !is_ident_cont(bytes[i - 2]));
+                i = skip_string(bytes, i, escapes);
+            }
+            b'"' => i = skip_quoted(bytes, i, b'"', false),
             b'$' => match dollar_tag(bytes, i) {
                 Some(tag_len) => i = skip_dollar_quoted(bytes, i, tag_len),
                 None => i += 1,
@@ -142,8 +145,8 @@ pub fn split_statements(sql: &str) -> Vec<StmtSpan> {
                 }
                 None => i += 1,
             },
-            c if c.is_ascii_alphabetic() || c == b'_' => {
-                let end = word_end(bytes, i);
+            c if is_ident_start(c) => {
+                let end = run(bytes, i + 1, is_ident_cont);
                 stmt.word(&sql[i..end]);
                 i = end;
             }
@@ -180,10 +183,10 @@ fn first_word(sql: &str, mut i: usize) -> &str {
     let bytes = sql.as_bytes();
     while i < bytes.len() {
         match bytes[i] {
-            b'-' if bytes.get(i + 1) == Some(&b'-') => i = sql[i..].find('\n').map_or(bytes.len(), |n| i + n),
+            b'-' if bytes.get(i + 1) == Some(&b'-') => i = line_comment_end(bytes, i),
             b'/' if bytes.get(i + 1) == Some(&b'*') => i = skip_block_comment(bytes, i),
             c if c.is_ascii_whitespace() => i += 1,
-            c if c.is_ascii_alphabetic() || c == b'_' => return &sql[i..word_end(bytes, i)],
+            c if is_ident_start(c) => return &sql[i..run(bytes, i + 1, is_ident_cont)],
             _ => return "",
         }
     }
@@ -238,23 +241,13 @@ fn is_only_comments(text: &str) -> bool {
     let mut i = 0;
     while i < bytes.len() {
         match bytes[i] {
-            b'-' if bytes.get(i + 1) == Some(&b'-') => {
-                i = text[i..].find('\n').map_or(bytes.len(), |n| i + n);
-            }
+            b'-' if bytes.get(i + 1) == Some(&b'-') => i = line_comment_end(bytes, i),
             b'/' if bytes.get(i + 1) == Some(&b'*') => i = skip_block_comment(bytes, i),
             c if c.is_ascii_whitespace() => i += 1,
             _ => return false,
         }
     }
     true
-}
-
-fn word_end(bytes: &[u8], start: usize) -> usize {
-    let mut i = start;
-    while i < bytes.len() && (bytes[i].is_ascii_alphanumeric() || bytes[i] == b'_') {
-        i += 1;
-    }
-    i
 }
 
 pub(super) fn skip_block_comment(bytes: &[u8], mut i: usize) -> usize {
@@ -276,9 +269,41 @@ pub(super) fn skip_block_comment(bytes: &[u8], mut i: usize) -> usize {
     bytes.len()
 }
 
-pub(super) fn skip_quoted(bytes: &[u8], i: usize, quote: u8) -> usize {
-    let escapes = quote == b'\'' && i > 0 && (bytes[i - 1] == b'E' || bytes[i - 1] == b'e')
-        && (i < 2 || !(bytes[i - 2].is_ascii_alphanumeric() || bytes[i - 2] == b'_'));
+/// The end of the string literal whose opening quote is at `i`, past every part Postgres joins to it.
+/// `escapes` is true for an `E` literal, whose backslash escapes hold in every part.
+pub(super) fn skip_string(bytes: &[u8], i: usize, escapes: bool) -> usize {
+    let mut end = skip_quoted(bytes, i, b'\'', escapes);
+    while let Some(next) = continued_at(bytes, end) {
+        end = skip_quoted(bytes, next, b'\'', escapes);
+    }
+    end
+}
+
+/// The quote of the part that continues a literal ending at `i`. `scan.l`'s `quotecontinue` allows
+/// whitespace and `--` comments between the parts, and requires a newline among them.
+fn continued_at(bytes: &[u8], mut i: usize) -> Option<usize> {
+    let mut newline = false;
+    loop {
+        match *bytes.get(i)? {
+            b'\'' => return newline.then_some(i),
+            b'-' if bytes.get(i + 1) == Some(&b'-') => i = line_comment_end(bytes, i),
+            c if c.is_ascii_whitespace() => {
+                newline |= matches!(c, b'\n' | b'\r');
+                i += 1;
+            }
+            _ => return None,
+        }
+    }
+}
+
+/// The end of the `--` comment at `i`, which is the next `\n` or `\r`.
+pub(super) fn line_comment_end(bytes: &[u8], i: usize) -> usize {
+    run(bytes, i, |c| !matches!(c, b'\n' | b'\r'))
+}
+
+/// The end of one quoted part at `i`. A doubled quote stays inside it, and so does any byte after a
+/// backslash when `escapes` is true.
+pub(super) fn skip_quoted(bytes: &[u8], i: usize, quote: u8, escapes: bool) -> usize {
     let mut j = i + 1;
     while j < bytes.len() {
         if escapes && bytes[j] == b'\\' {
@@ -296,13 +321,12 @@ pub(super) fn skip_quoted(bytes: &[u8], i: usize, quote: u8) -> usize {
     bytes.len()
 }
 
+/// The length of the `$tag$` at `i`. A tag is `scan.l`'s `{dolq_start}{dolq_cont}*`: a letter, `_`, or
+/// any byte from 0x80 up, then those or digits. A digit first makes a parameter such as `$1`.
 pub(super) fn dollar_tag(bytes: &[u8], i: usize) -> Option<usize> {
     let mut j = i + 1;
-    if j < bytes.len() && bytes[j].is_ascii_digit() {
-        return None; // a positional parameter such as `$1`
-    }
-    while j < bytes.len() && (bytes[j].is_ascii_alphanumeric() || bytes[j] == b'_') {
-        j += 1;
+    if bytes.get(j).is_some_and(|&c| is_ident_start(c)) {
+        j = run(bytes, j + 1, |c| is_ident_start(c) || c.is_ascii_digit());
     }
     (bytes.get(j) == Some(&b'$')).then_some(j + 1 - i)
 }
@@ -343,6 +367,13 @@ mod tests {
     }
 
     #[test]
+    fn a_continued_e_string_keeps_its_escapes_and_hides_semicolons() {
+        let sql = "update t set body = E'it\\'s'\n'\\'; still the string' where id = 1; select 2";
+        assert_eq!(texts(sql), vec!["update t set body = E'it\\'s'\n'\\'; still the string' where id = 1", "select 2"]);
+        assert_eq!(texts("select 'a'\n'b;c'; select 2"), vec!["select 'a'\n'b;c'", "select 2"]);
+    }
+
+    #[test]
     fn dollar_quotes_hide_semicolons_and_parameters_do_not() {
         let sql = "create function f() returns int language sql as $$ select 1; $$; select $1;";
         assert_eq!(
@@ -354,11 +385,30 @@ mod tests {
     }
 
     #[test]
+    fn a_dollar_inside_a_name_starts_no_dollar_quote() {
+        assert_eq!(texts("select 1 as a$x$; select 2"), vec!["select 1 as a$x$", "select 2"]);
+        assert_eq!(texts("select é$x$; select 2"), vec!["select é$x$", "select 2"]);
+    }
+
+    #[test]
+    fn a_dollar_quote_tag_may_hold_non_ascii_letters() {
+        assert_eq!(texts("select $é$ ; $é$; select 2"), vec!["select $é$ ; $é$", "select 2"]);
+        assert_eq!(texts("select $_ü1$ a;b $_ü1$ as v; select 2"), vec!["select $_ü1$ a;b $_ü1$ as v", "select 2"]);
+    }
+
+    #[test]
     fn comments_hide_semicolons_and_comment_only_chunks_vanish() {
         assert_eq!(texts("select 1 -- a;b\n; select 2"), vec!["select 1 -- a;b", "select 2"]);
         assert_eq!(texts("select /* x; /* nested; */ y */ 1; select 2"), vec!["select /* x; /* nested; */ y */ 1", "select 2"]);
         assert_eq!(texts("-- only a comment\n/* and another */"), Vec::<&str>::new());
         assert_eq!(texts("select 1; -- trailing"), vec!["select 1"]);
+    }
+
+    #[test]
+    fn a_line_comment_ends_at_a_carriage_return() {
+        assert_eq!(texts("select 1 -- c\r; select 2"), vec!["select 1 -- c", "select 2"]);
+        assert_eq!(texts("-- only\r-- comments"), Vec::<&str>::new());
+        assert_eq!(texts("select 1\n\n-- c\rselect 2"), vec!["select 1", "-- c\rselect 2"]);
     }
 
     #[test]

@@ -582,5 +582,7 @@ mod pg_tests {
         let of = |codes: &[&str]| rows.iter().filter(|r| codes.contains(&r.get::<_, String>(1).as_str())).map(|r| r.get::<_, String>(0)).collect::<Vec<_>>();
         assert_eq!(of(&["R", "C"]), sql::NEVER_A_FUNCTION, "rerun dev/pg-keywords.sh");
         assert_eq!(of(&["T", "U"]), sql::OTHER_KEYWORDS, "rerun dev/pg-keywords.sh");
+        assert_eq!(of(&["R"]), sql::RESERVED, "rerun dev/pg-keywords.sh");
+        assert_eq!(of(&["T"]), sql::TYPE_OR_FUNCTION_NAME, "rerun dev/pg-keywords.sh");
     }
 }
