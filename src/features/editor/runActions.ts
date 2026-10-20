@@ -89,8 +89,9 @@ export async function formatActive(): Promise<void> {
     return;
   }
   const { from, to, insert } = res.data;
-  // Offsets into text that changed while the engine worked would land in the wrong place.
-  if (editorStateOf(id).doc !== state.doc || state.doc.sliceString(from, to) === insert) return;
+  const stale = editorStateOf(id).doc !== state.doc;
+  const unchanged = state.doc.sliceString(from, to) === insert;
+  if (stale || unchanged) return;
   applyFormatEdit(id, res.data);
 }
 
