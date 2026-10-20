@@ -75,7 +75,6 @@ fn read<'a>(sql: &'a str, lexemes: &[Lexeme]) -> (Vec<Tok<'a>>, Vec<Note<'a>>) {
     (toks, notes)
 }
 
-/// How a word reads in its position.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Role {
     Keyword,
@@ -161,7 +160,6 @@ const PHRASES: &[&[&str]] = &[
     &["if", "not", "exists"],
 ];
 
-/// Phrases of the statements kept verbatim, where no clause layout marks keywords.
 const VERBATIM_PHRASES: &[&[&str]] = &[
     &["or", "replace"],
     &["returns"],
@@ -349,10 +347,8 @@ struct ClauseStart {
 enum Frame {
     /// A statement or a subquery, laid out clause by clause. `close` is the indent of a subquery's `)`.
     Query { indent: usize, close: Option<usize>, clause: Clause, open_betweens: usize },
-    /// Parentheses or brackets kept on one line.
     Inline,
     Case { indent: usize },
-    /// The column list of `CREATE TABLE`, one column or constraint per line.
     Columns { indent: usize },
 }
 
@@ -409,7 +405,7 @@ impl<'a> Layout<'a> {
 
     fn run(mut self, trailing: &[Note<'_>]) -> String {
         for i in 0..self.toks.len() {
-            let own = self.place(i);
+            let own = self.advance(i);
             let pending = self.pending.take().map(Sep::Line);
             let sep = own.or(pending).unwrap_or_else(|| self.gap(i));
             let tok = &self.toks[i];
@@ -447,9 +443,7 @@ impl<'a> Layout<'a> {
             .unwrap_or(2)
     }
 
-    /// The separator the token's place in the layout demands, if any. Closes the frames it ends and
-    /// moves the query frame to the clause it opens.
-    fn place(&mut self, i: usize) -> Option<Sep> {
+    fn advance(&mut self, i: usize) -> Option<Sep> {
         if matches!(self.kind(i), Some(LexKind::Close | LexKind::CloseBracket)) {
             while let Some(frame) = self.frames.pop() {
                 match frame {
@@ -548,7 +542,6 @@ impl<'a> Layout<'a> {
         })
     }
 
-    /// Opens the frame a token starts, after it is written with `sep`.
     fn open(&mut self, i: usize, sep: Sep) {
         match self.kind(i) {
             Some(LexKind::Open) => {
@@ -586,7 +579,6 @@ impl<'a> Layout<'a> {
         }
     }
 
-    /// Inline spacing between token `i` and the one before it.
     fn gap(&self, i: usize) -> Sep {
         use LexKind::*;
         if i == 0 {
