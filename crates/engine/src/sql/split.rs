@@ -1,4 +1,4 @@
-use super::lex::{is_ident_start, run};
+use super::lex::{is_ident_cont, is_ident_start, run};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct StmtSpan {
@@ -121,8 +121,11 @@ pub fn split_statements(sql: &str) -> Vec<StmtSpan> {
                 i = sql[i..].find('\n').map_or(bytes.len(), |n| i + n);
             }
             b'/' if bytes.get(i + 1) == Some(&b'*') => i = skip_block_comment(bytes, i),
-            b'\'' => i = skip_quoted(bytes, i, b'\''),
-            b'"' => i = skip_quoted(bytes, i, b'"'),
+            b'\'' => {
+                let escapes = i > 0 && matches!(bytes[i - 1], b'E' | b'e') && (i < 2 || !is_ident_cont(bytes[i - 2]));
+                i = skip_string(bytes, i, escapes);
+            }
+            b'"' => i = skip_quoted(bytes, i, b'"', false),
             b'$' => match dollar_tag(bytes, i) {
                 Some(tag_len) => i = skip_dollar_quoted(bytes, i, tag_len),
                 None => i += 1,
@@ -278,9 +281,41 @@ pub(super) fn skip_block_comment(bytes: &[u8], mut i: usize) -> usize {
     bytes.len()
 }
 
-pub(super) fn skip_quoted(bytes: &[u8], i: usize, quote: u8) -> usize {
-    let escapes = quote == b'\'' && i > 0 && (bytes[i - 1] == b'E' || bytes[i - 1] == b'e')
-        && (i < 2 || !(bytes[i - 2].is_ascii_alphanumeric() || bytes[i - 2] == b'_'));
+/// The end of the string literal whose opening quote is at `i`, past every part Postgres joins to it.
+/// `escapes` is true for an `E` literal, whose backslash escapes hold in every part.
+pub(super) fn skip_string(bytes: &[u8], i: usize, escapes: bool) -> usize {
+    let mut end = skip_quoted(bytes, i, b'\'', escapes);
+    while let Some(next) = continued_at(bytes, end) {
+        end = skip_quoted(bytes, next, b'\'', escapes);
+    }
+    end
+}
+
+/// The quote of the part that continues a literal ending at `i`. `scan.l`'s `quotecontinue` allows
+/// whitespace and `--` comments between the parts, and requires a newline among them.
+fn continued_at(bytes: &[u8], mut i: usize) -> Option<usize> {
+    let mut newline = false;
+    loop {
+        match *bytes.get(i)? {
+            b'\'' => return newline.then_some(i),
+            b'-' if bytes.get(i + 1) == Some(&b'-') => i = line_comment_end(bytes, i),
+            c if c.is_ascii_whitespace() => {
+                newline |= matches!(c, b'\n' | b'\r');
+                i += 1;
+            }
+            _ => return None,
+        }
+    }
+}
+
+/// The end of the `--` comment at `i`, which is the next `\n` or `\r`.
+pub(super) fn line_comment_end(bytes: &[u8], i: usize) -> usize {
+    run(bytes, i, |c| !matches!(c, b'\n' | b'\r'))
+}
+
+/// The end of one quoted part at `i`. A doubled quote stays inside it, and so does any byte after a
+/// backslash when `escapes` is true.
+pub(super) fn skip_quoted(bytes: &[u8], i: usize, quote: u8, escapes: bool) -> usize {
     let mut j = i + 1;
     while j < bytes.len() {
         if escapes && bytes[j] == b'\\' {
@@ -341,6 +376,13 @@ mod tests {
         assert_eq!(texts("select 'it''s;'; select 2"), vec!["select 'it''s;'", "select 2"]);
         assert_eq!(texts(r"select E'\';'; select 2"), vec![r"select E'\';'", "select 2"]);
         assert_eq!(texts(r"select e'a\\'; select 2"), vec![r"select e'a\\'", "select 2"]);
+    }
+
+    #[test]
+    fn a_continued_e_string_keeps_its_escapes_and_hides_semicolons() {
+        let sql = "update t set body = E'it\\'s'\n'\\'; still the string' where id = 1; select 2";
+        assert_eq!(texts(sql), vec!["update t set body = E'it\\'s'\n'\\'; still the string' where id = 1", "select 2"]);
+        assert_eq!(texts("select 'a'\n'b;c'; select 2"), vec!["select 'a'\n'b;c'", "select 2"]);
     }
 
     #[test]

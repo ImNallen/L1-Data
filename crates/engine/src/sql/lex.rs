@@ -1,6 +1,6 @@
 use std::ops::Range;
 
-use super::split::{dollar_tag, skip_block_comment, skip_dollar_quoted, skip_quoted};
+use super::split::{dollar_tag, skip_block_comment, skip_dollar_quoted, skip_quoted, skip_string};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum LexKind {
@@ -10,7 +10,8 @@ pub(crate) enum LexKind {
     Word,
     /// `"…"` or `U&"…"`.
     QuotedIdent,
-    /// `'…'`, or the same with an `E`, `B`, `X`, `N`, or `U&` prefix.
+    /// `'…'`, or the same with an `E`, `B`, `X`, `N`, or `U&` prefix, with every `'…'` that continues it
+    /// across a newline.
     String,
     DollarString,
     Number,
@@ -74,8 +75,8 @@ fn lexeme_at(sql: &str, i: usize) -> (LexKind, usize) {
         c if c.is_ascii_whitespace() => (Space, run(bytes, i, |c| c.is_ascii_whitespace())),
         b'-' if at(i + 1) == Some(b'-') => (LineComment, sql[i..].find('\n').map_or(bytes.len(), |n| i + n)),
         b'/' if at(i + 1) == Some(b'*') => (BlockComment, skip_block_comment(bytes, i)),
-        b'"' => (QuotedIdent, skip_quoted(bytes, i, b'"')),
-        b'\'' => (String, skip_quoted(bytes, i, b'\'')),
+        b'"' => (QuotedIdent, skip_quoted(bytes, i, b'"', false)),
+        b'\'' => (String, skip_string(bytes, i, false)),
         b'$' => match dollar_tag(bytes, i) {
             Some(tag_len) => (DollarString, skip_dollar_quoted(bytes, i, tag_len)),
             None if digit_at(i + 1) => (Param, junk(bytes, run(bytes, i + 1, |c| c.is_ascii_digit()))),
@@ -85,10 +86,9 @@ fn lexeme_at(sql: &str, i: usize) -> (LexKind, usize) {
             let end = run(bytes, i + 1, is_ident_cont);
             let word = &sql[i..end];
             match at(end) {
-                Some(b'\'') if matches!(word, "e" | "E" | "b" | "B" | "x" | "X" | "n" | "N") => (String, skip_quoted(bytes, end, b'\'')),
+                Some(b'\'') if matches!(word, "e" | "E" | "b" | "B" | "x" | "X" | "n" | "N") => (String, skip_string(bytes, end, word.eq_ignore_ascii_case("e"))),
                 Some(b'&') if word.eq_ignore_ascii_case("u") && matches!(at(end + 1), Some(b'"' | b'\'')) => {
-                    let quote = bytes[end + 1];
-                    (if quote == b'"' { QuotedIdent } else { String }, skip_quoted(bytes, end + 1, quote))
+                    if bytes[end + 1] == b'"' { (QuotedIdent, skip_quoted(bytes, end + 1, b'"', false)) } else { (String, skip_string(bytes, end + 1, false)) }
                 }
                 _ => (Word, end),
             }
@@ -222,6 +222,26 @@ mod tests {
             ]
         );
         assert_eq!(kinds("U&\"a\"\"b\" \"c"), vec![(QuotedIdent, "U&\"a\"\"b\""), (Space, " "), (QuotedIdent, "\"c")]);
+    }
+
+    #[test]
+    fn a_string_continued_across_a_newline_is_one_lexeme() {
+        assert_eq!(kinds("E'it\\'s'\n'\\'  two  spaces' x"), vec![(String, "E'it\\'s'\n'\\'  two  spaces'"), (Space, " "), (Word, "x")]);
+        assert_eq!(kinds("'a' -- c\n  'b'\n-- d\n'c'"), vec![(String, "'a' -- c\n  'b'\n-- d\n'c'")]);
+        assert_eq!(kinds("'a'\r'b'"), vec![(String, "'a'\r'b'")]);
+        assert_eq!(
+            kinds("B'01'\n'10' X'1F'\n'F' U&'a'\n'b' N'a'\n'b'"),
+            vec![(String, "B'01'\n'10'"), (Space, " "), (String, "X'1F'\n'F'"), (Space, " "), (String, "U&'a'\n'b'"), (Space, " "), (String, "N'a'\n'b'")]
+        );
+    }
+
+    #[test]
+    fn strings_without_a_newline_between_them_stay_apart() {
+        assert_eq!(kinds("'a' 'b'"), vec![(String, "'a'"), (Space, " "), (String, "'b'")]);
+        assert_eq!(kinds("'a' /* c */\n'b'"), vec![(String, "'a'"), (Space, " "), (BlockComment, "/* c */"), (Space, "\n"), (String, "'b'")]);
+        assert_eq!(kinds("'a'\n/* c */ 'b'"), vec![(String, "'a'"), (Space, "\n"), (BlockComment, "/* c */"), (Space, " "), (String, "'b'")]);
+        assert_eq!(kinds("'a' -- c"), vec![(String, "'a'"), (Space, " "), (LineComment, "-- c")]);
+        assert_eq!(kinds("\"a\"\n\"b\""), vec![(QuotedIdent, "\"a\""), (Space, "\n"), (QuotedIdent, "\"b\"")]);
     }
 
     #[test]

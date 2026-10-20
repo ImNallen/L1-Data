@@ -38,8 +38,6 @@ struct Tok<'a> {
     notes: Vec<Note<'a>>,
     /// Whitespace directly before the token.
     spaced: bool,
-    /// A newline anywhere between the previous token and this one.
-    newline: bool,
 }
 
 struct Note<'a> {
@@ -53,13 +51,12 @@ struct Note<'a> {
 fn read<'a>(sql: &'a str, lexemes: &[Lexeme]) -> (Vec<Tok<'a>>, Vec<Note<'a>>) {
     let mut toks = Vec::new();
     let mut notes: Vec<Note<'a>> = Vec::new();
-    let (mut spaced, mut newline, mut newline_since_tok) = (false, false, false);
+    let (mut spaced, mut newline) = (false, false);
     for l in lexemes {
         let text = &sql[l.span.clone()];
         if l.kind == LexKind::Space {
             spaced = true;
             newline |= text.contains('\n');
-            newline_since_tok |= newline;
             continue;
         }
         if let Some(last) = notes.last_mut() {
@@ -70,8 +67,7 @@ fn read<'a>(sql: &'a str, lexemes: &[Lexeme]) -> (Vec<Tok<'a>>, Vec<Note<'a>>) {
                 notes.push(Note { text, line: l.kind == LexKind::LineComment, own_line: newline, spaced, newline_after: false });
             }
             kind => {
-                toks.push(Tok { kind, text, notes: std::mem::take(&mut notes), spaced, newline: newline_since_tok });
-                newline_since_tok = false;
+                toks.push(Tok { kind, text, notes: std::mem::take(&mut notes), spaced });
             }
         }
         (spaced, newline) = (false, false);
@@ -593,10 +589,6 @@ impl<'a> Layout<'a> {
         if a.kind == Other || b.kind == Other {
             return if b.spaced || !b.notes.is_empty() { Sep::Space } else { Sep::Tight };
         }
-        // Postgres joins two string literals only across a newline, so the newline stays.
-        if a.kind == String && b.kind == String && b.newline {
-            return Sep::Line(self.cont());
-        }
         let tight = matches!(b.kind, Comma | Close | CloseBracket | Semicolon | Dot | OpenBracket)
             || matches!(a.kind, Open | OpenBracket | Dot)
             || a.text == "::"
@@ -788,8 +780,17 @@ mod tests {
     }
 
     #[test]
-    fn strings_joined_across_a_newline_stay_on_two_lines() {
-        assert_eq!(fmt("select 'a'\n'b', 'c' from t"), "SELECT 'a'\n  'b',\n  'c'\nFROM t");
+    fn a_string_continued_across_a_newline_stays_byte_for_byte() {
+        assert_eq!(fmt("select 'a'\n'b', 'c' from t"), "SELECT 'a'\n'b',\n  'c'\nFROM t");
+        assert_eq!(
+            fmt("update t set body = E'it\\'s'\n'\\'  two  spaces' where id = 1"),
+            "UPDATE t\nSET body = E'it\\'s'\n'\\'  two  spaces'\nWHERE id = 1"
+        );
+    }
+
+    #[test]
+    fn strings_that_postgres_would_not_join_are_never_joined() {
+        assert_eq!(fmt("select 'a' 'b' from t"), "SELECT 'a' 'b'\nFROM t");
     }
 
     #[test]
