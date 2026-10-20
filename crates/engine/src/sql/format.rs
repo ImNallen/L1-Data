@@ -789,6 +789,11 @@ mod tests {
     }
 
     #[test]
+    fn an_underscored_number_with_a_fraction_stays_whole() {
+        assert_eq!(fmt("select 1_000.5 as x, 1_000.25e-3, 1..2"), "SELECT 1_000.5 AS x,\n  1_000.25e-3,\n  1..2");
+    }
+
+    #[test]
     fn strings_that_postgres_would_not_join_are_never_joined() {
         assert_eq!(fmt("select 'a' 'b' from t"), "SELECT 'a' 'b'\nFROM t");
     }

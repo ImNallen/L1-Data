@@ -302,7 +302,7 @@ mod tests {
                 Close,
             ]
         );
-        assert_eq!(tokens("x #>> 'p' /* c */ .. \"open"), vec![Word("x"), Operator("#>>"), Other, Dot, Dot, Quoted("open")]);
+        assert_eq!(tokens("x #>> 'p' /* c */ .. \"open"), vec![Word("x"), Operator("#>>"), Other, Other, Quoted("open")]);
     }
 
     #[test]

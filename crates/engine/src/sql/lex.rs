@@ -95,6 +95,7 @@ fn lexeme_at(sql: &str, i: usize) -> (LexKind, usize) {
         }
         c if c.is_ascii_digit() => (Number, number_end(bytes, i)),
         b'.' if digit_at(i + 1) => (Number, number_end(bytes, i)),
+        b'.' if at(i + 1) == Some(b'.') => (Other, i + 2), // scan.l's `dot_dot`, one token
         b':' if at(i + 1) == Some(b':') => (Operator, i + 2),
         c if is_operator_char(c) => (Operator, operator_end(sql, i)),
         b'.' => (Dot, i + 1),
@@ -108,19 +109,40 @@ fn lexeme_at(sql: &str, i: usize) -> (LexKind, usize) {
     }
 }
 
-/// `1`, `1.5`, `.5`, `1.`, and `1e-5`. Postgres rejects letters glued to a number, so they stay in it
-/// (`0x1F`, `1_000`, `1e5`, `1abc`) rather than start a word that could later be spaced apart.
+/// `1_000`, `1.5`, `.5`, `1.`, and `1.5e-3`, then any word glued on. Postgres reads `0x1F`, `0o17`,
+/// and `0b1010` as one number and rejects every other glued word (`1abc`, `0b102`) as trailing junk,
+/// so the word stays in the lexeme rather than become a word the layout could space apart.
 fn number_end(bytes: &[u8], i: usize) -> usize {
-    let digits = |k: usize| run(bytes, k, |c| c.is_ascii_digit());
-    let mut j = digits(i);
+    let mut j = decinteger_end(bytes, i);
     if bytes.get(j) == Some(&b'.') && bytes.get(j + 1) != Some(&b'.') {
-        j = digits(j + 1);
+        j = decinteger_end(bytes, j + 1);
     }
-    // An unsigned exponent is glued letters and digits, which `junk` takes whole.
-    if matches!(bytes.get(j), Some(b'e' | b'E')) && matches!(bytes.get(j + 1), Some(b'+' | b'-')) && bytes.get(j + 2).is_some_and(u8::is_ascii_digit) {
-        j = digits(j + 2);
+    if matches!(bytes.get(j), Some(b'e' | b'E')) {
+        let digits = j + 1 + usize::from(matches!(bytes.get(j + 1), Some(b'+' | b'-')));
+        let end = decinteger_end(bytes, digits);
+        if end > digits {
+            j = end;
+        }
     }
     junk(bytes, j)
+}
+
+/// The end of `scan.l`'s `{decdigit}(_?{decdigit})*` at `i`, or `i` when no digit starts there.
+fn decinteger_end(bytes: &[u8], i: usize) -> usize {
+    let digit = |k: usize| bytes.get(k).is_some_and(u8::is_ascii_digit);
+    if !digit(i) {
+        return i;
+    }
+    let mut j = i + 1;
+    loop {
+        if digit(j) {
+            j += 1;
+        } else if bytes.get(j) == Some(&b'_') && digit(j + 1) {
+            j += 2;
+        } else {
+            return j;
+        }
+    }
 }
 
 fn junk(bytes: &[u8], j: usize) -> usize {
@@ -222,6 +244,20 @@ mod tests {
             ]
         );
         assert_eq!(kinds("U&\"a\"\"b\" \"c"), vec![(QuotedIdent, "U&\"a\"\"b\""), (Space, " "), (QuotedIdent, "\"c")]);
+    }
+
+    #[test]
+    fn numbers_lex_as_postgres_16_does() {
+        fn numbers(sql: &str) -> Vec<(LexKind, &str)> {
+            kinds(sql).into_iter().filter(|&(k, _)| k != Space).collect()
+        }
+        assert_eq!(
+            numbers("1_000.5 1_000.25e-3 0x1F 0b1010 0o17 1. .5 1.e5 1_000e1_0 0x_1F"),
+            ["1_000.5", "1_000.25e-3", "0x1F", "0b1010", "0o17", "1.", ".5", "1.e5", "1_000e1_0", "0x_1F"].map(|n| (Number, n))
+        );
+        assert_eq!(numbers("1..2"), vec![(Number, "1"), (Other, ".."), (Number, "2")]);
+        assert_eq!(numbers("0x1F.5 1.5.3"), vec![(Number, "0x1F"), (Number, ".5"), (Number, "1.5"), (Number, ".3")]);
+        assert_eq!(numbers("1_000_ 0b102 0x 1._5 1e+x"), vec![(Number, "1_000_"), (Number, "0b102"), (Number, "0x"), (Number, "1._5"), (Number, "1e"), (Operator, "+"), (Word, "x")]);
     }
 
     #[test]
