@@ -1605,6 +1605,8 @@ const AWKWARD_LITERALS: &[&str] = &[
     "1. + .5",
 ];
 
+const BACKSLASH_LITERALS: &[&str] = &["'a\\'b'", "n'a\\'b'", "'C:\\path'", "'tab\\there'", "'x' -- c\n'y\\'z'"];
+
 async fn text_rows(client: &tokio_postgres::Client, sql: &str) -> Vec<Vec<Option<String>>> {
     let messages = client.simple_query(sql).await.unwrap_or_else(|e| panic!("{sql:?}: {}", e.as_db_error().map_or(e.to_string(), |d| d.message().to_owned())));
     messages
@@ -1627,6 +1629,22 @@ async fn formatting_keeps_the_value_of_every_awkward_literal() {
     let h = Harness::start().await;
     let oracle = h.oracle().await;
     for literal in AWKWARD_LITERALS {
+        let sql = format!("select {literal} as v");
+        let formatted = match h.engine.editor_format(&sql, RunTarget::All) {
+            Ok(edit) => apply(&sql, &edit),
+            Err(FormatError::Unsafe) => continue,
+            Err(e) => panic!("{sql:?}: {e:?}"),
+        };
+        assert_eq!(text_rows(&oracle, &formatted).await, text_rows(&oracle, &sql).await, "{sql:?} formatted as {formatted:?}");
+    }
+}
+
+#[tokio::test]
+async fn formatting_keeps_the_value_of_a_backslash_literal_with_standard_strings_off() {
+    let h = Harness::start().await;
+    let oracle = h.oracle().await;
+    oracle.batch_execute("set standard_conforming_strings = off; set escape_string_warning = off").await.unwrap();
+    for literal in BACKSLASH_LITERALS {
         let sql = format!("select {literal} as v");
         let formatted = match h.engine.editor_format(&sql, RunTarget::All) {
             Ok(edit) => apply(&sql, &edit),

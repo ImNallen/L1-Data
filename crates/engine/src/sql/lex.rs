@@ -54,19 +54,31 @@ pub(super) fn run(bytes: &[u8], mut i: usize, keep: impl Fn(u8) -> bool) -> usiz
     i
 }
 
+/// How a plain `'…'` or `N'…'` literal reads a backslash. With `standard_conforming_strings` off,
+/// which a tab may `SET`, it escapes as it does in `E'…'`.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum Strings {
+    Standard,
+    Escaped,
+}
+
 /// Lexes all of `sql`: the spans are contiguous, start at 0, and end at `sql.len()`.
 pub(crate) fn lex(sql: &str) -> Vec<Lexeme> {
+    lex_strings(sql, Strings::Standard)
+}
+
+pub(crate) fn lex_strings(sql: &str, strings: Strings) -> Vec<Lexeme> {
     let mut out = Vec::new();
     let mut i = 0;
     while i < sql.len() {
-        let (kind, end) = lexeme_at(sql, i);
+        let (kind, end) = lexeme_at(sql, i, strings);
         out.push(Lexeme { kind, span: i..end });
         i = end;
     }
     out
 }
 
-fn lexeme_at(sql: &str, i: usize) -> (LexKind, usize) {
+fn lexeme_at(sql: &str, i: usize, strings: Strings) -> (LexKind, usize) {
     use LexKind::*;
     let bytes = sql.as_bytes();
     let at = |k: usize| bytes.get(k).copied();
@@ -76,7 +88,7 @@ fn lexeme_at(sql: &str, i: usize) -> (LexKind, usize) {
         b'-' if at(i + 1) == Some(b'-') => (LineComment, line_comment_end(bytes, i)),
         b'/' if at(i + 1) == Some(b'*') => (BlockComment, skip_block_comment(bytes, i)),
         b'"' => (QuotedIdent, skip_quoted(bytes, i, b'"', false)),
-        b'\'' => (String, skip_string(bytes, i, false)),
+        b'\'' => (String, skip_string(bytes, i, strings == Strings::Escaped)),
         b'$' => match dollar_tag(bytes, i) {
             Some(tag_len) => (DollarString, skip_dollar_quoted(bytes, i, tag_len)),
             None if digit_at(i + 1) => (Param, junk(bytes, run(bytes, i + 1, |c| c.is_ascii_digit()))),
@@ -86,7 +98,10 @@ fn lexeme_at(sql: &str, i: usize) -> (LexKind, usize) {
             let end = run(bytes, i + 1, is_ident_cont);
             let word = &sql[i..end];
             match at(end) {
-                Some(b'\'') if matches!(word, "e" | "E" | "b" | "B" | "x" | "X" | "n" | "N") => (String, skip_string(bytes, end, word.eq_ignore_ascii_case("e"))),
+                Some(b'\'') if matches!(word, "e" | "E" | "b" | "B" | "x" | "X" | "n" | "N") => {
+                    let escapes = word.eq_ignore_ascii_case("e") || (word.eq_ignore_ascii_case("n") && strings == Strings::Escaped);
+                    (String, skip_string(bytes, end, escapes))
+                }
                 Some(b'&') if word.eq_ignore_ascii_case("u") && matches!(at(end + 1), Some(b'"' | b'\'')) => {
                     if bytes[end + 1] == b'"' { (QuotedIdent, skip_quoted(bytes, end + 1, b'"', false)) } else { (String, skip_string(bytes, end + 1, false)) }
                 }

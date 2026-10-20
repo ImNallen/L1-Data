@@ -1,7 +1,7 @@
 use std::borrow::Cow;
 
 use super::keywords::{NEVER_A_FUNCTION, OTHER_KEYWORDS, RESERVED, TYPE_OR_FUNCTION_NAME};
-use super::lex::{LexKind, Lexeme, lex};
+use super::lex::{LexKind, Lexeme, Strings, lex, lex_strings};
 use crate::model::FormatError;
 
 /// Lays out one statement in the engine's fixed style. Statements other than queries, DML, and
@@ -20,15 +20,18 @@ pub fn format_statement(sql: &str) -> Result<String, FormatError> {
     checked(sql, out)
 }
 
+/// The formatter has no session, so the output must keep its meaning whether or not the tab runs
+/// with `standard_conforming_strings` off.
 fn checked(input: &str, output: String) -> Result<String, FormatError> {
-    let significant = |sql: &str| -> Vec<(LexKind, String)> {
-        lex(sql)
+    let significant = |sql: &str, strings: Strings| -> Vec<(LexKind, String)> {
+        lex_strings(sql, strings)
             .into_iter()
             .filter(|l| l.kind != LexKind::Space)
             .map(|l| (l.kind, if l.kind == LexKind::Word { sql[l.span].to_ascii_lowercase() } else { sql[l.span].to_owned() }))
             .collect()
     };
-    if significant(input) == significant(&output) { Ok(output) } else { Err(FormatError::Unsafe) }
+    let same = [Strings::Standard, Strings::Escaped].into_iter().all(|strings| significant(input, strings) == significant(&output, strings));
+    if same { Ok(output) } else { Err(FormatError::Unsafe) }
 }
 
 /// A significant lexeme with the comments and whitespace the input had before it.
@@ -841,6 +844,14 @@ mod tests {
         assert_eq!(checked("select a /* c */", "SELECT a".into()), Err(FormatError::Unsafe));
         assert_eq!(checked("select \"A\"", "SELECT \"a\"".into()), Err(FormatError::Unsafe));
         assert_eq!(checked("select a  from\nt", "SELECT a\nFROM t".into()), Ok("SELECT a\nFROM t".into()));
+    }
+
+    #[test]
+    fn a_backslash_that_would_end_a_string_with_standard_strings_off_is_refused() {
+        assert_eq!(format_statement("select 'a\\'b' as x"), Err(FormatError::Unsafe));
+        assert_eq!(format_statement("select n'a\\'b' as x"), Err(FormatError::Unsafe));
+        assert_eq!(fmt("select 'C:\\path' as p from t"), "SELECT 'C:\\path' AS p\nFROM t");
+        assert_eq!(fmt("select x'1F\\' as p from t"), "SELECT x'1F\\' AS p\nFROM t");
     }
 
     #[test]
