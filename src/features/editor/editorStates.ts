@@ -8,7 +8,7 @@ import {
   type CompletionSource,
 } from "@codemirror/autocomplete";
 import { defaultKeymap, history, historyKeymap, indentWithTab, isolateHistory } from "@codemirror/commands";
-import { PostgreSQL, sql, type SQLNamespace } from "@codemirror/lang-sql";
+import { PostgreSQL, sql } from "@codemirror/lang-sql";
 import { bracketMatching, indentOnInput } from "@codemirror/language";
 import { setDiagnostics, type Diagnostic } from "@codemirror/lint";
 import { highlightSelectionMatches, searchKeymap } from "@codemirror/search";
@@ -26,6 +26,7 @@ import {
   type LayerMarker,
 } from "@codemirror/view";
 import type { DocRange, FormatEdit, TabId } from "../../ipc/bindings";
+import type { CatalogView } from "../../state/catalog";
 import { editorHighlighting, editorTheme, functionCallStyle, LINE_PADDING_LEFT } from "./theme";
 
 const states = new Map<TabId, EditorState>();
@@ -169,10 +170,10 @@ function qualifiedTables(tables: readonly Completion[]): CompletionSource {
   });
 }
 
-function sqlLanguage(namespace: SQLNamespace | undefined, tables: readonly Completion[]): Extension {
+function sqlLanguage(catalog: CatalogView | undefined): Extension {
   return [
-    sql({ dialect: PostgreSQL, schema: namespace, upperCaseKeywords: true }),
-    PostgreSQL.language.data.of({ autocomplete: qualifiedTables(tables) }),
+    sql({ dialect: PostgreSQL, schema: catalog?.completion, defaultSchema: catalog?.catalog.defaultSchema ?? undefined, upperCaseKeywords: true }),
+    PostgreSQL.language.data.of({ autocomplete: qualifiedTables(catalog?.qualifiedTables ?? []) }),
   ];
 }
 
@@ -196,7 +197,7 @@ function createState(text: string): EditorState {
       autocompletion({ icons: false }),
       highlightSelectionMatches(),
       keymap.of([...closeBracketsKeymap, ...defaultKeymap, ...searchKeymap, ...historyKeymap, ...completionKeymap, indentWithTab]),
-      sqlConfig.of(sqlLanguage(undefined, [])),
+      sqlConfig.of(sqlLanguage(undefined)),
       flashField,
       previewField,
       runTargetField,
@@ -276,8 +277,8 @@ export function focusEditor(): void {
   view?.focus();
 }
 
-export function configureSql(id: TabId, namespace: SQLNamespace | undefined, tables: readonly Completion[]): void {
-  updateEditor(id, () => ({ effects: sqlConfig.reconfigure(sqlLanguage(namespace, tables)) }));
+export function configureSql(id: TabId, catalog: CatalogView | undefined): void {
+  updateEditor(id, () => ({ effects: sqlConfig.reconfigure(sqlLanguage(catalog)) }));
 }
 
 export function flashRanges(id: TabId, ranges: DocRange[]): void {
