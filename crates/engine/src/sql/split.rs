@@ -145,8 +145,8 @@ pub fn split_statements(sql: &str) -> Vec<StmtSpan> {
                 }
                 None => i += 1,
             },
-            c if c.is_ascii_alphabetic() || c == b'_' => {
-                let end = word_end(bytes, i);
+            c if is_ident_start(c) => {
+                let end = run(bytes, i + 1, is_ident_cont);
                 stmt.word(&sql[i..end]);
                 i = end;
             }
@@ -186,7 +186,7 @@ fn first_word(sql: &str, mut i: usize) -> &str {
             b'-' if bytes.get(i + 1) == Some(&b'-') => i = line_comment_end(bytes, i),
             b'/' if bytes.get(i + 1) == Some(&b'*') => i = skip_block_comment(bytes, i),
             c if c.is_ascii_whitespace() => i += 1,
-            c if c.is_ascii_alphabetic() || c == b'_' => return &sql[i..word_end(bytes, i)],
+            c if is_ident_start(c) => return &sql[i..run(bytes, i + 1, is_ident_cont)],
             _ => return "",
         }
     }
@@ -248,14 +248,6 @@ fn is_only_comments(text: &str) -> bool {
         }
     }
     true
-}
-
-fn word_end(bytes: &[u8], start: usize) -> usize {
-    let mut i = start;
-    while i < bytes.len() && (bytes[i].is_ascii_alphanumeric() || bytes[i] == b'_') {
-        i += 1;
-    }
-    i
 }
 
 pub(super) fn skip_block_comment(bytes: &[u8], mut i: usize) -> usize {
@@ -390,6 +382,12 @@ mod tests {
         );
         let tagged = "do $body$ begin perform 1; end $body$; select 2";
         assert_eq!(texts(tagged), vec!["do $body$ begin perform 1; end $body$", "select 2"]);
+    }
+
+    #[test]
+    fn a_dollar_inside_a_name_starts_no_dollar_quote() {
+        assert_eq!(texts("select 1 as a$x$; select 2"), vec!["select 1 as a$x$", "select 2"]);
+        assert_eq!(texts("select é$x$; select 2"), vec!["select é$x$", "select 2"]);
     }
 
     #[test]
