@@ -406,12 +406,12 @@ impl<'a> Layout<'a> {
             let pending = self.pending.take().map(Sep::Line);
             let sep = own.or(pending).unwrap_or_else(|| self.gap(i));
             let tok = &self.toks[i];
-            let sep = self.put_notes(&tok.notes, Some(sep), tok.spaced);
+            let sep = self.put_notes(&tok.notes, sep, tok.spaced);
             let text = if self.roles[i] == Role::Keyword { Cow::Owned(tok.text.to_ascii_uppercase()) } else { Cow::Borrowed(tok.text) };
             self.out.put(sep, &text);
             self.open(i, sep);
         }
-        self.put_notes(trailing, None, false);
+        self.put_trailing_notes(trailing);
         self.out.text
     }
 
@@ -641,16 +641,31 @@ impl<'a> Layout<'a> {
         }
     }
 
-    /// Writes the comments before a token, each where the input had it relative to its neighbors,
-    /// and returns the separator the token gets after them. `next` is `None` after the last token.
-    fn put_notes(&mut self, notes: &[Note<'_>], next: Option<Sep>, spaced: bool) -> Sep {
+    /// Writes the comments before a token and returns the separator the token gets after them.
+    fn put_notes(&mut self, notes: &[Note<'_>], next: Sep, spaced: bool) -> Sep {
         if notes.is_empty() {
-            return next.unwrap_or(Sep::Tight);
+            return next;
         }
         let indent = match next {
-            Some(Sep::Line(indent)) => indent,
+            Sep::Line(indent) => indent,
             _ => self.cont(),
         };
+        let owed = self.write_notes(notes, indent);
+        match next {
+            Sep::Line(_) => next,
+            _ if owed => Sep::Line(indent),
+            _ if spaced => Sep::Space,
+            _ => Sep::Tight,
+        }
+    }
+
+    fn put_trailing_notes(&mut self, notes: &[Note<'_>]) {
+        self.write_notes(notes, self.cont());
+    }
+
+    /// Writes each comment where the input had it relative to its neighbors, and returns whether the
+    /// last one ends its line.
+    fn write_notes(&mut self, notes: &[Note<'_>], indent: usize) -> bool {
         let mut owed = false;
         for note in notes {
             let sep = if note.own_line || owed {
@@ -663,12 +678,7 @@ impl<'a> Layout<'a> {
             self.out.put(sep, note.text);
             owed = note.line || note.newline_after;
         }
-        match next {
-            Some(Sep::Line(indent)) => Sep::Line(indent),
-            _ if owed => Sep::Line(indent),
-            _ if spaced => Sep::Space,
-            _ => Sep::Tight,
-        }
+        owed
     }
 }
 
