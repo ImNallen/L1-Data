@@ -528,6 +528,7 @@ Each command is one line delegating to `Engine`. tauri-specta uses `ErrorHandlin
 | `exact_row_count` | `DatabaseRef, schema: String, table: String, TableQuery` | `Result<u64, CountError>` | `count(*)` with the query's filters, on that database's metadata session. The pager's Last button calls it. |
 | `console_configure` | `TabId, ConsoleConfig` | `Result<ConsoleState, ConfigureError>` | Upsert. `TransactionOpen` if mode, connection, or database change with a live txn. A connection or database change resets the session. A schema change issues `SET search_path` (applied on next run if busy). |
 | `script_outline` | `text: String, cursor: DocOffset` | `ScriptOutline` | The UTF-16 range of each statement `split_statements` finds, and `atCursor`, the index of the one `pick` returns for a `Cursor` run at `cursor` (`null` only when there are none). The editor's run mark and the statement chooser call it, so neither splits SQL in TypeScript. Pure and sync, and it never touches the runtime. |
+| `editor_format` | `text: String, target: RunTarget` | `Result<FormatEdit, FormatError>` | Formats the statement a `Cursor` run would pick, every statement a selection touches, or the whole document, each statement on its own, and keeps the text between them. `FormatEdit { from, to, insert }` is in UTF-16 units. `NothingToFormat` when no statement is picked, `Unsafe` when the output would lex differently. Pure and sync, and it never touches the runtime. |
 | `console_run` | `TabId, RunRequest` | `Result<RunAccepted, RunError>` | Returns once statements are picked. Progress arrives as events. `BadFilter` when a table page's SQL isn't one statement. |
 | `console_cancel` | `TabId` | `()` | Idempotent. Sets the stop flag and sends `CancelRequest`. |
 | `console_commit` | `TabId` | `Result<(), TxnError>` | `Busy`, `NoTransaction`. Commit in `Aborted` reports `RolledBack`. |
@@ -651,6 +652,7 @@ impl Engine {
 
     pub async fn console_configure(&self, tab: TabId, c: ConsoleConfig) -> Result<ConsoleState, ConfigureError>;
     pub fn script_outline(&self, text: &str, cursor: DocOffset) -> ScriptOutline;     // pure; the run mark and the chooser
+    pub fn editor_format(&self, text: &str, target: RunTarget) -> Result<FormatEdit, FormatError>; // pure; ⌘⌥L
     pub async fn console_run(&self, tab: TabId, r: RunRequest) -> Result<RunAccepted, RunError>;
     pub async fn console_cancel(&self, tab: TabId);
     pub async fn console_commit(&self, tab: TabId) -> Result<(), TxnError>;
@@ -960,7 +962,7 @@ crates/engine/
   src/session.rs              # Session: client + driver task + notices + death watch; CancelHandle
   src/console.rs              # Console, SessionSlot, run task
   src/txn.rs                  # pure transaction state machine
-  src/sql/{mod,split,classify,relations}.rs  # pure lexer, picker, classifier, relation names and read checks
+  src/sql/{mod,lex,split,classify,relations,format}.rs  # pure lexer, picker, classifier, relation names and read checks, formatter
   src/text.rs                 # UTF-16 mapping, type_ref, synthesize_tag, quoting, browse/count/edit SQL
   src/results.rs              # Arena, pages, CSV writer
   src/catalog.rs              # 4 catalog queries -> Catalog
@@ -1222,6 +1224,14 @@ Usage page (**Settings** > **Usage**, also opened from the sidebar's bottom bar)
 - **Signed out or API key comes from `auth status`.** A signed-out `claude` answers `get_usage` with `rate_limits: null`, the same as an API-key login. When a read gets no rate limits, it runs `claude auth status` itself: the read is `SignedOut` when that says signed out, and `NoLimits` otherwise. It does not use the provider's cached probe, which a switched-off provider never refreshes. A switched-off Claude provider is still read, since the limits belong to the account.
 - **Only `limits[]` is read.** Claude's reply also carries a changing set of codenamed keys beside `rate_limits.limits`. The parser reads `subscription_type` and that list only, and the fake keeps a few codename keys so the parser's tests show it ignores them. Codex windows are named by `windowDurationMins`, because the primary window is not always the five-hour one, and sorted shortest first.
 - **A header action slot.** `SECTION_ACTIONS` in `sections.tsx` puts a section's control at the right of the settings header, shown only while no search is set. Usage's is the refresh button and its "Checked 2m ago" text.
+
+Formatter (`editor_format`, `⌘⌥L`, and **Format**). Decision 6 and decision 9 are the design. Each item is a place the code adds to it.
+
+- **A lossless lexer under the old tokenizer.** `sql::lex` returns lexemes that tile the input, whitespace and comments included, so text can be rebuilt from them. `tokens()`, which `vet` and `history_is_write` read, is a projection of `lex()` with its old output: a string's `E`, `B`, `X`, `N`, or `U&` prefix is a word of its own, `::` is two `Other` tokens, and a number splits at its dots, signs, and letters. A number lexeme keeps the letters glued to it (`1e5`, `0x1F`, `1abc`), because Postgres rejects them as trailing junk and a formatter must not space them apart. `split_statements` still scans bytes on its own, with the quote and comment skips it shares with `lex`.
+- **The formatter refuses what it cannot prove.** `sql::format_statement` lays out queries, DML, and `CREATE TABLE` with a stack of clause frames, and keeps every other statement's whitespace, changing only keyword case. Before it returns, it lexes its output and compares the significant lexemes with the input's: whitespace is dropped, unquoted words compare case-insensitively, and everything else compares byte for byte, comments included. A mismatch returns `FormatError::Unsafe`, and the editor keeps the text and shows a toast. The check cannot see whitespace that changes meaning between equal lexemes. The one such case Postgres has is two string literals joined across a newline, and the layout keeps that newline.
+- **Keyword case follows the server's categories.** `dev/pg-keywords.sh` also writes `RESERVED` and `TYPE_OR_FUNCTION_NAME`, and the keyword pg-test checks them. Those keywords are uppercased unless they sit next to a `.` or after `AS`. Unreserved and column-name keywords are uppercased only inside a phrase `format.rs` lists, such as `ORDER BY` or `ROWS BETWEEN`, or where a clause opens, such as `SET` after `UPDATE`. A column named `day`, `name`, or `type` keeps its case, and so do type and function names.
+- **A selection formats the statements it touches.** A selection run runs exactly the selected text, but `editor_format` widens a selection to every statement it overlaps, so a partial selection never formats a fragment. A cursor and `All` pick as a run does.
+- **One edit, one undo step.** The frontend applies the `FormatEdit` as one CodeMirror transaction with `isolateHistory`, so `⌘Z` restores the text as it was even right after typing, and moves the cursor to the end of the edit. A reply for a document that changed meanwhile is dropped, and a browsing table tab is not formatted, since its text is the engine's browse query.
 
 ## Open questions and risks
 
