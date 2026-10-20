@@ -1,3 +1,5 @@
+use super::lex::{is_ident_start, run};
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct StmtSpan {
     pub start: usize,
@@ -296,13 +298,12 @@ pub(super) fn skip_quoted(bytes: &[u8], i: usize, quote: u8) -> usize {
     bytes.len()
 }
 
+/// The length of the `$tag$` at `i`. A tag is `scan.l`'s `{dolq_start}{dolq_cont}*`: a letter, `_`, or
+/// any byte from 0x80 up, then those or digits. A digit first makes a parameter such as `$1`.
 pub(super) fn dollar_tag(bytes: &[u8], i: usize) -> Option<usize> {
     let mut j = i + 1;
-    if j < bytes.len() && bytes[j].is_ascii_digit() {
-        return None; // a positional parameter such as `$1`
-    }
-    while j < bytes.len() && (bytes[j].is_ascii_alphanumeric() || bytes[j] == b'_') {
-        j += 1;
+    if bytes.get(j).is_some_and(|&c| is_ident_start(c)) {
+        j = run(bytes, j + 1, |c| is_ident_start(c) || c.is_ascii_digit());
     }
     (bytes.get(j) == Some(&b'$')).then_some(j + 1 - i)
 }
@@ -351,6 +352,12 @@ mod tests {
         );
         let tagged = "do $body$ begin perform 1; end $body$; select 2";
         assert_eq!(texts(tagged), vec!["do $body$ begin perform 1; end $body$", "select 2"]);
+    }
+
+    #[test]
+    fn a_dollar_quote_tag_may_hold_non_ascii_letters() {
+        assert_eq!(texts("select $é$ ; $é$; select 2"), vec!["select $é$ ; $é$", "select 2"]);
+        assert_eq!(texts("select $_ü1$ a;b $_ü1$ as v; select 2"), vec!["select $_ü1$ a;b $_ü1$ as v", "select 2"]);
     }
 
     #[test]

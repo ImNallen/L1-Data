@@ -793,6 +793,15 @@ mod tests {
     }
 
     #[test]
+    fn a_dollar_quote_with_a_non_ascii_tag_keeps_its_body_byte_for_byte() {
+        assert_eq!(
+            fmt("insert into notes(body) values ($ü$line one\n    indented line$ü$)"),
+            "INSERT INTO notes(body)\nVALUES ($ü$line one\n    indented line$ü$)"
+        );
+        assert_eq!(fmt("select $é$select from t where x$é$ as v"), "SELECT $é$select from t where x$é$ AS v");
+    }
+
+    #[test]
     fn other_statements_change_only_keyword_case() {
         assert_eq!(fmt("alter table orders  add column note text"), "ALTER TABLE orders  ADD COLUMN note text");
         assert_eq!(fmt("do $$ begin perform 1; end $$"), "DO $$ begin perform 1; end $$");

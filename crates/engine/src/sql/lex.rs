@@ -225,6 +225,14 @@ mod tests {
     }
 
     #[test]
+    fn a_dollar_quote_tag_may_hold_non_ascii_letters() {
+        assert_eq!(
+            kinds("$é$select x$é$ $ü1$a$ü1$ $1é"),
+            vec![(DollarString, "$é$select x$é$"), (Space, " "), (DollarString, "$ü1$a$ü1$"), (Space, " "), (Param, "$1é")]
+        );
+    }
+
+    #[test]
     fn numbers_params_and_operators_lex_as_postgres_does() {
         assert_eq!(
             kinds("1.5e-3 .5 0x1F 1e5x $1abc $2"),
