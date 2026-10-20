@@ -1,7 +1,7 @@
 import * as Menu from "@radix-ui/react-dropdown-menu";
-import { IconChevronDown, IconPlayerPlayFilled, IconPlayerStopFilled } from "@tabler/icons-react";
+import { IconChevronDown, IconIndentIncrease, IconPlayerPlayFilled, IconPlayerStopFilled } from "@tabler/icons-react";
 import { ConnectionColorDot } from "../features/connections/connectionColors";
-import { cancelActive, endTransaction, runOrChoose, setTabMode, setTabTarget } from "../features/editor/runActions";
+import { cancelActive, endTransaction, formatActive, runOrChoose, setTabMode, setTabTarget } from "../features/editor/runActions";
 import type { TxnMode } from "../ipc/bindings";
 import { homeDb } from "../state/dbKey";
 import { useLive } from "../state/live";
@@ -100,6 +100,13 @@ export function TopBar({ hosted }: { hosted: HostedWindow | null }) {
             Rollback
           </Button>
         </>
+      )}
+
+      {tab && (
+        <Button data-testid="format-btn" title="Format the selection or the marked statement (⌘⌥L)" onClick={() => void formatActive()}>
+          <IconIndentIncrease size={14} className="text-muted" />
+          Format
+        </Button>
       )}
 
       {tab &&

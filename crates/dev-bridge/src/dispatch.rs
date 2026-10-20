@@ -114,6 +114,7 @@ routes! { e;
     exact_row_count(db: DatabaseRef, schema: String, table: String, query: TableQuery) => e.exact_row_count(db, schema, table, query).await;
     console_configure(tab_id: TabId, config: ConsoleConfig) => e.console_configure(tab_id, config).await;
     script_outline(text: String, cursor: DocOffset) => ok(e.script_outline(&text, cursor));
+    editor_format(text: String, target: RunTarget) => e.editor_format(&text, target);
     console_run(tab_id: TabId, request: RunRequest) => e.console_run(tab_id, request).await;
     console_cancel(tab_id: TabId) => { e.console_cancel(tab_id).await; ok(()) };
     console_commit(tab_id: TabId) => e.console_commit(tab_id).await;

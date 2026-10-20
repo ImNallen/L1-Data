@@ -1,11 +1,12 @@
+import { undo } from "@codemirror/commands";
 import { mockIPC } from "@tauri-apps/api/mocks";
 import { afterEach, expect, it, vi } from "vitest";
 import type { ConsoleState, Settings } from "../../ipc/bindings";
 import { useLive } from "../../state/live";
 import { useTableEdits } from "../../state/tableEdits";
 import { useWorkspace } from "../../state/workspace";
-import { dropEditor, seedEditor } from "./editorStates";
-import { browseQuery, loadTableOnce, openTableTab, saveSettings, setTabMode, setTabTarget } from "./runActions";
+import { dropEditor, editorStateOf, insertAtCursor, moveCursor, seedEditor, textOf } from "./editorStates";
+import { browseQuery, formatActive, loadTableOnce, openTableTab, saveSettings, setTabMode, setTabTarget } from "./runActions";
 
 afterEach(() => {
   vi.unstubAllGlobals();
@@ -124,6 +125,55 @@ it("keeps a tab on its database while it has staged edits", async () => {
   useTableEdits.getState().clear(id);
   await setTabTarget(id, { connectionId: "c1", database: "reporting" });
   expect([calls, useWorkspace.getState().tabs[id]?.console.db]).toEqual([["console_configure"], { connectionId: "c1", database: "reporting" }]);
+});
+
+function openScript(text: string, edit: () => unknown) {
+  const sent: unknown[] = [];
+  mockIPC((cmd, args) => {
+    if (cmd !== "editor_format") return null;
+    sent.push(args);
+    return edit();
+  });
+  seedEditor("script", text);
+  useWorkspace.getState().addTab({ id: "script", title: "Untitled", console: { db: null, mode: "AutoCommit" }, table: null });
+  return sent;
+}
+
+it("formats as its own undo step, apart from the typing before it, and leaves the cursor after the edit", async () => {
+  vi.stubGlobal("window", { crypto });
+  const sent = openScript("select 1;\nselect a,b from", () => ({ from: 10, to: 27, insert: "SELECT a,\n  b\nFROM t" }));
+  moveCursor("script", 25);
+  insertAtCursor("script", " t");
+  const typed = textOf("script");
+  await formatActive();
+  let state = editorStateOf("script");
+  expect([sent, state.doc.toString(), state.selection.main.head]).toEqual([
+    [{ text: typed, target: { kind: "cursor", offset: 27 } }],
+    "select 1;\nSELECT a,\n  b\nFROM t",
+    30,
+  ]);
+  undo({ state, dispatch: (tr) => (state = tr.state) });
+  expect(state.doc.toString()).toBe(typed);
+});
+
+it("toasts a refused format, stays quiet with nothing to format, and drops an edit for text that changed", async () => {
+  vi.stubGlobal("window", { crypto });
+  let reply: () => unknown = () => Promise.reject({ kind: "Unsafe" });
+  openScript("select 1", () => reply());
+  await formatActive();
+  expect([useWorkspace.getState().toast?.text, textOf("script")]).toEqual(["Couldn't format this statement safely.", "select 1"]);
+
+  useWorkspace.setState({ toast: null });
+  reply = () => Promise.reject({ kind: "NothingToFormat" });
+  await formatActive();
+  expect([useWorkspace.getState().toast, textOf("script")]).toEqual([null, "select 1"]);
+
+  reply = () => {
+    insertAtCursor("script", "-- typed\n");
+    return { from: 0, to: 8, insert: "SELECT 1" };
+  };
+  await formatActive();
+  expect(textOf("script")).toBe("-- typed\nselect 1");
 });
 
 it("loads a table tab's page on first show, and never runs edited text unasked", async () => {

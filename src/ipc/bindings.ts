@@ -20,6 +20,7 @@ export const commands = {
 	exactRowCount: (db: DatabaseRef, schema: string, table: string, query: TableQuery) => typedError<number, CountError>(__TAURI_INVOKE("exact_row_count", { db, schema, table, query })),
 	consoleConfigure: (tabId: TabId, config: ConsoleConfig) => typedError<ConsoleState, ConfigureError>(__TAURI_INVOKE("console_configure", { tabId, config })),
 	scriptOutline: (text: string, cursor: DocOffset) => __TAURI_INVOKE<ScriptOutline>("script_outline", { text, cursor }),
+	editorFormat: (text: string, target: RunTarget) => typedError<FormatEdit, FormatError>(__TAURI_INVOKE("editor_format", { text, target })),
 	consoleRun: (tabId: TabId, request: RunRequest) => typedError<RunAccepted, RunError>(__TAURI_INVOKE("console_run", { tabId, request })),
 	consoleCancel: (tabId: TabId) => __TAURI_INVOKE<void>("console_cancel", { tabId }),
 	consoleCommit: (tabId: TabId) => typedError<null, TxnError>(__TAURI_INVOKE("console_commit", { tabId })),
@@ -470,6 +471,19 @@ export type FontSetting = {
 	family: string,
 	size: number,
 };
+
+/**  Replace `from..to` with `insert`: the formatted statements and the original text between them. */
+export type FormatEdit = {
+	from: DocOffset,
+	to: DocOffset,
+	insert: string,
+};
+
+export type FormatError = 
+/**  No statement at the cursor or in the selection. */
+{ kind: "NothingToFormat" } | 
+/**  The laid-out text would lex differently from the original, so the engine refused it. */
+{ kind: "Unsafe" };
 
 export type FunctionInfo = {
 	oid: number,

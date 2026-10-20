@@ -103,6 +103,12 @@ pub fn script_outline(engine: State<'_, Arc<Engine>>, text: String, cursor: DocO
 
 #[tauri::command]
 #[specta::specta]
+pub fn editor_format(engine: State<'_, Arc<Engine>>, text: String, target: RunTarget) -> Result<FormatEdit, FormatError> {
+    engine.editor_format(&text, target)
+}
+
+#[tauri::command]
+#[specta::specta]
 pub async fn console_run(engine: State<'_, Arc<Engine>>, tab_id: TabId, request: RunRequest) -> Result<RunAccepted, RunError> {
     engine.console_run(tab_id, request).await
 }
