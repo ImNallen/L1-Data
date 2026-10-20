@@ -1,6 +1,7 @@
 mod classify;
 mod history;
 mod keywords;
+mod lex;
 mod relations;
 mod split;
 
