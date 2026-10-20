@@ -338,6 +338,13 @@ impl Clause {
     }
 }
 
+/// A keyword that opens a clause: the clause, how many words the keyword spans, and whether it starts a line.
+struct ClauseStart {
+    clause: Clause,
+    words: usize,
+    line: bool,
+}
+
 #[derive(Debug, Clone, Copy)]
 enum Frame {
     /// A statement or a subquery, laid out clause by clause. `close` is the indent of a subquery's `)`.
@@ -471,14 +478,12 @@ impl<'a> Layout<'a> {
             },
             Some(&mut Frame::Query { indent, clause, open_betweens, .. }) => {
                 if i >= self.phrase_end
-                    && let Some((next, len, line)) = self.clause_at(i, clause)
+                    && let Some(start) = self.clause_at(i, clause)
                 {
-                    for k in i..i + len {
-                        self.roles[k] = Role::Keyword;
-                    }
-                    self.phrase_end = i + len;
-                    self.set_query(next, 0);
-                    return line.then_some(Sep::Line(indent));
+                    self.roles[i..i + start.words].fill(Role::Keyword);
+                    self.phrase_end = i + start.words;
+                    self.set_query(start.clause, 0);
+                    return start.line.then_some(Sep::Line(indent));
                 }
                 if self.keyword(i, "between") {
                     self.set_query(clause, open_betweens + 1);
@@ -499,36 +504,38 @@ impl<'a> Layout<'a> {
         }
     }
 
-    /// The clause a word opens in a query frame, how many words its keyword spans, and whether it starts a line.
-    fn clause_at(&self, i: usize, current: Clause) -> Option<(Clause, usize, bool)> {
+    /// The clause a word opens in a query frame.
+    fn clause_at(&self, i: usize, current: Clause) -> Option<ClauseStart> {
         use Clause::*;
         if current.inert() {
             return None;
         }
+        let line = |clause, words| ClauseStart { clause, words, line: true };
+        let inline = |clause, words| ClauseStart { clause, words, line: false };
         let w = |k: usize| self.word(i + k);
         Some(match w(0) {
-            "select" => (Select, 1, true),
-            "with" if current == Start => (With, if w(1) == "recursive" { 2 } else { 1 }, true),
-            "insert" if w(1) == "into" && current.before_statement() => (InsertInto, 2, true),
-            "update" if current.before_statement() => (Update, 1, true),
-            "delete" if w(1) == "from" && current.before_statement() => (DeleteFrom, 2, true),
-            "values" if matches!(current, Start | With | InsertInto | SetOp) && !(i > 0 && self.word(i - 1) == "default") => (Values, 1, true),
-            "from" if !(i > 1 && self.word(i - 1) == "distinct" && matches!(self.word(i - 2), "is" | "not")) => (From, 1, true),
-            "on" if current == Join => (On, 1, false),
-            "on" if w(1) == "conflict" => (OnConflict, 2, true),
-            "do" if current == OnConflict && w(1) == "update" && w(2) == "set" => (Set, 3, false),
-            "set" if current == Update => (Set, 1, true),
-            "where" => (Where, 1, true),
-            "group" if w(1) == "by" => (GroupBy, 2, true),
-            "having" => (Having, 1, true),
-            "window" => (Window, 1, true),
-            "order" if w(1) == "by" => (OrderBy, 2, true),
-            "limit" => (Limit, 1, true),
-            "offset" => (Offset, 1, true),
-            "fetch" if matches!(w(1), "first" | "next") => (Fetch, 2, true),
-            "for" if matches!(w(1), "update" | "share" | "no" | "key") => (Locking, 1, true),
-            "union" | "intersect" | "except" => (SetOp, if matches!(w(1), "all" | "distinct") { 2 } else { 1 }, true),
-            "returning" => (Returning, 1, true),
+            "select" => line(Select, 1),
+            "with" if current == Start => line(With, if w(1) == "recursive" { 2 } else { 1 }),
+            "insert" if w(1) == "into" && current.before_statement() => line(InsertInto, 2),
+            "update" if current.before_statement() => line(Update, 1),
+            "delete" if w(1) == "from" && current.before_statement() => line(DeleteFrom, 2),
+            "values" if matches!(current, Start | With | InsertInto | SetOp) && !(i > 0 && self.word(i - 1) == "default") => line(Values, 1),
+            "from" if !(i > 1 && self.word(i - 1) == "distinct" && matches!(self.word(i - 2), "is" | "not")) => line(From, 1),
+            "on" if current == Join => inline(On, 1),
+            "on" if w(1) == "conflict" => line(OnConflict, 2),
+            "do" if current == OnConflict && w(1) == "update" && w(2) == "set" => inline(Set, 3),
+            "set" if current == Update => line(Set, 1),
+            "where" => line(Where, 1),
+            "group" if w(1) == "by" => line(GroupBy, 2),
+            "having" => line(Having, 1),
+            "window" => line(Window, 1),
+            "order" if w(1) == "by" => line(OrderBy, 2),
+            "limit" => line(Limit, 1),
+            "offset" => line(Offset, 1),
+            "fetch" if matches!(w(1), "first" | "next") => line(Fetch, 2),
+            "for" if matches!(w(1), "update" | "share" | "no" | "key") => line(Locking, 1),
+            "union" | "intersect" | "except" => line(SetOp, if matches!(w(1), "all" | "distinct") { 2 } else { 1 }),
+            "returning" => line(Returning, 1),
             _ => {
                 let mut k = usize::from(w(0) == "natural");
                 match w(k) {
@@ -536,7 +543,7 @@ impl<'a> Layout<'a> {
                     "left" | "right" | "full" => k += if w(k + 1) == "outer" { 2 } else { 1 },
                     _ => {}
                 }
-                return (w(k) == "join").then_some((Join, k + 1, true));
+                return (w(k) == "join").then_some(line(Join, k + 1));
             }
         })
     }
