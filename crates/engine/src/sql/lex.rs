@@ -1,6 +1,6 @@
 use std::ops::Range;
 
-use super::split::{dollar_tag, skip_block_comment, skip_dollar_quoted, skip_quoted, skip_string};
+use super::split::{dollar_tag, line_comment_end, skip_block_comment, skip_dollar_quoted, skip_quoted, skip_string};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum LexKind {
@@ -73,7 +73,7 @@ fn lexeme_at(sql: &str, i: usize) -> (LexKind, usize) {
     let digit_at = |k: usize| at(k).is_some_and(|c| c.is_ascii_digit());
     match bytes[i] {
         c if c.is_ascii_whitespace() => (Space, run(bytes, i, |c| c.is_ascii_whitespace())),
-        b'-' if at(i + 1) == Some(b'-') => (LineComment, sql[i..].find('\n').map_or(bytes.len(), |n| i + n)),
+        b'-' if at(i + 1) == Some(b'-') => (LineComment, line_comment_end(bytes, i)),
         b'/' if at(i + 1) == Some(b'*') => (BlockComment, skip_block_comment(bytes, i)),
         b'"' => (QuotedIdent, skip_quoted(bytes, i, b'"', false)),
         b'\'' => (String, skip_string(bytes, i, false)),
@@ -269,6 +269,11 @@ mod tests {
             kinds("B'01'\n'10' X'1F'\n'F' U&'a'\n'b' N'a'\n'b'"),
             vec![(String, "B'01'\n'10'"), (Space, " "), (String, "X'1F'\n'F'"), (Space, " "), (String, "U&'a'\n'b'"), (Space, " "), (String, "N'a'\n'b'")]
         );
+    }
+
+    #[test]
+    fn a_line_comment_ends_at_a_carriage_return() {
+        assert_eq!(kinds("--c\rselect"), vec![(LineComment, "--c"), (Space, "\r"), (Word, "select")]);
     }
 
     #[test]

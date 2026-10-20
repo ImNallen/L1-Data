@@ -56,7 +56,7 @@ fn read<'a>(sql: &'a str, lexemes: &[Lexeme]) -> (Vec<Tok<'a>>, Vec<Note<'a>>) {
         let text = &sql[l.span.clone()];
         if l.kind == LexKind::Space {
             spaced = true;
-            newline |= text.contains('\n');
+            newline |= text.contains(['\n', '\r']);
             continue;
         }
         if let Some(last) = notes.last_mut() {
@@ -805,6 +805,12 @@ mod tests {
             "INSERT INTO notes(body)\nVALUES ($ü$line one\n    indented line$ü$)"
         );
         assert_eq!(fmt("select $é$select from t where x$é$ as v"), "SELECT $é$select from t where x$é$ AS v");
+    }
+
+    #[test]
+    fn a_lone_carriage_return_ends_a_line() {
+        assert_eq!(fmt("select a -- note\rfrom t"), "SELECT a -- note\nFROM t");
+        assert_eq!(fmt("select a,\r/* own */ b from t"), "SELECT a,\n  /* own */\n  b\nFROM t");
     }
 
     #[test]

@@ -117,9 +117,7 @@ pub fn split_statements(sql: &str) -> Vec<StmtSpan> {
     while i < bytes.len() {
         let c = bytes[i];
         match c {
-            b'-' if bytes.get(i + 1) == Some(&b'-') => {
-                i = sql[i..].find('\n').map_or(bytes.len(), |n| i + n);
-            }
+            b'-' if bytes.get(i + 1) == Some(&b'-') => i = line_comment_end(bytes, i),
             b'/' if bytes.get(i + 1) == Some(&b'*') => i = skip_block_comment(bytes, i),
             b'\'' => {
                 let escapes = i > 0 && matches!(bytes[i - 1], b'E' | b'e') && (i < 2 || !is_ident_cont(bytes[i - 2]));
@@ -185,7 +183,7 @@ fn first_word(sql: &str, mut i: usize) -> &str {
     let bytes = sql.as_bytes();
     while i < bytes.len() {
         match bytes[i] {
-            b'-' if bytes.get(i + 1) == Some(&b'-') => i = sql[i..].find('\n').map_or(bytes.len(), |n| i + n),
+            b'-' if bytes.get(i + 1) == Some(&b'-') => i = line_comment_end(bytes, i),
             b'/' if bytes.get(i + 1) == Some(&b'*') => i = skip_block_comment(bytes, i),
             c if c.is_ascii_whitespace() => i += 1,
             c if c.is_ascii_alphabetic() || c == b'_' => return &sql[i..word_end(bytes, i)],
@@ -243,9 +241,7 @@ fn is_only_comments(text: &str) -> bool {
     let mut i = 0;
     while i < bytes.len() {
         match bytes[i] {
-            b'-' if bytes.get(i + 1) == Some(&b'-') => {
-                i = text[i..].find('\n').map_or(bytes.len(), |n| i + n);
-            }
+            b'-' if bytes.get(i + 1) == Some(&b'-') => i = line_comment_end(bytes, i),
             b'/' if bytes.get(i + 1) == Some(&b'*') => i = skip_block_comment(bytes, i),
             c if c.is_ascii_whitespace() => i += 1,
             _ => return false,
@@ -408,6 +404,13 @@ mod tests {
         assert_eq!(texts("select /* x; /* nested; */ y */ 1; select 2"), vec!["select /* x; /* nested; */ y */ 1", "select 2"]);
         assert_eq!(texts("-- only a comment\n/* and another */"), Vec::<&str>::new());
         assert_eq!(texts("select 1; -- trailing"), vec!["select 1"]);
+    }
+
+    #[test]
+    fn a_line_comment_ends_at_a_carriage_return() {
+        assert_eq!(texts("select 1 -- c\r; select 2"), vec!["select 1 -- c", "select 2"]);
+        assert_eq!(texts("-- only\r-- comments"), Vec::<&str>::new());
+        assert_eq!(texts("select 1\n\n-- c\rselect 2"), vec!["select 1", "-- c\rselect 2"]);
     }
 
     #[test]
