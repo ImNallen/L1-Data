@@ -21,7 +21,7 @@ export function SqlEditor({ tabId }: { tabId: TabId }) {
   }, []);
 
   useEffect(() => {
-    configureSql(tabId, view?.completion, view?.qualifiedTables ?? []);
+    configureSql(tabId, view);
   }, [tabId, view]);
 
   useEffect(() => {
