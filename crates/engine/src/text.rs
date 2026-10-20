@@ -1,6 +1,8 @@
 use tokio_postgres::types::{Kind, Type};
 
-use crate::model::{CellWrite, ColumnFilter, DocOffset, DocRange, FilterOp, PgTypeRef, ScriptOutline, TableQuery, TypeCategory};
+use crate::model::{
+    CellWrite, ColumnFilter, DocOffset, DocRange, FilterOp, FormatEdit, FormatError, PgTypeRef, RunTarget, ScriptOutline, TableQuery, TypeCategory,
+};
 use crate::sql::{self, ByteTarget, DmlVerb, StmtKind, StmtSpan};
 
 pub struct OffsetMap<'a> {
@@ -26,6 +28,14 @@ impl<'a> OffsetMap<'a> {
             units += ch.len_utf16() as u32;
         }
         self.text.len()
+    }
+
+    pub fn target(&self, target: RunTarget) -> ByteTarget {
+        match target {
+            RunTarget::All => ByteTarget::All,
+            RunTarget::Cursor { offset } => ByteTarget::Cursor(self.from_utf16(offset)),
+            RunTarget::Selection { from, to } => ByteTarget::Selection { from: self.from_utf16(from), to: self.from_utf16(to) },
+        }
     }
 
     pub fn range(&self, span: &StmtSpan) -> DocRange {
@@ -55,6 +65,29 @@ pub fn script_outline(text: &str, cursor: DocOffset) -> ScriptOutline {
         statements: spans.iter().map(|s| map.range(s)).collect(),
         at_cursor: picked.first().and_then(|p| spans.iter().position(|s| s == p)).and_then(|i| u16::try_from(i).ok()),
     }
+}
+
+/// A cursor formats the statement a `Cursor` run would execute, a selection every statement it
+/// touches, and `All` the document. Each statement is formatted on its own; the text between them,
+/// `;` included, is kept.
+pub fn format_edit(text: &str, target: RunTarget) -> Result<FormatEdit, FormatError> {
+    let map = OffsetMap::new(text);
+    let spans = sql::split_statements(text);
+    let picked = match map.target(target) {
+        ByteTarget::Selection { from, to } if from < to => spans.into_iter().filter(|s| s.start < to && from < s.end).collect(),
+        target => sql::pick(&spans, text, target),
+    };
+    let (Some(first), Some(last)) = (picked.first(), picked.last()) else {
+        return Err(FormatError::NothingToFormat);
+    };
+    let mut insert = String::new();
+    let mut at = first.start;
+    for span in &picked {
+        insert.push_str(&text[at..span.start]);
+        insert.push_str(&sql::format_statement(span.text(text))?);
+        at = span.end;
+    }
+    Ok(FormatEdit { from: map.to_utf16(first.start), to: map.to_utf16(last.end), insert })
 }
 
 pub fn type_ref(t: &Type) -> PgTypeRef {

@@ -532,7 +532,7 @@ mod tests {
 
     #[test]
     fn the_lists_are_sorted_for_the_binary_search() {
-        for (name, list) in [("VETTED", VETTED), ("VETTED_SIZES", VETTED_SIZES), ("VETTED_OPERATORS", VETTED_OPERATORS), ("NEVER_A_FUNCTION", NEVER_A_FUNCTION), ("OTHER_KEYWORDS", OTHER_KEYWORDS)] {
+        for (name, list) in [("VETTED", VETTED), ("VETTED_SIZES", VETTED_SIZES), ("VETTED_OPERATORS", VETTED_OPERATORS), ("NEVER_A_FUNCTION", NEVER_A_FUNCTION), ("OTHER_KEYWORDS", OTHER_KEYWORDS), ("RESERVED", super::super::keywords::RESERVED), ("TYPE_OR_FUNCTION_NAME", super::super::keywords::TYPE_OR_FUNCTION_NAME)] {
             assert!(list.windows(2).all(|w| w[0] < w[1]), "{name} is not sorted and unique");
         }
         assert!(SYNTAX_AFTER.iter().all(|(name, _)| !NEVER_A_FUNCTION.contains(name)), "SYNTAX_AFTER is for words that may also be function names");
