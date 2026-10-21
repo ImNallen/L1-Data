@@ -39,7 +39,7 @@ export function runErrorText(e: RunError): string {
     case "NotConfigured":
       return "Choose a connection for this tab.";
     case "Unsupported":
-      return `${e.what} is not supported.`;
+      return `Cannot run this SQL. ${e.what}`;
     case "Connect":
       return connectErrorText(e.error);
     case "BadFilter":
@@ -53,6 +53,8 @@ export function runErrorText(e: RunError): string {
 
 export function applyErrorText(e: ApplyError): string {
   switch (e.kind) {
+    case "Unsupported":
+      return e.what;
     case "Busy":
       return "This tab is still running. Cancel it first.";
     case "NotConfigured":
@@ -100,6 +102,8 @@ export function txnErrorText(e: TxnError): string {
 
 export function configureErrorText(e: ConfigureError): string {
   switch (e.kind) {
+    case "Unsupported":
+      return e.what;
     case "TransactionOpen":
       return "Commit or roll back the open transaction first.";
     case "Busy":

@@ -1,6 +1,13 @@
 import { expect, it } from "vitest";
 import type { ApproveError, ChatError, SendError } from "./bindings";
-import { applyErrorText, approveErrorText, chatErrorText, sendErrorText } from "./errors";
+import { applyErrorText, approveErrorText, chatErrorText, configureErrorText, runErrorText, sendErrorText } from "./errors";
+
+it("keeps the engine's actionable capability refusal intact", () => {
+  const what = "SQL Server Manual mode is unavailable. Select Auto-commit and use explicit transaction statements.";
+  expect(configureErrorText({ kind: "Unsupported", what })).toBe(what);
+  expect(applyErrorText({ kind: "Unsupported", what })).toBe(what);
+  expect(runErrorText({ kind: "Unsupported", what })).toBe(`Cannot run this SQL. ${what}`);
+});
 
 it("tells the user to verify unknown edit outcomes before retrying", () => {
   const error = { message: "Connection closed during commit", severity: "ERROR", sqlstate: null, detail: null, hint: null, context: null, position: null };
