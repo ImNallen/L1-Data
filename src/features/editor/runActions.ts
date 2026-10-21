@@ -212,7 +212,12 @@ export async function endTransaction(tabId: TabId, verb: "commit" | "rollback"):
 async function reconfigure(tabId: TabId, patch: Partial<ConsoleTarget>) {
   const tab = ws().tabs[tabId];
   if (!tab) return;
-  const config = consoleConfig({ ...tab.console, ...patch });
+  const target = { ...tab.console, ...patch };
+  if (target.mode === "Manual" && databaseKindFor(target.db, ws().configs) === "SqlServer") {
+    notify("SQL Server Manual mode is unavailable. Choose Auto-commit and use native transaction statements.");
+    return;
+  }
+  const config = consoleConfig(target);
   if (config && useLive.getState().consoles[tabId]) {
     const res = await commands.consoleConfigure(tabId, config);
     if (res.status === "error") {

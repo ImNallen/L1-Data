@@ -130,6 +130,29 @@ it("switches a table tab to manual transactions through console_configure", asyn
   expect(useWorkspace.getState().tabs[id]?.console.mode).toBe("Manual");
 });
 
+it("refuses SQL Server Manual mode before an unopened tab can change commit semantics", async () => {
+  useWorkspace.setState({ configs: { ms: { ...connectionConfig("ms", "SQL Server"), databaseKind: "SqlServer" } } });
+  const id = openSqlTab({ db: { connectionId: "ms", database: "shop" } });
+  const calls: string[] = [];
+  mockIPC((cmd) => { calls.push(cmd); return null; });
+  await setTabMode(id, "Manual");
+  expect(calls).toEqual([]);
+  expect(useWorkspace.getState().tabs[id]?.console.mode).toBe("AutoCommit");
+  expect(useWorkspace.getState().toast?.text).toContain("SQL Server Manual mode is unavailable");
+});
+
+it("keeps a Manual tab on its old target when SQL Server requires an explicit mode choice", async () => {
+  const id = await openWithConsole();
+  useWorkspace.getState().patchConsole(id, { mode: "Manual" });
+  useWorkspace.setState({ configs: { ms: { ...connectionConfig("ms", "SQL Server"), databaseKind: "SqlServer" } } });
+  const calls: string[] = [];
+  mockIPC((cmd) => { calls.push(cmd); return null; });
+  await setTabTarget(id, { connectionId: "ms", database: "shop" });
+  expect(calls).toEqual([]);
+  expect(useWorkspace.getState().tabs[id]?.console).toEqual({ db: orders.db, mode: "Manual" });
+  expect(useWorkspace.getState().toast?.text).toContain("Choose Auto-commit");
+});
+
 it("keeps a tab on its database while it has staged edits", async () => {
   vi.stubGlobal("window", { crypto });
   const calls: string[] = [];
