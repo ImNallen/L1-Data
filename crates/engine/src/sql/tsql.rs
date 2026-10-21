@@ -360,10 +360,20 @@ fn batch_schema_change(tokens: &[Token<'_>]) -> Option<StmtKind> {
     Some(changes.find(|kind| matches!(kind, StmtKind::Ddl(tag) if tag.ends_with(" DATABASE"))).unwrap_or(first))
 }
 
+fn opaque_execution(tokens: &[Token<'_>]) -> bool {
+    tokens.iter().any(|t| t.word("EXEC") || t.word("EXECUTE"))
+        || tokens.iter().find(|t| t.code()).is_some_and(|t| {
+            matches!(t.kind, Kind::Word | Kind::Ident) && !STATEMENT_WORDS.iter().any(|w| t.word(w))
+        })
+}
+
 pub(crate) fn invalidates(text: &str) -> Invalidates {
     let Ok(tokens) = significant(text) else {
         return Invalidates::Nothing;
     };
+    if opaque_execution(&tokens) {
+        return Invalidates::Both;
+    }
     let mut catalog = false;
     let mut databases = false;
     for kind in (0..tokens.len()).filter_map(|i| ddl_at(&tokens, i)) {
@@ -405,14 +415,15 @@ pub(crate) fn classify(text: &str) -> StmtKind {
 
 pub(crate) fn is_write(text: &str) -> bool {
     significant(text).map_or(true, |tokens| {
-        tokens.iter().any(|t| {
-            [
-                "INSERT", "UPDATE", "DELETE", "MERGE", "INTO", "CREATE", "ALTER", "DROP", "TRUNCATE", "GRANT", "DENY", "REVOKE", "EXEC",
-                "EXECUTE", "DBCC", "BULK", "BACKUP", "RESTORE",
-            ]
-            .iter()
-            .any(|w| t.word(w))
-        })
+        opaque_execution(&tokens)
+            || tokens.iter().any(|t| {
+                [
+                    "INSERT", "UPDATE", "DELETE", "MERGE", "INTO", "CREATE", "ALTER", "DROP", "TRUNCATE", "GRANT", "DENY", "REVOKE",
+                    "DBCC", "BULK", "BACKUP", "RESTORE",
+                ]
+                .iter()
+                .any(|w| t.word(w))
+            })
     })
 }
 
@@ -777,6 +788,49 @@ mod tests {
             ("SELECT N'CREATE TABLE t'; /* ALTER DATABASE d */ SELECT [DROP], @CREATE", Invalidates::Nothing),
         ] {
             assert_eq!(invalidates(text), expected, "{text}");
+        }
+    }
+
+    #[test]
+    fn opaque_execution_can_change_both_metadata_snapshots_and_counts_as_a_write() {
+        for text in [
+            "EXEC dbo.p",
+            "execute sys.sp_executesql N'CREATE TABLE dbo.t (id int)'",
+            "SELECT 1; EXEC sys.sp_rename N'dbo.t', N'renamed'",
+            "DECLARE @sql nvarchar(max)=N'DROP DATABASE d'; EXEC(@sql)",
+            "IF 1=1 EXECUTE @procedure",
+            "EXECUTE AS USER = N'other'",
+            "dbo.p @x=1",
+            "p",
+            "/* header /* nested */ */ [dbo].[p] @x=N'readable'",
+            "-- header\n\"dbo\".\"p\"",
+            ";; #temporary_procedure",
+            "dbo.旅",
+        ] {
+            assert_eq!(invalidates(text), Invalidates::Both, "{text}");
+            assert!(is_write(text), "{text}");
+        }
+    }
+
+    #[test]
+    fn ordinary_statements_and_quoted_execution_words_do_not_imply_opaque_calls() {
+        for text in [
+            "",
+            ";; -- EXEC dbo.p\n/* EXECUTE dbo.p */",
+            "SELECT 1",
+            "SELECT [EXEC], \"EXECUTE\", N'EXEC dbo.p', 'EXECUTE dbo.p', @EXEC, #EXECUTE",
+            "SELECT 1 AS execution_count /* nested /* EXEC */ EXECUTE */ -- EXEC dbo.p",
+            "DECLARE @sql nvarchar(max)=N'EXEC dbo.p'",
+            "PRINT N'EXECUTE dbo.p'",
+            "SET NOCOUNT ON",
+            "BEGIN TRANSACTION",
+            "COMMIT TRANSACTION",
+            "ROLLBACK TRANSACTION",
+            "WITH c AS (SELECT 1 AS id) SELECT * FROM c",
+            "IF 1=1 SELECT 1",
+        ] {
+            assert_eq!(invalidates(text), Invalidates::Nothing, "{text}");
+            assert!(!is_write(text), "{text}");
         }
     }
 
