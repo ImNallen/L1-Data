@@ -514,5 +514,22 @@ async fn concurrent_ddl_waits_for_the_checked_edit_and_auto_commit_releases_the_
         assert!(h.engine.table_apply(h.editor, update(&table, "1", "note", "auto")).await.unwrap().committed);
         h.sql(h.ddl, &format!("SET LOCK_TIMEOUT 150; ALTER TABLE dbo.[{table}] ALTER COLUMN note varchar(40) NULL")).await;
         assert_eq!(h.sql(h.observer, &format!("SELECT note FROM dbo.[{table}]")).await, vec![vec![Some("auto".into())]]);
+        h.refresh().await;
+        h.configure(TxnMode::Manual).await;
+        assert!(!h.engine.table_apply(h.editor, update(&table, "1", "note", "cancelled")).await.unwrap().committed);
+        let owner_pid = h.pid(h.editor);
+        let accepted = h.engine.console_run(h.editor, RunRequest::Script { text: "WAITFOR DELAY '00:00:30'".into(), target: RunTarget::All }).await.unwrap();
+        tokio::time::timeout(Duration::from_secs(3), async {
+            loop {
+                let waiting = h.sql(h.observer, &format!("SELECT COUNT_BIG(*) FROM sys.dm_exec_requests WHERE session_id={owner_pid} AND command='WAITFOR'")).await;
+                if waiting[0][0].as_deref() == Some("1") { break; }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        }).await.expect("the edit transaction must still own the session during WAITFOR");
+        h.engine.console_cancel(h.editor).await;
+        let cancelled = h.finish(h.editor, accepted.run_id).await;
+        assert!(matches!(cancelled.session, SessionState::Lost { transaction: TransactionLoss::Unknown, .. }));
+        h.sql(h.ddl, &format!("SET LOCK_TIMEOUT 2000; ALTER TABLE dbo.[{table}] ALTER COLUMN note varchar(50) NULL")).await;
+        assert_eq!(h.sql(h.observer, &format!("SELECT note FROM dbo.[{table}]")).await, vec![vec![Some("auto".into())]]);
     }.boxed()).await;
 }
