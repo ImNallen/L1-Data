@@ -87,13 +87,13 @@ impl Session {
     pub fn txn_depth(&self) -> Option<u32> {
         match &self.driver {
             Driver::Postgres(_) => None,
-            Driver::SqlServer(s) => Some(s.depth),
+            Driver::SqlServer(s) => s.txn().1,
         }
     }
     pub fn observed_txn(&self) -> Option<TxnState> {
         match &self.driver {
             Driver::Postgres(_) => None,
-            Driver::SqlServer(s) => Some(s.txn),
+            Driver::SqlServer(s) => Some(s.txn().0),
         }
     }
     pub fn transaction_loss(&self, txn: TxnState) -> TransactionLoss {
@@ -162,7 +162,12 @@ impl Session {
     pub async fn list_databases(&mut self) -> Result<(Vec<DatabaseInfo>, String), QueryError> {
         match &mut self.driver {
             Driver::Postgres(p) => p.list_databases().await,
-            Driver::SqlServer(s) => s.list_databases().await,
+            Driver::SqlServer(s) => {
+                let (databases, _) = s.list_databases().await?;
+                let rows = s.rows("SELECT DB_NAME()").await?;
+                let home = rows.first().and_then(|row| row.first()).and_then(Clone::clone).ok_or_else(|| error("SQL Server returned no database name"))?;
+                Ok((databases, home))
+            }
         }
     }
     pub async fn count_schemas(&mut self) -> Result<u32, QueryError> {
@@ -192,7 +197,7 @@ impl Session {
     pub async fn has_writes(&mut self) -> bool {
         match &mut self.driver {
             Driver::Postgres(p) => p.has_writes().await,
-            Driver::SqlServer(s) => s.depth > 0,
+            Driver::SqlServer(s) => s.txn().0 != TxnState::Idle,
         }
     }
     pub async fn finish_transaction(&mut self, commit: bool) -> Result<(), QueryError> {

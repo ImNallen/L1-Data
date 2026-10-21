@@ -37,6 +37,7 @@ pub fn txn_after(state: TxnState, kind: &StmtKind, outcome: StmtOutcome) -> TxnS
     use StmtOutcome::*;
     use TxnState::*;
     match (state, kind, outcome) {
+        (Open, _, _) => Open,
         (Idle, Begin, Ok) => Active,
         (Idle, _, _) => Idle,
         (_, Commit, Ok) | (_, Rollback, Ok) => Idle,
@@ -119,7 +120,7 @@ mod tests {
 
     #[test]
     fn the_machine_is_total() {
-        for state in [Idle, Active, Aborted] {
+        for state in [Idle, Active, Aborted, Open] {
             for kind in all_kinds() {
                 for outcome in [Ok, Err] {
                     let _ = txn_after(state, &kind, outcome);

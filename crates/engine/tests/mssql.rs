@@ -177,11 +177,11 @@ async fn transactions_are_observed_and_commit_button_finishes_all_nesting() {
     let mut h = Harness::open(TxnMode::AutoCommit).await;
     h.ok("CREATE TABLE #tx (id int)").await;
     let state = h.ok("BEGIN TRANSACTION; BEGIN TRANSACTION; INSERT INTO #tx VALUES (1)").await;
-    assert_eq!((state.txn, state.txn_depth), (TxnState::Active, Some(2)));
+    assert_eq!((state.txn, state.txn_depth), (TxnState::Open, None));
     let state = h.ok("COMMIT TRANSACTION").await;
-    assert_eq!((state.txn, state.txn_depth), (TxnState::Active, Some(1)));
+    assert_eq!((state.txn, state.txn_depth), (TxnState::Open, None));
     let state = h.run("RAISERROR('recoverable',16,1)").await;
-    assert_eq!((state.txn, state.txn_depth), (TxnState::Active, Some(1)));
+    assert_eq!((state.txn, state.txn_depth), (TxnState::Open, None));
     h.engine.console_rollback(h.tab).await.unwrap();
     let state = h.ok("SELECT COUNT_BIG(*) FROM #tx").await;
     assert_eq!(h.rows(Harness::rowsets(&state)[0])[0][0].as_deref(), Some("0"));

@@ -132,7 +132,7 @@ async fn check(test: impl for<'a> FnOnce(&'a mut Harness) -> BoxFuture<'a, ()>) 
 }
 
 fn transaction(state: &ConsoleState, depth: u32) {
-    assert_eq!((state.txn, state.txn_depth), (if depth == 0 { TxnState::Idle } else { TxnState::Active }, Some(depth)));
+    assert_eq!((state.txn, state.txn_depth), if depth == 0 { (TxnState::Idle, Some(0)) } else { (TxnState::Open, None) });
 }
 
 fn changes(table: &str) -> TableChanges {

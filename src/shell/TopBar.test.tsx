@@ -49,3 +49,16 @@ it("does not claim a lost transaction when an idle PostgreSQL session closes", (
   expect(html).not.toContain("rolled back");
   expect(html).not.toContain("session reset");
 });
+
+it("shows an open transaction without claiming its depth or committability", () => {
+  lostSession("None");
+  const state = live.consoles.t1!;
+  live.consoles = { t1: { ...state, session: { kind: "Open", backendPid: 1 }, txn: "Open", txnDepth: null } };
+  const html = renderToStaticMarkup(<TopBar hosted={null} />);
+  expect(html).toContain("in transaction");
+  expect(html).toContain("does not report nesting depth or committability");
+  expect(html).toContain('data-testid="commit-btn"');
+  expect(html).toContain('data-testid="rollback-btn"');
+  expect(html).not.toContain("aborted");
+  expect(html).not.toContain("in transaction (1)");
+});

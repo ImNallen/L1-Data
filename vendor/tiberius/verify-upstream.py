@@ -1,5 +1,4 @@
 #!/usr/bin/env python3
-"""Verify the pinned archive and compare the local delta with UPSTREAM.patch."""
 import difflib
 import hashlib
 from pathlib import Path

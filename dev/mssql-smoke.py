@@ -247,7 +247,7 @@ def check(bridge, work, assistant=True):
         print("PASS precise text, money cast, long-cell retrieval and CSV export")
 
         bridge.run(tab, f"SET XACT_ABORT ON; BEGIN TRANSACTION; INSERT INTO {qualified} ([id],[value]) VALUES(2,N'rollback')")
-        assert bridge.console(tab)["txn"] == "Active"
+        assert bridge.console(tab)["txn"] == "Open"
         refused_manual()
         refused_apply(inserts=[[cell("id", "1"), cell("value", "duplicate")]])
         assert bridge.rows(bridge.run(tab, f"SELECT [value],@@TRANCOUNT,XACT_STATE() FROM {qualified} WHERE id=2")) == [[["rollback", "1", "1"]]]
@@ -257,7 +257,7 @@ def check(bridge, work, assistant=True):
         bridge.invoke("console_commit", tabId=tab)
         assert bridge.rows(bridge.run(observer, f"SELECT [value] FROM {qualified} WHERE id = 2")) == [[["commit"]]]
         bridge.run(tab, "BEGIN TRANSACTION; BEGIN TRANSACTION;")
-        assert bridge.console(tab)["txn"] == "Active" and bridge.console(tab)["txnDepth"] == 2
+        assert bridge.console(tab)["txn"] == "Open" and bridge.console(tab)["txnDepth"] is None
         bridge.invoke("console_commit", tabId=tab)
         assert bridge.console(tab)["txn"] == "Idle"
         backend_pid = bridge.console(tab)["session"]["backendPid"]

@@ -97,7 +97,7 @@ pub enum SessionSlot {
         backend_pid: i32,
         cancel: CancelHandle,
         stop: Arc<AtomicBool>,
-        closed: watch::Receiver<Option<String>>,
+        session_release: watch::Receiver<Option<String>>,
     },
     Lost {
         reason: String,
@@ -193,7 +193,7 @@ impl Console {
             backend_pid: session.backend_pid,
             cancel: session.cancel_handle(),
             stop: stop.clone(),
-            closed: session.closed_watch(),
+            session_release: session.closed_watch(),
         };
         Some((session, stop))
     }
@@ -264,13 +264,12 @@ impl Console {
         self.publish(&mut inner, shared);
         drop(inner);
         match session {
-            SessionSlot::Busy { cancel, mut closed, .. } => {
+            SessionSlot::Busy { cancel, mut session_release, .. } => {
                 let worker = shared.clone();
                 shared.spawn(async move {
                     cancel.cancel().await;
                     if let Some((db, owed)) = due {
-                        // The orphaned task must release its session before metadata can see its final DDL.
-                        while closed.changed().await.is_ok() {}
+                        while session_release.changed().await.is_ok() {}
                         worker.schedule_refreshes(db, owed);
                     }
                 });
@@ -381,13 +380,14 @@ pub async fn run_task(console: Arc<Console>, shared: Arc<Shared>, mut session: S
             Err(error) => (StmtStatus::Failed { error: error.clone() }, HistoryOutcome::Error { message: error.message.clone() }),
         };
         let due = console.edit(&shared, run_id, |inner| {
+            let committed = result.is_ok() && inner.txn != TxnState::Aborted && stmt.kind != crate::sql::StmtKind::Rollback;
             inner.txn = txn;
             inner.txn_depth = session.txn_depth();
             Console::statements_mut(inner)[index].status = status;
             if plan.connection.database_kind == DatabaseKind::Postgres && result.is_ok() {
                 inner.invalidate(DatabaseKind::Postgres, stmt.kind.invalidates());
             }
-            inner.finish_refreshes(true)
+            inner.finish_refreshes(committed)
         }).await?;
         if let Some((db, owed)) = due { shared.schedule_refreshes(db, owed); }
         let mut lines = notice_lines(&mut session);

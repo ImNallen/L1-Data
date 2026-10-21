@@ -439,11 +439,12 @@ pub struct ConsoleConfig {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Type)]
+/// `Aborted` permits only rollback. `Open` reports presence without known committability.
 pub enum TxnState {
     Idle,
     Active,
-    /// Only `ROLLBACK [TO SAVEPOINT]` is accepted.
     Aborted,
+    Open,
 }
 
 #[derive(Debug, Clone, Serialize, Type)]

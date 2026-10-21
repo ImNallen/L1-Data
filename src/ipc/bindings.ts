@@ -1108,9 +1108,8 @@ export type TxnError = { kind: "Busy" } | { kind: "NoTransaction" } | { kind: "R
 
 export type TxnMode = "AutoCommit" | "Manual";
 
-export type TxnState = "Idle" | "Active" | 
-/**  Only `ROLLBACK [TO SAVEPOINT]` is accepted. */
-"Aborted";
+/**  `Aborted` permits only rollback. `Open` reports presence without known committability. */
+export type TxnState = "Idle" | "Active" | "Aborted" | "Open";
 
 export type TypeCategory = 
 /**  int2, int4, int8, oid. */

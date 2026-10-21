@@ -148,7 +148,10 @@ impl Shared {
     /// Parameters for a console session on `database`, from the config as saved now.
     fn session_params(&self, id: ConnectionId, database: &str) -> Result<ConnectParams, ConnectError> {
         let config = self.config(id).ok_or_else(|| ConnectError::Network { message: "unknown connection".into() })?;
-        self.params(&config, database)
+        match self.instance(id) {
+            Some(instance) => self.params(&config, instance.canonical_database(database)),
+            None => self.params(&config, database),
+        }
     }
 
     fn next_catalog_version(&self) -> u64 {

@@ -109,7 +109,7 @@ def main():
             value = json.loads(result.stdout)
             print(f"{label}: {json.dumps(value)}", flush=True)
             if expected is None:
-                assert "Ok" in value, f"{label} did not complete Engine login and server-info SELECT"
+                assert "Ok" in value, f"{label} did not complete Engine login and decode server identity"
                 assert value["Ok"]["versionNum"] == 160000, "expected SQL Server 2022"
             else:
                 error = value.get("Err", {})

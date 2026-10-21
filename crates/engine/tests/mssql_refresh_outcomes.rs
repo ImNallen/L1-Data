@@ -131,6 +131,7 @@ impl Harness {
         self.scalar(&sql).await == "1"
     }
 
+    #[cfg(feature = "mssql-tests")]
     async fn refreshed(&self, before: u64, table: &str) -> Arc<Catalog> {
         let result = tokio::time::timeout(Duration::from_secs(4), async {
             loop {
@@ -148,6 +149,7 @@ impl Harness {
         catalog
     }
 
+    #[cfg(feature = "mssql-tests")]
     async fn waiting(&self, pid: i32) {
         tokio::time::timeout(Duration::from_secs(5), async {
             loop {
@@ -291,7 +293,7 @@ async fn commit_and_typed_rollback_keep_database_scoped_refreshes() {
 #[tokio::test]
 async fn postgres_rollback_and_retirement_do_not_publish_uncommitted_objects() {
     check(DatabaseKind::Postgres, |h| async move {
-        for finish in ["rollback", "loss", "close"] {
+        for finish in ["rollback", "typed rollback", "loss", "close"] {
             let table = h.table();
             let before = h.engine.catalog(h.db("shop")).await.unwrap().version;
             let state = h.ok(h.tab, &format!("CREATE TABLE {} (id int)", h.qualified(&table))).await;
@@ -299,6 +301,7 @@ async fn postgres_rollback_and_retirement_do_not_publish_uncommitted_objects() {
             assert!(!h.table_exists(&table).await);
             match finish {
                 "rollback" => h.engine.console_rollback(h.tab).await.unwrap(),
+                "typed rollback" => { h.ok(h.tab, "ROLLBACK").await; }
                 "loss" => {
                     let SessionState::Open { backend_pid } = state.session else { panic!("Expected PostgreSQL session") };
                     assert_eq!(h.scalar(&format!("SELECT pg_terminate_backend({backend_pid})")).await, "t");

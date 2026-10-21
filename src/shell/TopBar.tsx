@@ -78,7 +78,7 @@ export function TopBar({ hosted }: { hosted: HostedWindow | null }) {
         <Menu.Root modal={false}>
           <Menu.Trigger
             data-testid="tx-mode"
-            title={loss?.title}
+            title={loss?.title ?? (txn === "Open" ? "Transaction open. SQL Server does not report nesting depth or committability through the protocol." : undefined)}
             className="inline-flex h-7 items-center gap-1 rounded-md pr-1.5 pl-2 text-ui-12.5 text-muted outline-none hover:bg-hover hover:text-fg data-[state=open]:bg-hover data-[state=open]:text-fg"
           >
             {MODE_LABEL[tab.console.mode]}
