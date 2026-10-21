@@ -38,11 +38,12 @@ import {
 } from "../../ipc/bindings";
 import { isViewKind, useCatalog, viewFor } from "../../state/catalog";
 import { connectErrorText } from "../../ipc/errors";
+import { DATABASE_LABEL, databaseKindFor } from "../../state/databaseKind";
 import { dbKey, sameDb } from "../../state/dbKey";
 import { instanceOf, useLive } from "../../state/live";
 import { detailKey, useRelationDetail } from "../../state/relationDetail";
 import { connectionTone, type Tone } from "../../state/status";
-import { useWorkspace } from "../../state/workspace";
+import { tabTarget, useWorkspace } from "../../state/workspace";
 import {
   ContextMenuArea,
   ContextMenuItem,
@@ -399,15 +400,29 @@ function RelationRow({
   );
 }
 
-export function FunctionRow({ path, depth, fn, ranges }: { path: string; depth: number; fn: FunctionInfo; ranges?: readonly TextRange[] }) {
+export function FunctionRow({ path, depth, db, fn, ranges }: { path: string; depth: number; db: DatabaseRef; fn: FunctionInfo; ranges?: readonly TextRange[] }) {
   return (
     <Row
       path={`${path}/${fn.name}`}
       depth={depth}
       expandable={false}
       onDoubleClick={() => {
-        const active = useWorkspace.getState().active;
-        if (active) insertAtCursor(active, fn.insertText);
+        const { active, tabs, configs, notify } = useWorkspace.getState();
+        const target = tabTarget(active ? tabs[active] : undefined);
+        if (!active || !target || !configs[target.connectionId]) {
+          notify("Choose a tab with a saved connection before inserting a routine.");
+          return;
+        }
+        if (!configs[db.connectionId]) {
+          notify("The routine's connection is no longer available.");
+          return;
+        }
+        const sourceKind = databaseKindFor(db, configs);
+        if (sourceKind !== databaseKindFor(target, configs)) {
+          notify(`Choose a ${DATABASE_LABEL[sourceKind]} tab to insert this routine.`);
+          return;
+        }
+        insertAtCursor(active, fn.insertText);
       }}
       label={
         <span title={`${fn.name}(${fn.args}) → ${fn.returns}`} className="text-ui-13.5">
@@ -455,7 +470,7 @@ function Group({
   );
 }
 
-function SchemaNode({
+export function SchemaNode({
   path,
   depth,
   db,
@@ -502,7 +517,7 @@ function SchemaNode({
               expanded={expanded}
             >
               {schema.functions.map((fn) => (
-                <FunctionRow key={fn.oid} path={`${me}/#functions`} depth={depth + 2} fn={fn} />
+                <FunctionRow key={fn.oid} path={`${me}/#functions`} depth={depth + 2} db={db} fn={fn} />
               ))}
             </Group>
           )}
@@ -789,7 +804,7 @@ function FilteredRelationNode({
   );
 }
 
-function FilteredSchemaNode({ path, db, match, expanded }: { path: string; db: DatabaseRef; match: FilteredSchema; expanded: Expanded }) {
+export function FilteredSchemaNode({ path, db, match, expanded }: { path: string; db: DatabaseRef; match: FilteredSchema; expanded: Expanded }) {
   const me = `${path}/${match.name}`;
   const functions = `${me}/#functions`;
   return (
@@ -803,7 +818,7 @@ function FilteredSchemaNode({ path, db, match, expanded }: { path: string; db: D
           {match.functions.length > 0 && (
             <FoldRow path={functions} depth={3} icon={<IconBraces size={14} className="text-muted" />} label="Functions" expanded={expanded} />
           )}
-          {expanded.has(functions) && match.functions.map((f) => <FunctionRow key={f.fn.oid} path={functions} depth={4} fn={f.fn} ranges={f.ranges} />)}
+          {expanded.has(functions) && match.functions.map((f) => <FunctionRow key={f.fn.oid} path={functions} depth={4} db={db} fn={f.fn} ranges={f.ranges} />)}
         </>
       )}
     </>
