@@ -1,143 +1,85 @@
-use std::future::poll_fn;
-use std::time::Duration;
+mod postgres;
 
-use postgres_native_tls::MakeTlsConnector;
-use tokio::sync::{mpsc, watch};
-use tokio_postgres::error::DbError;
-use tokio_postgres::{AsyncMessage, CancelToken, Client, SimpleQueryMessage};
-
-use crate::connection::{ConnectParams, connect_error, error_text};
-use crate::model::{ConnectError, ServerInfo};
-use crate::text::quote_ident;
+use std::pin::Pin;
+use futures_util::Stream;
+use tokio::sync::watch;
+use crate::connection::{ConnectParams, DatabaseInfo};
+use crate::model::*;
+use crate::sql::StmtKind;
 
 pub struct Session {
-    pub client: Client,
+    driver: Driver,
     pub backend_pid: i32,
     pub server: ServerInfo,
     pub search_path: Option<String>,
-    cancel: CancelToken,
-    tls: MakeTlsConnector,
-    notices: mpsc::UnboundedReceiver<DbError>,
-    closed: watch::Receiver<Option<String>>,
+}
+
+enum Driver {
+    Postgres(postgres::PgSession),
 }
 
 #[derive(Clone)]
-pub struct CancelHandle {
-    token: CancelToken,
-    tls: MakeTlsConnector,
+pub struct CancelHandle(postgres::PgCancel);
+impl CancelHandle {
+    pub async fn cancel(&self) { self.0.cancel().await; }
 }
 
-impl CancelHandle {
-    pub async fn cancel(&self) {
-        if let Err(e) = self.token.cancel_query(self.tls.clone()).await {
-            eprintln!("cancel request failed: {}", error_text(&e));
-        }
-    }
+pub enum QueryEvent {
+    Prepared,
+    Columns(Vec<ColumnMeta>),
+    Row(Vec<Option<String>>),
+    Complete { affected_rows: Option<u64> },
+    Notice(OutputBody),
 }
+pub type QueryStream<'a> = Pin<Box<dyn Stream<Item = Result<QueryEvent, QueryError>> + Send + 'a>>;
+
+pub fn error(message: impl Into<String>) -> QueryError {
+    QueryError { severity: "ERROR".into(), sqlstate: None, message: message.into(), detail: None, hint: None, context: None, position: None }
+}
+
+pub fn parse_postgres_url(url: &str, name: &str) -> Result<ConnectionDraft, String> { postgres::draft_from_url(url, name) }
 
 impl Session {
-    pub async fn open(p: &ConnectParams, schema: Option<&str>, timezone: &str) -> Result<Session, ConnectError> {
-        let tls = p.tls()?;
-        let (client, mut connection) = p.pg_config().connect(tls.clone()).await.map_err(connect_error)?;
-        let (notice_tx, notices) = mpsc::unbounded_channel();
-        let (closed_tx, closed) = watch::channel(None);
-        tokio::spawn(async move {
-            let reason = loop {
-                match poll_fn(|cx| connection.poll_message(cx)).await {
-                    Some(Ok(AsyncMessage::Notice(n))) => {
-                        let _ = notice_tx.send(n);
-                    }
-                    Some(Ok(_)) => {}
-                    Some(Err(e)) => break error_text(&e),
-                    None => break "connection closed".to_owned(),
-                }
-            };
-            let _ = closed_tx.send(Some(reason));
-        });
-
-        // An OS zone Postgres does not know is not worth failing the connection over.
-        let _ = client.batch_execute(&format!("SET TimeZone = '{}'", timezone.replace('\'', "''"))).await;
-        let server = server_info(&client).await.map_err(connect_error)?;
-        let mut session = Session {
-            backend_pid: server.1,
-            server: server.0,
-            search_path: None,
-            cancel: client.cancel_token(),
-            tls,
-            notices,
-            closed,
-            client,
-        };
-        session.set_search_path(schema).await.map_err(connect_error)?;
-        Ok(session)
-    }
-
-    pub async fn open_assistant(p: &ConnectParams, timezone: &str) -> Result<Session, ConnectError> {
-        let session = Session::open(p, None, timezone).await?;
-        session.client.batch_execute("SET application_name = 'L1 Data assistant'; SET default_transaction_read_only = on").await.map_err(connect_error)?;
-        Ok(session)
-    }
-
-    pub async fn set_search_path(&mut self, schema: Option<&str>) -> Result<(), tokio_postgres::Error> {
-        if let Some(s) = schema {
-            self.client.batch_execute(&format!("SET search_path TO {}", quote_ident(s))).await?;
+    pub async fn open(p: &ConnectParams, schema: Option<&str>, timezone: &str) -> Result<Self, ConnectError> {
+        match p.database_kind {
+            DatabaseKind::Postgres => {
+                let driver = postgres::PgSession::open(p, schema, timezone).await?;
+                Ok(Self { backend_pid: driver.backend_pid, server: driver.server.clone(), search_path: driver.search_path.clone(), driver: Driver::Postgres(driver) })
+            }
+            DatabaseKind::SqlServer => Err(ConnectError::Network { message: "SQL Server driver is not connected yet".into() }),
         }
+    }
+
+    pub async fn open_assistant(p: &ConnectParams, timezone: &str) -> Result<Self, ConnectError> {
+        if p.database_kind != DatabaseKind::Postgres {
+            return Err(ConnectError::Server(error("SQL Server model queries are disabled because server-enforced read-only transactions are unavailable.")));
+        }
+        let mut session = Self::open(p, None, timezone).await?;
+        session.batch("SET application_name = 'L1 Data assistant'; SET default_transaction_read_only = on").await.map_err(ConnectError::Server)?;
+        Ok(session)
+    }
+
+    pub fn txn_depth(&self) -> Option<u32> { None }
+    pub fn observed_txn(&self) -> Option<TxnState> { None }
+    pub fn cancel_handle(&self) -> CancelHandle { match &self.driver { Driver::Postgres(p) => CancelHandle(p.cancel_handle()) } }
+    pub fn closed_reason(&self) -> Option<String> { match &self.driver { Driver::Postgres(p) => p.closed_reason() } }
+    pub fn closed_watch(&self) -> watch::Receiver<Option<String>> { match &self.driver { Driver::Postgres(p) => p.closed_watch() } }
+    pub async fn closed_reason_settled(&mut self, fatal: Option<String>) -> Option<String> { match &mut self.driver { Driver::Postgres(p) => p.closed_reason_settled(fatal).await } }
+    pub async fn set_search_path(&mut self, schema: Option<&str>) -> Result<(), QueryError> {
+        match &mut self.driver { Driver::Postgres(p) => p.set_search_path(schema).await.map_err(|e| postgres::query_failure(e, None))? }
         self.search_path = schema.map(str::to_owned);
         Ok(())
     }
-
-    pub fn cancel_handle(&self) -> CancelHandle {
-        CancelHandle { token: self.cancel.clone(), tls: self.tls.clone() }
-    }
-
-    pub fn drain_notices(&mut self) -> Vec<DbError> {
-        let mut out = Vec::new();
-        while let Ok(n) = self.notices.try_recv() {
-            out.push(n);
-        }
-        out
-    }
-
-    /// `Some(reason)` once the connection is dead. The client learns of a dead socket before the
-    /// driver task records why, so a closed client without a reason yet gets a generic one.
-    pub fn closed_reason(&self) -> Option<String> {
-        self.closed.borrow().clone().or_else(|| self.client.is_closed().then(|| "connection closed".to_owned()))
-    }
-
-    /// Like `closed_reason`, but gives the driver task a moment to deliver the server's reason.
-    /// A FATAL error answered to a statement (`terminating connection due to administrator
-    /// command`) means the server is closing the socket; `fatal` carries that message so the
-    /// session counts as dead even if EOF has not been read yet.
-    pub async fn closed_reason_settled(&mut self, fatal: Option<String>) -> Option<String> {
-        if self.closed.borrow().is_none() && (fatal.is_some() || self.client.is_closed()) {
-            let _ = tokio::time::timeout(Duration::from_millis(500), self.closed.changed()).await;
-        }
-        self.closed.borrow().clone().or(fatal).or_else(|| self.closed_reason())
-    }
-
-    pub fn closed_watch(&self) -> watch::Receiver<Option<String>> {
-        self.closed.clone()
-    }
-}
-
-async fn server_info(client: &Client) -> Result<(ServerInfo, i32), tokio_postgres::Error> {
-    let messages = client
-        .simple_query(
-            "SELECT pg_backend_pid()::text, current_setting('server_version'), current_setting('server_version_num'), current_setting('server_encoding')",
-        )
-        .await?;
-    let row = messages.iter().find_map(|m| match m {
-        SimpleQueryMessage::Row(r) => Some(r),
-        _ => None,
-    });
-    let cell = |i: usize| row.and_then(|r| r.get(i)).unwrap_or("");
-    let full_version = cell(1);
-    Ok((
-        ServerInfo {
-            version: full_version.split_whitespace().next().unwrap_or(full_version).to_owned(),
-            version_num: cell(2).parse().unwrap_or(0),
-            encoding: cell(3).to_owned(),
-        },
-        cell(0).parse().unwrap_or(0),
-    ))
+    pub fn drain_notices(&mut self) -> Vec<OutputBody> { match &mut self.driver { Driver::Postgres(p) => p.drain_notices().iter().map(postgres::notice).collect() } }
+    pub async fn batch(&mut self, sql: &str) -> Result<(), QueryError> { match &mut self.driver { Driver::Postgres(p) => p.batch(sql).await } }
+    pub async fn execute_edit(&mut self, sql: &str) -> Result<u64, QueryError> { match &mut self.driver { Driver::Postgres(p) => p.execute_edit(sql).await } }
+    pub fn query<'a>(&'a mut self, sql: &'a str) -> QueryStream<'a> { match &mut self.driver { Driver::Postgres(p) => p.query(sql) } }
+    pub async fn list_databases(&mut self) -> Result<(Vec<DatabaseInfo>, String), QueryError> { match &mut self.driver { Driver::Postgres(p) => p.list_databases().await } }
+    pub async fn count_schemas(&mut self) -> Result<u32, QueryError> { match &mut self.driver { Driver::Postgres(p) => p.count_schemas().await } }
+    pub async fn catalog(&mut self, db: DatabaseRef, version: u64, extra: &[String]) -> Result<Catalog, QueryError> { match &mut self.driver { Driver::Postgres(p) => p.catalog(db, version, extra).await } }
+    pub async fn detail(&mut self, db: DatabaseRef, oid: u32, version: u64) -> Result<Option<RelationDetail>, QueryError> { match &mut self.driver { Driver::Postgres(p) => p.detail(db, oid, version).await } }
+    pub async fn count(&mut self, sql: &str) -> Result<u64, QueryError> { match &mut self.driver { Driver::Postgres(p) => p.count(sql).await } }
+    pub async fn has_writes(&mut self) -> bool { match &mut self.driver { Driver::Postgres(p) => p.has_writes().await } }
+    pub async fn finish_transaction(&mut self, commit: bool) -> Result<(), QueryError> { self.batch(if commit { "COMMIT" } else { "ROLLBACK" }).await }
+    pub fn implicit_begin(&self, mode: TxnMode, txn: TxnState, kind: &StmtKind, _sql: &str) -> bool { crate::txn::needs_implicit_begin(mode, txn, kind) }
 }

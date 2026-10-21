@@ -7,7 +7,7 @@ use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
 
-use crate::connection::PgDatabase;
+use crate::connection::DatabaseInfo;
 use crate::model::{Catalog, DbAccess, Preset, ViewEdit};
 
 /// Persisted per connection in `connection_views`. Never crosses IPC: the UI sees the resolved
@@ -96,7 +96,7 @@ impl<'de> Deserialize<'de> for DatabaseView {
 /// served catalog of every slot that has one.
 pub struct Known<'a> {
     pub home: &'a str,
-    pub databases: &'a [PgDatabase],
+    pub databases: &'a [DatabaseInfo],
     pub catalogs: &'a HashMap<String, Arc<Catalog>>,
 }
 
@@ -214,12 +214,12 @@ mod tests {
     use super::*;
     use crate::model::{ConnectionId, DatabaseRef, SchemaInfo};
 
-    fn db(name: &str, system: bool, access: DbAccess) -> PgDatabase {
-        PgDatabase { name: name.into(), system, access }
+    fn db(name: &str, system: bool, access: DbAccess) -> DatabaseInfo {
+        DatabaseInfo { name: name.into(), system, access }
     }
 
     fn catalog(database: &str, default: Option<&str>, schemas: &[(&str, bool)]) -> Arc<Catalog> {
-        Arc::new(Catalog {
+        Arc::new(Catalog { database_kind: crate::model::DatabaseKind::Postgres,
             db: DatabaseRef { connection_id: ConnectionId(uuid::Uuid::nil()), database: database.into() },
             version: 1,
             default_schema: default.map(str::to_owned),
@@ -231,7 +231,7 @@ mod tests {
     }
 
     struct Server {
-        databases: Vec<PgDatabase>,
+        databases: Vec<DatabaseInfo>,
         catalogs: HashMap<String, Arc<Catalog>>,
     }
 

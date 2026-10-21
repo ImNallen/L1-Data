@@ -201,7 +201,7 @@ impl Shared {
             (seq, control_rx, inner.closing.clone())
         };
         chat.store_record(self);
-        let context = request.tab.as_ref().map(|t| SentContext { db: t.db.clone(), connection_name, tab_title: t.title.clone() });
+        let context = request.tab.as_ref().map(|t| SentContext { database_kind: None, db: t.db.clone(), connection_name, tab_title: t.title.clone() });
         let entry = Entry::User { at_ms: now_ms(), text: text.clone(), context, attachment };
         chat.store_entry(self, seq, seq, &entry);
         chat.publish_entry(self, seq, seq, entry);
@@ -322,13 +322,13 @@ mod tests {
     }
 
     #[test]
-    fn only_tools_rs_reaches_a_session_client() {
+    fn only_tools_rs_runs_model_sql() {
         for (name, text) in sources() {
             if name == "tools.rs" {
-                assert!(text.contains(".client."), "tools.rs is where queries run");
+                assert!(text.contains("session.query("), "tools.rs is where queries run");
                 continue;
             }
-            assert!(!text.contains(".client."), "{name} reaches a session's client; database access belongs in tools.rs, on its own read-only session");
+            assert!(!text.contains("session.query("), "{name} reaches a session's query stream; database access belongs in tools.rs, on its own read-only session");
         }
     }
 

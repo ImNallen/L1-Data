@@ -230,18 +230,18 @@ mod tests {
     use crate::model::{ColumnInfo, ConnectionId, Relation, SchemaInfo, TypeCategory};
 
     fn column(name: &str, pk: bool, fk: bool) -> ColumnInfo {
-        ColumnInfo { attnum: 1, name: name.into(), type_display: "bigint".into(), category: TypeCategory::Integer, not_null: true, pk, fk }
+        ColumnInfo { writable: true, attnum: 1, name: name.into(), type_display: "bigint".into(), category: TypeCategory::Integer, not_null: true, pk, fk }
     }
 
     fn catalog(tables: usize) -> Catalog {
         let relations = (0..tables)
-            .map(|i| Relation { oid: i as u32, name: format!("table_{i}"), kind: RelKind::Table, row_estimate: Some(10 * i as i64), columns: vec![column("id", true, false), column("customer_id", false, true), column("total", false, false)] })
+            .map(|i| Relation { qualified_name: String::new(), oid: i as u32, name: format!("table_{i}"), kind: RelKind::Table, row_estimate: Some(10 * i as i64), columns: vec![column("id", true, false), column("customer_id", false, true), column("total", false, false)] })
             .collect();
-        Catalog {
+        Catalog { database_kind: crate::model::DatabaseKind::Postgres,
             db: DatabaseRef { connection_id: ConnectionId(uuid::Uuid::nil()), database: "shop".into() },
             version: 1,
             default_schema: Some("public".into()),
-            schemas: vec![SchemaInfo { name: "public".into(), system: false, table_count: tables as u32, relations, functions: Vec::new() }, SchemaInfo { name: "hidden".into(), system: false, table_count: 1, relations: vec![Relation { oid: 9, name: "secret".into(), kind: RelKind::View, row_estimate: None, columns: vec![] }], functions: Vec::new() }],
+            schemas: vec![SchemaInfo { name: "public".into(), system: false, table_count: tables as u32, relations, functions: Vec::new() }, SchemaInfo { name: "hidden".into(), system: false, table_count: 1, relations: vec![Relation { qualified_name: String::new(), oid: 9, name: "secret".into(), kind: RelKind::View, row_estimate: None, columns: vec![] }], functions: Vec::new() }],
         }
     }
 

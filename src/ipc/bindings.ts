@@ -123,6 +123,7 @@ export type BootSnapshot = {
 };
 
 export type Catalog = {
+	databaseKind: DatabaseKind,
 	db: DatabaseRef,
 	version: number,
 	/**
@@ -237,6 +238,7 @@ export type ColumnFilter = {
 };
 
 export type ColumnInfo = {
+	writable: boolean,
 	attnum: number,
 	name: string,
 	typeDisplay: string,
@@ -249,7 +251,7 @@ export type ColumnInfo = {
 
 export type ColumnMeta = {
 	name: string,
-	type: PgTypeRef,
+	type: SqlTypeRef,
 	source: ColumnSource | null,
 };
 
@@ -276,6 +278,7 @@ export type ConnectError = { kind: "Network"; message: string } | { kind: "Tls";
 } & QueryError | { kind: "Keychain"; message: string };
 
 export type ConnectionConfig = {
+	databaseKind: DatabaseKind,
 	id: ConnectionId,
 	name: string,
 	host: string,
@@ -289,6 +292,7 @@ export type ConnectionConfig = {
 };
 
 export type ConnectionDraft = {
+	databaseKind: DatabaseKind,
 	/**  `None` creates a new connection. */
 	id: ConnectionId | null,
 	name: string,
@@ -337,6 +341,7 @@ export type ConsoleConfigView = {
 };
 
 export type ConsoleState = {
+	txnDepth: number | null,
 	tabId: TabId,
 	rev: number,
 	config: ConsoleConfigView,
@@ -361,6 +366,8 @@ export type CustomThemeVariant = {
 	appearance: Appearance,
 	colors: { [key in string]: string },
 };
+
+export type DatabaseKind = "Postgres" | "SqlServer";
 
 /**
  *  One database on one saved connection. Postgres catalogs and OIDs are per database, so every
@@ -452,6 +459,8 @@ export type EntrySnapshot = {
 	entry: Entry,
 };
 
+export type ExecutionUnitKind = "Statement" | "Batch";
+
 export type ExportError = { kind: "Gone" } | { kind: "Io"; message: string };
 
 export type ExportSummary = {
@@ -479,7 +488,7 @@ export type FormatEdit = {
 	insert: string,
 };
 
-export type FormatError = 
+export type FormatError = { kind: "Unsupported" } | 
 /**  No statement at the cursor or in the selection. */
 { kind: "NothingToFormat" } | 
 /**  The laid-out text would lex differently from the original, so the engine refused it. */
@@ -515,6 +524,7 @@ export type HistoryCounts = {
 };
 
 export type HistoryEntry = {
+	databaseKind: DatabaseKind,
 	id: number,
 	atMs: number,
 	connectionId: ConnectionId,
@@ -530,6 +540,7 @@ export type HistoryError = { kind: "Stale" } | { kind: "Unavailable"; message: s
 export type HistoryFilter = "All" | "Failed" | "Writes";
 
 export type HistoryGroupPage = {
+	databaseKind: DatabaseKind,
 	sql: string,
 	runs: HistoryRun[],
 	hasMore: boolean,
@@ -545,6 +556,7 @@ export type HistoryGroupQuery = {
 };
 
 export type HistoryGroupSummary = {
+	databaseKind: DatabaseKind,
 	id: number,
 	latestId: number,
 	latestAtMs: number,
@@ -707,13 +719,6 @@ export type Permission =
  */
 "Auto";
 
-export type PgTypeRef = {
-	oid: number,
-	/**  `"bigint"`, `"integer[]"`, `"order_status"`. */
-	display: string,
-	category: TypeCategory,
-};
-
 /**  The quick actions of a picker. `None` is an explicit empty selection. */
 export type Preset = "All" | "DefaultOnly" | "None";
 
@@ -774,6 +779,7 @@ export type QueryError = {
 export type RelKind = "Table" | "PartitionedTable" | "View" | "MaterializedView" | "ForeignTable";
 
 export type Relation = {
+	qualifiedName: string,
 	oid: number,
 	name: string,
 	kind: RelKind,
@@ -809,6 +815,7 @@ export type ReplyBlock = { kind: "Markdown"; text: string } |
 export type ResultError = { kind: "Gone" } | { kind: "OutOfRange" };
 
 export type ResultMeta = {
+	databaseKind: DatabaseKind,
 	ref: ResultRef,
 	/**
 	 *  The database the rows came from. Column sources are its OIDs, so PK lookups key on this,
@@ -843,6 +850,8 @@ export type RowUpdate = {
 	set: CellWrite[],
 };
 
+export type RowsState = "Streaming" | "Complete" | "Failed" | "Cancelled";
+
 export type RunAccepted = {
 	runId: RunId,
 	statements: DocRange[],
@@ -858,6 +867,8 @@ export type RunError = { kind: "Busy" } | { kind: "NoStatement" } | { kind: "Not
 export type RunId = number;
 
 export type RunOutcome = "Ok" | "Failed" | "Cancelled";
+
+export type RunOutput = { kind: "Rows"; result: ResultMeta; state: RowsState } | { kind: "Command"; tag: string; affectedRows: number | null; elapsedMs: number };
 
 export type RunRequest = { kind: "script"; text: string; target: RunTarget } | { kind: "tablePage"; schema: string; table: string; page: number; query?: TableQuery };
 
@@ -886,6 +897,7 @@ export type SchemaInfo = {
 
 /**  The statements of a script and the one a run at the cursor would pick. */
 export type ScriptOutline = {
+	unitKind: ExecutionUnitKind,
 	statements: DocRange[],
 	atCursor: number | null,
 };
@@ -902,6 +914,7 @@ export type SendRequest = {
 };
 
 export type SentContext = {
+	databaseKind: DatabaseKind | null,
 	db: DatabaseRef | null,
 	/**  As named at send, so the chip reads right after a rename or a delete. */
 	connectionName: string | null,
@@ -949,17 +962,22 @@ export type SourceLimits = {
 	outcome: LimitsOutcome,
 };
 
+export type SqlTypeRef = {
+	/**  `"bigint"`, `"integer[]"`, `"order_status"`. */
+	display: string,
+	category: TypeCategory,
+};
+
 export type SslMode = "Disable" | "Prefer" | "Require" | "VerifyCa" | "VerifyFull";
 
 export type StatementRun = {
+	outputs: RunOutput[],
 	index: number,
 	range: DocRange,
 	status: StmtStatus,
 };
 
-export type StmtStatus = { kind: "Pending" } | { kind: "Preparing" } | { kind: "Rows"; result: ResultMeta; done: boolean } | 
-/**  `tag` reads like `"UPDATE 3"`. */
-{ kind: "Command"; tag: string; elapsedMs: number } | { kind: "Failed"; error: QueryError } | { kind: "Cancelled" } | 
+export type StmtStatus = { kind: "Pending" } | { kind: "Preparing" } | { kind: "Running" } | { kind: "Finished" } | { kind: "Failed"; error: QueryError } | { kind: "Cancelled" } | 
 /**  An earlier statement failed or was cancelled. */
 { kind: "Skipped" };
 
@@ -1035,6 +1053,8 @@ export type ToolUse = { kind: "DescribeTables"; tables: string[] } | { kind: "Se
 
 export type TriggerEvent = "Insert" | "Update" | "Delete" | "Truncate";
 
+export type TriggerImplementation = { kind: "Function"; name: string } | { kind: "SqlModule"; definition: string | null };
+
 export type TriggerInfo = {
 	name: string,
 	timing: TriggerTiming,
@@ -1042,8 +1062,7 @@ export type TriggerInfo = {
 	events: TriggerEvent[],
 	perRow: boolean,
 	enabled: boolean,
-	/**  Schema-qualified only when the function is not on the search path: `set_updated_at`. */
-	function: string,
+	implementation: TriggerImplementation,
 };
 
 export type TriggerTiming = "Before" | "After" | "InsteadOf";

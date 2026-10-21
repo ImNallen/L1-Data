@@ -14,8 +14,12 @@ const GROUPS: &str = "WITH groups AS (
             OR instr(history_lower(database), ?1) > 0
             OR (json_extract(outcome_json, '$.kind') = 'Error' AND instr(history_lower(json_extract(outcome_json, '$.message')), ?1) > 0)
             THEN 1 ELSE 0 END) AS matches
-    FROM history GROUP BY sql, connection_id, database
+    FROM history GROUP BY sql, connection_id, database, database_kind
 ) ";
+
+fn database_kind(raw: String) -> rusqlite::Result<DatabaseKind> {
+    serde_json::from_value(serde_json::Value::String(raw)).map_err(|e| rusqlite::Error::FromSqlConversionFailure(0, rusqlite::types::Type::Text, Box::new(e)))
+}
 
 fn connection_id(raw: String) -> rusqlite::Result<ConnectionId> {
     raw.parse().map(ConnectionId).map_err(|e| {
@@ -44,6 +48,7 @@ fn summary(row: &Row<'_>) -> rusqlite::Result<HistoryGroupSummary> {
     let sql: String = row.get(8)?;
     let (title, excerpt) = history_text(&sql);
     Ok(HistoryGroupSummary {
+        database_kind: database_kind(row.get(14)?)?,
         id: row.get(0)?,
         latest_id: row.get(1)?,
         latest_at_ms: row.get(2)?,
@@ -81,7 +86,7 @@ fn browse(
     let mut stmt = c.prepare(&format!("{GROUPS}
         SELECT g.group_id, g.latest_id, latest.at_ms, h.connection_id, h.database,
             g.run_count, g.failed_count, g.is_write, h.sql,
-            h.id, h.at_ms, h.connection_name, h.elapsed_ms, h.outcome_json
+            h.id, h.at_ms, h.connection_name, h.elapsed_ms, h.outcome_json, h.database_kind
         FROM groups g JOIN history latest ON latest.id = g.latest_id
         JOIN history h ON h.id = CASE WHEN ?2 = 'Failed' THEN g.failed_id ELSE g.latest_id END
         WHERE g.matches AND (?2 = 'All' OR (?2 = 'Failed' AND g.failed_count > 0) OR (?2 = 'Writes' AND g.is_write))
@@ -125,17 +130,17 @@ impl Store {
             if q.revision != *revision { return Ok(Err(HistoryError::Stale)); }
             let mut stmt = c.prepare("SELECT h.id, h.at_ms, h.connection_name, h.elapsed_ms, h.outcome_json
                 FROM history h JOIN history anchor ON anchor.id = ?1
-                WHERE h.sql = anchor.sql AND h.connection_id = anchor.connection_id AND h.database = anchor.database
+                WHERE h.sql = anchor.sql AND h.connection_id = anchor.connection_id AND h.database = anchor.database AND h.database_kind = anchor.database_kind
                     AND (?2 IS NULL OR h.id < ?2) ORDER BY h.id DESC LIMIT ?3")?;
             let limit = usize::from(q.limit.clamp(1, 100));
             let mut runs = stmt.query_map(params![q.id, q.before_id, (limit + 1) as i64], |r| run(r, 0))?.collect::<Result<Vec<_>, _>>()?;
             if runs.is_empty() && q.before_id.is_none() { return Ok(Err(HistoryError::Stale)); }
-            let (sql, max_elapsed_ms) = c.query_row("SELECT anchor.sql, max(h.elapsed_ms)
-                FROM history anchor JOIN history h ON h.sql = anchor.sql AND h.connection_id = anchor.connection_id AND h.database = anchor.database
-                WHERE anchor.id = ?1", [q.id], |r| Ok((r.get(0)?, r.get(1)?)))?;
+            let (sql, max_elapsed_ms, kind) = c.query_row("SELECT anchor.sql, max(h.elapsed_ms), anchor.database_kind
+                FROM history anchor JOIN history h ON h.sql = anchor.sql AND h.connection_id = anchor.connection_id AND h.database = anchor.database AND h.database_kind = anchor.database_kind
+                WHERE anchor.id = ?1", [q.id], |r| Ok((r.get(0)?, r.get(1)?, r.get::<_, String>(2)?)))?;
             let has_more = runs.len() > limit;
             runs.truncate(limit);
-            Ok(Ok(HistoryGroupPage { sql, runs, has_more, max_elapsed_ms, revision: *revision }))
+            Ok(Ok(HistoryGroupPage { database_kind: database_kind(kind)?, sql, runs, has_more, max_elapsed_ms, revision: *revision }))
         }).map_err(unavailable)?
     }
 }
@@ -160,7 +165,7 @@ mod tests {
         name: &str,
         outcome: HistoryOutcome,
     ) -> HistoryEntry {
-        s.insert_history_and_prune(HistoryInsert {
+        s.insert_history_and_prune(HistoryInsert { database_kind: crate::model::DatabaseKind::Postgres,
             at_ms: 123,
             connection_id: ConnectionId(uuid::Uuid::nil()),
             connection_name: name.into(),
@@ -233,7 +238,7 @@ mod tests {
         insert(&s, "select 1", "reporting", "new name", ok());
         insert(&s, "SELECT 1", "shop", "new name", ok());
         insert(&s, "select 1 ", "shop", "new name", ok());
-        s.insert_history_and_prune(HistoryInsert {
+        s.insert_history_and_prune(HistoryInsert { database_kind: crate::model::DatabaseKind::Postgres,
             at_ms: 124,
             connection_id: ConnectionId(uuid::Uuid::new_v4()),
             connection_name: "other".into(),

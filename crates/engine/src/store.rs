@@ -6,7 +6,7 @@ use rusqlite::functions::FunctionFlags;
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 
-use crate::model::{ChatId, ChatOptions, ConnectionConfig, ConnectionId, Entry, HistoryEntry, HistoryOutcome, HistoryPage, HistoryQuery, ProviderKind};
+use crate::model::{ChatId, ChatOptions, ConnectionConfig, ConnectionId, DatabaseKind, Entry, HistoryEntry, HistoryOutcome, HistoryPage, HistoryQuery, ProviderKind};
 use crate::secrets::Sealed;
 use crate::view::ConnectionView;
 
@@ -22,7 +22,7 @@ pub enum StoreError {
 
 pub const HISTORY_KEEP: i64 = 10_000;
 
-const MIGRATIONS: [&str; 5] = [
+const MIGRATIONS: [&str; 6] = [
     "
     CREATE TABLE connections (id TEXT PRIMARY KEY, json TEXT NOT NULL);
     CREATE TABLE history (
@@ -52,6 +52,7 @@ const MIGRATIONS: [&str; 5] = [
         PRIMARY KEY (chat_id, seq)
     ) WITHOUT ROWID;
 ",
+    "ALTER TABLE history ADD COLUMN database_kind TEXT NOT NULL DEFAULT 'Postgres';",
 ];
 
 pub struct Store {
@@ -83,6 +84,7 @@ pub struct ProviderSession {
 }
 
 pub struct HistoryInsert {
+    pub database_kind: DatabaseKind,
     pub at_ms: i64,
     pub connection_id: ConnectionId,
     pub connection_name: String,
@@ -218,8 +220,8 @@ impl Store {
             let tx = conn.unchecked_transaction()?;
             let c = &tx;
             c.execute(
-                "INSERT INTO history (at_ms, connection_id, connection_name, database, sql, elapsed_ms, outcome_json, is_write)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                "INSERT INTO history (at_ms, connection_id, connection_name, database, sql, elapsed_ms, outcome_json, is_write, database_kind)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
                 params![
                     h.at_ms,
                     h.connection_id.0.to_string(),
@@ -228,7 +230,8 @@ impl Store {
                     h.sql,
                     h.elapsed_ms,
                     serde_json::to_string(&h.outcome)?,
-                    crate::sql::history_is_write(&h.sql)
+                    crate::sql::history_is_write(&h.sql),
+                    serde_json::to_value(h.database_kind)?.as_str().unwrap(),
                 ],
             )?;
             let id = c.last_insert_rowid();
@@ -239,6 +242,7 @@ impl Store {
             tx.commit()?;
             *revision += 1;
             Ok(HistoryEntry {
+                database_kind: h.database_kind,
                 id,
                 at_ms: h.at_ms,
                 connection_id: h.connection_id,
@@ -256,7 +260,7 @@ impl Store {
             let limit = i64::from(q.limit.max(1));
             let pattern = q.text.as_deref().filter(|t| !t.trim().is_empty()).map(|t| format!("%{}%", t.trim()));
             let mut stmt = c.prepare(
-                "SELECT id, at_ms, connection_id, connection_name, database, sql, elapsed_ms, outcome_json
+                "SELECT id, at_ms, connection_id, connection_name, database, sql, elapsed_ms, outcome_json, database_kind
                  FROM history
                  WHERE (?1 IS NULL OR id < ?1)
                    AND (?2 IS NULL OR connection_id = ?2)
@@ -275,13 +279,15 @@ impl Store {
                         r.get::<_, String>(5)?,
                         r.get::<_, u32>(6)?,
                         r.get::<_, String>(7)?,
+                        r.get::<_, String>(8)?,
                     ))
                 },
             )?;
             let mut entries = Vec::new();
             for row in rows {
-                let (id, at_ms, connection_id, connection_name, database, sql, elapsed_ms, outcome) = row?;
+                let (id, at_ms, connection_id, connection_name, database, sql, elapsed_ms, outcome, database_kind) = row?;
                 entries.push(HistoryEntry {
+                    database_kind: serde_json::from_value(serde_json::Value::String(database_kind))?,
                     id,
                     at_ms,
                     connection_id: ConnectionId(connection_id.parse().map_err(|_| {
@@ -419,7 +425,7 @@ mod tests {
     }
 
     fn entry(sql: &str) -> HistoryInsert {
-        HistoryInsert {
+        HistoryInsert { database_kind: crate::model::DatabaseKind::Postgres,
             at_ms: 1,
             connection_id: ConnectionId(uuid::Uuid::nil()),
             connection_name: "dev".into(),
@@ -434,7 +440,7 @@ mod tests {
     fn migrations_run_once_and_data_survives_reopen() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("t.sqlite3");
-        let config = ConnectionConfig {
+        let config = ConnectionConfig { database_kind: crate::model::DatabaseKind::Postgres,
             id: ConnectionId(uuid::Uuid::new_v4()),
             name: "dev".into(),
             host: "localhost".into(),
@@ -570,7 +576,7 @@ mod tests {
         Store::open(&path).unwrap().put_chat(chat_id(1), &first).unwrap();
         let s = Store::open(&path).unwrap();
         let version: i64 = s.with(|c| Ok(c.query_row("PRAGMA user_version", [], |r| r.get(0))?)).unwrap();
-        assert_eq!(version, 5);
+        assert_eq!(version, 6);
         assert_eq!(s.chats(10).unwrap(), vec![(chat_id(1), first)]);
         assert_eq!(s.kv_get::<serde_json::Value>("workspace").unwrap(), Some(serde_json::json!({})));
     }

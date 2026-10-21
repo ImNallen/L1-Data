@@ -1,6 +1,6 @@
 use tokio_postgres::Client;
 
-use crate::model::{ColumnDefault, DatabaseRef, DefaultValue, FkAction, IndexInfo, KeyInfo, KeyKind, RelationDetail, TriggerEvent, TriggerInfo, TriggerTiming};
+use crate::model::{ColumnDefault, DatabaseRef, DefaultValue, FkAction, IndexInfo, KeyInfo, KeyKind, RelationDetail, TriggerEvent, TriggerInfo, TriggerImplementation, TriggerTiming};
 
 /// Reads one relation's defaults, keys, indexes, and triggers. Every query is an index lookup on
 /// the relation's OID, so the cost does not grow with the size of the database. `None` when the
@@ -99,7 +99,7 @@ pub async fn load(client: &Client, db: DatabaseRef, oid: u32, catalog_version: u
         .iter()
         .map(|r| {
             let (timing, events, per_row) = decode_tgtype(r.get(1));
-            TriggerInfo { name: r.get(0), timing, events, per_row, enabled: matches!(r.get::<_, &str>(2), "O" | "A"), function: r.get(3) }
+            TriggerInfo { name: r.get(0), timing, events, per_row, enabled: matches!(r.get::<_, &str>(2), "O" | "A"), implementation: TriggerImplementation::Function { name: r.get(3) } }
         })
         .collect();
 

@@ -1,7 +1,7 @@
 use std::io::{self, Write};
 use std::sync::RwLock;
 
-use crate::model::{ColumnMeta, DatabaseRef, ResultMeta, ResultRef, RowPage, TruncateReason};
+use crate::model::{ColumnMeta, DatabaseKind, DatabaseRef, ResultMeta, ResultRef, RowPage, TruncateReason};
 
 pub const CELL_CHAR_LIMIT: usize = 2_000;
 pub const PAGE_LEN_MAX: u32 = 2_000;
@@ -9,6 +9,7 @@ pub const PAGE_LEN_MAX: u32 = 2_000;
 const NULL: u32 = u32::MAX;
 
 pub struct ResultSet {
+    pub database_kind: DatabaseKind,
     pub r#ref: ResultRef,
     pub db: DatabaseRef,
     pub columns: Vec<ColumnMeta>,
@@ -30,9 +31,10 @@ pub struct Caps {
 }
 
 impl ResultSet {
-    pub fn new(r#ref: ResultRef, db: DatabaseRef, columns: Vec<ColumnMeta>) -> Self {
+    pub fn new(r#ref: ResultRef, db: DatabaseRef, database_kind: DatabaseKind, columns: Vec<ColumnMeta>) -> Self {
         let ncols = columns.len();
         Self {
+            database_kind,
             r#ref,
             db,
             columns,
@@ -83,6 +85,7 @@ impl ResultSet {
     pub fn meta(&self) -> ResultMeta {
         let a = self.data.read().unwrap();
         ResultMeta {
+            database_kind: self.database_kind,
             r#ref: self.r#ref,
             db: self.db.clone(),
             columns: self.columns.clone(),
@@ -200,18 +203,18 @@ impl<W: Write> Write for CountingWriter<'_, W> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::{ConnectionId, DatabaseRef, PgTypeRef, RunId, TabId, TypeCategory};
+    use crate::model::{ConnectionId, DatabaseRef, SqlTypeRef, RunId, TabId, TypeCategory};
 
     fn set(ncols: usize) -> ResultSet {
         let columns = (0..ncols)
             .map(|i| ColumnMeta {
                 name: format!("c{i}"),
-                r#type: PgTypeRef { oid: 25, display: "text".into(), category: TypeCategory::Text },
+                r#type: SqlTypeRef { display: "text".into(), category: TypeCategory::Text },
                 source: None,
             })
             .collect();
         let db = DatabaseRef { connection_id: ConnectionId(uuid::Uuid::nil()), database: "shop".into() };
-        ResultSet::new(ResultRef { tab_id: TabId(uuid::Uuid::nil()), run_id: RunId(1), index: 0 }, db, columns)
+        ResultSet::new(ResultRef { tab_id: TabId(uuid::Uuid::nil()), run_id: RunId(1), index: 0 }, db, DatabaseKind::Postgres, columns)
     }
 
     const NO_CAPS: Caps = Caps { max_rows: u32::MAX, max_bytes: u64::MAX };

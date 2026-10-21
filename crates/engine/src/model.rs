@@ -26,6 +26,36 @@ pub struct DocRange {
     pub to: DocOffset,
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, Type)]
+pub enum DatabaseKind {
+    #[default]
+    Postgres,
+    SqlServer,
+}
+
+impl<'de> Deserialize<'de> for ConnectionConfig {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        #[derive(Deserialize)]
+        #[serde(rename_all = "camelCase")]
+        struct Stored {
+            #[serde(default)]
+            database_kind: DatabaseKind,
+            id: ConnectionId,
+            name: String,
+            host: String,
+            port: u16,
+            database: String,
+            user: String,
+            ssl_mode: SslMode,
+            ca_cert_path: Option<String>,
+            has_password: bool,
+            color: Option<String>,
+        }
+        let Stored { database_kind, id, name, host, port, database, user, ssl_mode, ca_cert_path, has_password, color } = Stored::deserialize(d)?;
+        Ok(Self { database_kind, id, name, host, port, database, user, ssl_mode, ca_cert_path, has_password, color })
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Type)]
 pub enum SslMode {
     Disable,
@@ -35,9 +65,10 @@ pub enum SslMode {
     VerifyFull,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, Type)]
+#[derive(Debug, Clone, Serialize, Type)]
 #[serde(rename_all = "camelCase")]
 pub struct ConnectionConfig {
+    pub database_kind: DatabaseKind,
     pub id: ConnectionId,
     pub name: String,
     pub host: String,
@@ -60,6 +91,7 @@ pub enum PasswordInput {
 #[derive(Debug, Clone, Serialize, Deserialize, Type)]
 #[serde(rename_all = "camelCase")]
 pub struct ConnectionDraft {
+    pub database_kind: DatabaseKind,
     /// `None` creates a new connection.
     pub id: Option<ConnectionId>,
     pub name: String,
@@ -194,6 +226,7 @@ pub enum ConnectError {
 #[derive(Debug, Clone, Serialize, Type)]
 #[serde(rename_all = "camelCase")]
 pub struct Catalog {
+    pub database_kind: DatabaseKind,
     pub db: DatabaseRef,
     pub version: u64,
     /// The first existing non-system entry of `current_schemas(false)` on this database's
@@ -231,6 +264,7 @@ pub enum RelKind {
 #[derive(Debug, Clone, Serialize, Type)]
 #[serde(rename_all = "camelCase")]
 pub struct Relation {
+    pub qualified_name: String,
     pub oid: u32,
     pub name: String,
     pub kind: RelKind,
@@ -243,6 +277,7 @@ pub struct Relation {
 #[derive(Debug, Clone, Serialize, Type)]
 #[serde(rename_all = "camelCase")]
 pub struct ColumnInfo {
+    pub writable: bool,
     pub attnum: i16,
     pub name: String,
     pub type_display: String,
@@ -361,8 +396,14 @@ pub struct TriggerInfo {
     pub events: Vec<TriggerEvent>,
     pub per_row: bool,
     pub enabled: bool,
-    /// Schema-qualified only when the function is not on the search path: `set_updated_at`.
-    pub function: String,
+    pub implementation: TriggerImplementation,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Type)]
+#[serde(tag = "kind", rename_all_fields = "camelCase")]
+pub enum TriggerImplementation {
+    Function { name: String },
+    SqlModule { definition: Option<String> },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Type)]
@@ -415,6 +456,7 @@ pub enum SessionState {
 #[derive(Debug, Clone, Serialize, Type)]
 #[serde(rename_all = "camelCase")]
 pub struct ConsoleState {
+    pub txn_depth: Option<u32>,
     pub tab_id: TabId,
     pub rev: u64,
     pub config: ConsoleConfigView,
@@ -465,6 +507,7 @@ pub enum RunOutcome {
 #[derive(Debug, Clone, Serialize, Type)]
 #[serde(rename_all = "camelCase")]
 pub struct StatementRun {
+    pub outputs: Vec<RunOutput>,
     pub index: u16,
     pub range: DocRange,
     pub status: StmtStatus,
@@ -475,14 +518,35 @@ pub struct StatementRun {
 pub enum StmtStatus {
     Pending,
     Preparing,
-    Rows { result: ResultMeta, done: bool },
-    /// `tag` reads like `"UPDATE 3"`.
-    Command { tag: String, elapsed_ms: u32 },
+    Running,
+    Finished,
     Failed { error: QueryError },
     Cancelled,
     /// An earlier statement failed or was cancelled.
     Skipped,
 }
+
+#[derive(Debug, Clone, Serialize, Type)]
+#[serde(tag = "kind", rename_all_fields = "camelCase")]
+pub enum RunOutput {
+    Rows { result: ResultMeta, state: RowsState },
+    Command { tag: String, affected_rows: Option<u64>, elapsed_ms: u32 },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Type)]
+pub enum RowsState { Streaming, Complete, Failed, Cancelled }
+
+#[derive(Debug, Clone, Deserialize, Type)]
+#[serde(tag = "kind", rename_all_fields = "camelCase")]
+pub enum TableOrderEdit { Inspect, Cycle { column: String, additive: bool } }
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct TableSortKey { pub column: String, pub desc: bool }
+
+#[derive(Debug, Clone, Serialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct TableOrderView { pub sql: String, pub keys: Option<Vec<TableSortKey>> }
 
 #[derive(Debug, Clone, Deserialize, Type)]
 #[serde(tag = "kind", rename_all = "camelCase", rename_all_fields = "camelCase")]
@@ -565,6 +629,7 @@ pub struct RunAccepted {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Type)]
 #[serde(rename_all = "camelCase")]
 pub struct ScriptOutline {
+    pub unit_kind: ExecutionUnitKind,
     pub statements: Vec<DocRange>,
     pub at_cursor: Option<u16>,
 }
@@ -579,8 +644,12 @@ pub struct FormatEdit {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Type)]
+pub enum ExecutionUnitKind { Statement, Batch }
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Type)]
 #[serde(tag = "kind")]
 pub enum FormatError {
+    Unsupported,
     /// No statement at the cursor or in the selection.
     NothingToFormat,
     /// The laid-out text would lex differently from the original, so the engine refused it.
@@ -598,6 +667,7 @@ pub struct ResultRef {
 #[derive(Debug, Clone, Serialize, Type)]
 #[serde(rename_all = "camelCase")]
 pub struct ResultMeta {
+    pub database_kind: DatabaseKind,
     pub r#ref: ResultRef,
     /// The database the rows came from. Column sources are its OIDs, so PK lookups key on this,
     /// not on the tab's current target, which a retarget can change under an old result.
@@ -621,14 +691,13 @@ pub enum TruncateReason {
 #[serde(rename_all = "camelCase")]
 pub struct ColumnMeta {
     pub name: String,
-    pub r#type: PgTypeRef,
+    pub r#type: SqlTypeRef,
     pub source: Option<ColumnSource>,
 }
 
 #[derive(Debug, Clone, Serialize, Type)]
 #[serde(rename_all = "camelCase")]
-pub struct PgTypeRef {
-    pub oid: u32,
+pub struct SqlTypeRef {
     /// `"bigint"`, `"integer[]"`, `"order_status"`.
     pub display: String,
     pub category: TypeCategory,
@@ -738,6 +807,7 @@ pub enum OutputBody {
 #[derive(Debug, Clone, Serialize, Type)]
 #[serde(rename_all = "camelCase")]
 pub struct HistoryEntry {
+    pub database_kind: DatabaseKind,
     pub id: i64,
     pub at_ms: i64,
     pub connection_id: ConnectionId,
@@ -811,6 +881,7 @@ pub struct HistoryRun {
 #[derive(Debug, Clone, Serialize, Type)]
 #[serde(rename_all = "camelCase")]
 pub struct HistoryGroupSummary {
+    pub database_kind: DatabaseKind,
     pub id: i64,
     pub latest_id: i64,
     pub latest_at_ms: i64,
@@ -845,6 +916,7 @@ pub struct HistoryGroupQuery {
 #[derive(Debug, Clone, Serialize, Type)]
 #[serde(rename_all = "camelCase")]
 pub struct HistoryGroupPage {
+    pub database_kind: DatabaseKind,
     pub sql: String,
     pub runs: Vec<HistoryRun>,
     pub has_more: bool,
@@ -1690,13 +1762,29 @@ pub enum Entry {
     Unreadable,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Type)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Type)]
 #[serde(rename_all = "camelCase")]
 pub struct SentContext {
+    pub database_kind: Option<DatabaseKind>,
     pub db: Option<DatabaseRef>,
     /// As named at send, so the chip reads right after a rename or a delete.
     pub connection_name: Option<String>,
     pub tab_title: String,
+}
+
+impl<'de> Deserialize<'de> for SentContext {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        #[derive(Deserialize)]
+        #[serde(rename_all = "camelCase")]
+        struct Stored {
+            database_kind: Option<DatabaseKind>,
+            db: Option<DatabaseRef>,
+            connection_name: Option<String>,
+            tab_title: String,
+        }
+        let Stored { database_kind, db, connection_name, tab_title } = Stored::deserialize(d)?;
+        Ok(Self { database_kind: database_kind.or(db.as_ref().map(|_| DatabaseKind::Postgres)), db, connection_name, tab_title })
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Type)]
@@ -2147,5 +2235,26 @@ mod tests {
             }
         );
         assert_eq!(serde_json::to_value(&entry).unwrap(), value);
+    }
+}
+
+#[cfg(test)]
+mod database_compatibility_tests {
+    use super::*;
+
+    #[test]
+    fn old_connections_and_sent_context_load_as_postgres_and_unknown_kinds_fail() {
+        let mut saved = serde_json::json!({"id":Uuid::nil(), "name":"legacy", "host":"localhost", "port":5432, "database":"shop", "user":"reader", "sslMode":"Prefer", "hasPassword":false});
+        let config: ConnectionConfig = serde_json::from_value(saved.clone()).unwrap();
+        assert_eq!(config.database_kind, DatabaseKind::Postgres);
+        assert_eq!(serde_json::to_value(&config).unwrap()["databaseKind"], "Postgres");
+        saved["databaseKind"] = serde_json::json!("SqlServer");
+        assert_eq!(serde_json::from_value::<ConnectionConfig>(saved.clone()).unwrap().database_kind, DatabaseKind::SqlServer);
+        saved["databaseKind"] = serde_json::json!("unknown");
+        assert!(serde_json::from_value::<ConnectionConfig>(saved).is_err());
+        let sent: SentContext = serde_json::from_value(serde_json::json!({"db":{"connectionId":Uuid::nil(),"database":"shop"},"connectionName":"old", "tabTitle":"query"})).unwrap();
+        assert_eq!(sent.database_kind, Some(DatabaseKind::Postgres));
+        let entry: Entry = serde_json::from_value(serde_json::json!({"kind":"User", "atMs":0,"text":"question","context":{"db":{"connectionId":Uuid::nil(),"database":"shop"},"connectionName":"old", "tabTitle":"query"}})).unwrap();
+        assert!(matches!(entry, Entry::User { context: Some(SentContext { database_kind: Some(DatabaseKind::Postgres), .. }), .. }));
     }
 }

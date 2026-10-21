@@ -233,8 +233,8 @@ impl Harness {
 
     fn result(state: &ConsoleState, index: usize) -> ResultMeta {
         match &state.run {
-            RunState::Finished { statements, .. } => match &statements[index].status {
-                StmtStatus::Rows { result, done: true } => result.clone(),
+            RunState::Finished { statements, .. } => match statements[index].outputs.first() {
+                Some(RunOutput::Rows { result, state: RowsState::Complete }) => result.clone(),
                 other => panic!("statement {index} is not a finished result: {other:?}"),
             },
             other => panic!("not finished: {other:?}"),
@@ -466,14 +466,11 @@ async fn multi_statement_run_tags_notices_and_history() {
     let accepted = h.start_run(tab, script).await;
     assert_eq!(accepted.statements.len(), 5);
     let state = h.wait_finished(tab, accepted.run_id).await;
-    let tags: Vec<String> = statuses(&state)
-        .iter()
-        .map(|s| match s {
-            StmtStatus::Command { tag, .. } => tag.clone(),
-            StmtStatus::Rows { result, .. } => format!("rows:{}", result.row_count),
-            other => format!("{other:?}"),
-        })
-        .collect();
+    let RunState::Finished { statements, .. } = &state.run else { panic!("not finished") };
+    let tags: Vec<String> = statements.iter().flat_map(|s| &s.outputs).map(|o| match o {
+        RunOutput::Command { tag, .. } => tag.clone(),
+        RunOutput::Rows { result, .. } => format!("rows:{}", result.row_count),
+    }).collect();
     assert_eq!(tags, ["CREATE TABLE", "INSERT 0 5", "UPDATE 3", "rows:1", "rows:1"]);
     assert_eq!(
         h.log(tab),
@@ -711,7 +708,7 @@ async fn a_run_orphaned_by_disconnect_never_writes_into_the_next_run() {
     assert!(runs[..first_new].iter().any(|(r, cancelled)| *r == old.run_id && *cancelled), "disconnect finished the old run as Cancelled: {runs:?}");
     assert!(matches!(state.run, RunState::Finished { outcome: RunOutcome::Ok, .. }), "{:?}", state.run);
     assert_eq!(statuses(&state).len(), 4);
-    assert!(statuses(&state).iter().all(|s| matches!(s, StmtStatus::Rows { done: true, .. })), "{:?}", state.run);
+    assert!(statuses(&state).iter().all(|s| matches!(s, StmtStatus::Finished)), "{:?}", state.run);
     assert_eq!(h.page(&Harness::result(&state, 3), 0, 1)[0][0].as_deref(), Some("b3"));
 }
 
@@ -1310,7 +1307,7 @@ async fn relation_detail_reads_orders() {
         events: events.to_vec(),
         per_row: true,
         enabled: true,
-        function: function.into(),
+        implementation: TriggerImplementation::Function { name: function.into() },
     };
     assert_eq!(
         detail.triggers,
@@ -1374,7 +1371,7 @@ async fn relation_detail_hides_partition_clones_and_shows_inherited_triggers() {
         events: vec![TriggerEvent::Insert],
         per_row: true,
         enabled,
-        function: format!("{s}_noop"),
+        implementation: TriggerImplementation::Function { name: format!("{s}_noop") },
     };
     assert_eq!(t.triggers, [trigger("t_replica", false)], "a replica trigger does not fire in a normal session, and RI triggers stay hidden");
 
