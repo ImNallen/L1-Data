@@ -13,7 +13,6 @@ use tokio::sync::watch;
 use tokio_util::compat::{Compat, TokioAsyncWriteCompatExt};
 
 type TdsClient = Client<Compat<TcpStream>>;
-const PROBE_TIMEOUT: Duration = Duration::from_secs(2);
 const ATTENTION_TIMEOUT: Duration = Duration::from_millis(300);
 
 pub(super) struct MsSession {
@@ -21,8 +20,7 @@ pub(super) struct MsSession {
     pub backend_pid: i32,
     pub server: ServerInfo,
     database: String,
-    pub depth: u32,
-    pub txn: TxnState,
+    txn: TxnState,
     cancel: watch::Sender<u64>,
     closed: watch::Sender<Option<String>>,
 }
@@ -43,8 +41,7 @@ impl Lease<'_> {
     fn client(&mut self) -> &mut TdsClient {
         self.client.as_mut().expect("lease owns the client")
     }
-    fn restore(mut self, depth: u32, txn: TxnState) {
-        self.owner.depth = depth;
+    fn restore(mut self, txn: TxnState) {
         self.owner.txn = txn;
         self.owner.client = self.client.take();
     }
@@ -58,8 +55,11 @@ impl Drop for Lease<'_> {
         if let Some(mut client) = self.client.take() {
             self.owner.closed.send_replace(Some("SQL Server operation was abandoned; the session and any open transaction were discarded.".into()));
             if let Ok(runtime) = tokio::runtime::Handle::try_current() {
+                let closed = self.owner.closed.clone();
                 runtime.spawn(async move {
                     let _ = tokio::time::timeout(ATTENTION_TIMEOUT, client.cancel_query()).await;
+                    drop(client);
+                    drop(closed);
                 });
             }
         }
@@ -119,26 +119,14 @@ impl MsSession {
                 e => ConnectError::Server(query_error(e)),
             })
         };
-        let mut client = tokio::time::timeout(CONNECT_TIMEOUT, connection).await.map_err(|_| ConnectError::Network { message: "SQL Server connection timed out".into() })??;
-        let initialize = async {
-            let mut stream = native_query(&mut client, "SELECT CONVERT(int, @@SPID), CONVERT(nvarchar(128), SERVERPROPERTY('ProductVersion')), DB_NAME()");
-            let mut rows = Vec::new();
-            while let Some(event) = stream.next().await {
-                if let QueryEvent::Row(row) = event? {
-                    rows.push(row);
-                }
-            }
-            let row = rows.first().ok_or_else(|| error("SQL Server returned no server information"))?;
-            let backend_pid = number(row, 0)?;
-            let version = required(row, 1)?.to_owned();
-            let database = required(row, 2)?.to_owned();
-            Ok::<_, QueryError>((backend_pid, version, database))
-        };
-        let (backend_pid, version, database) = tokio::time::timeout(CONNECT_TIMEOUT, initialize)
-            .await
-            .map_err(|_| ConnectError::Network { message: "SQL Server initialization timed out".into() })?
-            .map_err(ConnectError::Server)?;
-        let version_num = version.split('.').next().and_then(|n| n.parse::<u32>().ok()).unwrap_or(0) * 10000;
+        let client = tokio::time::timeout(CONNECT_TIMEOUT, connection).await.map_err(|_| ConnectError::Network { message: "SQL Server connection timed out".into() })??;
+        let state = client.session_state().map_err(|e| ConnectError::Server(query_error(e)))?;
+        let backend_pid = i32::from(state.server_process_id);
+        let (major, minor, build) = state.server_version;
+        let version = format!("{major}.{minor}.{build}");
+        let version_num = u32::from(major) * 10000;
+        let database = state.database.to_owned();
+        let txn = transaction(state.has_transaction);
         let (cancel, _) = watch::channel(0);
         let (closed, _) = watch::channel(None);
         Ok(Self {
@@ -146,11 +134,13 @@ impl MsSession {
             backend_pid,
             server: ServerInfo { version, version_num, encoding: "Unicode".into() },
             database,
-            depth: 0,
-            txn: TxnState::Idle,
+            txn,
             cancel,
             closed,
         })
+    }
+    pub(super) fn txn(&self) -> (TxnState, Option<u32>) {
+        (self.txn, (self.txn == TxnState::Idle).then_some(0))
     }
     pub(super) fn cancel_handle(&self) -> MsCancel {
         MsCancel(self.cancel.clone())
@@ -203,12 +193,13 @@ impl MsSession {
                 yield Err(e);
                 return;
             }
-            let observed = tokio::select! {
-                _ = cancel.changed() => Err(error("Cancelled during SQL Server transaction-state probe")),
-                result = tokio::time::timeout(PROBE_TIMEOUT, probe(lease.client(), &database)) => result.unwrap_or_else(|_| Err(error("SQL Server transaction-state probe timed out"))),
+            let observed = if *cancel.borrow() != 0 {
+                Err(error("Cancelled after SQL Server execution"))
+            } else {
+                observe(lease.client(), &database)
             };
             match observed {
-                Ok((depth, txn)) => lease.restore(depth, txn),
+                Ok(txn) => lease.restore(txn),
                 Err(e) => {
                     let _ = tokio::time::timeout(ATTENTION_TIMEOUT, lease.client().cancel_query()).await;
                     lease.retire(e.message.clone());
@@ -251,47 +242,43 @@ fn native_query<'a>(client: &'a mut TdsClient, sql: &'a str) -> QueryStream<'a> 
         let stream = client.simple_query(sql).await.map_err(query_error)?;
         let mut stream = std::pin::pin!(stream);
         let mut has_rows = false;
+        let mut conversion_error = None;
         while let Some(item) = stream.try_next().await.map_err(query_error)? {
+            if conversion_error.is_some() { continue; }
             match item {
                 QueryItem::Metadata(meta) => {
                     if has_rows { yield QueryEvent::Complete { affected_rows: None }; }
-                    let columns = meta.columns().iter().map(values::metadata).collect::<Result<Vec<_>, _>>()?;
+                    let columns = match meta.columns().iter().map(values::metadata).collect::<Result<Vec<_>, _>>() {
+                        Ok(columns) => columns,
+                        Err(e) => { conversion_error = Some(e); continue; }
+                    };
                     has_rows = true;
                     yield QueryEvent::Columns(columns);
                 }
                 QueryItem::Row(row) => {
-                    let cells = row.cells().map(|(_, data)| values::text(data)).collect::<Result<Vec<_>, _>>()?;
+                    let cells = match row.cells().map(|(_, data)| values::text(data)).collect::<Result<Vec<_>, _>>() {
+                        Ok(cells) => cells,
+                        Err(e) => { conversion_error = Some(e); continue; }
+                    };
                     yield QueryEvent::Row(cells);
                 }
             }
         }
+        if let Some(e) = conversion_error { Err(e)?; }
     })
 }
 
-async fn probe(client: &mut TdsClient, database: &str) -> Result<(u32, TxnState), QueryError> {
-    let row = client
-        .simple_query("SELECT @@TRANCOUNT, XACT_STATE(), DB_NAME()")
-        .await
-        .map_err(query_error)?
-        .into_row()
-        .await
-        .map_err(query_error)?
-        .ok_or_else(|| error("Transaction-state probe returned no row"))?;
-    let depth = row.try_get::<i32, _>(0).map_err(query_error)?.ok_or_else(|| error("Missing transaction depth"))?;
-    let depth = u32::try_from(depth).map_err(|_| error("Invalid transaction depth"))?;
-    let actual = row.try_get::<&str, _>(2).map_err(query_error)?.ok_or_else(|| error("Missing execution database"))?;
+fn observe(client: &TdsClient, database: &str) -> Result<TxnState, QueryError> {
+    let state = client.session_state().map_err(query_error)?;
+    let actual = state.database;
     if actual != database {
         return Err(error(format!("Execution database changed to {actual}. The session was retired; select a database through the tab target.")));
     }
-    if depth == 0 {
-        return Ok((0, TxnState::Idle));
-    }
-    let state = match row.try_get::<i32, _>(1).map_err(query_error)? {
-        Some(1) => TxnState::Active,
-        Some(-1) => TxnState::Aborted,
-        _ => return Err(error("SQL Server returned an inconsistent transaction state")),
-    };
-    Ok((depth, state))
+    Ok(transaction(state.has_transaction))
+}
+
+fn transaction(has_transaction: bool) -> TxnState {
+    if has_transaction { TxnState::Open } else { TxnState::Idle }
 }
 
 fn required(row: &[Option<String>], i: usize) -> Result<&str, QueryError> {
@@ -334,11 +321,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_canonicalized_login_still_retires_a_session_that_changes_database() {
+    async fn a_login_alias_still_retires_a_session_that_changes_database() {
         let mut p = params();
         p.database = "SHOP".into();
         let mut session = MsSession::open(&p).await.unwrap();
-        assert_eq!(session.database, "shop");
+        assert_eq!(session.database, "SHOP");
         let error = session.rows("USE reporting; SELECT DB_NAME()").await.unwrap_err();
         assert!(error.message.contains("Execution database changed to reporting"), "{}", error.message);
         assert!(session.closed_reason().is_some());
@@ -413,5 +400,34 @@ mod tests {
         p.ssl_mode = SslMode::VerifyFull;
         p.ca_cert_path = Some("not-a-real-ca.pem".into());
         assert!(matches!(MsSession::open(&p).await, Err(ConnectError::Tls { .. })));
+    }
+
+    #[tokio::test]
+    async fn conversion_failure_still_consumes_database_environment_changes() {
+        let mut session = MsSession::open(&params()).await.unwrap();
+        assert!(session.rows("SELECT CAST(1 AS money); SELECT REPLICATE(CAST('x' AS varchar(max)),9000); USE reporting").await.is_err());
+        assert!(session.client.is_none());
+        assert!(session.closed_reason().unwrap().contains("Execution database changed to reporting"));
+    }
+
+    #[tokio::test]
+    async fn closed_watch_outlives_detached_attention_and_client() {
+        let mut observer = MsSession::open(&params()).await.unwrap();
+        let mut session = MsSession::open(&params()).await.unwrap();
+        let pid = session.backend_pid;
+        let mut closed = session.closed_watch();
+        {
+            let mut stream = session.query("SELECT 1; RAISERROR('flush',0,1) WITH NOWAIT; WAITFOR DELAY '00:00:30'");
+            tokio::time::timeout(Duration::from_secs(2), async {
+                while !matches!(stream.next().await.unwrap().unwrap(), QueryEvent::Row(_)) {}
+            }).await.unwrap();
+        }
+        closed.borrow_and_update();
+        drop(session);
+        assert!(closed.has_changed().is_ok(), "Detached cleanup must keep the client lifetime signal open");
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while closed.changed().await.is_ok() {}
+        }).await.expect("Detached Attention retained the client beyond its bound");
+        stopped(&mut observer, pid).await;
     }
 }
