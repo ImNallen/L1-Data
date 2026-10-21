@@ -123,28 +123,26 @@ export async function formatActive(): Promise<void> {
   applyFormatEdit(id, res.data);
 }
 
-type CountContext = { tab: TableTab; text: string; pageSize: number; intent: object };
-type PageTarget = { page: number; exactRowCount?: number; countContext?: CountContext; intent: object };
-type PageQueue = { intent: object; countRequest?: object; target?: PageTarget };
+type CountContext = { tab: TableTab; text: string; pageSize: number; intent: symbol };
+type PageTarget = { page: number; exactRowCount?: number; countContext?: CountContext; intent: symbol };
+type PageQueue = { intent: symbol; pendingNativeCount?: symbol; target?: PageTarget };
 
 function isCurrentCount({ tab, text, pageSize, intent }: CountContext): boolean {
   const current = ws().tabs[tab.id];
   return queuedPages.get(tab.id)?.intent === intent && isTableTab(current) && current.console === tab.console && current.table === tab.table && textOf(tab.id) === text && ws().settings.tablePageSize === pageSize;
 }
 
-// Save a page only after acceptance. The latest intent wins while a run or count owns the session.
 const queuedPages = new Map<TabId, PageQueue>();
 
 function nextPageIntent(tabId: TabId): PageQueue {
-  const queue: PageQueue = { intent: {}, countRequest: queuedPages.get(tabId)?.countRequest };
+  const queue: PageQueue = { intent: Symbol(), pendingNativeCount: queuedPages.get(tabId)?.pendingNativeCount };
   queuedPages.set(tabId, queue);
   return queue;
 }
 
-function queuePage(tabId: TabId, target: PageTarget | undefined): boolean {
+function deferPageForPendingWork(tabId: TabId, target: PageTarget | undefined): boolean {
   const queue = queuedPages.get(tabId);
-  // The pending IPC request also serializes pages before its first Busy snapshot arrives.
-  if (!isBusy(useLive.getState().consoles[tabId]) && !queue?.countRequest) return false;
+  if (!isBusy(useLive.getState().consoles[tabId]) && !queue?.pendingNativeCount) return false;
   if (target && queue) queue.target = target;
   return true;
 }
@@ -155,11 +153,11 @@ async function runTab(tabId: TabId, target?: PageTarget, script?: RunTarget): Pr
   if (target && queuedPages.get(tabId)?.intent !== target.intent) return;
   if (target?.countContext && !isCurrentCount(target.countContext)) return;
   if (target && !isBrowsing(tab)) return;
-  if (queuePage(tabId, target)) return;
+  if (deferPageForPendingWork(tabId, target)) return;
   if (!(await ensureConsole(tab)) || (target && !isBrowsing(tab))) return;
   if (target && queuedPages.get(tabId)?.intent !== target.intent) return;
   if (target?.countContext && !isCurrentCount(target.countContext)) return;
-  if (queuePage(tabId, target)) return;
+  if (deferPageForPendingWork(tabId, target)) return;
 
   let request: RunRequest;
   let text = "";
@@ -348,16 +346,16 @@ export async function saveSettings(patch: Partial<Settings>): Promise<void> {
 
 export async function lastTablePage(tabId: TabId): Promise<void> {
   const tab = ws().tabs[tabId];
-  if (!isTableTab(tab) || !isBrowsing(tab) || isBusy(useLive.getState().consoles[tabId]) || queuedPages.get(tabId)?.countRequest) return;
+  if (!isTableTab(tab) || !isBrowsing(tab) || isBusy(useLive.getState().consoles[tabId]) || queuedPages.get(tabId)?.pendingNativeCount) return;
   const { schema, table, query } = tab.table;
   const queue = nextPageIntent(tabId);
   const { intent } = queue;
   const countContext = { tab, text: textOf(tabId), pageSize: ws().settings.tablePageSize, intent };
-  if (databaseKindFor(tab.console.db, ws().configs) === "SqlServer") queue.countRequest = intent;
+  if (databaseKindFor(tab.console.db, ws().configs) === "SqlServer") queue.pendingNativeCount = intent;
   try {
     const res = await commands.exactRowCount(tabId, tab.console.db, schema, table, query);
     const current = queuedPages.get(tabId);
-    if (current?.countRequest === intent) delete current.countRequest;
+    if (current?.pendingNativeCount === intent) delete current.pendingNativeCount;
     if (!isCurrentCount(countContext)) return;
     if (res.status === "error") {
       notify(res.error.kind === "NotConnected" ? "Connect to jump to the last page." : res.error.message);
@@ -366,7 +364,7 @@ export async function lastTablePage(tabId: TabId): Promise<void> {
     await runTab(tabId, { page: Math.max(0, Math.ceil(res.data / countContext.pageSize) - 1), exactRowCount: res.data, countContext, intent });
   } finally {
     const current = queuedPages.get(tabId);
-    if (current?.countRequest === intent) delete current.countRequest;
+    if (current?.pendingNativeCount === intent) delete current.pendingNativeCount;
     runQueuedPages(useLive.getState());
   }
 }
@@ -524,7 +522,7 @@ function runQueuedPages(s: ReturnType<typeof useLive.getState>, previous?: Retur
       queuedPages.delete(tabId);
       continue;
     }
-    if (isBusy(console) || queue.countRequest || !queue.target) continue;
+    if (isBusy(console) || queue.pendingNativeCount || !queue.target) continue;
     const target = queue.target;
     delete queue.target;
     if (console.session.kind !== "Open") continue;
