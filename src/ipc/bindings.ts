@@ -501,6 +501,7 @@ export type FunctionInfo = {
 	args: string,
 	returns: string,
 	kind: FnKind,
+	insertText: string,
 };
 
 export type HistoryBrowsePage = {

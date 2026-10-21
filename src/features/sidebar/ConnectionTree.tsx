@@ -399,7 +399,7 @@ function RelationRow({
   );
 }
 
-function FunctionRow({ path, depth, fn, ranges }: { path: string; depth: number; fn: FunctionInfo; ranges?: readonly TextRange[] }) {
+export function FunctionRow({ path, depth, fn, ranges }: { path: string; depth: number; fn: FunctionInfo; ranges?: readonly TextRange[] }) {
   return (
     <Row
       path={`${path}/${fn.name}`}
@@ -407,7 +407,7 @@ function FunctionRow({ path, depth, fn, ranges }: { path: string; depth: number;
       expandable={false}
       onDoubleClick={() => {
         const active = useWorkspace.getState().active;
-        if (active) insertAtCursor(active, `${fn.name}()`);
+        if (active) insertAtCursor(active, fn.insertText);
       }}
       label={
         <span title={`${fn.name}(${fn.args}) → ${fn.returns}`} className="text-ui-13.5">

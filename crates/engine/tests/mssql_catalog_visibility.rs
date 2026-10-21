@@ -264,6 +264,8 @@ async fn check_visibility(executable: bool) {
                 assert_eq!(routine.kind, FnKind::Procedure);
                 assert_eq!(routine.args, "@value nvarchar, @echo nvarchar OUTPUT");
                 assert_eq!(routine.returns, "");
+                assert_eq!(routine.insert_text, format!("EXEC [dbo].[{procedure}] NULL, NULL"));
+                assert_eq!(routine.insert_text, owner_routine.insert_text, "Hidden alias types do not change argument placeholders");
                 eprintln!("Restricted public routine {routine:?}");
             }
             assert_eq!(h.rows(&browsed), selected, "TablePage must return every readable SELECT value exactly");

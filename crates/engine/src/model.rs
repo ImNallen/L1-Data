@@ -297,6 +297,7 @@ pub struct FunctionInfo {
     pub args: String,
     pub returns: String,
     pub kind: FnKind,
+    pub insert_text: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Type)]

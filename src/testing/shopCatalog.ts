@@ -23,11 +23,11 @@ const SHOP: TableSpec[] = [
 ];
 
 const SHOP_FUNCTIONS: FunctionInfo[] = [
-  { oid: 17001, name: "apply_coupon", args: "amount numeric, code text", returns: "numeric", kind: "Function" },
-  { oid: 17002, name: "customer_ltv", args: "cust bigint", returns: "numeric", kind: "Function" },
-  { oid: 17003, name: "order_count", args: "cust bigint", returns: "bigint", kind: "Function" },
-  { oid: 17004, name: "slow_echo", args: "secs double precision", returns: "double precision", kind: "Function" },
-  { oid: 17005, name: "touch_order", args: "oid bigint", returns: "void", kind: "Function" },
+  { oid: 17001, name: "apply_coupon", insertText: "apply_coupon()", args: "amount numeric, code text", returns: "numeric", kind: "Function" },
+  { oid: 17002, name: "customer_ltv", insertText: "customer_ltv()", args: "cust bigint", returns: "numeric", kind: "Function" },
+  { oid: 17003, name: "order_count", insertText: "order_count()", args: "cust bigint", returns: "bigint", kind: "Function" },
+  { oid: 17004, name: "slow_echo", insertText: "slow_echo()", args: "secs double precision", returns: "double precision", kind: "Function" },
+  { oid: 17005, name: "touch_order", insertText: "touch_order()", args: "oid bigint", returns: "void", kind: "Function" },
 ];
 
 const LAB: TableSpec[] = [{ name: "type_zoo", rows: 2, columns: ["id|integer|pk", `tstz|${TSTZ}|null`, "m|lab.mood|null"] }];

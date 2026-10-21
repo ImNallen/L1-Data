@@ -182,6 +182,7 @@ pub async fn load(client: &Client, db: DatabaseRef, version: u64, extra_schemas:
             args: r.get(3),
             returns: r.get(4),
             kind,
+            insert_text: format!("{}()", r.get::<_, String>(2)),
         });
     }
 

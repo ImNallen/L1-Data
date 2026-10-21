@@ -6,6 +6,16 @@ use std::collections::HashMap;
 
 const SYSTEM: &str = "(s.name IN ('sys', 'INFORMATION_SCHEMA') OR s.schema_id BETWEEN 16384 AND 16393)";
 
+fn routine_insert_text(schema: &str, name: &str, kind: FnKind, arguments: &[String]) -> String {
+    let qualified = format!("{}.{}", quote_ident(schema), quote_ident(name));
+    let args = arguments.join(", ");
+    match kind {
+        FnKind::Procedure if arguments.is_empty() => format!("EXEC {qualified}"),
+        FnKind::Procedure => format!("EXEC {qualified} {args}"),
+        FnKind::Function | FnKind::Aggregate | FnKind::Window => format!("{qualified}({args})"),
+    }
+}
+
 pub(super) fn category(name: &str) -> TypeCategory {
     match name {
         "tinyint" | "smallint" | "int" | "bigint" => TypeCategory::Integer,
@@ -115,27 +125,37 @@ impl MsSession {
             });
         }
         let rows = self.rows(&format!("SELECT o.object_id,s.name,o.name,o.type,COALESCE(TYPE_NAME(p.user_type_id),TYPE_NAME(p.system_type_id),CASE WHEN p.parameter_id=0 THEN 'unknown' ELSE '' END) FROM sys.objects o JOIN sys.schemas s ON s.schema_id=o.schema_id LEFT JOIN sys.parameters p ON p.object_id=o.object_id AND p.parameter_id=0 WHERE o.type IN ('P','PC','FN','IF','TF','FS','FT') AND NOT {SYSTEM} ORDER BY o.name,o.object_id")).await?;
+        let mut routine_index = HashMap::new();
         for r in rows {
             let si = *schema_index.get(required(&r, 1)?).ok_or_else(|| error("Routine schema changed during load"))?;
             let oid = object_id(&r, 0)?;
+            routine_index.insert(oid, (si, schemas[si].functions.len(), Vec::<String>::new()));
             schemas[si].functions.push(FunctionInfo {
                 oid,
                 name: required(&r, 2)?.into(),
                 args: String::new(),
                 returns: required(&r, 4)?.into(),
                 kind: if matches!(required(&r, 3)?.trim(), "P" | "PC") { FnKind::Procedure } else { FnKind::Function },
+                insert_text: String::new(),
             });
         }
         let rows =
-            self.rows("SELECT p.object_id,p.name,COALESCE(TYPE_NAME(p.user_type_id),TYPE_NAME(p.system_type_id),'unknown'),p.is_output FROM sys.parameters p WHERE p.parameter_id>0 ORDER BY p.object_id,p.parameter_id").await?;
+            self.rows("SELECT p.object_id,p.name,COALESCE(TYPE_NAME(p.user_type_id),TYPE_NAME(p.system_type_id),'unknown'),p.is_output,p.is_readonly FROM sys.parameters p WHERE p.parameter_id>0 ORDER BY p.object_id,p.parameter_id").await?;
         for r in rows {
             let oid = object_id(&r, 0)?;
-            if let Some(f) = schemas.iter_mut().flat_map(|s| &mut s.functions).find(|f| f.oid == oid) {
+            if let Some((si, fi, arguments)) = routine_index.get_mut(&oid) {
+                let f = &mut schemas[*si].functions[*fi];
                 if !f.args.is_empty() {
                     f.args.push_str(", ");
                 }
                 f.args.push_str(&format!("{} {}{}", required(&r, 1)?, required(&r, 2)?, if number::<u8>(&r, 3)? != 0 { " OUTPUT" } else { "" }));
+                arguments.push(if number::<u8>(&r, 4)? != 0 { format!("@table_argument_{}", arguments.len() + 1) } else { "NULL".into() });
             }
+        }
+        for (_, (si, fi, arguments)) in routine_index {
+            let schema = &mut schemas[si];
+            let f = &mut schema.functions[fi];
+            f.insert_text = routine_insert_text(&schema.name, &f.name, f.kind, &arguments);
         }
         Ok(Catalog { database_kind: DatabaseKind::SqlServer, db, version, default_schema, schemas })
     }
