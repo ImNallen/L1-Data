@@ -200,7 +200,7 @@ export async function runOrChoose(ask = false): Promise<void> {
 export function cancelActive(): boolean {
   const id = ws().active;
   if (!id || !isRunning(useLive.getState().consoles[id])) return false;
-  if (databaseKindFor(tabTarget(ws().tabs[id]), ws().configs) === "SqlServer") notify("Cancelling SQL Server resets this session and rolls back its open transaction.");
+  if (databaseKindFor(tabTarget(ws().tabs[id]), ws().configs) === "SqlServer") notify("Cancelling SQL Server resets this session. Earlier commits remain committed; the last transaction outcome may be unknown.");
   void commands.consoleCancel(id);
   return true;
 }

@@ -118,7 +118,7 @@ export function TopBar({ hosted }: { hosted: HostedWindow | null }) {
 
       {tab &&
         (running ? (
-          <Button data-testid="cancel-btn" title={sqlServer ? "Cancel resets the SQL Server session and rolls back its open transaction" : undefined} className="w-[104px] justify-center bg-hover" onClick={() => cancelActive()}>
+          <Button data-testid="cancel-btn" title={sqlServer ? "Cancel resets the SQL Server session. Earlier commits remain committed." : undefined} className="w-[104px] justify-center bg-hover" onClick={() => cancelActive()}>
             <IconPlayerStopFilled size={10} className="text-muted" />
             Cancel
             <Kbd className="bg-control text-muted">Esc</Kbd>
