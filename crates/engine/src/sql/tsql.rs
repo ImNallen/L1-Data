@@ -126,12 +126,8 @@ fn lex(text: &str) -> Result<Vec<Token<'_>>, String> {
             }
             b'0' if matches!(bytes.get(i + 1), Some(b'x' | b'X')) => {
                 i += 2;
-                let digits = i;
                 while i < bytes.len() && bytes[i].is_ascii_hexdigit() {
                     i += 1;
-                }
-                if i == digits {
-                    return Err(format!("Incomplete T-SQL binary literal at byte {start}"));
                 }
                 Kind::Number
             }
@@ -1048,6 +1044,12 @@ mod tests {
     }
 
     #[test]
+    fn empty_binary_literal_is_a_valid_batch_and_formats_without_changing_it() {
+        assert_eq!(selected("SELECT 0x", ByteTarget::All), ["SELECT 0x"]);
+        assert_eq!(format("SELECT 0x").unwrap(), "SELECT 0x");
+    }
+
+    #[test]
     fn only_go_splits_batches_and_preserves_variable_and_procedure_scope() {
         let declare = "DECLARE @x int = 1;\n\nSELECT @x; SELECT 2;";
         let procedure = "CREATE OR ALTER PROCEDURE [dbo].[p] AS\nBEGIN\nDECLARE @n int; SELECT @n;\nEND;";
@@ -1261,6 +1263,7 @@ mod tests {
             "LOWER([Name]) = LOWER(N'A') AND LEN([Name]) > 2",
             "id = @id",
             "data = 0xDEADBEEF",
+            "data = 0x",
             "date >= CURRENT_TIMESTAMP",
             "dbo.[t].[id] <= -12.25",
             "amount & 1 = 0",
@@ -1313,7 +1316,6 @@ mod tests {
             "name = N'open",
             "[id = 1",
             "id = 1e",
-            "id = 0x",
             "id += 1",
             "id = 1 2",
             "CASE WHEN id=1 THEN 2 ELSE 3 END=2",
