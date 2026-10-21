@@ -3,7 +3,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use futures_util::StreamExt;
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, watch};
 
 use crate::Shared;
 use crate::model::*;
@@ -31,12 +31,9 @@ pub struct ConsoleInner {
     pub txn_depth: Option<u32>,
     pub run: RunState,
     pub rev: u64,
-    /// Refreshes owed by statements whose transaction has not committed yet.
-    pub owed: Owed,
+    refreshes: Option<PendingRefreshes>,
 }
 
-/// What successful statements have made stale, due once their transaction commits: the
-/// console's catalog, the instance's database list, or both.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub struct Owed {
     pub catalog: bool,
@@ -55,9 +52,40 @@ impl Owed {
             }
         }
     }
+}
 
-    pub fn take(&mut self) -> Owed {
-        std::mem::take(self)
+struct PendingRefreshes {
+    db: DatabaseRef,
+    policy: RefreshPolicy,
+    owed: Owed,
+}
+
+#[derive(PartialEq, Eq)]
+enum RefreshPolicy {
+    Commit,
+    NativeEnd,
+}
+
+impl ConsoleInner {
+    fn invalidate(&mut self, database_kind: DatabaseKind, invalidates: Invalidates) {
+        if invalidates == Invalidates::Nothing { return; }
+        let db = self.config.db();
+        let pending = self.refreshes.get_or_insert_with(|| PendingRefreshes {
+            db,
+            policy: match database_kind {
+                DatabaseKind::Postgres => RefreshPolicy::Commit,
+                DatabaseKind::SqlServer => RefreshPolicy::NativeEnd,
+            },
+            owed: Owed::default(),
+        });
+        pending.owed.add(invalidates);
+    }
+
+    pub fn finish_refreshes(&mut self, committed: bool) -> Option<(DatabaseRef, Owed)> {
+        if self.txn != TxnState::Idle { return None; }
+        let pending = self.refreshes.take()?;
+        // Native batches may have committed DDL before opening the transaction that ended.
+        (committed || pending.policy == RefreshPolicy::NativeEnd).then_some((pending.db, pending.owed))
     }
 }
 
@@ -69,6 +97,7 @@ pub enum SessionSlot {
         backend_pid: i32,
         cancel: CancelHandle,
         stop: Arc<AtomicBool>,
+        closed: watch::Receiver<Option<String>>,
     },
     Lost {
         reason: String,
@@ -89,7 +118,7 @@ impl Console {
             txn_depth: None,
             run: RunState::Idle,
             rev: 0,
-            owed: Owed::default(),
+            refreshes: None,
         };
         let latest = ConsoleState {
             tab_id: tab,
@@ -164,6 +193,7 @@ impl Console {
             backend_pid: session.backend_pid,
             cancel: session.cancel_handle(),
             stop: stop.clone(),
+            closed: session.closed_watch(),
         };
         Some((session, stop))
     }
@@ -181,35 +211,36 @@ impl Console {
     }
 
     /// Puts the session back after a run or a transaction command and applies its final `txn`.
-    pub fn return_session(inner: &mut ConsoleInner, session: Session, txn: TxnState, lost: Option<String>) {
+    pub fn return_session(inner: &mut ConsoleInner, session: Session, txn: TxnState, lost: Option<String>) -> Option<(DatabaseRef, Owed)> {
         inner.txn = txn;
         inner.txn_depth = session.txn_depth();
-        inner.session = match lost {
+        match lost {
             Some(reason) => {
                 let transaction = session.transaction_loss(txn);
                 inner.txn = TxnState::Idle;
                 inner.txn_depth = None;
-                inner.owed = Owed::default();
-                SessionSlot::Lost { reason, transaction }
+                inner.session = SessionSlot::Lost { reason, transaction };
+                inner.finish_refreshes(false)
             }
-            None => SessionSlot::Idle(session),
-        };
+            None => {
+                inner.session = SessionSlot::Idle(session);
+                None
+            }
+        }
     }
 
     /// Cancels any run and drops the session; the console itself stays. A task holding the
     /// session finds itself `Orphaned` at its next edit, so the run is finished here: the
     /// statement in flight is Cancelled and the rest Skipped.
-    pub async fn drop_session(&self, shared: &Shared) {
+    pub async fn drop_session(&self, shared: &Arc<Shared>) {
         let mut inner = self.inner.lock().await;
-        if let SessionSlot::Busy { cancel, stop, .. } = &inner.session {
+        let session = std::mem::replace(&mut inner.session, SessionSlot::Empty);
+        if let SessionSlot::Busy { stop, .. } = &session {
             stop.store(true, Ordering::Relaxed);
-            let cancel = cancel.clone();
-            shared.spawn(async move { cancel.cancel().await });
         }
-        inner.session = SessionSlot::Empty;
         inner.txn = TxnState::Idle;
         inner.txn_depth = None;
-        inner.owed = Owed::default();
+        let due = inner.finish_refreshes(false);
         if let RunState::Running { run_id, started_at_ms, statements } = &mut inner.run {
             let mut in_flight = true;
             for s in statements.iter_mut() {
@@ -231,6 +262,24 @@ impl Console {
             };
         }
         self.publish(&mut inner, shared);
+        drop(inner);
+        match session {
+            SessionSlot::Busy { cancel, mut closed, .. } => {
+                let worker = shared.clone();
+                shared.spawn(async move {
+                    cancel.cancel().await;
+                    if let Some((db, owed)) = due {
+                        // The orphaned task must release its session before metadata can see its final DDL.
+                        while closed.changed().await.is_ok() {}
+                        worker.schedule_refreshes(db, owed);
+                    }
+                });
+            }
+            session => {
+                drop(session);
+                if let Some((db, owed)) = due { shared.schedule_refreshes(db, owed); }
+            }
+        }
     }
 
     pub fn statements_mut(inner: &mut ConsoleInner) -> &mut Vec<StatementRun> {
@@ -311,7 +360,12 @@ pub async fn run_task(console: Arc<Console>, shared: Arc<Shared>, mut session: S
             }
         }
         console.output(&shared, run_id, statement_line(i, sql));
-        set_status(&console, &shared, run_id, i, StmtStatus::Preparing).await?;
+        console.edit(&shared, run_id, |inner| {
+            if plan.connection.database_kind == DatabaseKind::SqlServer {
+                inner.invalidate(DatabaseKind::SqlServer, crate::sql::tsql::invalidates(sql));
+            }
+            Console::statements_mut(inner)[index].status = StmtStatus::Preparing;
+        }).await?;
         let unit_started = Instant::now();
         let result = run_outputs(&console, &shared, &mut session, &plan, index, &caps, &stop).await?;
         let cancelled = stop.load(Ordering::Relaxed) && result.is_err();
@@ -326,17 +380,14 @@ pub async fn run_task(console: Arc<Console>, shared: Arc<Shared>, mut session: S
             Err(_) if cancelled => (StmtStatus::Cancelled, HistoryOutcome::Cancelled),
             Err(error) => (StmtStatus::Failed { error: error.clone() }, HistoryOutcome::Error { message: error.message.clone() }),
         };
-        let invalidates = match plan.connection.database_kind {
-            DatabaseKind::SqlServer => crate::sql::tsql::invalidates(sql),
-            DatabaseKind::Postgres if result.is_ok() => stmt.kind.invalidates(),
-            DatabaseKind::Postgres => Invalidates::Nothing,
-        };
         let due = console.edit(&shared, run_id, |inner| {
             inner.txn = txn;
             inner.txn_depth = session.txn_depth();
             Console::statements_mut(inner)[index].status = status;
-            inner.owed.add(invalidates);
-            (txn == TxnState::Idle).then(|| (inner.config.db(), inner.owed.take()))
+            if plan.connection.database_kind == DatabaseKind::Postgres && result.is_ok() {
+                inner.invalidate(DatabaseKind::Postgres, stmt.kind.invalidates());
+            }
+            inner.finish_refreshes(true)
         }).await?;
         if let Some((db, owed)) = due { shared.schedule_refreshes(db, owed); }
         let mut lines = notice_lines(&mut session);
@@ -353,7 +404,7 @@ pub async fn run_task(console: Arc<Console>, shared: Arc<Shared>, mut session: S
         if fatal.is_some() || session.closed_reason().is_some() { break; }
     }
     let lost = session.closed_reason_settled(fatal).await;
-    console.edit(&shared, run_id, |inner| {
+    let due = console.edit(&shared, run_id, |inner| {
         let statements = Console::statements_mut(inner);
         for s in statements.iter_mut().skip(index) { if matches!(s.status, StmtStatus::Pending) { s.status = StmtStatus::Skipped; } }
         let statements = statements.clone();
@@ -365,9 +416,12 @@ pub async fn run_task(console: Arc<Console>, shared: Arc<Shared>, mut session: S
             };
             console.output(&shared, run_id, OutputBody::Info { message });
         }
-        Console::return_session(inner, session, txn, lost);
+        let due = Console::return_session(inner, session, txn, lost);
         inner.run = RunState::Finished { run_id, elapsed_ms: elapsed_ms(started), statements, outcome };
-    }).await
+        due
+    }).await?;
+    if let Some((db, owed)) = due { shared.schedule_refreshes(db, owed); }
+    Ok(())
 }
 
 async fn set_status(console: &Console, shared: &Shared, run_id: RunId, index: u16, status: StmtStatus) -> Result<(), Orphaned> {

@@ -513,7 +513,7 @@ impl Shared {
 
     /// Consoles of `id` with an open transaction, with `has_writes` probed on their idle sessions.
     /// The probe takes the session out like a run does, so the lock is not held across the query.
-    async fn open_transactions(&self, consoles: &[Arc<Console>]) -> Vec<OpenTxn> {
+    async fn open_transactions(self: &Arc<Self>, consoles: &[Arc<Console>]) -> Vec<OpenTxn> {
         let mut open = Vec::new();
         for console in consoles {
             let run_id = self.next_run_id();
@@ -529,12 +529,13 @@ impl Shared {
                 Some((mut session, _stop)) => {
                     let has_writes = session.has_writes().await;
                     let lost = session.closed_reason();
-                    let _ = console
+                    let edited = console
                         .edit(self, run_id, |inner| {
                             let txn = inner.txn;
-                            Console::return_session(inner, session, txn, lost);
+                            Console::return_session(inner, session, txn, lost)
                         })
                         .await;
+                    if let Ok(Some((db, owed))) = edited { self.schedule_refreshes(db, owed); }
                     has_writes
                 }
             };
@@ -578,10 +579,9 @@ impl Shared {
         let edited = console
             .edit(self, run_id, |inner| {
                 let txn = session.observed_txn().unwrap_or_else(|| txn::txn_after(inner.txn, &kind, outcome));
-                Console::return_session(inner, session, txn, lost);
-                let owed = if inner.txn == TxnState::Idle { inner.owed.take() } else { Owed::default() };
+                let retired = Console::return_session(inner, session, txn, lost);
                 let committed = commit && !aborted && result.is_ok();
-                committed.then(|| (inner.config.db(), owed))
+                retired.or_else(|| inner.finish_refreshes(committed))
             })
             .await;
         if let Ok(Some((db, owed))) = edited {
@@ -996,13 +996,16 @@ impl Engine {
                 return Err(ConfigureError::TransactionOpen);
             }
         }
-        if target_changed {
+        let due = if target_changed {
+            let due = inner.finish_refreshes(false);
             inner.session = SessionSlot::Empty;
             inner.txn_depth = None;
-        }
+            due
+        } else { None };
         inner.config = view.clone();
         let state = console.publish(&mut inner, s);
         drop(inner);
+        if let Some((db, owed)) = due { s.schedule_refreshes(db, owed); }
         s.reconcile(view.connection_id);
         if previous != view.connection_id {
             s.reconcile(previous);
@@ -1254,7 +1257,9 @@ impl Engine {
             lines.push(OutputBody::Error { statement: None, error: error.clone() });
         }
         console.output_all(s, run_id, lines);
-        let _ = console.edit(s, run_id, |inner| Console::return_session(inner, session, after, lost)).await;
+        if let Ok(Some((db, owed))) = console.edit(s, run_id, |inner| Console::return_session(inner, session, after, lost)).await {
+            s.schedule_refreshes(db, owed);
+        }
         outcome.map(|()| ApplySummary { committed: after == TxnState::Idle })
     }
 
