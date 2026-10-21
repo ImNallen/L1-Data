@@ -1,19 +1,24 @@
 import { undo } from "@codemirror/commands";
 import { mockIPC } from "@tauri-apps/api/mocks";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
-import type { ConsoleState, Settings, TableQuery, TableScript, TabSnapshot } from "../../ipc/bindings";
+import type { ApplyError, ConsoleState, Settings, TableQuery, TableScript, TabSnapshot } from "../../ipc/bindings";
 import { connectionConfig } from "../../testing/connections";
+import { shopCatalog } from "../../testing/shopCatalog";
+import { buildCatalogView, useCatalog } from "../../state/catalog";
+import { dbKey } from "../../state/dbKey";
 import { useLive } from "../../state/live";
-import { useTableEdits } from "../../state/tableEdits";
+import { markDeleted, pendingCount, setCell, useTableEdits } from "../../state/tableEdits";
 import { useWorkspace, workspaceSnapshot } from "../../state/workspace";
+import { gridEditing } from "../results/ResultGrid";
 import { dropEditor, editorStateOf, insertAtCursor, moveCursor, seedEditor, textOf } from "./editorStates";
-import { browseTemplate, formatActive, loadTableOnce, openTableTab, saveSettings, setTabMode, setTabTarget, runOrChoose, openSqlTab, isBrowsing } from "./runActions";
+import { browseTemplate, formatActive, loadTableOnce, openTableTab, saveSettings, setTabMode, setTabTarget, runOrChoose, openSqlTab, isBrowsing, submitEdits } from "./runActions";
 
 afterEach(() => {
   vi.unstubAllGlobals();
   for (const id of useWorkspace.getState().order) dropEditor(id);
   useWorkspace.setState(useWorkspace.getInitialState(), true);
   useLive.setState(useLive.getInitialState(), true);
+  useCatalog.setState(useCatalog.getInitialState(), true);
   useTableEdits.setState(useTableEdits.getInitialState(), true);
 });
 
@@ -146,6 +151,58 @@ it("keeps a tab on its database while it has staged edits", async () => {
   useTableEdits.getState().clear(id);
   await setTabTarget(id, { connectionId: "c1", database: "reporting" });
   expect([calls, useWorkspace.getState().tabs[id]?.console.db]).toEqual([["console_configure"], { connectionId: "c1", database: "reporting" }]);
+});
+
+it.each(["update", "delete"])("submits the original named %s key after PostgreSQL catalog replacement and keeps refused edits", async (change) => {
+  const id = await openWithConsole();
+  const catalog = shopCatalog("c1", 1);
+  const relation = catalog.schemas[1]!.relations.find((r) => r.name === "orders")!;
+  relation.columns[1]!.name = "alternate";
+  const meta = {
+    databaseKind: catalog.databaseKind,
+    db: catalog.db,
+    columns: relation.columns.map((column) => ({ name: column.name, type: { display: column.typeDisplay, category: column.category }, source: { tableOid: relation.oid, attnum: column.attnum } })),
+  };
+  const original = buildCatalogView(catalog);
+  useCatalog.setState({ views: { [dbKey(catalog.db)]: original } });
+  const editing = gridEditing(original, "public", "orders", meta);
+  expect(editing?.pkColumns).toEqual(["id"]);
+  const originalRow = ["1", "2", "selected", "0", "2026-10-21"];
+  const selected = editing!.pkColumns.map((column) => ({ column, value: originalRow[meta.columns.findIndex((c) => c.name === column)] ?? null }));
+  useTableEdits.getState().edit(id, (edits) => change === "update" ? setCell(edits, selected, "status", "edited", "selected") : markDeleted(edits, [selected], true));
+  const staged = useTableEdits.getState().byTab[id];
+
+  const refreshed = buildCatalogView({
+    ...catalog,
+    version: 2,
+    schemas: catalog.schemas.map((schema) => ({ ...schema, relations: schema.relations.map((rel) => rel === relation ? { ...rel, columns: rel.columns.map((c) => ({ ...c, pk: c.name === "alternate" })) } : rel) })),
+  });
+  useCatalog.setState({ views: { [dbKey(catalog.db)]: refreshed } });
+  expect(gridEditing(refreshed, "public", "orders", meta)?.pkColumns).toEqual(["alternate"]);
+  const submitted: unknown[] = [];
+  mockIPC((cmd, args) => {
+    submitted.push({ cmd, args });
+    if (cmd === "table_apply") return Promise.reject({ kind: "NoPrimaryKey" } satisfies ApplyError);
+    return null;
+  });
+
+  await submitEdits(id);
+
+  expect(submitted).toEqual([{
+    cmd: "table_apply",
+    args: {
+      tabId: id,
+      changes: {
+        schema: "public", table: "orders", inserts: [],
+        updates: change === "update" ? [{ key: [{ column: "id", value: "1" }], set: [{ column: "status", value: "edited" }] }] : [],
+        deletes: change === "delete" ? [[{ column: "id", value: "1" }]] : [],
+      },
+    },
+  }]);
+  expect(useTableEdits.getState().byTab[id]).toEqual(staged);
+  expect(pendingCount(useTableEdits.getState().byTab[id]!)).toBe(1);
+  expect(useTableEdits.getState().submitting[id]).toBeUndefined();
+  expect(useWorkspace.getState().toast?.text).toContain("primary key");
 });
 
 function openScript(text: string, edit: () => unknown) {

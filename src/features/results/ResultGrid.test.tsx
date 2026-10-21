@@ -1,10 +1,11 @@
 import { renderToStaticMarkup } from "react-dom/server";
 import { expect, it } from "vitest";
-import type { ColumnMeta, TypeCategory } from "../../ipc/bindings";
+import type { ColumnMeta, DatabaseKind, TypeCategory } from "../../ipc/bindings";
 import { buildCatalogView } from "../../state/catalog";
 import { dbKey } from "../../state/dbKey";
+import { markDeleted, NO_EDITS, setCell } from "../../state/tableEdits";
 import { shopCatalog } from "../../testing/shopCatalog";
-import { gridEditing, HeaderIcon, nextFocus, primaryKeyColumns, selectRows } from "./ResultGrid";
+import { gridEditing, gridKeyColumns, HeaderIcon, nextFocus, primaryKeyColumns, selectRows } from "./ResultGrid";
 
 const iconOf = (category: TypeCategory, primaryKey = false) => {
   const html = renderToStaticMarkup(<HeaderIcon column={{ name: "c", type: { display: "t", category }, source: null }} primaryKey={primaryKey} />);
@@ -101,10 +102,10 @@ it("selects whole rows from the first to the last column, focused on the first",
 
 it("keeps generated columns read-only and requires database-scoped edit provenance", () => {
   const catalog = shopCatalog("ms", 1);
-  catalog.databaseKind = "SqlServer";
   const relation = catalog.schemas[1]!.relations.find((r) => r.name === "orders")!;
   relation.columns[0]!.writable = false;
   const meta = {
+    databaseKind: catalog.databaseKind,
     db: catalog.db,
     columns: relation.columns.map((column) => ({ name: column.name, type: { display: column.typeDisplay, category: column.category }, source: { tableOid: relation.oid, attnum: column.attnum } })),
   };
@@ -115,4 +116,27 @@ it("keeps generated columns read-only and requires database-scoped edit provenan
   expect(editing?.writableColumns.has("status")).toBe(true);
   expect(gridEditing(view, "public", "orders", { ...meta, db: { ...meta.db, database: "reporting" } })).toBeNull();
   expect(gridEditing(view, "public", "orders", { ...meta, columns: meta.columns.map((c) => ({ ...c, source: null })) })).toBeNull();
+});
+
+it.each<{ catalogKind: DatabaseKind; resultKind: DatabaseKind }>([
+  { catalogKind: "SqlServer", resultKind: "SqlServer" },
+  { catalogKind: "SqlServer", resultKind: "Postgres" },
+  { catalogKind: "Postgres", resultKind: "SqlServer" },
+])("keeps a $resultKind result read-only with a $catalogKind catalog despite valid key provenance", ({ catalogKind, resultKind }) => {
+  const catalog = shopCatalog("ms", 1);
+  const relation = catalog.schemas[1]!.relations.find((r) => r.name === "orders")!;
+  const meta = {
+    databaseKind: catalog.databaseKind,
+    db: catalog.db,
+    columns: relation.columns.map((column) => ({ name: column.name, type: { display: column.typeDisplay, category: column.category }, source: { tableOid: relation.oid, attnum: column.attnum } })),
+  };
+  expect(gridEditing(buildCatalogView(catalog), "public", "orders", meta)?.pkColumns).toEqual(["id"]);
+  expect(gridEditing(buildCatalogView({ ...catalog, databaseKind: catalogKind }), "public", "orders", { ...meta, databaseKind: resultKind })).toBeNull();
+});
+
+it.each(["update", "delete"])("keeps original key columns for a pending %s when the key changes or editing is refused", (change) => {
+  const selected = [{ column: "id", value: "1" }];
+  const edits = change === "update" ? setCell(NO_EDITS, selected, "note", "edited", "original") : markDeleted(NO_EDITS, [selected], true);
+  expect(gridKeyColumns({ pkColumns: ["alternate"], writableColumns: new Set(["note"]) }, edits)).toEqual(["id"]);
+  expect(gridKeyColumns(null, edits)).toEqual(["id"]);
 });

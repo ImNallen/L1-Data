@@ -3,20 +3,21 @@ import type { CellWrite, ChangeRef, TabId, TableChanges } from "../ipc/bindings"
 
 export type CellValue = string | null;
 export type RowKey = string;
-export type RowId = { key: RowKey; values: CellValue[] };
+export type RowId = readonly Readonly<CellWrite>[];
 
 export type NewRow = { id: number; values: Record<string, CellValue> };
 
 export type TableEdits = {
   inserts: NewRow[];
-  updates: Record<RowKey, { key: CellValue[]; values: Record<string, CellValue> }>;
-  deletes: Record<RowKey, CellValue[]>;
+  updates: Record<RowKey, { key: RowId; values: Record<string, CellValue> }>;
+  deletes: Record<RowKey, RowId>;
   failedAt: { insert: number } | { key: RowKey } | null;
 };
 
 export const NO_EDITS: TableEdits = { inserts: [], updates: {}, deletes: {}, failedAt: null };
 
-export const rowKey = (values: CellValue[]): RowKey => JSON.stringify(values);
+export const rowKey = (cells: RowId): RowKey => JSON.stringify(cells.map(({ column, value }) => [column, value]));
+const copyKey = (cells: RowId): CellWrite[] => cells.map(({ column, value }) => ({ column, value }));
 
 export function pendingCount(e: TableEdits): number {
   return e.inserts.length + Object.keys(e.updates).filter((k) => !(k in e.deletes)).length + Object.keys(e.deletes).length;
@@ -46,34 +47,34 @@ export function removeNewRows(e: TableEdits, ids: number[]): TableEdits {
 }
 
 export function setCell(e: TableEdits, row: RowId, column: string, value: CellValue, stored: CellValue): TableEdits {
-  const current = e.updates[row.key]?.values ?? {};
+  const key = rowKey(row);
+  const current = e.updates[key]?.values ?? {};
   const { [column]: _, ...rest } = current;
   const values = value === stored ? rest : { ...rest, [column]: value };
-  const { [row.key]: __, ...others } = e.updates;
-  return { ...e, updates: Object.keys(values).length ? { ...others, [row.key]: { key: row.values, values } } : others };
+  const { [key]: __, ...others } = e.updates;
+  return { ...e, updates: Object.keys(values).length ? { ...others, [key]: { key: e.updates[key]?.key ?? copyKey(row), values } } : others };
 }
 
 export function markDeleted(e: TableEdits, rows: RowId[], on: boolean): TableEdits {
   const deletes = { ...e.deletes };
   for (const r of rows) {
-    if (on) deletes[r.key] = r.values;
-    else delete deletes[r.key];
+    const key = rowKey(r);
+    if (on) deletes[key] ??= copyKey(r);
+    else delete deletes[key];
   }
   return { ...e, deletes };
 }
 
 export function toggleDeletes(e: TableEdits, rows: RowId[]): TableEdits {
-  return markDeleted(e, rows, !rows.every((r) => r.key in e.deletes));
+  return markDeleted(e, rows, !rows.every((r) => rowKey(r) in e.deletes));
 }
 
-const writes = (columns: string[], values: CellValue[]): CellWrite[] => columns.map((column, i) => ({ column, value: values[i] ?? null }));
 const entries = (values: Record<string, CellValue>): CellWrite[] => Object.entries(values).map(([column, value]) => ({ column, value }));
 
 export function toChanges(
   e: TableEdits,
   schema: string,
   table: string,
-  pkColumns: string[],
 ): { changes: TableChanges; rowOf: (ref: ChangeRef) => TableEdits["failedAt"] } {
   const deleteKeys = Object.keys(e.deletes);
   const updateKeys = Object.keys(e.updates).filter((k) => !(k in e.deletes));
@@ -81,8 +82,8 @@ export function toChanges(
     schema,
     table,
     inserts: e.inserts.map((r) => entries(r.values)),
-    updates: updateKeys.map((k) => ({ key: writes(pkColumns, e.updates[k]!.key), set: entries(e.updates[k]!.values) })),
-    deletes: deleteKeys.map((k) => writes(pkColumns, e.deletes[k]!)),
+    updates: updateKeys.map((k) => ({ key: copyKey(e.updates[k]!.key), set: entries(e.updates[k]!.values) })),
+    deletes: deleteKeys.map((k) => copyKey(e.deletes[k]!)),
   };
   const rowOf = (ref: ChangeRef): TableEdits["failedAt"] => {
     if (ref.kind === "Insert") return { insert: e.inserts[ref.index]!.id };

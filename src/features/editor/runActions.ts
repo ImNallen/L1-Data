@@ -14,7 +14,6 @@ import {
   type TxnMode,
 } from "../../ipc/bindings";
 import { applyErrorText, configureErrorText, disconnectErrorText, runErrorText, txnErrorText } from "../../ipc/errors";
-import { findRelation, useCatalog, viewFor } from "../../state/catalog";
 import { databaseKindFor } from "../../state/databaseKind";
 import { homeDb, resolveDb, sameDb } from "../../state/dbKey";
 import { useLive } from "../../state/live";
@@ -343,11 +342,6 @@ export function updateTableQuery(tabId: TabId, update: (q: TableQuery) => TableQ
 
 const plural = (n: number, word: string) => `${n} ${word}${n === 1 ? "" : "s"}`;
 
-export function tablePrimaryKey(tab: TableTab): string[] {
-  const rel = findRelation(viewFor(useCatalog.getState().views, tab.console.db), tab.table.schema, tab.table.table);
-  return rel?.kind === "Table" ? rel.columns.filter((c) => c.pk).map((c) => c.name) : [];
-}
-
 export async function submitEdits(tabId: TabId): Promise<void> {
   const tab = ws().tabs[tabId];
   const edits = useTableEdits.getState().byTab[tabId];
@@ -365,7 +359,7 @@ async function applyEdits(tab: TableTab, edits: TableEdits): Promise<void> {
   const tabId = tab.id;
   if (!(await ensureConsole(tab))) return;
   const count = pendingCount(edits);
-  const { changes, rowOf } = toChanges(edits, tab.table.schema, tab.table.table, tablePrimaryKey(tab));
+  const { changes, rowOf } = toChanges(edits, tab.table.schema, tab.table.table);
   const res = await commands.tableApply(tabId, changes);
   if (res.status === "error") {
     const failedAt = "change" in res.error ? rowOf(res.error.change) : null;
