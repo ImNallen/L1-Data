@@ -7,6 +7,8 @@ use std::panic::AssertUnwindSafe;
 use std::sync::Arc;
 use std::time::Duration;
 
+static FIXTURES: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
 struct Harness {
     engine: Arc<Engine>,
     db: DatabaseRef,
@@ -14,10 +16,12 @@ struct Harness {
     control: TabId,
     table: String,
     _dir: tempfile::TempDir,
+    _fixture: tokio::sync::MutexGuard<'static, ()>,
 }
 
 impl Harness {
     async fn open() -> Self {
+        let fixture = FIXTURES.lock().await;
         let dir = tempfile::tempdir().unwrap();
         let engine = Engine::open(EngineConfig {
             data_dir: dir.path().into(), keys: Arc::new(MemoryKeyStore::default()), agent_path: AgentPath::Fixed("".into()),
@@ -34,7 +38,7 @@ impl Harness {
         let h = Self {
             engine, db: DatabaseRef { connection_id: connection.id, database: "shop".into() },
             tab: TabId(uuid::Uuid::new_v4()), control: TabId(uuid::Uuid::new_v4()),
-            table: format!("l1_native_count_{}", uuid::Uuid::new_v4().simple()), _dir: dir,
+            table: format!("l1_native_count_{}", uuid::Uuid::new_v4().simple()), _dir: dir, _fixture: fixture,
         };
         for tab in [h.tab, h.control] { h.engine.console_configure(tab, h.config("shop")).await.unwrap(); }
         let setup = AssertUnwindSafe(async {
