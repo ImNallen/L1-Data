@@ -5,6 +5,7 @@ mod keywords;
 mod lex;
 mod relations;
 mod split;
+pub(crate) mod tsql;
 
 pub use classify::{DmlVerb, Invalidates, StmtKind, classify};
 pub use format::format_statement;
