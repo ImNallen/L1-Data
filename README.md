@@ -40,6 +40,7 @@ L1 Data is a desktop IDE for PostgreSQL and Microsoft SQL Server, built with Tau
 ### Results and table data
 
 - SQL Server table browsing preserves exact decimal and money values, Unicode, binary values, and temporal precision. An arbitrary query returning raw `money` must cast it to `decimal(19,4)` because the driver otherwise rounds it through floating point. Unsupported value conversions fail explicitly. Generated columns remain read-only in the grid.
+- SQL Server filters compare typed values and search the text shown in the grid. Equality filters for text, ntext, and XML compare serialized text. Text searches on floating-point columns or with excessively long patterns are refused with guidance.
 - The results grid streams large results in pages. Select cells and press `⌘C` to copy them as TSV. Press `Enter`, or click the **…** on a cut-off value, to see the full value.
 - A run with several result sets has a selector to switch between them.
 - **Export** writes the result to CSV, up to the row limit.
