@@ -19,7 +19,6 @@ use crate::sql;
 use crate::store::ProviderSession;
 use crate::text::OffsetMap;
 
-const SYSTEM_PROMPT: &str = include_str!("system_prompt.md");
 const TEXT_PUBLISH_INTERVAL: Duration = Duration::from_millis(50);
 const EXECUTION_TIMEOUT: Duration = Duration::from_secs(45);
 const FAR_FUTURE: Duration = Duration::from_secs(3600);
@@ -674,12 +673,70 @@ fn resolve_blocks(blocks: Vec<ReplyBlock>, catalog: Option<&Catalog>, kind: Data
 
 fn system_prompt(kind: DatabaseKind) -> &'static str {
     match kind {
-        DatabaseKind::Postgres => SYSTEM_PROMPT,
-        DatabaseKind::SqlServer => {
-            static PROMPT: std::sync::LazyLock<String> = std::sync::LazyLock::new(|| SYSTEM_PROMPT.replace("for PostgreSQL", "for Microsoft SQL Server")
-            .replace("run_query runs one statement in a READ ONLY transaction with a 30 s timeout, and the user may have to approve it. Results come back cut to 50 rows. Prefer aggregates and LIMIT.", "run_query is disabled on SQL Server because server-enforced read-only transactions are unavailable. Use describe_tables and search_catalog. Suggest T-SQL with bracket-quoted identifiers, TOP or OFFSET/FETCH, and Unicode N literals for the user to run. Keep batch-scoped variables together and use GO only between batches.")
-            .replace("Put each statement you hand the user in its own", "Put each executable batch you hand the user in its own"));
-            PROMPT.as_str()
-        },
+        DatabaseKind::Postgres => include_str!("system_prompt.md"),
+        DatabaseKind::SqlServer => include_str!("system_prompt_mssql.md"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn both_system_prompts_keep_the_tools_and_shared_instructions() {
+        for kind in [DatabaseKind::Postgres, DatabaseKind::SqlServer] {
+            let prompt = system_prompt(kind);
+            for tool in &tools::TOOLS {
+                assert!(prompt.contains(tool.name), "{kind:?} prompt does not mention {}", tool.name);
+            }
+            for instruction in [
+                "<l1_context>",
+                "Never try to change data or schema.",
+                "write it in a ```sql block for them to run",
+                "Use names from the outline and the tools; do not guess them.",
+                "Keep answers short. Use inline code for identifiers.",
+                "```followups",
+                "up to 3 short requests",
+            ] {
+                assert!(prompt.contains(instruction), "{kind:?} prompt omits {instruction:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn postgres_system_prompt_keeps_read_only_statement_execution() {
+        let prompt = system_prompt(DatabaseKind::Postgres);
+        assert_eq!(prompt, include_str!("system_prompt.md"));
+        for instruction in [
+            "for PostgreSQL",
+            "run_query runs one statement in a READ ONLY transaction with a 30 s timeout",
+            "the user may have to approve it",
+            "Results come back cut to 50 rows",
+            "Prefer aggregates and LIMIT",
+            "Put each statement you hand the user in its own ```sql block",
+        ] {
+            assert!(prompt.contains(instruction), "PostgreSQL prompt omits {instruction:?}");
+        }
+        assert!(!prompt.contains("run_query is disabled"));
+        assert!(!prompt.contains("SQL Server"));
+    }
+
+    #[test]
+    fn sql_server_system_prompt_disables_queries_and_preserves_tsql_batches() {
+        let prompt = system_prompt(DatabaseKind::SqlServer);
+        for instruction in [
+            "for Microsoft SQL Server",
+            "run_query is disabled on SQL Server",
+            "server-enforced read-only transactions are unavailable",
+            "Use describe_tables and search_catalog",
+            "Suggest T-SQL with bracket-quoted identifiers, TOP or OFFSET/FETCH, and Unicode N literals for the user to run",
+            "Keep batch-scoped variables together and use GO only between batches",
+            "Put each executable batch you hand the user in its own ```sql block",
+        ] {
+            assert!(prompt.contains(instruction), "SQL Server prompt omits {instruction:?}");
+        }
+        for instruction in ["PostgreSQL", "LIMIT", "READ ONLY", "run_query runs one statement", "Put each statement"] {
+            assert!(!prompt.contains(instruction), "SQL Server prompt includes {instruction:?}");
+        }
     }
 }

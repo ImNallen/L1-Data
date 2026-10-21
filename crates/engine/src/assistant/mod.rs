@@ -290,8 +290,6 @@ async fn drain(tasks: &mut FuturesUnordered<JoinHandle<()>>) {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-
     const DIR: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/src/assistant");
 
     fn sources() -> Vec<(String, String)> {
@@ -330,14 +328,5 @@ mod tests {
             }
             assert!(!text.contains("session.query("), "{name} reaches a session's query stream; database access belongs in tools.rs, on its own read-only session");
         }
-    }
-
-    #[test]
-    fn the_system_prompt_names_the_tools_and_the_followups_fence() {
-        let prompt = std::fs::read_to_string(format!("{DIR}/system_prompt.md")).unwrap();
-        for tool in &tools::TOOLS {
-            assert!(prompt.contains(tool.name), "the prompt does not mention {}", tool.name);
-        }
-        assert!(prompt.contains("```followups"));
     }
 }
