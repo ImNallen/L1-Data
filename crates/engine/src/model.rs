@@ -141,6 +141,7 @@ pub enum ConnStatus {
 #[derive(Debug, Clone, Serialize, Type)]
 #[serde(rename_all = "camelCase")]
 pub struct InstanceState {
+    pub configured_database: String,
     /// `ConnectionConfig.database` as the server spells it.
     pub home: String,
     /// The database picker lists system databases only while this is on.

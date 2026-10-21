@@ -54,6 +54,10 @@ export async function boot(): Promise<void> {
     seedEditor(saved.id, saved.text ?? template ?? "");
   }
   useWorkspace.getState().restore(snapshot.workspace, snapshot.connections, snapshot.settings);
+  useWorkspace.getState().resolveDatabases(useLive.getState().connections);
+  useLive.subscribe((s, prev) => {
+    if (s.connections !== prev.connections) useWorkspace.getState().resolveDatabases(s.connections);
+  });
   startTheme();
   startAppearance();
   if (snapshot.workspace.tabs.length === 0) openSqlTab();

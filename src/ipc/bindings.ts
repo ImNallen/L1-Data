@@ -613,6 +613,7 @@ export type IndexInfo = {
  *  single source of catalog versions.
  */
 export type InstanceState = {
+	configuredDatabase: string,
 	/**  `ConnectionConfig.database` as the server spells it. */
 	home: string,
 	/**  The database picker lists system databases only while this is on. */

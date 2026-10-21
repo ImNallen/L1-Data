@@ -1,4 +1,4 @@
-import type { ConnectionConfig, DatabaseRef } from "../ipc/bindings";
+import type { ConnectionConfig, ConnectionState, DatabaseRef } from "../ipc/bindings";
 
 /** Map key for a DatabaseRef. NUL cannot appear in a Postgres identifier, so the join is exact. */
 export type DbKey = string & { readonly __brand: "DbKey" };
@@ -11,7 +11,12 @@ export function sameDb(a: DatabaseRef | null | undefined, b: DatabaseRef | null 
   return a === b || (!!a && !!b && a.connectionId === b.connectionId && a.database === b.database);
 }
 
-/** The connection's configured database: the one it connects to first and the tree shows. */
-export function homeDb(config: ConnectionConfig): DatabaseRef {
-  return { connectionId: config.id, database: config.database };
+export function resolveDb(db: DatabaseRef, state: ConnectionState | undefined): DatabaseRef {
+  if (state?.id !== db.connectionId || state.status.kind !== "Connected") return db;
+  const { configuredDatabase, home } = state.status.instance;
+  return db.database === configuredDatabase && db.database !== home ? { ...db, database: home } : db;
+}
+
+export function homeDb(config: ConnectionConfig, state?: ConnectionState): DatabaseRef {
+  return resolveDb({ connectionId: config.id, database: config.database }, state);
 }

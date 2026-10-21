@@ -263,6 +263,10 @@ impl Instance {
         self.databases.read().unwrap().iter().any(|d| d.name == database)
     }
 
+    pub fn canonical_database<'a>(&'a self, requested: &'a str) -> &'a str {
+        if requested == self.config.database { &self.home } else { requested }
+    }
+
     /// Converges the slots to `wanted`: drops the ones outside `keep`, which closes their
     /// sessions, creates the missing ones in `open`, and returns every slot whose catalog has not
     /// been loaded yet. Running it twice changes nothing. `wanted` runs under the slot lock, so
@@ -313,7 +317,7 @@ impl Instance {
                 }
             })
             .collect();
-        InstanceState { home: self.home.clone(), show_system_databases: view.show_system_databases, databases }
+        InstanceState { configured_database: self.config.database.clone(), home: self.home.clone(), show_system_databases: view.show_system_databases, databases }
     }
 }
 
@@ -357,6 +361,35 @@ impl ConnEntry {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn case_sensitive_database_names_keep_distinct_slots() {
+        let id = ConnectionId(uuid::Uuid::nil());
+        let config = ConnectionConfig {
+            database_kind: DatabaseKind::SqlServer,
+            id,
+            name: "case sensitive".into(),
+            host: "localhost".into(),
+            port: 1433,
+            database: "Shop".into(),
+            user: "sa".into(),
+            ssl_mode: SslMode::Require,
+            ca_cert_path: None,
+            has_password: false,
+            color: None,
+        };
+        let databases = ["Shop", "shop"].map(|name| DatabaseInfo { name: name.into(), system: false, access: DbAccess::Ok });
+        let home = DbSlot::new(DatabaseRef { connection_id: id, database: "Shop".into() });
+        let instance = Instance::new(config, ServerInfo { version: String::new(), version_num: 0, encoding: "Unicode".into() }, "Shop".into(), databases.into(), ConnectionView::initial(), home);
+        instance.converge(id, || Wanted { keep: BTreeSet::from(["Shop".into(), "shop".into()]), open: BTreeSet::from(["Shop".into(), "shop".into()]) });
+        for name in ["Shop", "shop"] {
+            assert_eq!(instance.canonical_database(name), name);
+            assert_eq!(instance.slot(name).unwrap().db.database, name);
+        }
+        assert_eq!(instance.canonical_database("SHOP"), "SHOP");
+        assert!(!instance.knows("SHOP"));
+        assert!(instance.slot("SHOP").is_none());
+    }
 
     #[test]
     fn a_failed_reload_keeps_the_last_catalog_and_its_version() {

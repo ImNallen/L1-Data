@@ -120,29 +120,38 @@ impl MsSession {
                 e => ConnectError::Server(query_error(e)),
             })
         };
-        let client = tokio::time::timeout(CONNECT_TIMEOUT, connection).await.map_err(|_| ConnectError::Network { message: "SQL Server connection timed out".into() })??;
+        let mut client = tokio::time::timeout(CONNECT_TIMEOUT, connection).await.map_err(|_| ConnectError::Network { message: "SQL Server connection timed out".into() })??;
+        let initialize = async {
+            let mut stream = native_query(&mut client, "SELECT CONVERT(int, @@SPID), CONVERT(nvarchar(128), SERVERPROPERTY('ProductVersion')), DB_NAME()", &[]);
+            let mut rows = Vec::new();
+            while let Some(event) = stream.next().await {
+                if let QueryEvent::Row(row) = event? {
+                    rows.push(row);
+                }
+            }
+            let row = rows.first().ok_or_else(|| error("SQL Server returned no server information"))?;
+            let backend_pid = number(row, 0)?;
+            let version = required(row, 1)?.to_owned();
+            let database = required(row, 2)?.to_owned();
+            Ok::<_, QueryError>((backend_pid, version, database))
+        };
+        let (backend_pid, version, database) = tokio::time::timeout(CONNECT_TIMEOUT, initialize)
+            .await
+            .map_err(|_| ConnectError::Network { message: "SQL Server initialization timed out".into() })?
+            .map_err(ConnectError::Server)?;
+        let version_num = version.split('.').next().and_then(|n| n.parse::<u32>().ok()).unwrap_or(0) * 10000;
         let (cancel, _) = watch::channel(0);
         let (closed, _) = watch::channel(None);
-        let mut session = Self {
+        Ok(Self {
             client: Some(client),
-            backend_pid: 0,
-            server: ServerInfo { version: String::new(), version_num: 0, encoding: "Unicode".into() },
-            database: p.database.clone(),
+            backend_pid,
+            server: ServerInfo { version, version_num, encoding: "Unicode".into() },
+            database,
             depth: 0,
             txn: TxnState::Idle,
             cancel,
             closed,
-        };
-        let rows = tokio::time::timeout(CONNECT_TIMEOUT, session.rows("SELECT CONVERT(int, @@SPID), CONVERT(nvarchar(128), SERVERPROPERTY('ProductVersion')), DB_NAME()"))
-            .await
-            .map_err(|_| ConnectError::Network { message: "SQL Server initialization timed out".into() })?
-            .map_err(ConnectError::Server)?;
-        let row = rows.first().ok_or_else(|| ConnectError::Server(error("SQL Server returned no server information")))?;
-        session.backend_pid = number(row, 0).map_err(ConnectError::Server)?;
-        session.server.version = required(row, 1).map_err(ConnectError::Server)?.to_owned();
-        session.database = required(row, 2).map_err(ConnectError::Server)?.to_owned();
-        session.server.version_num = session.server.version.split('.').next().and_then(|n| n.parse::<u32>().ok()).unwrap_or(0) * 10000;
-        Ok(session)
+        })
     }
     pub(super) fn cancel_handle(&self) -> MsCancel {
         MsCancel(self.cancel.clone())
@@ -330,6 +339,17 @@ mod tests {
             ssl_mode: SslMode::Require,
             ca_cert_path: None,
         }
+    }
+
+    #[tokio::test]
+    async fn a_canonicalized_login_still_retires_a_session_that_changes_database() {
+        let mut p = params();
+        p.database = "SHOP".into();
+        let mut session = MsSession::open(&p).await.unwrap();
+        assert_eq!(session.database, "shop");
+        let error = session.rows("USE reporting; SELECT DB_NAME()").await.unwrap_err();
+        assert!(error.message.contains("Execution database changed to reporting"), "{}", error.message);
+        assert!(session.closed_reason().is_some());
     }
 
     async fn stopped(observer: &mut MsSession, pid: i32) {

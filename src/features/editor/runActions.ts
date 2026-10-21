@@ -15,7 +15,7 @@ import {
 import { applyErrorText, configureErrorText, disconnectErrorText, runErrorText, txnErrorText } from "../../ipc/errors";
 import { findRelation, useCatalog, viewFor } from "../../state/catalog";
 import { databaseKindFor } from "../../state/databaseKind";
-import { dbKey, homeDb, sameDb } from "../../state/dbKey";
+import { homeDb, resolveDb, sameDb } from "../../state/dbKey";
 import { useLive } from "../../state/live";
 import { dropRowCaches } from "../../state/rowCache";
 import { isRunning } from "../../state/status";
@@ -67,7 +67,7 @@ async function ensureConsole(tab: Tab): Promise<boolean> {
 const sent = new Map<TabId, { runId: number; text: string }>();
 
 const tableScripts = new Map<string, string>();
-const tableScriptKey = (db: DatabaseRef, schema: string, table: string) => JSON.stringify([dbKey(db), schema, table]);
+const tableScriptKey = (db: DatabaseRef, schema: string, table: string) => JSON.stringify([db.connectionId, schema, table]);
 
 export async function browseTemplate(db: DatabaseRef, schema: string, table: string): Promise<string | null> {
   const key = tableScriptKey(db, schema, table);
@@ -231,7 +231,7 @@ export function setTabTarget(tabId: TabId, db: DatabaseRef): Promise<void> {
     notify("Submit or revert the pending changes first.");
     return Promise.resolve();
   }
-  return reconfigure(tabId, { db });
+  return reconfigure(tabId, { db: resolveDb(db, useLive.getState().connections[db.connectionId]) });
 }
 
 function defaultTarget(): DatabaseRef | null {
@@ -241,16 +241,18 @@ function defaultTarget(): DatabaseRef | null {
   const live = useLive.getState().connections;
   const configs = Object.values(s.configs);
   const config = configs.find((c) => live[c.id]?.status.kind === "Connected") ?? configs[0];
-  return config ? homeDb(config) : null;
+  return config ? homeDb(config, live[config.id]) : null;
 }
 
 export function openSqlTab(opts: { db?: DatabaseRef | null; text?: string; title?: string } = {}): TabId {
   const id = crypto.randomUUID();
+  const target = opts.db ?? defaultTarget();
+  const db = target && resolveDb(target, useLive.getState().connections[target.connectionId]);
   seedEditor(id, opts.text ?? "");
   ws().addTab({
     id,
     title: opts.title ?? nextUntitled(Object.values(ws().tabs)),
-    console: { db: opts.db ?? defaultTarget(), mode: "AutoCommit" },
+    console: { db, mode: "AutoCommit" },
     table: null,
   });
   return id;

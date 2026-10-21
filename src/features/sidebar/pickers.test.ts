@@ -28,7 +28,7 @@ const db = (name: string, over: Partial<DatabaseState> = {}): DatabaseState => (
   ...over,
 });
 
-const instance = (databases: DatabaseState[], showSystemDatabases = false): InstanceState => ({ home: "shop", showSystemDatabases, databases });
+const instance = (databases: DatabaseState[], showSystemDatabases = false): InstanceState => ({ configuredDatabase: "shop", home: "shop", showSystemDatabases, databases });
 
 const prod = instance([
   db("legacy_crm", { schemaCount: { kind: "Known", count: 2 } }),

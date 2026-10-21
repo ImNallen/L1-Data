@@ -130,6 +130,16 @@ impl Shared {
         self.store.connections().ok()?.into_iter().find(|c| c.id == id)
     }
 
+    fn resolve_workspace(&self, workspace: &mut Workspace) {
+        for tab in &mut workspace.tabs {
+            if let (Some(id), Some(database)) = (tab.console.connection_id, &mut tab.console.database) {
+                if let Some(instance) = self.instance(id) {
+                    *database = instance.canonical_database(database).to_owned();
+                }
+            }
+        }
+    }
+
     fn params(&self, config: &ConnectionConfig, database: &str) -> Result<ConnectParams, ConnectError> {
         let password = if config.has_password { self.saved_password(config.id)? } else { None };
         Ok(ConnectParams::for_database(config, database, password))
@@ -209,6 +219,7 @@ impl Shared {
     /// missing afterwards only when the instance closed or the database left `pg_database`.
     fn slot(self: &Arc<Self>, db: &DatabaseRef) -> Result<(Arc<Instance>, Arc<DbSlot>), CatalogError> {
         let instance = self.instance(db.connection_id).ok_or(CatalogError::NotConnected)?;
+        let db = DatabaseRef { connection_id: db.connection_id, database: instance.canonical_database(&db.database).to_owned() };
         if !instance.knows(&db.database) {
             return Err(CatalogError::UnknownDatabase { database: db.database.clone() });
         }
@@ -451,6 +462,16 @@ impl Shared {
             Ok((instance, home_pid, home_closed)) => {
                 let server = instance.server.clone();
                 self.set_connection(id, ConnSlot::Connected(instance.clone()));
+                for console in self.all_consoles() {
+                    let mut inner = console.inner.lock().await;
+                    if inner.config.connection_id == id {
+                        let database = instance.canonical_database(&inner.config.database);
+                        if database != inner.config.database {
+                            inner.config.database = database.to_owned();
+                            console.publish(&mut inner, self);
+                        }
+                    }
+                }
                 let home = DatabaseRef { connection_id: id, database: instance.home.clone() };
                 self.watch_slot_session(&instance, &home, home_pid, home_closed);
                 self.reconcile(id);
@@ -634,10 +655,11 @@ impl Engine {
             eprintln!("connections load failed: {e}");
             Vec::new()
         });
-        let workspace = s.store.kv_get(KV_WORKSPACE).unwrap_or_else(|e| {
+        let mut workspace = s.store.kv_get(KV_WORKSPACE).unwrap_or_else(|e| {
             eprintln!("workspace load failed: {e}");
             None
-        });
+        }).unwrap_or_default();
+        s.resolve_workspace(&mut workspace);
         let chats = s.store.chats(BOOT_CHATS).unwrap_or_else(|e| {
             eprintln!("chats load failed: {e}");
             Vec::new()
@@ -647,7 +669,7 @@ impl Engine {
             .into_iter()
             .map(|(id, r)| live_chats.remove(&id).unwrap_or_else(|| ChatState { id, rev: 0, title: r.title, updated_at_ms: r.updated_at_ms, options: r.options, status: ChatStatus::Idle, entry_count: r.entry_count }))
             .collect();
-        BootSnapshot { connections, live, consoles, workspace: workspace.unwrap_or_default(), settings: s.settings(), providers: s.provider_states(), chats }
+        BootSnapshot { connections, live, consoles, workspace, settings: s.settings(), providers: s.provider_states(), chats }
     }
 
     pub async fn save_connection(&self, d: ConnectionDraft) -> Result<ConnectionConfig, SaveError> {
@@ -936,7 +958,7 @@ impl Engine {
         };
         let mut meta = slot.meta.lock().await;
         let session = self.shared.session_in(&instance, &slot, &mut meta).await.map_err(|e| DetailError::Failed { message: connection::connect_error_text(&e) })?;
-        session.detail(db, oid, version)
+        session.detail(slot.db.clone(), oid, version)
             .await
             .map_err(|e| DetailError::Failed { message: e.message })?
             .ok_or(DetailError::Gone)
@@ -949,12 +971,15 @@ impl Engine {
         if s.config(c.connection_id).is_none() {
             return Err(ConfigureError::UnknownConnection);
         }
-        let view = ConsoleConfigView { connection_id: c.connection_id, database: c.database, schema: c.schema, mode: c.mode };
+        let mut view = ConsoleConfigView { connection_id: c.connection_id, database: c.database, schema: c.schema, mode: c.mode };
         let console = {
             let mut map = s.consoles.write().unwrap();
             map.entry(tab).or_insert_with(|| Arc::new(Console::new(tab, view.clone()))).clone()
         };
         let mut inner = console.inner.lock().await;
+        if let Some(instance) = s.instance(view.connection_id) {
+            view.database = instance.canonical_database(&view.database).to_owned();
+        }
         let previous = inner.config.connection_id;
         let target_changed = inner.config.connection_id != view.connection_id || inner.config.database != view.database;
         let mode_changed = inner.config.mode != view.mode;
@@ -983,7 +1008,7 @@ impl Engine {
     pub async fn console_run(&self, tab: TabId, r: RunRequest) -> Result<RunAccepted, RunError> {
         let s = &self.shared;
         let console = s.console(tab).ok_or(RunError::NotConfigured)?;
-        let (config, busy) = {
+        let (mut config, busy) = {
             let inner = console.inner.lock().await;
             (inner.config.clone(), matches!(inner.session, SessionSlot::Busy { .. }))
         };
@@ -991,6 +1016,11 @@ impl Engine {
             return Err(RunError::Busy);
         }
         s.connect(config.connection_id).await.map_err(|error| RunError::Connect { error })?;
+        let instance = s.instance(config.connection_id).ok_or(RunError::NotConfigured)?;
+        config.database = instance.canonical_database(&config.database).to_owned();
+        if instance.config.database_kind == DatabaseKind::SqlServer && !instance.knows(&config.database) {
+            return Err(RunError::NotConfigured);
+        }
         let connection = s.config(config.connection_id).ok_or(RunError::NotConfigured)?;
 
         let mut table_relation = None;
@@ -1036,6 +1066,9 @@ impl Engine {
 
         let run_id = s.next_run_id();
         let mut inner = console.inner.lock().await;
+        if inner.config.connection_id == instance.config.id {
+            inner.config.database = instance.canonical_database(&inner.config.database).to_owned();
+        }
         if let Some(session) = fresh {
             match inner.session {
                 SessionSlot::Empty | SessionSlot::Lost { .. } => inner.session = SessionSlot::Idle(session),
@@ -1253,7 +1286,8 @@ impl Engine {
         }
     }
 
-    pub fn save_workspace(&self, w: Workspace) {
+    pub fn save_workspace(&self, mut w: Workspace) {
+        self.shared.resolve_workspace(&mut w);
         if let Err(e) = self.shared.store.kv_set(KV_WORKSPACE, &w) {
             eprintln!("workspace save failed: {e}");
         }
