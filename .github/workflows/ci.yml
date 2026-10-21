@@ -162,3 +162,6 @@ jobs:
 
       - name: Mixed database bridge smoke
         run: python3 dev/mssql-smoke.py
+
+      - name: SQL Server certificate verification
+        run: python3 dev/mssql-tls-smoke.py
