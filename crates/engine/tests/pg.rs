@@ -500,6 +500,28 @@ async fn multi_statement_run_tags_notices_and_history() {
 }
 
 #[tokio::test]
+async fn notices_stream_before_a_waiting_command_finishes() {
+    let mut h = Harness::start().await;
+    let tab = h.sql_tab(TxnMode::AutoCommit).await;
+    let accepted = h.start_run(tab, "DO $$ BEGIN RAISE NOTICE 'before wait'; PERFORM pg_sleep(30); END $$").await;
+    let noticed = tokio::time::timeout(Duration::from_secs(3), async {
+        loop {
+            if let AppEvent::ConsoleOutput { tab_id, entries } = h.next_event().await
+                && tab_id == tab
+                && entries.iter().any(|e| matches!(&e.body, OutputBody::Notice { message, .. } if message == "before wait"))
+            {
+                break;
+            }
+        }
+    }).await;
+    h.engine.console_cancel(tab).await;
+    let state = h.wait_finished(tab, accepted.run_id).await;
+    assert!(noticed.is_ok(), "notice waited for command completion");
+    assert!(matches!(state.run, RunState::Finished { outcome: RunOutcome::Cancelled, .. }));
+    assert_eq!(h.scalar(tab, "SELECT 1").await, "1");
+}
+
+#[tokio::test]
 async fn error_position_maps_to_utf16_past_an_emoji() {
     let mut h = Harness::start().await;
     let tab = h.sql_tab(TxnMode::AutoCommit).await;

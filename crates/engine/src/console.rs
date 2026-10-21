@@ -322,7 +322,7 @@ pub async fn run_task(console: Arc<Console>, shared: Arc<Shared>, mut session: S
             Err(_) if cancelled => (StmtStatus::Cancelled, HistoryOutcome::Cancelled),
             Err(error) => (StmtStatus::Failed { error: error.clone() }, HistoryOutcome::Error { message: error.message.clone() }),
         };
-        let invalidates = if result.is_ok() { stmt.kind.invalidates() } else { Invalidates::Nothing };
+        let invalidates = if result.is_ok() || plan.connection.database_kind == DatabaseKind::SqlServer { stmt.kind.invalidates() } else { Invalidates::Nothing };
         let due = console.edit(&shared, run_id, |inner| {
             inner.txn = txn;
             inner.txn_depth = session.txn_depth();

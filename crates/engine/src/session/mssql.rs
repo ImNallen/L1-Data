@@ -112,7 +112,7 @@ impl MsSession {
     pub(super) async fn open(p: &ConnectParams) -> Result<Self, ConnectError> {
         let cfg = config(p)?;
         let connection = async {
-            let tcp = TcpStream::connect(cfg.get_addr()).await.map_err(|e| ConnectError::Network { message: e.to_string() })?;
+            let tcp = TcpStream::connect((p.host.as_str(), p.port)).await.map_err(|e| ConnectError::Network { message: e.to_string() })?;
             tcp.set_nodelay(true).map_err(|e| ConnectError::Network { message: e.to_string() })?;
             Client::connect(cfg, tcp.compat_write()).await.map_err(|e| match e {
                 tiberius::error::Error::Tls(message) => ConnectError::Tls { message },

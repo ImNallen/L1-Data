@@ -19,4 +19,3 @@ pub(crate) use keywords::{NEVER_A_FUNCTION, OTHER_KEYWORDS, RESERVED, TYPE_OR_FU
 pub(crate) use relations::{VETTED, VETTED_OPERATORS, VETTED_SIZES};
 
 pub(crate) mod order;
-pub(crate) mod tsql;

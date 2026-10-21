@@ -322,13 +322,24 @@ impl PgSession {
             if !columns.is_empty() { yield QueryEvent::Columns(columns); }
             let stream = self.client.simple_query_raw(sql).await.map_err(|e| query_failure(e, Some(sql)))?;
             let mut stream = std::pin::pin!(stream);
-            while let Some(message) = stream.next().await {
+            let mut notices_open = true;
+            loop {
+                let message = tokio::select! {
+                    biased;
+                    n = self.notices.recv(), if notices_open => {
+                        if let Some(n) = n { yield QueryEvent::Notice(notice(&n)); }
+                        else { notices_open = false; }
+                        continue;
+                    }
+                    message = stream.next() => message,
+                };
+                for n in self.drain_notices() { yield QueryEvent::Notice(notice(&n)); }
+                let Some(message) = message else { break; };
                 match message.map_err(|e| query_failure(e, Some(sql)))? {
                     SimpleQueryMessage::Row(row) => yield QueryEvent::Row((0..row.len()).map(|c| row.get(c).map(str::to_owned)).collect()),
                     SimpleQueryMessage::CommandComplete(n) => yield QueryEvent::Complete { affected_rows: Some(n) },
                     _ => {}
                 }
-                for n in self.drain_notices() { yield QueryEvent::Notice(notice(&n)); }
             }
         })
     }

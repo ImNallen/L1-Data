@@ -445,3 +445,25 @@ async fn system_schema_views_keep_lossless_opaque_ids_in_catalog_and_detail() {
         assert_eq!(detail.db, h.db());
     }
 }
+
+#[tokio::test]
+async fn ddl_committed_before_a_later_batch_error_refreshes_the_catalog() {
+    let mut h = Harness::open(TxnMode::AutoCommit).await;
+    h.engine.catalog(h.db()).await.unwrap();
+    let table = format!("l1_partial_{}", uuid::Uuid::new_v4().simple());
+    let state = h.run(&format!("CREATE TABLE dbo.[{table}] (id int); RAISERROR('after committed DDL',16,1)")).await;
+    assert!(matches!(state.run, RunState::Finished { outcome: RunOutcome::Failed, .. }));
+    assert_eq!(state.txn, TxnState::Idle);
+    let refreshed = tokio::time::timeout(Duration::from_secs(3), async {
+        loop {
+            let catalog = h.engine.catalog(h.db()).await.unwrap();
+            if catalog.schemas.iter().flat_map(|s| &s.relations).any(|r| r.name == table) {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await;
+    h.ok(&format!("DROP TABLE dbo.[{table}]")).await;
+    assert!(refreshed.is_ok(), "The catalog stayed stale after the batch committed DDL before its error");
+}
