@@ -173,6 +173,38 @@ async fn check(test: impl for<'a> FnOnce(&'a Harness) -> BoxFuture<'a, ()>) {
 }
 
 #[tokio::test]
+async fn select_into_refreshes_created_table_and_plain_select_does_not_refresh() {
+    check(|h| async move {
+        let before = h.engine.catalog(h.db()).await.unwrap().version;
+        h.ok(h.tab, &format!("SELECT CAST(41 AS int) AS id, N'readable' AS value INTO dbo.[{}]", h.table)).await;
+        let catalog = h.table_after(before, true).await;
+        assert_eq!(catalog.relation("dbo", &h.table).unwrap().columns.iter().map(|c| c.name.as_str()).collect::<Vec<_>>(), ["id", "value"]);
+        assert_eq!(h.rows(&h.page(&h.table).await), vec![vec![Some("41".into()), Some("readable".into())]]);
+        h.ok(h.tab, "SELECT 1 AS ordinary_read").await;
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert_eq!(h.engine.catalog(h.db()).await.unwrap().version, catalog.version);
+    }.boxed()).await;
+}
+
+#[tokio::test]
+async fn select_into_refreshes_after_native_commit_and_rollback() {
+    check(|h| async move {
+        for commit in [true, false] {
+            let before = h.engine.catalog(h.db()).await.unwrap().version;
+            let state = h.ok(h.tab, &format!("BEGIN TRANSACTION; IF 1=1 SELECT 42 AS id INTO dbo.[{}]", h.table)).await;
+            assert_eq!(state.txn, TxnState::Open);
+            if commit { h.engine.console_commit(h.tab).await.unwrap(); }
+            else { h.engine.console_rollback(h.tab).await.unwrap(); }
+            let catalog = h.table_after(before, commit).await;
+            if commit {
+                h.ok(h.tab, &format!("DROP TABLE dbo.[{}]", h.table)).await;
+                h.table_after(catalog.version, false).await;
+            }
+        }
+    }.boxed()).await;
+}
+
+#[tokio::test]
 async fn procedure_exec_and_execute_refresh_created_and_dropped_tables() {
     check(|h| async move {
         let before = h.table_procedure().await;

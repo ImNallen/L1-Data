@@ -367,6 +367,24 @@ fn opaque_execution(tokens: &[Token<'_>]) -> bool {
         })
 }
 
+fn selects_into(tokens: &[Token<'_>]) -> bool {
+    let mut selecting = vec![false];
+    for token in tokens {
+        match token.text {
+            "(" => selecting.push(false),
+            ")" if selecting.len() > 1 => { selecting.pop(); }
+            ";" => *selecting.last_mut().unwrap() = false,
+            _ if token.word("SELECT") => *selecting.last_mut().unwrap() = true,
+            _ if ["INSERT", "UPDATE", "DELETE", "MERGE"].iter().any(|word| token.word(word)) => {
+                *selecting.last_mut().unwrap() = false;
+            }
+            _ if token.word("INTO") && *selecting.last().unwrap() => return true,
+            _ => {}
+        }
+    }
+    false
+}
+
 pub(crate) fn invalidates(text: &str) -> Invalidates {
     let Ok(tokens) = significant(text) else {
         return Invalidates::Nothing;
@@ -374,7 +392,7 @@ pub(crate) fn invalidates(text: &str) -> Invalidates {
     if opaque_execution(&tokens) {
         return Invalidates::Both;
     }
-    let mut catalog = false;
+    let mut catalog = selects_into(&tokens);
     let mut databases = false;
     for kind in (0..tokens.len()).filter_map(|i| ddl_at(&tokens, i)) {
         match kind.invalidates() {
@@ -831,6 +849,32 @@ mod tests {
         ] {
             assert_eq!(invalidates(text), Invalidates::Nothing, "{text}");
             assert!(!is_write(text), "{text}");
+        }
+    }
+
+    #[test]
+    fn select_into_creates_catalog_objects_without_treating_insert_or_output_into_as_ddl() {
+        for text in [
+            "SELECT 7 AS id INTO dbo.t",
+            "IF 1=1 SELECT (SELECT 7) AS id INTO dbo.t",
+            "WITH c AS (SELECT 7 AS id) SELECT id INTO reporting.dbo.t FROM c",
+            "SELECT 1; SELECT N'value' AS v INTO #local",
+            "BEGIN TRANSACTION; SELECT 7 AS id INTO dbo.t; COMMIT",
+        ] {
+            assert_eq!(invalidates(text), Invalidates::Catalog, "{text}");
+            assert!(is_write(text), "{text}");
+        }
+        for text in [
+            "SELECT 7 AS id",
+            "SELECT N'INTO', [INTO], @INTO /* INTO dbo.t */",
+            "SELECT 1; INSERT INTO dbo.t VALUES (1)",
+            "SELECT 1 UPDATE t SET n=(SELECT 7) OUTPUT inserted.n INTO audit",
+            "SELECT 1 DELETE FROM t OUTPUT deleted.n INTO audit",
+            "INSERT INTO dbo.t SELECT 7",
+            "UPDATE t SET n=(SELECT 7) OUTPUT inserted.n INTO audit",
+            "MERGE INTO t USING (SELECT 7 AS n) s ON t.n=s.n WHEN MATCHED THEN UPDATE SET n=s.n OUTPUT inserted.n INTO audit;",
+        ] {
+            assert_eq!(invalidates(text), Invalidates::Nothing, "{text}");
         }
     }
 
