@@ -6,13 +6,17 @@ pub(crate) enum Input<'a> {
     Literal(&'a str),
 }
 
+fn base_type(column: &ColumnInfo) -> &str {
+    column.type_display.split('(').next().unwrap_or(&column.type_display)
+}
+
 pub(crate) fn input_sql(column: &ColumnInfo, input: Input<'_>) -> Result<String, String> {
     let (expression, value) = match input {
         Input::Parameter { index, value } => (format!("@P{index}"), value),
         Input::Literal(value) => (quote_literal(value), Some(value)),
     };
     let native = column.type_display.as_str();
-    let base = native.split('(').next().unwrap_or(native);
+    let base = base_type(column);
     let bound = native.strip_suffix(')').and_then(|s| s.split_once('(')).and_then(|(_, n)| n.parse::<usize>().ok());
     match base {
         "char" | "varchar" | "nchar" | "nvarchar" | "text" | "ntext" => {
@@ -43,6 +47,38 @@ pub(crate) fn input_sql(column: &ColumnInfo, input: Input<'_>) -> Result<String,
     }
 }
 
+pub(crate) fn comparison_sql(column: &ColumnInfo, expression: &str, value: &str) -> Result<(String, String), String> {
+    match base_type(column) {
+        "text" | "ntext" | "xml" => Ok((format!("CONVERT(nvarchar(max), {expression})"), quote_literal(value))),
+        "image" => Ok((format!("CONVERT(varbinary(max), {expression})"), input_sql(column, Input::Literal(value))?)),
+        _ => Ok((expression.into(), input_sql(column, Input::Literal(value))?)),
+    }
+}
+
+pub(crate) fn display_sql(column: &ColumnInfo, expression: &str) -> Result<String, String> {
+    let display = match base_type(column) {
+        "binary" | "varbinary" | "image" | "timestamp" | "rowversion" => {
+            format!("CONVERT(varchar(max), CONVERT(varbinary(max), {expression}), 1)")
+        }
+        "date" => format!("CONVERT(nvarchar(max), {expression}, 23)"),
+        "smalldatetime" => format!("CONVERT(nvarchar(max), {expression}, 120)"),
+        "datetime" => format!("CONVERT(nvarchar(max), {expression}, 121)"),
+        "time" => format!("CONVERT(nvarchar(max), CONVERT(time(7), {expression}), 121)"),
+        "datetime2" => format!("CONVERT(nvarchar(max), CONVERT(datetime2(7), {expression}), 121)"),
+        "datetimeoffset" => format!("CONVERT(nvarchar(max), CONVERT(datetime2(7), {expression}), 121) + DATENAME(TZOFFSET, {expression})"),
+        "money" | "smallmoney" => format!("CONVERT(nvarchar(max), CONVERT(decimal(19,4), {expression}))"),
+        "uniqueidentifier" => format!("LOWER(CONVERT(nvarchar(max), {expression}))"),
+        "float" | "real" => return Err(format!(
+            "Text search cannot reproduce the canonical display of SQL Server {}. Use a typed comparison or an explicit SQL conversion.", column.type_display
+        )),
+        "char" | "varchar" | "nchar" | "nvarchar" | "text" | "ntext" | "xml" | "tinyint" | "smallint" | "int" | "bigint" | "decimal" | "numeric" | "bit" => {
+            format!("CONVERT(nvarchar(max), {expression})")
+        }
+        native => return Err(format!("Text search for SQL Server type {native} is unsupported")),
+    };
+    Ok(display)
+}
+
 #[cfg(all(test, feature = "mssql-tests"))]
 mod tests {
     use crate::connection::ConnectParams;
@@ -66,8 +102,8 @@ mod tests {
         };
         let mut session = Session::open(&params, None, "UTC").await.unwrap();
         let table = format!("l1_typed_count_{}", uuid::Uuid::new_v4().simple());
-        session.batch(&format!("CREATE TABLE dbo.[{table}] (old datetime, small smalldatetime, day date, modern datetime2(7), moment datetimeoffset(7), tick time(7), bytes varbinary(4)); INSERT INTO dbo.[{table}] VALUES (N'2024-01-02T03:04:05.123',N'2024-01-02T03:04:00',N'20240102',N'2024-01-02T03:04:05.1234567',N'2024-01-02T03:04:05.1234567+02:00',N'03:04:05.1234567',0xDEADBEEF)")).await.unwrap();
         let outcome = AssertUnwindSafe(async {
+            session.batch(&format!("CREATE TABLE dbo.[{table}] (old datetime, small smalldatetime, day date, modern datetime2(7), moment datetimeoffset(7), tick time(7), bytes varbinary(4), uid uniqueidentifier); INSERT INTO dbo.[{table}] VALUES (N'2024-01-02T03:04:05.123',N'2024-01-02T03:04:00',N'20240102',N'2024-01-02T03:04:05.1234567',N'2024-01-02T03:04:05.1234567+02:00',N'03:04:05.1234567',0xDEADBEEF,N'abcd1234-5678-90ab-cdef-1234567890ab')")).await.unwrap();
             let db = DatabaseRef { connection_id: ConnectionId(uuid::Uuid::new_v4()), database: "shop".into() };
             let catalog = session.catalog(db, 1, &[]).await.unwrap();
             let relation = catalog.relation("dbo", &table).unwrap();
@@ -81,18 +117,25 @@ mod tests {
                     ("moment", "2024-01-02 03:04:05.1234567+02:00"),
                     ("tick", "03:04:05.1234567"),
                     ("bytes", "0xDEADBEEF"),
+                    ("uid", "abcd1234-5678-90ab-cdef-1234567890ab"),
                 ] {
-                    for (op, expected) in [(FilterOp::Eq, 1), (FilterOp::Ne, 0)] {
+                    for (op, expected) in [(FilterOp::Eq, 1), (FilterOp::Ne, 0), (FilterOp::Contains, 1), (FilterOp::StartsWith, 1)] {
                         let query = TableQuery { filters: vec![ColumnFilter { column: column.into(), op, value: value.into() }], ..Default::default() };
                         let sql = text::table_count(DatabaseKind::SqlServer, "dbo", &table, Some(relation), &query).unwrap();
                         assert_eq!(session.count(&sql).await.unwrap(), expected, "{column} {op:?} under {dateformat}");
                     }
                 }
             }
+            let uid = relation.columns.iter().find(|column| column.name == "uid").unwrap();
+            let display = super::display_sql(uid, "[uid]").unwrap();
+            for collation in ["Latin1_General_100_CS_AS", "Latin1_General_100_BIN2"] {
+                let sql = format!("SELECT COUNT_BIG(*) FROM dbo.[{table}] WHERE {display} COLLATE {collation} LIKE N'abcd1234-5678-90ab-cdef-1234567890ab'");
+                assert_eq!(session.count(&sql).await.unwrap(), 1, "UUID display under {collation}");
+            }
         })
         .catch_unwind()
         .await;
-        session.batch(&format!("DROP TABLE dbo.[{table}]")).await.unwrap();
+        session.batch(&format!("DROP TABLE IF EXISTS dbo.[{table}]")).await.unwrap();
         assert_eq!(session.count(&format!("SELECT COUNT_BIG(*) FROM sys.tables WHERE name=N'{table}'")).await.unwrap(), 0);
         if let Err(panic) = outcome {
             std::panic::resume_unwind(panic);

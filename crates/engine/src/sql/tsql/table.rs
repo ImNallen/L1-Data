@@ -1,6 +1,6 @@
 use super::{expression::expression_name, lex, quote_ident, quote_literal, word_at};
-use crate::model::{ColumnFilter, ColumnInfo, FilterOp, TableQuery, TypeCategory};
-use crate::sql::mssql_value::{Input, input_sql};
+use crate::model::{ColumnFilter, ColumnInfo, FilterOp, TableQuery};
+use crate::sql::mssql_value::{comparison_sql, display_sql};
 
 pub(crate) fn parse_order_by(text: &str) -> Option<Vec<(String, bool)>> {
     let tokens = lex(text).ok()?;
@@ -32,7 +32,7 @@ pub(crate) fn format_order_by(keys: &[(String, bool)]) -> String {
     keys.iter().map(|(name, desc)| format!("{} {}", quote_ident(name), if *desc { "DESC" } else { "ASC" })).collect::<Vec<_>>().join(", ")
 }
 
-fn like_pattern(value: &str, prefix_only: bool) -> String {
+fn like_pattern(value: &str, prefix_only: bool) -> Result<String, String> {
     let mut pattern = String::new();
     if !prefix_only {
         pattern.push('%');
@@ -44,21 +44,23 @@ fn like_pattern(value: &str, prefix_only: bool) -> String {
         pattern.push(ch);
     }
     pattern.push('%');
-    quote_literal(&pattern)
+    if pattern.encode_utf16().count() > 4000 {
+        return Err("SQL Server text-search patterns cannot exceed 4000 UTF-16 code units after escaping. Use a shorter search.".into());
+    }
+    Ok(quote_literal(&pattern))
 }
 
 fn filter_sql(filter: &ColumnFilter, columns: &[ColumnInfo]) -> Result<String, String> {
     let info = columns.iter().find(|c| c.name == filter.column).ok_or_else(|| format!("Unknown filter column {}", filter.column))?;
     let column = quote_ident(&filter.column);
-    let comparable = if info.type_display == "image" { format!("CONVERT(varbinary(max), {column})") } else { column.clone() };
     let op = match filter.op {
         FilterOp::IsNull => return Ok(format!("{column} IS NULL")),
         FilterOp::NotNull => return Ok(format!("{column} IS NOT NULL")),
         FilterOp::Contains | FilterOp::StartsWith => {
-            let display = if info.category == TypeCategory::Binary { format!("CONVERT(varchar(max), {comparable}, 1)") } else { format!("CONVERT(nvarchar(max), {column})") };
+            let display = display_sql(info, &column)?;
             return Ok(format!(
                 "{display} LIKE {} ESCAPE N'~'",
-                like_pattern(&filter.value, filter.op == FilterOp::StartsWith)
+                like_pattern(&filter.value, filter.op == FilterOp::StartsWith)?
             ));
         }
         FilterOp::Eq => "=",
@@ -68,7 +70,8 @@ fn filter_sql(filter: &ColumnFilter, columns: &[ColumnInfo]) -> Result<String, S
         FilterOp::Gt => ">",
         FilterOp::Ge => ">=",
     };
-    Ok(format!("{comparable} {op} {}", input_sql(info, Input::Literal(&filter.value))?))
+    let (comparable, value) = comparison_sql(info, &column, &filter.value)?;
+    Ok(format!("{comparable} {op} {value}"))
 }
 
 fn from_sql(schema: &str, table: &str, columns: &[ColumnInfo], query: &TableQuery) -> Result<String, String> {
@@ -119,6 +122,7 @@ pub(crate) fn count_sql(schema: &str, table: &str, columns: &[ColumnInfo], query
 mod tests {
     use super::*;
     use super::super::validate_expression;
+    use crate::model::TypeCategory;
 
     #[test]
     fn simple_order_inspection_and_generation_preserve_identifier_spelling() {
