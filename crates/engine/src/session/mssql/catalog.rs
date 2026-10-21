@@ -19,7 +19,7 @@ pub(super) fn category(name: &str) -> TypeCategory {
     }
 }
 
-fn display(name: &str, length: i32, precision: u8, scale: u8) -> String {
+pub(super) fn display(name: &str, length: i32, precision: u8, scale: u8) -> String {
     match name {
         "nvarchar" | "nchar" | "varchar" | "char" | "varbinary" | "binary" => {
             let size = if length == -1 { "max".into() } else { (if name.starts_with('n') { length / 2 } else { length }).to_string() };

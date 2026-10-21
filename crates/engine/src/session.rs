@@ -144,6 +144,12 @@ impl Session {
             Driver::SqlServer(s) => s.execute_edit(edit).await,
         }
     }
+    pub async fn prepare_edits(&mut self, changes: &TableChanges, relation: &Relation, plan: Vec<Edit>) -> Result<Vec<Edit>, ApplyError> {
+        match &mut self.driver {
+            Driver::Postgres(_) => Ok(plan),
+            Driver::SqlServer(s) => s.prepare_edits(changes, relation).await,
+        }
+    }
     pub fn query<'a>(&'a mut self, sql: &'a str) -> QueryStream<'a> {
         match &mut self.driver {
             Driver::Postgres(p) => p.query(sql),

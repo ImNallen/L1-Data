@@ -1180,6 +1180,7 @@ impl Engine {
         let mut lines = Vec::new();
         let mut outcome: Result<(), ApplyError> = async {
             session.batch(open).await.map_err(|e| ApplyError::Transaction { error: e })?;
+            let plan = session.prepare_edits(&changes, relation, plan).await?;
             for (i, edit) in plan.iter().enumerate() {
                 let change = &edit.change;
                 let sql = &edit.sql;

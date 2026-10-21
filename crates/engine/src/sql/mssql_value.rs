@@ -6,11 +6,15 @@ pub(crate) enum Input<'a> {
     Literal(&'a str),
 }
 
-fn base_type(column: &ColumnInfo) -> &str {
+pub(crate) fn base_type(column: &ColumnInfo) -> &str {
     column.type_display.split('(').next().unwrap_or(&column.type_display)
 }
 
 pub(crate) fn input_sql(column: &ColumnInfo, input: Input<'_>) -> Result<String, String> {
+    converted_input(column, input, "CONVERT")
+}
+
+fn converted_input(column: &ColumnInfo, input: Input<'_>, convert: &str) -> Result<String, String> {
     let (expression, value) = match input {
         Input::Parameter { index, value } => (format!("@P{index}"), value),
         Input::Literal(value) => (quote_literal(value), Some(value)),
@@ -36,14 +40,42 @@ pub(crate) fn input_sql(column: &ColumnInfo, input: Input<'_>) -> Result<String,
                     return Err(format!("Binary value exceeds the capacity of {} ({native})", column.name));
                 }
             }
-            Ok(format!("CONVERT(varbinary(max), {expression}, 1)"))
+            Ok(format!("{convert}(varbinary(max), {expression}, 1)"))
         }
-        "date" => Ok(format!("CONVERT({native}, {expression}, 23)")),
-        "time" | "datetime" | "smalldatetime" | "datetime2" | "datetimeoffset" => Ok(format!("CONVERT({native}, {expression}, 121)")),
+        "date" => Ok(format!("{convert}({native}, {expression}, 23)")),
+        "time" | "datetime" | "smalldatetime" | "datetime2" | "datetimeoffset" => Ok(format!("{convert}({native}, {expression}, 121)")),
         "tinyint" | "smallint" | "int" | "bigint" | "decimal" | "numeric" | "money" | "smallmoney" | "float" | "real" | "bit" | "uniqueidentifier" | "xml" => {
-            Ok(format!("CONVERT({native}, {expression})"))
+            Ok(format!("{convert}({native}, {expression})"))
         }
         _ => Err(format!("Canonical input for SQL Server type {native} is unsupported")),
+    }
+}
+
+pub(crate) fn edit_input_sql(column: &ColumnInfo, index: usize, value: Option<&str>, collation: Option<&str>, probe: bool) -> Result<String, String> {
+    let convert = if probe { "TRY_CONVERT" } else { "CONVERT" };
+    let expression = converted_input(column, Input::Parameter { index, value }, convert)?;
+    match base_type(column) {
+        "char" | "varchar" | "nchar" | "nvarchar" | "text" | "ntext" => {
+            let collation = collation.ok_or_else(|| format!("Missing live collation for {}", column.name))?;
+            if collation.is_empty() || !collation.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_') {
+                return Err("Unsupported SQL Server collation name".into());
+            }
+            let native = match base_type(column) {
+                "text" => "varchar(max)",
+                "ntext" => "nvarchar(max)",
+                _ => &column.type_display,
+            };
+            Ok(format!("{convert}({native}, {expression} COLLATE {collation})"))
+        }
+        "binary" | "varbinary" | "image" | "timestamp" | "rowversion" => {
+            let native = match base_type(column) {
+                "image" => "varbinary(max)",
+                "timestamp" | "rowversion" => "binary(8)",
+                _ => &column.type_display,
+            };
+            Ok(format!("{convert}({native}, {expression})"))
+        }
+        _ => Ok(expression),
     }
 }
 
