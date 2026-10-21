@@ -84,7 +84,7 @@ jobs:
         run: cargo test --workspace
 
   database:
-    name: database integrations and bridge smokes
+    name: pg-tests and bridge-smoke
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     services:
