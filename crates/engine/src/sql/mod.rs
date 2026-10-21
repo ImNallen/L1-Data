@@ -17,3 +17,6 @@ pub(crate) use history::{history_is_write, history_text};
 pub(crate) use keywords::{NEVER_A_FUNCTION, OTHER_KEYWORDS, RESERVED, TYPE_OR_FUNCTION_NAME};
 #[cfg(all(test, feature = "pg-tests"))]
 pub(crate) use relations::{VETTED, VETTED_OPERATORS, VETTED_SIZES};
+
+pub(crate) mod order;
+pub(crate) mod tsql;

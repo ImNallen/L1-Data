@@ -234,6 +234,8 @@ impl Turn {
         self.chat.store_record(&self.shared);
     }
 
+    fn database_kind(&self) -> Option<DatabaseKind> { self.db.as_ref().and_then(|db| self.shared.config(db.connection_id)).map(|c| c.database_kind) }
+
     fn provider_config(&self) -> ProviderConfig {
         self.shared.settings().providers.into_iter().find(|c| c.provider == self.options.provider).unwrap_or_else(|| default_config(self.options.provider))
     }
@@ -246,7 +248,8 @@ impl Turn {
             AgentError::NotFound { binary } => StartError::NotFound { binary },
             other => StartError::Reported(other),
         })?;
-        let codec = p.codec(cfg, Open { system_prompt: SYSTEM_PROMPT, tools: &tools::TOOLS });
+        let prompt = system_prompt(self.database_kind().unwrap_or(DatabaseKind::Postgres));
+        let codec = p.codec(cfg, Open { system_prompt: prompt, tools: &tools::TOOLS });
         let shared = self.shared.clone();
         tokio::select! {
             started = Agent::start(&shared, spec, codec) => started.map(|(agent, _)| Started::Agent(agent)),
@@ -258,7 +261,7 @@ impl Turn {
         let instance = self.db.as_ref().and_then(|db| self.shared.instance(db.connection_id));
         let config = self.db.as_ref().and_then(|db| self.shared.config(db.connection_id));
         let server_version = instance.as_ref().map(|i| i.server.version.clone());
-        let connection = config.as_ref().map(|c| context::ConnectionFacts { name: &c.name, server_version: server_version.as_deref(), connected: self.connected.as_ref().map(|_| ()).map_err(String::as_str) });
+        let connection = config.as_ref().map(|c| context::ConnectionFacts { database_kind: c.database_kind, name: &c.name, server_version: server_version.as_deref(), connected: self.connected.as_ref().map(|_| ()).map_err(String::as_str) });
         let shown: Vec<String> = match (&instance, &self.catalog, &self.db) {
             (Some(instance), Some(catalog), Some(db)) => crate::view::resolve_schemas(&instance.view().database(&db.database, &instance.home), catalog),
             _ => Vec::new(),
@@ -266,7 +269,7 @@ impl Turn {
         let tab_text = self.tab.as_ref().map_or("", |t| t.text.as_str());
         let picked = self.tab.as_ref().and_then(|t| {
             let target = OffsetMap::new(&t.text).target(t.target);
-            let spans = sql::pick(&sql::split_statements(&t.text), &t.text, target);
+            let spans = crate::text::pick(&t.text, target, self.database_kind().unwrap_or(DatabaseKind::Postgres)).ok()?;
             Some(sql::StmtSpan { start: spans.first()?.start, end: spans.last()?.end })
         });
         let selected = matches!(self.tab.as_ref().map(|t| t.target), Some(RunTarget::Selection { from, to }) if from.0 < to.0);
@@ -403,6 +406,7 @@ impl Turn {
     }
 
     fn publish_texts(&mut self, close: bool) {
+        let kind = self.database_kind().unwrap_or(DatabaseKind::Postgres);
         for state in &mut self.texts {
             if close && !state.done {
                 state.done = true;
@@ -412,7 +416,7 @@ impl Turn {
                 continue;
             }
             state.dirty = false;
-            let entry = Entry::Text { blocks: resolve_blocks(reply::parse_text(&state.text, state.done).blocks, self.catalog.as_deref()), done: state.done };
+            let entry = Entry::Text { blocks: resolve_blocks(reply::parse_text(&state.text, state.done).blocks, self.catalog.as_deref(), kind), done: state.done };
             if state.done {
                 self.chat.store_entry(&self.shared, state.seq, self.turn, &entry);
             }
@@ -421,17 +425,18 @@ impl Turn {
     }
 
     fn ensure_tool(&mut self, call: &ToolCallId, name: &str, input: &Value) {
+        let kind = self.database_kind().unwrap_or(DatabaseKind::Postgres);
         if let Some(state) = self.tools.iter_mut().find(|t| t.call == *call) {
             if state.input == *input {
                 return;
             }
             state.input = input.clone();
-            state.tool = tools::describe(name, input, self.catalog.as_deref());
+            state.tool = tools::describe(name, input, self.catalog.as_deref(), kind);
             let status = state.status.clone();
             return self.set_tool_status(call, status);
         }
         let seq = self.next_seq();
-        let tool = tools::describe(name, input, self.catalog.as_deref());
+        let tool = tools::describe(name, input, self.catalog.as_deref(), kind);
         self.tools.push(ToolState { call: call.clone(), seq, input: input.clone(), tool: tool.clone(), status: ToolStatus::Running, running: None });
         let entry = Entry::Tool { call: call.clone(), tool, status: ToolStatus::Running };
         self.chat.store_entry(&self.shared, seq, self.turn, &entry);
@@ -467,7 +472,7 @@ impl Turn {
 
     async fn on_gate(&mut self, agent: &mut Agent, site: Site, call: ToolCallId, name: &str, input: Value, waits: &mut Waits, execs: &mut Execs) {
         let parsed = tools::parse_call(name, &input);
-        let ask = tools::policy(&parsed, self.chat.permission());
+        let ask = tools::policy(&parsed, self.chat.permission(), self.database_kind());
         let gated = if self.stop_deadline.is_some() { Gated::Deny(Refusal::Stopped) } else { self.chat.gate(&self.shared.assistant, &call, &input, &ask) };
         // The card and the allow reply hold the input the ledger holds, never one it refused.
         if !matches!(gated, Gated::Deny(Refusal::Mismatch)) {
@@ -654,15 +659,27 @@ fn start_failure(e: StartError) -> AgentError {
     }
 }
 
-fn resolve_blocks(blocks: Vec<ReplyBlock>, catalog: Option<&Catalog>) -> Vec<ReplyBlock> {
+fn resolve_blocks(blocks: Vec<ReplyBlock>, catalog: Option<&Catalog>, kind: DatabaseKind) -> Vec<ReplyBlock> {
     blocks
         .into_iter()
         .map(|block| match block {
             ReplyBlock::Sql { sql, complete: true, .. } => {
-                let (relations, vetted) = (reply::uses(&sql, catalog), reply::vetted(&sql));
+                let (relations, vetted) = (reply::uses(&sql, catalog, kind), kind == DatabaseKind::Postgres && reply::vetted(&sql));
                 ReplyBlock::Sql { sql, relations, vetted, complete: true }
             }
             other => other,
         })
         .collect()
+}
+
+fn system_prompt(kind: DatabaseKind) -> &'static str {
+    match kind {
+        DatabaseKind::Postgres => SYSTEM_PROMPT,
+        DatabaseKind::SqlServer => {
+            static PROMPT: std::sync::LazyLock<String> = std::sync::LazyLock::new(|| SYSTEM_PROMPT.replace("for PostgreSQL", "for Microsoft SQL Server")
+            .replace("run_query runs one statement in a READ ONLY transaction with a 30 s timeout, and the user may have to approve it. Results come back cut to 50 rows. Prefer aggregates and LIMIT.", "run_query is disabled on SQL Server because server-enforced read-only transactions are unavailable. Use describe_tables and search_catalog. Suggest T-SQL with bracket-quoted identifiers, TOP or OFFSET/FETCH, and Unicode N literals for the user to run. Keep batch-scoped variables together and use GO only between batches.")
+            .replace("Put each statement you hand the user in its own", "Put each executable batch you hand the user in its own"));
+            PROMPT.as_str()
+        },
+    }
 }

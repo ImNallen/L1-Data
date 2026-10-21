@@ -263,7 +263,7 @@ impl Shared {
             }
         };
         let version = self.next_catalog_version();
-        let extra = view::system_schemas_to_load(&instance.view.read().unwrap().database(&slot.db.database, &instance.home));
+        let extra = view::system_schemas_to_load(&instance.view.read().unwrap().database(&slot.db.database, &instance.home),instance.config.database_kind);
         match session.catalog(slot.db.clone(), version, &extra).await {
             Ok(catalog) => {
                 let catalog = Arc::new(catalog);
@@ -539,10 +539,13 @@ impl Shared {
         };
         let (kind, sql) = if commit && !aborted { (sql::StmtKind::Commit, "COMMIT") } else { (sql::StmtKind::Rollback, "ROLLBACK") };
         let started = std::time::Instant::now();
-        let result = session.finish_transaction(commit && !aborted).await;
+        let mut result = session.finish_transaction(commit && !aborted).await;
         let elapsed_ms = started.elapsed().as_millis().min(u32::MAX as u128) as u32;
         let fatal = result.as_ref().err().filter(|e| e.severity == "FATAL").map(|e| e.message.clone());
         let lost = session.closed_reason_settled(fatal).await;
+        if commit && !aborted && lost.is_some() {
+            if let Err(error) = &mut result { error.message = format!("Commit outcome is unknown because the session was lost: {}", error.message); }
+        }
         let mut lines = vec![console::statement_line(0, sql)];
         lines.extend(console::notice_lines(&mut session));
         lines.push(match &result {
@@ -714,13 +717,22 @@ impl Engine {
     }
 
     /// The statement chooser and the editor's run mark. Pure, so the sync command never needs the runtime.
-    pub fn script_outline(&self, text: &str, cursor: DocOffset) -> ScriptOutline {
-        text::script_outline(text, cursor)
+    pub fn script_outline(&self, text: &str, cursor: DocOffset, database_kind: DatabaseKind) -> ScriptOutline {
+        text::script_outline(text, cursor, database_kind)
     }
 
     /// The editor's format action. Pure, so the sync command never needs the runtime.
-    pub fn editor_format(&self, text: &str, target: RunTarget) -> Result<FormatEdit, FormatError> {
-        text::format_edit(text, target)
+    pub fn editor_format(&self, text: &str, target: RunTarget, database_kind: DatabaseKind) -> Result<FormatEdit, FormatError> {
+        text::format_edit(text, target, database_kind)
+    }
+
+    pub fn table_script(&self, db: DatabaseRef, schema: &str, table: &str) -> Result<String,String> {
+        let kind = self.shared.config(db.connection_id).ok_or("Unknown connection")?.database_kind;
+        Ok(text::table_script(kind,schema,table))
+    }
+    pub fn table_order(&self, db: DatabaseRef, order_by: &str, edit: TableOrderEdit) -> Result<TableOrderView,String> {
+        let kind = self.shared.config(db.connection_id).ok_or("Unknown connection")?.database_kind;
+        Ok(text::table_order(kind,order_by,edit))
     }
 
     pub async fn test_connection(&self, d: ConnectionDraft) -> Result<ServerInfo, ConnectError> {
@@ -832,7 +844,7 @@ impl Engine {
         let reload: Vec<String> = instance
             .slot_names()
             .into_iter()
-            .filter(|db| view::system_schemas_to_load(&view.database(db, &instance.home)) != view::system_schemas_to_load(&next.database(db, &instance.home)))
+            .filter(|db| view::system_schemas_to_load(&view.database(db, &instance.home),instance.config.database_kind) != view::system_schemas_to_load(&next.database(db, &instance.home),instance.config.database_kind))
             .collect();
         *instance.view.write().unwrap() = next;
         s.reconcile_instance(&instance);
@@ -898,10 +910,7 @@ impl Engine {
     /// `count(*)` with the query's filters, on the database's metadata session.
     pub async fn exact_row_count(&self, db: DatabaseRef, schema: String, table: String, query: TableQuery) -> Result<u64, CountError> {
         let (instance, slot) = self.shared.slot(&db).map_err(|_| CountError::NotConnected)?;
-        let sql = text::count_sql(&schema, &table, &query);
-        if sql::split_statements(&sql).len() != 1 {
-            return Err(CountError::Failed { message: "The filter must be a single expression.".into() });
-        }
+        let sql = text::table_count(instance.config.database_kind, &schema, &table, &query).map_err(|message| CountError::Failed { message })?;
         let mut meta = slot.meta.lock().await;
         let session = self.shared.session_in(&instance, &slot, &mut meta).await.map_err(|e| CountError::Failed { message: connection::connect_error_text(&e) })?;
         session.count(&sql).await.map_err(|e| CountError::Failed { message: e.message })
@@ -950,6 +959,7 @@ impl Engine {
         }
         if target_changed {
             inner.session = SessionSlot::Empty;
+            inner.txn_depth = None;
         }
         inner.config = view.clone();
         let state = console.publish(&mut inner, s);
@@ -974,28 +984,33 @@ impl Engine {
         s.connect(config.connection_id).await.map_err(|error| RunError::Connect { error })?;
         let connection = s.config(config.connection_id).ok_or(RunError::NotConfigured)?;
 
+        let mut table_relation = None;
         let (text, spans) = match r {
             RunRequest::Script { text, target } => {
                 let target = text::OffsetMap::new(&text).target(target);
-                let spans = sql::pick(&sql::split_statements(&text), &text, target);
+                let spans = text::pick(&text, target, connection.database_kind).map_err(|what| RunError::Unsupported { what })?;
                 (text, spans)
             }
             RunRequest::TablePage { schema, table, page, query } => {
                 let catalog = self.catalog(config.db()).await.map_err(|_| RunError::NotConfigured)?;
-                let pk = catalog.relation(&schema, &table).map(|r| r.pk_columns()).unwrap_or_default();
+                table_relation = catalog.relation(&schema, &table).cloned();
                 let size = s.settings().table_page_size.max(1);
-                let text = text::browse_sql(&schema, &table, &pk, &query, size, u64::from(page) * u64::from(size));
-                let spans = sql::split_statements(&text);
+                let text = text::table_browse(connection.database_kind, &schema, &table, table_relation.as_ref(), &query, size, u64::from(page) * u64::from(size)).map_err(|_| RunError::BadFilter)?;
+                let spans = text::pick(&text, sql::ByteTarget::All, connection.database_kind).map_err(|_| RunError::BadFilter)?;
                 if spans.len() != 1 {
                     return Err(RunError::BadFilter);
                 }
                 (text, spans)
             }
         };
+        if spans.len() > usize::from(u16::MAX) { return Err(RunError::Unsupported { what: "Too many execution units".into() }); }
         if spans.is_empty() {
             return Err(RunError::NoStatement);
         }
-        let statements: Vec<PlannedStmt> = spans.iter().map(|span| PlannedStmt { span: *span, kind: sql::classify(span.text(&text)) }).collect();
+        if connection.database_kind == DatabaseKind::SqlServer {
+            for span in &spans { sql::tsql::validate_batch(span.text(&text)).map_err(|what| RunError::Unsupported { what })?; }
+        }
+        let statements: Vec<PlannedStmt> = spans.iter().map(|span| PlannedStmt { span: *span, kind: text::classify(span.text(&text), connection.database_kind) }).collect();
         if statements.iter().any(|p| p.kind == sql::StmtKind::CopyStdio) {
             return Err(RunError::Unsupported { what: "COPY FROM STDIN / TO STDOUT".into() });
         }
@@ -1034,7 +1049,7 @@ impl Engine {
         console.publish(&mut inner, s);
         drop(inner);
 
-        let plan = RunPlan { run_id, text, statements, mode: config.mode, txn, schema: config.schema.clone(), database: config.database.clone(), connection, table: None };
+        let plan = RunPlan { run_id, text, statements, mode: config.mode, txn, schema: config.schema.clone(), database: config.database.clone(), connection, table: table_relation };
         s.spawn(console::run_task(console.clone(), s.clone(), session, plan, stop));
         Ok(RunAccepted { run_id, statements: ranges })
     }
@@ -1073,20 +1088,14 @@ impl Engine {
         let config = console.inner.lock().await.config.clone();
         s.connect(config.connection_id).await.map_err(|error| ApplyError::Connect { error })?;
         let catalog = self.catalog(config.db()).await.map_err(|_| ApplyError::NotConfigured)?;
-        let pk = catalog.relation(&changes.schema, &changes.table).map(|r| r.pk_columns()).unwrap_or_default();
+        let relation = catalog.relation(&changes.schema, &changes.table).ok_or(ApplyError::NotConfigured)?;
+        let pk = relation.pk_columns();
         let full_key = |key: &[CellWrite]| !pk.is_empty() && key.len() == pk.len() && pk.iter().all(|p| key.iter().any(|k| &k.column == p));
         if !changes.deletes.iter().all(|k| full_key(k)) || !changes.updates.iter().all(|u| full_key(&u.key)) {
             return Err(ApplyError::NoPrimaryKey);
         }
 
-        let (schema, table) = (&changes.schema, &changes.table);
-        let at = |kind, index: usize| ChangeRef { kind, index: index as u32 };
-        let mut plan: Vec<(ChangeRef, String)> = Vec::new();
-        plan.extend(changes.deletes.iter().enumerate().map(|(i, key)| (at(ChangeKind::Delete, i), text::delete_sql(schema, table, key))));
-        plan.extend(
-            changes.updates.iter().enumerate().filter(|(_, u)| !u.set.is_empty()).map(|(i, u)| (at(ChangeKind::Update, i), text::update_sql(schema, table, &u.key, &u.set))),
-        );
-        plan.extend(changes.inserts.iter().enumerate().map(|(i, cells)| (at(ChangeKind::Insert, i), text::insert_sql(schema, table, cells))));
+        let plan = session::plan_edits(catalog.database_kind, &changes, relation)?;
 
         let needs_session = matches!(console.inner.lock().await.session, SessionSlot::Empty | SessionSlot::Lost { .. });
         let mut fresh = None;
@@ -1096,7 +1105,7 @@ impl Engine {
         }
 
         let run_id = s.next_run_id();
-        let (mut session, txn) = {
+        let (mut session, txn, stop) = {
             let mut inner = console.inner.lock().await;
             if let Some(session) = fresh {
                 match inner.session {
@@ -1109,24 +1118,23 @@ impl Engine {
                 return Err(ApplyError::TransactionAborted);
             }
             let txn = inner.txn;
-            let Some((session, _stop)) = console.take_session(&mut inner, run_id) else { return Err(ApplyError::Busy) };
-            (session, txn)
+            let Some((session, stop)) = console.take_session(&mut inner, run_id) else { return Err(ApplyError::Busy) };
+            (session, txn, stop)
         };
 
         let inside = txn == TxnState::Active;
-        let (open, finish, undo) = if inside {
-            ("SAVEPOINT l1_apply", Some("RELEASE SAVEPOINT l1_apply"), "ROLLBACK TO SAVEPOINT l1_apply; RELEASE SAVEPOINT l1_apply")
-        } else {
-            ("BEGIN", (config.mode == TxnMode::AutoCommit).then_some("COMMIT"), "ROLLBACK")
-        };
+        let (open, finish, undo) = session.edit_transaction(inside, config.mode == TxnMode::AutoCommit);
         let mut lines = Vec::new();
-        let outcome: Result<(), ApplyError> = async {
+        let mut outcome: Result<(), ApplyError> = async {
             session.batch(open).await.map_err(|e| ApplyError::Transaction { error: e })?;
-            for (i, (change, sql)) in plan.iter().enumerate() {
+            for (i, edit) in plan.iter().enumerate() {
+                let change = &edit.change;
+                let sql = &edit.sql;
+                if stop.load(Ordering::Relaxed) { return Err(ApplyError::Transaction { error: session::error("Cancelled") }); }
                 let statement = i as u16;
                 lines.push(console::statement_line(statement, sql));
                 let started = std::time::Instant::now();
-                let executed = session.execute_edit(sql.as_str()).await;
+                let executed = session.execute_edit(edit).await;
                 let elapsed_ms = started.elapsed().as_millis().min(u32::MAX as u128) as u32;
                 lines.extend(console::notice_lines(&mut session));
                 let rows = match executed {
@@ -1154,13 +1162,17 @@ impl Engine {
         }
         .await;
         if outcome.is_err() {
-            let _ = session.batch(undo).await;
+            if let Err(rollback) = session.batch(undo).await {
+                let message = format!("Staged edits failed; rollback also failed: {}. The session was retired. Commit outcome may be unknown.",rollback.message);
+                session.retire(message.clone());
+                outcome = Err(ApplyError::Transaction { error: session::error(message) });
+            }
         }
-        let after = match (&outcome, inside, finish) {
+        let after = session.observed_txn().unwrap_or(match (&outcome, inside, finish) {
             (_, true, _) => TxnState::Active,
             (Ok(()), false, None) => TxnState::Active,
             _ => TxnState::Idle,
-        };
+        });
         let lost = session.closed_reason_settled(None).await;
         lines.extend(console::notice_lines(&mut session));
         if let Err(ApplyError::Transaction { error }) = &outcome {
@@ -1446,16 +1458,16 @@ mod tests {
     async fn format_edits_are_in_utf16_units_past_non_ascii_text() {
         let (engine, _dir) = engine().await;
         assert_eq!(
-            engine.editor_format("select 'café 😀';\nselect a,b from t;\n", RunTarget::Cursor { offset: DocOffset(20) }),
+            engine.editor_format("select 'café 😀';\nselect a,b from t;\n", RunTarget::Cursor { offset: DocOffset(20) }, DatabaseKind::Postgres),
             Ok(FormatEdit { from: DocOffset(18), to: DocOffset(35), insert: "SELECT a,\n  b\nFROM t".into() })
         );
         assert_eq!(
-            engine.editor_format("-- café 😀\nselect a,b from t", RunTarget::Cursor { offset: DocOffset(13) }),
+            engine.editor_format("-- café 😀\nselect a,b from t", RunTarget::Cursor { offset: DocOffset(13) }, DatabaseKind::Postgres),
             Ok(FormatEdit { from: DocOffset(0), to: DocOffset(28), insert: "-- café 😀\nSELECT a,\n  b\nFROM t".into() }),
             "a leading comment is part of its statement"
         );
         assert_eq!(
-            engine.editor_format("select '漢字';\nselect 'é', x from t; select 2", RunTarget::Cursor { offset: DocOffset(15) }),
+            engine.editor_format("select '漢字';\nselect 'é', x from t; select 2", RunTarget::Cursor { offset: DocOffset(15) }, DatabaseKind::Postgres),
             Ok(FormatEdit { from: DocOffset(13), to: DocOffset(33), insert: "SELECT 'é',\n  x\nFROM t".into() })
         );
     }
@@ -1465,14 +1477,14 @@ mod tests {
         let (engine, _dir) = engine().await;
         let text = "select 1;\nselect a,b from t;";
         let both = FormatEdit { from: DocOffset(0), to: DocOffset(27), insert: "SELECT 1;\nSELECT a,\n  b\nFROM t".into() };
-        assert_eq!(engine.editor_format(text, RunTarget::Selection { from: DocOffset(3), to: DocOffset(12) }), Ok(both.clone()));
-        assert_eq!(engine.editor_format(text, RunTarget::All), Ok(both));
+        assert_eq!(engine.editor_format(text, RunTarget::Selection { from: DocOffset(3), to: DocOffset(12) }, DatabaseKind::Postgres), Ok(both.clone()));
+        assert_eq!(engine.editor_format(text, RunTarget::All, DatabaseKind::Postgres), Ok(both));
         assert_eq!(
-            engine.editor_format(text, RunTarget::Selection { from: DocOffset(8), to: DocOffset(10) }),
+            engine.editor_format(text, RunTarget::Selection { from: DocOffset(8), to: DocOffset(10) }, DatabaseKind::Postgres),
             Err(FormatError::NothingToFormat),
             "only the semicolon and the newline"
         );
-        assert_eq!(engine.editor_format("select 1;\n\nselect 2", RunTarget::Cursor { offset: DocOffset(10) }), Err(FormatError::NothingToFormat));
+        assert_eq!(engine.editor_format("select 1;\n\nselect 2", RunTarget::Cursor { offset: DocOffset(10) }, DatabaseKind::Postgres), Err(FormatError::NothingToFormat));
     }
 
     #[tokio::test]

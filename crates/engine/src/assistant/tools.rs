@@ -6,7 +6,7 @@ use serde_json::{Value, json};
 
 use super::reply;
 use crate::connection::{ConnectParams, connect_error_text};
-use crate::model::{ApprovalReason, Catalog, ConnStatus, DatabaseRef, KeyKind, Permission, RelKind, Relation, SchemaInfo, ToolResult, ToolStatus, ToolUse};
+use crate::model::{ApprovalReason, Catalog, ConnStatus, DatabaseKind, DatabaseRef, KeyKind, Permission, RelKind, Relation, SchemaInfo, ToolResult, ToolStatus, ToolUse};
 use crate::provider::{ModelResult, ToolSpec};
 use crate::session::{CancelHandle, Session, QueryEvent};
 use crate::{Shared, sql};
@@ -74,7 +74,12 @@ pub(crate) enum Ask {
     User(ApprovalReason),
 }
 
-pub(crate) fn policy(call: &ParsedCall, permission: Permission) -> Ask {
+pub(crate) const MSSQL_REFUSAL: &str = "SQL Server model queries are disabled because server-enforced read-only transactions are unavailable. Use the schema tools and suggest T-SQL for the user to run.";
+
+pub(crate) fn policy(call: &ParsedCall, permission: Permission, database_kind: Option<DatabaseKind>) -> Ask {
+    if matches!(call,ParsedCall::RunQuery { .. }) && database_kind == Some(DatabaseKind::SqlServer) {
+        return Ask::Refuse(MSSQL_REFUSAL.into());
+    }
     match call {
         ParsedCall::DescribeTables { .. } | ParsedCall::SearchCatalog { .. } => Ask::Allow,
         ParsedCall::Invalid { message, .. } => Ask::Refuse(message.clone()),
@@ -89,12 +94,12 @@ pub(crate) fn policy(call: &ParsedCall, permission: Permission) -> Ask {
     }
 }
 
-pub(crate) fn describe(name: &str, input: &Value, catalog: Option<&Catalog>) -> ToolUse {
+pub(crate) fn describe(name: &str, input: &Value, catalog: Option<&Catalog>, kind: DatabaseKind) -> ToolUse {
     match parse_call(name, input) {
         ParsedCall::DescribeTables { tables } => ToolUse::DescribeTables { tables },
         ParsedCall::SearchCatalog { query } => ToolUse::SearchCatalog { query },
         ParsedCall::RunQuery { sql, purpose } => {
-            let relations = reply::uses(&sql, catalog);
+            let relations = reply::uses(&sql, catalog, kind);
             ToolUse::RunQuery { sql, purpose, relations }
         }
         ParsedCall::Invalid { name, .. } => ToolUse::Other { name },
@@ -127,6 +132,7 @@ pub(crate) async fn execute(shared: &Arc<Shared>, db: Option<&DatabaseRef>, call
             Err(message) => Executed::failed(message),
         },
         ParsedCall::RunQuery { sql, .. } => {
+            if instance.config.database_kind != DatabaseKind::Postgres { return Executed::failed(MSSQL_REFUSAL); }
             let params = match shared.params(&instance.config, &db.database) {
                 Ok(params) => params,
                 Err(e) => return Executed::failed(connect_error_text(&e)),
@@ -382,6 +388,38 @@ fn cut_bytes(text: &str, max: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    fn policy(call: &ParsedCall, permission: Permission) -> Ask { super::policy(call,permission,Some(DatabaseKind::Postgres)) }
+    #[test]
+    fn sql_server_queries_are_refused_before_approval_in_every_permission_mode() {
+        let call = parse_call("run_query", &json!({"sql":"SELECT 1"}));
+        for permission in [Permission::Auto,Permission::AskFirst] {
+            assert_eq!(super::policy(&call,permission,Some(DatabaseKind::SqlServer)),Ask::Refuse(MSSQL_REFUSAL.into()));
+        }
+        assert_eq!(super::policy(&parse_call("search_catalog",&json!({"query":"orders"})),Permission::Auto,Some(DatabaseKind::SqlServer)),Ask::Allow);
+    }
+
+    #[cfg(feature = "mssql-tests")]
+    #[tokio::test]
+    async fn sql_server_execution_boundary_refuses_queries_but_schema_tools_work() {
+        let dir = tempfile::tempdir().unwrap();
+        let engine = crate::Engine::open(crate::EngineConfig { data_dir: dir.path().into(), keys: Arc::new(crate::MemoryKeyStore::default()), agent_path: crate::AgentPath::Fixed("".into()) }).await.unwrap();
+        let mut draft = crate::draft_from_url("mssql://sa@localhost:1434/shop?sslmode=require", "tools test").unwrap();
+        draft.host = std::env::var("L1_DATA_TEST_MSSQL_HOST").unwrap_or(draft.host);
+        draft.port = std::env::var("L1_DATA_TEST_MSSQL_PORT").ok().and_then(|p| p.parse().ok()).unwrap_or(draft.port);
+        draft.password = crate::model::PasswordInput::Set(std::env::var("L1_DATA_TEST_MSSQL_PASSWORD").unwrap_or_else(|_| "L1Data_dev_Str0ng".into()));
+        let config = engine.save_connection(draft).await.unwrap();
+        engine.connect(config.id).await.unwrap();
+        let db = DatabaseRef { connection_id: config.id, database: "shop".into() };
+        let refused = execute(&engine.shared, Some(&db), parse_call("run_query", &json!({"sql":"SELECT 1"}))).await;
+        assert_eq!(refused.for_model.text, MSSQL_REFUSAL);
+        assert!(refused.for_model.is_error);
+        for (name, input) in [("search_catalog",json!({"query":"orders"})),("describe_tables",json!({"tables":["dbo.orders"]}))] {
+            let result = execute(&engine.shared, Some(&db), parse_call(name, &input)).await;
+            assert!(!result.for_model.is_error, "{}", result.for_model.text);
+            assert!(matches!(result.status, ToolStatus::Done { .. }));
+            assert!(result.for_model.text.contains("orders"));
+        }
+    }
 
     #[test]
     fn calls_parse_once_and_bad_input_is_named() {
@@ -412,9 +450,9 @@ mod tests {
 
     #[test]
     fn describe_builds_the_card_with_uses() {
-        let tool = describe("run_query", &json!({ "sql": "select * from orders o join customers c on c.id = o.customer_id", "purpose": "join" }), None);
+        let tool = describe("run_query", &json!({ "sql": "select * from orders o join customers c on c.id = o.customer_id", "purpose": "join" }), None, DatabaseKind::Postgres);
         assert_eq!(tool, ToolUse::RunQuery { sql: "select * from orders o join customers c on c.id = o.customer_id".into(), purpose: "join".into(), relations: vec!["orders".into(), "customers".into()] });
-        assert_eq!(describe("Bash", &json!({}), None), ToolUse::Other { name: "Bash".into() });
+        assert_eq!(describe("Bash", &json!({}), None, DatabaseKind::Postgres), ToolUse::Other { name: "Bash".into() });
     }
 
     #[test]

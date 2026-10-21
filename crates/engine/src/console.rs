@@ -182,7 +182,7 @@ impl Console {
         inner.txn_depth = session.txn_depth();
         inner.session = match lost {
             Some(reason) => {
-                let txn_lost = inner.txn != TxnState::Idle;
+                let txn_lost = inner.txn != TxnState::Idle || session.txn_depth().is_some();
                 inner.txn = TxnState::Idle;
                 inner.txn_depth = None;
                 inner.owed = Owed::default();
@@ -204,6 +204,7 @@ impl Console {
         }
         inner.session = SessionSlot::Empty;
         inner.txn = TxnState::Idle;
+        inner.txn_depth = None;
         inner.owed = Owed::default();
         if let RunState::Running { run_id, started_at_ms, statements } = &mut inner.run {
             let mut in_flight = true;
@@ -382,7 +383,7 @@ async fn run_outputs(console: &Console, shared: &Shared, session: &mut Session, 
             Ok(QueryEvent::Columns(mut columns)) => {
                 if let Some((set, out)) = active.take() { finish_rows(console, shared, index, &set, &mut outputs[out], started, &mut rows); }
                 if let Some(table) = &plan.table {
-                    if columns.len() != table.columns.len() || columns.iter().zip(&table.columns).any(|(actual, known)| actual.name != known.name) {
+                    if columns.len() != table.columns.len() || columns.iter().zip(&table.columns).any(|(actual, known)| actual.name != known.name || actual.r#type.category != known.category) {
                         failure = Some(crate::session::error("Table shape changed. Refresh the catalog before browsing again."));
                         break;
                     }

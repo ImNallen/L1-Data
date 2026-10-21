@@ -27,6 +27,7 @@ pub(super) struct PgSession {
     tls: MakeTlsConnector,
     notices: mpsc::UnboundedReceiver<DbError>,
     closed: watch::Receiver<Option<String>>,
+    retired: Option<String>,
 }
 
 #[derive(Clone)]
@@ -74,6 +75,7 @@ impl PgSession {
             tls,
             notices,
             closed,
+            retired: None,
             client,
         };
         session.set_search_path(schema).await.map_err(connect_error)?;
@@ -103,7 +105,7 @@ impl PgSession {
     /// `Some(reason)` once the connection is dead. The client learns of a dead socket before the
     /// driver task records why, so a closed client without a reason yet gets a generic one.
     pub fn closed_reason(&self) -> Option<String> {
-        self.closed.borrow().clone().or_else(|| self.client.is_closed().then(|| "connection closed".to_owned()))
+        self.retired.clone().or_else(|| self.closed.borrow().clone()).or_else(|| self.client.is_closed().then(|| "connection closed".to_owned()))
     }
 
     /// Like `closed_reason`, but gives the driver task a moment to deliver the server's reason.
@@ -345,3 +347,5 @@ impl PgSession {
         }
     }
 }
+
+impl PgSession { pub(super) fn retire(&mut self, reason: String) { self.retired = Some(reason); } }

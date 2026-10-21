@@ -1,3 +1,5 @@
+mod sqlserver_url;
+
 use std::collections::{BTreeSet, HashMap};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
@@ -54,6 +56,9 @@ impl ConnectParams {
 }
 
 pub fn draft_from_url(url: &str, name: &str) -> Result<ConnectionDraft, String> {
+    if url.trim().split_once(':').is_some_and(|(scheme, _)| scheme.eq_ignore_ascii_case("mssql") || scheme.eq_ignore_ascii_case("sqlserver")) {
+        return sqlserver_url::parse(url.trim(), name);
+    }
     crate::session::parse_postgres_url(url, name)
 }
 

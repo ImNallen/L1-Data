@@ -19,8 +19,10 @@ export const commands = {
 	relationDetail: (db: DatabaseRef, oid: number) => typedError<RelationDetail, DetailError>(__TAURI_INVOKE("relation_detail", { db, oid })),
 	exactRowCount: (db: DatabaseRef, schema: string, table: string, query: TableQuery) => typedError<number, CountError>(__TAURI_INVOKE("exact_row_count", { db, schema, table, query })),
 	consoleConfigure: (tabId: TabId, config: ConsoleConfig) => typedError<ConsoleState, ConfigureError>(__TAURI_INVOKE("console_configure", { tabId, config })),
-	scriptOutline: (text: string, cursor: DocOffset) => __TAURI_INVOKE<ScriptOutline>("script_outline", { text, cursor }),
-	editorFormat: (text: string, target: RunTarget) => typedError<FormatEdit, FormatError>(__TAURI_INVOKE("editor_format", { text, target })),
+	scriptOutline: (text: string, cursor: DocOffset, databaseKind: DatabaseKind) => __TAURI_INVOKE<ScriptOutline>("script_outline", { text, cursor, databaseKind }),
+	editorFormat: (text: string, target: RunTarget, databaseKind: DatabaseKind) => typedError<FormatEdit, FormatError>(__TAURI_INVOKE("editor_format", { text, target, databaseKind })),
+	tableScript: (db: DatabaseRef, schema: string, table: string) => typedError<string, string>(__TAURI_INVOKE("table_script", { db, schema, table })),
+	tableOrder: (db: DatabaseRef, orderBy: string, edit: TableOrderEdit) => typedError<TableOrderView, string>(__TAURI_INVOKE("table_order", { db, orderBy, edit })),
 	consoleRun: (tabId: TabId, request: RunRequest) => typedError<RunAccepted, RunError>(__TAURI_INVOKE("console_run", { tabId, request })),
 	consoleCancel: (tabId: TabId) => __TAURI_INVOKE<void>("console_cancel", { tabId }),
 	consoleCommit: (tabId: TabId) => typedError<null, TxnError>(__TAURI_INVOKE("console_commit", { tabId })),
@@ -1016,6 +1018,13 @@ export type TableChanges = {
 	deletes: CellWrite[][],
 };
 
+export type TableOrderEdit = { kind: "Inspect" } | { kind: "Cycle"; column: string; additive: boolean };
+
+export type TableOrderView = {
+	sql: string,
+	keys: TableSortKey[] | null,
+};
+
 export type TableQuery = {
 	/**  SQL after `ORDER BY`, e.g. `"created_at" DESC`; empty means primary key order. */
 	orderBy: string,
@@ -1030,6 +1039,11 @@ export type TableSnapshot = {
 	table: string,
 	page: number,
 	query: TableQuery,
+};
+
+export type TableSortKey = {
+	column: string,
+	desc: boolean,
 };
 
 /**  The provider's id for one tool use (`toolu_…` for Claude). Opaque outside the codec. */

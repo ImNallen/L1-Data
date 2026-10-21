@@ -1,11 +1,12 @@
+mod mssql;
 mod postgres;
 
-use std::pin::Pin;
-use futures_util::Stream;
-use tokio::sync::watch;
 use crate::connection::{ConnectParams, DatabaseInfo};
 use crate::model::*;
 use crate::sql::StmtKind;
+use futures_util::Stream;
+use std::pin::Pin;
+use tokio::sync::watch;
 
 pub struct Session {
     driver: Driver,
@@ -16,12 +17,23 @@ pub struct Session {
 
 enum Driver {
     Postgres(postgres::PgSession),
+    SqlServer(mssql::MsSession),
 }
 
 #[derive(Clone)]
-pub struct CancelHandle(postgres::PgCancel);
+pub struct CancelHandle(CancelDriver);
+#[derive(Clone)]
+enum CancelDriver {
+    Postgres(postgres::PgCancel),
+    SqlServer(mssql::MsCancel),
+}
 impl CancelHandle {
-    pub async fn cancel(&self) { self.0.cancel().await; }
+    pub async fn cancel(&self) {
+        match &self.0 {
+            CancelDriver::Postgres(p) => p.cancel().await,
+            CancelDriver::SqlServer(s) => s.cancel().await,
+        }
+    }
 }
 
 pub enum QueryEvent {
@@ -37,7 +49,9 @@ pub fn error(message: impl Into<String>) -> QueryError {
     QueryError { severity: "ERROR".into(), sqlstate: None, message: message.into(), detail: None, hint: None, context: None, position: None }
 }
 
-pub fn parse_postgres_url(url: &str, name: &str) -> Result<ConnectionDraft, String> { postgres::draft_from_url(url, name) }
+pub fn parse_postgres_url(url: &str, name: &str) -> Result<ConnectionDraft, String> {
+    postgres::draft_from_url(url, name)
+}
 
 impl Session {
     pub async fn open(p: &ConnectParams, schema: Option<&str>, timezone: &str) -> Result<Self, ConnectError> {
@@ -46,7 +60,10 @@ impl Session {
                 let driver = postgres::PgSession::open(p, schema, timezone).await?;
                 Ok(Self { backend_pid: driver.backend_pid, server: driver.server.clone(), search_path: driver.search_path.clone(), driver: Driver::Postgres(driver) })
             }
-            DatabaseKind::SqlServer => Err(ConnectError::Network { message: "SQL Server driver is not connected yet".into() }),
+            DatabaseKind::SqlServer => {
+                let driver = mssql::MsSession::open(p).await?;
+                Ok(Self { backend_pid: driver.backend_pid, server: driver.server.clone(), search_path: schema.map(str::to_owned), driver: Driver::SqlServer(driver) })
+            }
         }
     }
 
@@ -59,27 +76,202 @@ impl Session {
         Ok(session)
     }
 
-    pub fn txn_depth(&self) -> Option<u32> { None }
-    pub fn observed_txn(&self) -> Option<TxnState> { None }
-    pub fn cancel_handle(&self) -> CancelHandle { match &self.driver { Driver::Postgres(p) => CancelHandle(p.cancel_handle()) } }
-    pub fn closed_reason(&self) -> Option<String> { match &self.driver { Driver::Postgres(p) => p.closed_reason() } }
-    pub fn closed_watch(&self) -> watch::Receiver<Option<String>> { match &self.driver { Driver::Postgres(p) => p.closed_watch() } }
-    pub async fn closed_reason_settled(&mut self, fatal: Option<String>) -> Option<String> { match &mut self.driver { Driver::Postgres(p) => p.closed_reason_settled(fatal).await } }
+    pub fn txn_depth(&self) -> Option<u32> {
+        match &self.driver {
+            Driver::Postgres(_) => None,
+            Driver::SqlServer(s) => Some(s.depth),
+        }
+    }
+    pub fn observed_txn(&self) -> Option<TxnState> {
+        match &self.driver {
+            Driver::Postgres(_) => None,
+            Driver::SqlServer(s) => Some(s.txn),
+        }
+    }
+    pub fn cancel_handle(&self) -> CancelHandle {
+        match &self.driver {
+            Driver::Postgres(p) => CancelHandle(CancelDriver::Postgres(p.cancel_handle())),
+            Driver::SqlServer(s) => CancelHandle(CancelDriver::SqlServer(s.cancel_handle())),
+        }
+    }
+    pub fn closed_reason(&self) -> Option<String> {
+        match &self.driver {
+            Driver::Postgres(p) => p.closed_reason(),
+            Driver::SqlServer(s) => s.closed_reason(),
+        }
+    }
+    pub fn closed_watch(&self) -> watch::Receiver<Option<String>> {
+        match &self.driver {
+            Driver::Postgres(p) => p.closed_watch(),
+            Driver::SqlServer(s) => s.closed_watch(),
+        }
+    }
+    pub async fn closed_reason_settled(&mut self, fatal: Option<String>) -> Option<String> {
+        match &mut self.driver {
+            Driver::Postgres(p) => p.closed_reason_settled(fatal).await,
+            Driver::SqlServer(s) => s.closed_reason().or(fatal),
+        }
+    }
     pub async fn set_search_path(&mut self, schema: Option<&str>) -> Result<(), QueryError> {
-        match &mut self.driver { Driver::Postgres(p) => p.set_search_path(schema).await.map_err(|e| postgres::query_failure(e, None))? }
+        match &mut self.driver {
+            Driver::Postgres(p) => p.set_search_path(schema).await.map_err(|e| postgres::query_failure(e, None))?,
+            Driver::SqlServer(_) => {}
+        }
         self.search_path = schema.map(str::to_owned);
         Ok(())
     }
-    pub fn drain_notices(&mut self) -> Vec<OutputBody> { match &mut self.driver { Driver::Postgres(p) => p.drain_notices().iter().map(postgres::notice).collect() } }
-    pub async fn batch(&mut self, sql: &str) -> Result<(), QueryError> { match &mut self.driver { Driver::Postgres(p) => p.batch(sql).await } }
-    pub async fn execute_edit(&mut self, sql: &str) -> Result<u64, QueryError> { match &mut self.driver { Driver::Postgres(p) => p.execute_edit(sql).await } }
-    pub fn query<'a>(&'a mut self, sql: &'a str) -> QueryStream<'a> { match &mut self.driver { Driver::Postgres(p) => p.query(sql) } }
-    pub async fn list_databases(&mut self) -> Result<(Vec<DatabaseInfo>, String), QueryError> { match &mut self.driver { Driver::Postgres(p) => p.list_databases().await } }
-    pub async fn count_schemas(&mut self) -> Result<u32, QueryError> { match &mut self.driver { Driver::Postgres(p) => p.count_schemas().await } }
-    pub async fn catalog(&mut self, db: DatabaseRef, version: u64, extra: &[String]) -> Result<Catalog, QueryError> { match &mut self.driver { Driver::Postgres(p) => p.catalog(db, version, extra).await } }
-    pub async fn detail(&mut self, db: DatabaseRef, oid: u32, version: u64) -> Result<Option<RelationDetail>, QueryError> { match &mut self.driver { Driver::Postgres(p) => p.detail(db, oid, version).await } }
-    pub async fn count(&mut self, sql: &str) -> Result<u64, QueryError> { match &mut self.driver { Driver::Postgres(p) => p.count(sql).await } }
-    pub async fn has_writes(&mut self) -> bool { match &mut self.driver { Driver::Postgres(p) => p.has_writes().await } }
-    pub async fn finish_transaction(&mut self, commit: bool) -> Result<(), QueryError> { self.batch(if commit { "COMMIT" } else { "ROLLBACK" }).await }
-    pub fn implicit_begin(&self, mode: TxnMode, txn: TxnState, kind: &StmtKind, _sql: &str) -> bool { crate::txn::needs_implicit_begin(mode, txn, kind) }
+    pub fn drain_notices(&mut self) -> Vec<OutputBody> {
+        match &mut self.driver {
+            Driver::Postgres(p) => p.drain_notices().iter().map(postgres::notice).collect(),
+            Driver::SqlServer(_) => vec![],
+        }
+    }
+    pub async fn batch(&mut self, sql: &str) -> Result<(), QueryError> {
+        match &mut self.driver {
+            Driver::Postgres(p) => p.batch(sql).await,
+            Driver::SqlServer(s) => s.batch(sql).await,
+        }
+    }
+    pub async fn execute_edit(&mut self, edit: &Edit) -> Result<u64, QueryError> {
+        match &mut self.driver {
+            Driver::Postgres(p) => p.execute_edit(&edit.sql).await,
+            Driver::SqlServer(s) => s.execute_edit(edit).await,
+        }
+    }
+    pub fn query<'a>(&'a mut self, sql: &'a str) -> QueryStream<'a> {
+        match &mut self.driver {
+            Driver::Postgres(p) => p.query(sql),
+            Driver::SqlServer(s) => s.query(sql),
+        }
+    }
+    pub async fn list_databases(&mut self) -> Result<(Vec<DatabaseInfo>, String), QueryError> {
+        match &mut self.driver {
+            Driver::Postgres(p) => p.list_databases().await,
+            Driver::SqlServer(s) => s.list_databases().await,
+        }
+    }
+    pub async fn count_schemas(&mut self) -> Result<u32, QueryError> {
+        match &mut self.driver {
+            Driver::Postgres(p) => p.count_schemas().await,
+            Driver::SqlServer(s) => s.count_schemas().await,
+        }
+    }
+    pub async fn catalog(&mut self, db: DatabaseRef, version: u64, extra: &[String]) -> Result<Catalog, QueryError> {
+        match &mut self.driver {
+            Driver::Postgres(p) => p.catalog(db, version, extra).await,
+            Driver::SqlServer(s) => s.catalog(db, version, extra).await,
+        }
+    }
+    pub async fn detail(&mut self, db: DatabaseRef, oid: u32, version: u64) -> Result<Option<RelationDetail>, QueryError> {
+        match &mut self.driver {
+            Driver::Postgres(p) => p.detail(db, oid, version).await,
+            Driver::SqlServer(s) => s.detail(db, oid, version).await,
+        }
+    }
+    pub async fn count(&mut self, sql: &str) -> Result<u64, QueryError> {
+        match &mut self.driver {
+            Driver::Postgres(p) => p.count(sql).await,
+            Driver::SqlServer(s) => s.count(sql).await,
+        }
+    }
+    pub async fn has_writes(&mut self) -> bool {
+        match &mut self.driver {
+            Driver::Postgres(p) => p.has_writes().await,
+            Driver::SqlServer(s) => s.depth > 0,
+        }
+    }
+    pub async fn finish_transaction(&mut self, commit: bool) -> Result<(), QueryError> {
+        match &mut self.driver {
+            Driver::Postgres(p) => p.batch(if commit { "COMMIT" } else { "ROLLBACK" }).await,
+            Driver::SqlServer(s) => s.finish_transaction(commit).await,
+        }
+    }
+    pub fn implicit_begin(&self, mode: TxnMode, txn: TxnState, kind: &StmtKind, sql: &str) -> bool {
+        match self.driver {
+            Driver::Postgres(_) => crate::txn::needs_implicit_begin(mode, txn, kind),
+            Driver::SqlServer(_) => mode == TxnMode::Manual && txn == TxnState::Idle && !crate::sql::tsql::has_transaction_control(sql),
+        }
+    }
+}
+
+pub struct Edit {
+    pub change: ChangeRef,
+    pub sql: String,
+    parameters: Vec<Option<String>>,
+}
+
+pub fn plan_edits(kind: DatabaseKind, changes: &TableChanges, relation: &Relation) -> Result<Vec<Edit>, ApplyError> {
+    let valid = |cells: &[CellWrite], change| -> Result<(), ApplyError> {
+        let mut names = std::collections::HashSet::new();
+        for cell in cells {
+            if !names.insert(&cell.column) || !relation.columns.iter().any(|c| c.name == cell.column && c.writable) {
+                return Err(ApplyError::Failed { change, error: error(format!("Column {} is unknown, repeated, or server-owned", cell.column)) });
+            }
+        }
+        Ok(())
+    };
+    for (i, cells) in changes.inserts.iter().enumerate() {
+        valid(cells, ChangeRef { kind: ChangeKind::Insert, index: i as u32 })?;
+    }
+    for (i, update) in changes.updates.iter().enumerate() {
+        valid(&update.set, ChangeRef { kind: ChangeKind::Update, index: i as u32 })?;
+    }
+    if kind == DatabaseKind::SqlServer {
+        return mssql::edits::plan(changes, relation);
+    }
+    let mut edits = Vec::new();
+    let (schema, table) = (&changes.schema, &changes.table);
+    let mut add = |kind, index, sql| edits.push(Edit { change: ChangeRef { kind, index }, sql, parameters: vec![] });
+    for (i, key) in changes.deletes.iter().enumerate() {
+        add(ChangeKind::Delete, i as u32, crate::text::delete_sql(schema, table, key));
+    }
+    for (i, u) in changes.updates.iter().enumerate() {
+        if !u.set.is_empty() {
+            add(ChangeKind::Update, i as u32, crate::text::update_sql(schema, table, &u.key, &u.set));
+        }
+    }
+    for (i, cells) in changes.inserts.iter().enumerate() {
+        add(ChangeKind::Insert, i as u32, crate::text::insert_sql(schema, table, cells));
+    }
+    Ok(edits)
+}
+
+impl Session {
+    pub fn edit_transaction(&self, inside: bool, auto_commit: bool) -> (&'static str, Option<&'static str>, &'static str) {
+        match (&self.driver, inside) {
+            (Driver::Postgres(_), true) => ("SAVEPOINT l1_apply", Some("RELEASE SAVEPOINT l1_apply"), "ROLLBACK TO SAVEPOINT l1_apply; RELEASE SAVEPOINT l1_apply"),
+            (Driver::SqlServer(_), true) => ("SAVE TRANSACTION l1_apply", None, "ROLLBACK TRANSACTION l1_apply"),
+            (_, false) => ("BEGIN", auto_commit.then_some("COMMIT"), "ROLLBACK"),
+        }
+    }
+    pub fn retire(&mut self, reason: String) {
+        match &mut self.driver {
+            Driver::Postgres(p) => p.retire(reason),
+            Driver::SqlServer(s) => s.retire(reason),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn native_driver_types_stay_inside_the_private_drivers() {
+        fn check(path: &std::path::Path) {
+            for entry in std::fs::read_dir(path).unwrap() {
+                let path = entry.unwrap().path();
+                if path.is_dir() {
+                    if path.file_name().unwrap() != "session" {
+                        check(&path);
+                    }
+                } else if path.extension().is_some_and(|e| e == "rs") {
+                    let source = std::fs::read_to_string(&path).unwrap();
+                    let production = source.split("#[cfg(test)]").next().unwrap();
+                    for native in ["tokio_postgres::", "tiberius::"] {
+                        assert!(!production.contains(native), "{} names {native}; put native types in a private session driver", path.display());
+                    }
+                }
+            }
+        }
+        check(&std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src"));
+    }
 }

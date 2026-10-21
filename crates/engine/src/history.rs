@@ -190,6 +190,24 @@ mod tests {
     fn ok() -> HistoryOutcome {
         HistoryOutcome::Rows { rows: 4 }
     }
+
+    #[test]
+    fn database_kind_separates_otherwise_identical_history_groups() {
+        let (store, _dir) = store();
+        for database_kind in [DatabaseKind::Postgres, DatabaseKind::SqlServer] {
+            store.insert_history_and_prune(HistoryInsert {
+                database_kind, at_ms: 1, connection_id: ConnectionId(uuid::Uuid::nil()), connection_name: "same".into(),
+                database: "shop".into(), sql: "SELECT 1".into(), elapsed_ms: 1, outcome: ok(),
+            }).unwrap();
+        }
+        let page = store.history_browse(&query()).unwrap();
+        assert_eq!(page.groups.len(), 2);
+        for group in &page.groups {
+            let detail = store.history_group(&HistoryGroupQuery { id: group.id, before_id: None, limit: 10, revision: page.revision }).unwrap();
+            assert_eq!(detail.database_kind, group.database_kind);
+            assert_eq!(detail.runs.len(), 1);
+        }
+    }
     fn failed() -> HistoryOutcome {
         HistoryOutcome::Error {
             message: "permission denied for orders".into(),

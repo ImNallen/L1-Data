@@ -201,7 +201,7 @@ impl Shared {
             (seq, control_rx, inner.closing.clone())
         };
         chat.store_record(self);
-        let context = request.tab.as_ref().map(|t| SentContext { database_kind: None, db: t.db.clone(), connection_name, tab_title: t.title.clone() });
+        let context = request.tab.as_ref().map(|t| SentContext { database_kind: t.db.as_ref().and_then(|db| self.config(db.connection_id)).map(|c| c.database_kind), db: t.db.clone(), connection_name, tab_title: t.title.clone() });
         let entry = Entry::User { at_ms: now_ms(), text: text.clone(), context, attachment };
         chat.store_entry(self, seq, seq, &entry);
         chat.publish_entry(self, seq, seq, entry);

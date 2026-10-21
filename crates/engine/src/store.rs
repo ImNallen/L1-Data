@@ -230,7 +230,7 @@ impl Store {
                     h.sql,
                     h.elapsed_ms,
                     serde_json::to_string(&h.outcome)?,
-                    crate::sql::history_is_write(&h.sql),
+                    match h.database_kind { DatabaseKind::Postgres => crate::sql::history_is_write(&h.sql), DatabaseKind::SqlServer => crate::sql::tsql::is_write(&h.sql) },
                     serde_json::to_value(h.database_kind)?.as_str().unwrap(),
                 ],
             )?;

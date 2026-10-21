@@ -97,14 +97,14 @@ pub async fn console_configure(engine: State<'_, Arc<Engine>>, tab_id: TabId, co
 
 #[tauri::command]
 #[specta::specta]
-pub fn script_outline(engine: State<'_, Arc<Engine>>, text: String, cursor: DocOffset) -> ScriptOutline {
-    engine.script_outline(&text, cursor)
+pub fn script_outline(engine: State<'_, Arc<Engine>>, text: String, cursor: DocOffset, database_kind: DatabaseKind) -> ScriptOutline {
+    engine.script_outline(&text, cursor, database_kind)
 }
 
 #[tauri::command]
 #[specta::specta]
-pub fn editor_format(engine: State<'_, Arc<Engine>>, text: String, target: RunTarget) -> Result<FormatEdit, FormatError> {
-    engine.editor_format(&text, target)
+pub fn editor_format(engine: State<'_, Arc<Engine>>, text: String, target: RunTarget, database_kind: DatabaseKind) -> Result<FormatEdit, FormatError> {
+    engine.editor_format(&text, target, database_kind)
 }
 
 #[tauri::command]
@@ -250,4 +250,16 @@ pub fn provider_refresh(engine: State<'_, Arc<Engine>>) {
 #[specta::specta]
 pub async fn usage_limits(app: AppHandle) -> LimitsReport {
     app.state::<Arc<Engine>>().usage_limits().await
+}
+
+#[tauri::command]
+#[specta::specta]
+pub fn table_script(engine: State<'_, Arc<Engine>>, db: DatabaseRef, schema: String, table: String) -> Result<String, String> {
+    engine.table_script(db, &schema, &table)
+}
+
+#[tauri::command]
+#[specta::specta]
+pub fn table_order(engine: State<'_, Arc<Engine>>, db: DatabaseRef, order_by: String, edit: TableOrderEdit) -> Result<TableOrderView, String> {
+    engine.table_order(db, &order_by, edit)
 }
