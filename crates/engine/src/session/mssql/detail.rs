@@ -26,14 +26,17 @@ impl MsSession {
         let mut detail = RelationDetail { db, oid: object_id, catalog_version: version, defaults: vec![], keys: vec![], indexes: vec![], triggers: vec![] };
         let rows = self.rows(&format!("SELECT c.name,c.is_identity,c.is_computed,dc.definition,cc.definition FROM sys.columns c LEFT JOIN sys.default_constraints dc ON dc.object_id=c.default_object_id LEFT JOIN sys.computed_columns cc ON cc.object_id=c.object_id AND cc.column_id=c.column_id WHERE c.object_id={oid} AND (c.is_identity=1 OR c.is_computed=1 OR c.default_object_id<>0) ORDER BY c.column_id")).await?;
         for r in rows {
+            let column = required(&r, 0)?.into();
             let value = if number::<u8>(&r, 1)? != 0 {
                 DefaultValue::Identity { always: true }
             } else if number::<u8>(&r, 2)? != 0 {
-                DefaultValue::Generated { sql: required(&r, 4)?.into() }
+                let Some(sql) = &r[4] else { continue };
+                DefaultValue::Generated { sql: sql.clone() }
             } else {
-                DefaultValue::Expr { sql: required(&r, 3)?.into() }
+                let Some(sql) = &r[3] else { continue };
+                DefaultValue::Expr { sql: sql.clone() }
             };
-            detail.defaults.push(ColumnDefault { column: required(&r, 0)?.into(), value });
+            detail.defaults.push(ColumnDefault { column, value });
         }
         let rows = self.rows(&format!("SELECT k.name,k.type,c.name FROM sys.key_constraints k JOIN sys.index_columns ic ON ic.object_id=k.parent_object_id AND ic.index_id=k.unique_index_id JOIN sys.columns c ON c.object_id=ic.object_id AND c.column_id=ic.column_id WHERE k.parent_object_id={oid} AND ic.key_ordinal>0 ORDER BY CASE k.type WHEN 'PK' THEN 0 ELSE 1 END,k.name,ic.key_ordinal")).await?;
         for r in rows {
@@ -71,7 +74,9 @@ impl MsSession {
         }
         let rows = self.rows(&format!("SELECT k.name,c.name,k.definition FROM sys.check_constraints k LEFT JOIN sys.columns c ON c.object_id=k.parent_object_id AND c.column_id=k.parent_column_id WHERE k.parent_object_id={oid} ORDER BY k.name")).await?;
         for r in rows {
-            detail.keys.push(KeyInfo { name: required(&r, 0)?.into(), columns: r[1].clone().into_iter().collect(), kind: KeyKind::Check { definition: required(&r, 2)?.into() } });
+            let name = required(&r, 0)?.into();
+            let Some(definition) = &r[2] else { continue };
+            detail.keys.push(KeyInfo { name, columns: r[1].clone().into_iter().collect(), kind: KeyKind::Check { definition: definition.clone() } });
         }
         detail.keys.sort_by_key(|k| {
             (
