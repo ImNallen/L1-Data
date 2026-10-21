@@ -1,6 +1,14 @@
 import { expect, it } from "vitest";
 import type { ApproveError, ChatError, SendError } from "./bindings";
-import { approveErrorText, chatErrorText, sendErrorText } from "./errors";
+import { applyErrorText, approveErrorText, chatErrorText, sendErrorText } from "./errors";
+
+it("tells the user to verify unknown edit outcomes before retrying", () => {
+  const error = { message: "Connection closed during commit", severity: "ERROR", sqlstate: null, detail: null, hint: null, context: null, position: null };
+  expect(applyErrorText({ kind: "OutcomeUnknown", error })).toBe(
+    "The outcome of these edits is unknown. Verify the saved data before retrying. Connection closed during commit",
+  );
+  expect(applyErrorText({ kind: "Transaction", error })).not.toContain("Nothing was saved");
+});
 
 it("says what to do about every way a send can fail", () => {
   const errors: SendError[] = [

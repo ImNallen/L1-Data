@@ -65,12 +65,14 @@ export function applyErrorText(e: ApplyError): string {
       return "Editing rows needs the table's primary key.";
     case "Failed":
     case "Transaction":
-      return `Nothing was saved. ${e.error.message}`;
+      return `Could not apply edits. ${e.error.message}`;
+    case "OutcomeUnknown":
+      return `The outcome of these edits is unknown. Verify the saved data before retrying. ${e.error.message}`;
     case "RowMismatch": {
       const verb = e.change.kind === "Delete" ? "delete" : "update";
       return e.rows === 0
-        ? `Nothing was saved. A row to ${verb} no longer exists. Reload and try again.`
-        : `Nothing was saved. A row to ${verb} matched ${e.rows} rows.`;
+        ? `Could not apply edits. A row to ${verb} no longer exists. Reload and try again.`
+        : `Could not apply edits. A row to ${verb} matched ${e.rows} rows.`;
     }
     default: {
       const unreachable: never = e;

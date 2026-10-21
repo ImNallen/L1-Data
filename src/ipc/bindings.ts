@@ -75,7 +75,6 @@ export type AppEvent = {
 
 export type Appearance = "light" | "dark";
 
-/**  Nothing is applied when any of these comes back. */
 export type ApplyError = { kind: "Busy" } | { kind: "NotConfigured" } | { kind: "Connect"; error: ConnectError } | 
 /**  The tab's transaction already failed; roll it back first. */
 { kind: "TransactionAborted" } | 
@@ -84,7 +83,7 @@ export type ApplyError = { kind: "Busy" } | { kind: "NotConfigured" } | { kind: 
 /**  An update or delete matched `rows` rows instead of one, so the row changed underneath. */
 { kind: "RowMismatch"; change: ChangeRef; rows: number } | 
 /**  Opening or committing the transaction failed. */
-{ kind: "Transaction"; error: QueryError };
+{ kind: "Transaction"; error: QueryError } | { kind: "OutcomeUnknown"; error: QueryError };
 
 export type ApplySummary = {
 	/**  False when the changes wait in the tab's open transaction (manual mode) for Commit. */

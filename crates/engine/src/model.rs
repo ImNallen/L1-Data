@@ -1458,7 +1458,6 @@ pub struct ApplySummary {
     pub committed: bool,
 }
 
-/// Nothing is applied when any of these comes back.
 #[derive(Debug, Clone, Serialize, Type)]
 #[serde(tag = "kind", rename_all_fields = "camelCase")]
 pub enum ApplyError {
@@ -1474,6 +1473,7 @@ pub enum ApplyError {
     RowMismatch { change: ChangeRef, rows: u64 },
     /// Opening or committing the transaction failed.
     Transaction { error: QueryError },
+    OutcomeUnknown { error: QueryError },
 }
 
 #[derive(Debug, Clone, Serialize, Type)]

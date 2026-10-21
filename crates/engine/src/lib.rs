@@ -1210,7 +1210,7 @@ impl Engine {
                 }
             }
             if let Some(finish) = finish {
-                session.batch(finish).await.map_err(|e| ApplyError::Transaction { error: e })?;
+                session.batch(finish).await.map_err(|error| ApplyError::OutcomeUnknown { error })?;
             }
             Ok(())
         }
@@ -1219,7 +1219,7 @@ impl Engine {
             if let Err(rollback) = session.batch(undo).await {
                 let message = format!("Staged edits failed; rollback also failed: {}. The session was retired. Commit outcome may be unknown.",rollback.message);
                 session.retire(message.clone());
-                outcome = Err(ApplyError::Transaction { error: session::error(message) });
+                outcome = Err(ApplyError::OutcomeUnknown { error: session::error(message) });
             }
         }
         let after = session.observed_txn().unwrap_or(match (&outcome, inside, finish) {
@@ -1229,7 +1229,7 @@ impl Engine {
         });
         let lost = session.closed_reason_settled(None).await;
         lines.extend(console::notice_lines(&mut session));
-        if let Err(ApplyError::Transaction { error }) = &outcome {
+        if let Err(ApplyError::Transaction { error } | ApplyError::OutcomeUnknown { error }) = &outcome {
             lines.push(OutputBody::Error { statement: None, error: error.clone() });
         }
         console.output_all(s, run_id, lines);
