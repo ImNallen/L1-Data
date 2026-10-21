@@ -230,7 +230,7 @@ async fn self_check_steps(engine: &Arc<Engine>, url: &str) -> Result<serde_json:
         let outline = text_engine.script_outline("SELECT 1", DocOffset(0), database_kind);
         let formatted = text_engine.editor_format("SELECT 1", RunTarget::All, database_kind).map_err(fail("editor_format"))?;
         let browse = text_engine.table_script(text_db.clone(), &text_schema, "orders").map_err(fail("table_script"))?;
-        let order = text_engine.table_order(text_db, "", TableOrderEdit::Cycle { column: "id".into(), additive: false }).map_err(fail("table_order"))?;
+        let order = text_engine.table_order(text_db, &text_schema, "orders", "", TableOrderEdit::Cycle { column: "id".into(), additive: false }).map_err(fail("table_order"))?;
         Ok::<_, (&'static str, serde_json::Value)>(serde_json::json!({ "outline": outline, "formatted": formatted, "browse": browse, "order": order }))
     }).join().map_err(|_| ("text_services", serde_json::json!("panicked off the runtime")))??;
     engine

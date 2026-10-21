@@ -260,6 +260,6 @@ pub fn table_script(engine: State<'_, Arc<Engine>>, db: DatabaseRef, schema: Str
 
 #[tauri::command]
 #[specta::specta]
-pub fn table_order(engine: State<'_, Arc<Engine>>, db: DatabaseRef, order_by: String, edit: TableOrderEdit) -> Result<TableOrderView, String> {
-    engine.table_order(db, &order_by, edit)
+pub fn table_order(engine: State<'_, Arc<Engine>>, db: DatabaseRef, schema: String, table: String, order_by: String, edit: TableOrderEdit) -> Result<TableOrderView, String> {
+    engine.table_order(db, &schema, &table, &order_by, edit)
 }

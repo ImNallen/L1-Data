@@ -116,7 +116,7 @@ routes! { e;
     script_outline(text: String, cursor: DocOffset, database_kind: DatabaseKind) => ok(e.script_outline(&text, cursor, database_kind));
     editor_format(text: String, target: RunTarget, database_kind: DatabaseKind) => e.editor_format(&text, target, database_kind);
     table_script(db: DatabaseRef, schema: String, table: String) => e.table_script(db, &schema, &table);
-    table_order(db: DatabaseRef, order_by: String, edit: TableOrderEdit) => e.table_order(db, &order_by, edit);
+    table_order(db: DatabaseRef, schema: String, table: String, order_by: String, edit: TableOrderEdit) => e.table_order(db, &schema, &table, &order_by, edit);
     console_run(tab_id: TabId, request: RunRequest) => e.console_run(tab_id, request).await;
     console_cancel(tab_id: TabId) => { e.console_cancel(tab_id).await; ok(()) };
     console_commit(tab_id: TabId) => e.console_commit(tab_id).await;

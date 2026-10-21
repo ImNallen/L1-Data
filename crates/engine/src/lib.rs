@@ -752,9 +752,15 @@ impl Engine {
         let kind = self.shared.config(db.connection_id).ok_or("Unknown connection")?.database_kind;
         Ok(text::table_script(kind,schema,table))
     }
-    pub fn table_order(&self, db: DatabaseRef, order_by: &str, edit: TableOrderEdit) -> Result<TableOrderView,String> {
+    pub fn table_order(&self, db: DatabaseRef, schema: &str, table: &str, order_by: &str, edit: TableOrderEdit) -> Result<TableOrderView,String> {
         let kind = self.shared.config(db.connection_id).ok_or("Unknown connection")?.database_kind;
-        Ok(text::table_order(kind,order_by,edit))
+        let catalog = match kind {
+            DatabaseKind::Postgres => None,
+            DatabaseKind::SqlServer => self.shared.instance(db.connection_id)
+                .and_then(|instance| instance.slot(instance.canonical_database(&db.database)))
+                .and_then(|slot| slot.last()),
+        };
+        text::table_order(kind, catalog.as_ref().and_then(|c| c.relation(schema, table)), order_by, edit)
     }
 
     pub async fn test_connection(&self, d: ConnectionDraft) -> Result<ServerInfo, ConnectError> {
@@ -1389,6 +1395,40 @@ mod tests {
         let boot = engine.boot();
         assert!(boot.connections.is_empty() && boot.consoles.is_empty());
         assert_eq!(boot.settings.max_rows, 200_000);
+    }
+
+    #[tokio::test]
+    async fn postgres_header_sort_does_not_require_a_connection_or_catalog() {
+        let (engine, _dir) = engine().await;
+        let config = engine.save_connection(ConnectionDraft { password: PasswordInput::Clear, ..draft("sort") }).await.unwrap();
+        let db = DatabaseRef { connection_id: config.id, database: "shop".into() };
+        let inspected = engine.table_order(db.clone(), "public", "orders", "ID DESC", TableOrderEdit::Inspect).unwrap();
+        assert_eq!(inspected.sql, "ID DESC");
+        let keys = inspected.keys.unwrap();
+        assert_eq!((keys[0].column.as_str(), keys[0].desc), ("id", true));
+        let sorted = engine.table_order(db.clone(), "public", "orders", "ID DESC", TableOrderEdit::Cycle { column: "id".into(), additive: true }).unwrap();
+        assert!(sorted.sql.is_empty() && sorted.keys.unwrap().is_empty());
+        let advanced = "lower(name) DESC";
+        let sorted = engine.table_order(db, "public", "orders", advanced, TableOrderEdit::Cycle { column: "id".into(), additive: false }).unwrap();
+        assert_eq!(sorted.sql, advanced);
+        assert!(sorted.keys.is_none());
+        engine.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn sql_server_header_sort_reports_an_unloaded_catalog_without_starting_work() {
+        let (engine, _dir) = engine().await;
+        let config = engine.save_connection(ConnectionDraft { database_kind: DatabaseKind::SqlServer, password: PasswordInput::Clear, ..draft("sort") }).await.unwrap();
+        let db = DatabaseRef { connection_id: config.id, database: "shop".into() };
+        let inspected = engine.table_order(db.clone(), "dbo", "orders", "ID DESC", TableOrderEdit::Inspect).unwrap();
+        assert_eq!(inspected.sql, "ID DESC");
+        assert!(inspected.keys.is_none());
+        let sort_engine = engine.clone();
+        let error = std::thread::spawn(move || sort_engine.table_order(db, "dbo", "orders", "", TableOrderEdit::Cycle { column: "id".into(), additive: false }))
+            .join().unwrap().unwrap_err();
+        assert!(error.contains("Connect") && error.contains("refresh") && error.contains("catalog"), "{error}");
+        assert!(engine.boot().live.is_empty());
+        engine.shutdown().await;
     }
 
     #[tokio::test]

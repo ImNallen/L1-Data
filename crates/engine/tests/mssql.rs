@@ -404,12 +404,12 @@ async fn database_catalogs_stay_scoped_and_header_sort_sql_runs_with_bracket_nam
     let oid = reporting.schemas.iter().flat_map(|s| &s.relations).find(|r| r.name == "customers").unwrap().oid;
     assert_eq!(h.engine.relation_detail(reporting_db.clone(), oid).await.unwrap().db, reporting_db);
     assert_eq!(h.engine.table_script(h.db(), "lab", "awkward names").unwrap(), "SELECT * FROM [lab].[awkward names]");
-    let sorted = h.engine.table_order(h.db(), "", TableOrderEdit::Cycle { column: "a]b".into(), additive: false }).unwrap();
+    let sorted = h.engine.table_order(h.db(), "lab", "awkward names", "", TableOrderEdit::Cycle { column: "a]b".into(), additive: false }).unwrap();
     assert_eq!(sorted.sql, "[a]]b] ASC");
-    let descending = h.engine.table_order(h.db(), &sorted.sql, TableOrderEdit::Cycle { column: "a]b".into(), additive: false }).unwrap();
+    let descending = h.engine.table_order(h.db(), "lab", "awkward names", &sorted.sql, TableOrderEdit::Cycle { column: "a]b".into(), additive: false }).unwrap();
     assert_eq!(descending.sql, "[a]]b] DESC");
     let advanced = "COALESCE([a]]b], N'') DESC";
-    let inspected = h.engine.table_order(h.db(), advanced, TableOrderEdit::Cycle { column: "a]b".into(), additive: false }).unwrap();
+    let inspected = h.engine.table_order(h.db(), "lab", "awkward names", advanced, TableOrderEdit::Cycle { column: "a]b".into(), additive: false }).unwrap();
     assert_eq!(inspected.sql, advanced);
     assert!(inspected.keys.is_none());
     let accepted = h

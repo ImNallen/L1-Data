@@ -43,7 +43,7 @@ L1 Data is a desktop IDE for PostgreSQL and Microsoft SQL Server, built with Tau
 - The results grid streams large results in pages. Select cells and press `⌘C` to copy them as TSV. Press `Enter`, or click the **…** on a cut-off value, to see the full value.
 - A run with several result sets has a selector to switch between them.
 - **Export** writes the result to CSV, up to the row limit.
-- A table tab pages through rows, from 10 to 1,000 per page. It filters with a `WHERE` condition or per-column filters, and sorts with `ORDER BY`. Click a header to sort by it, and Shift-click to add a column to the sort.
+- A table tab pages through rows, from 10 to 1,000 per page. It filters with a `WHERE` condition or per-column filters, and sorts with `ORDER BY`. Click a header to sort by it, and Shift-click to add a column to the sort. SQL Server requires exact table column names for Shift-click sorting. If a raw name uses another spelling, edit `ORDER BY` or click without Shift to replace the simple column order.
 - A table tab with a primary key can add, edit, and delete rows, and set a cell to `NULL` or `DEFAULT`. Changes stay pending until **Submit** (`⌘S`), which applies them all in one transaction or none of them. In manual mode, submitted changes wait in the tab's open transaction until **Commit**. **Revert** drops them.
 
 ### The assistant

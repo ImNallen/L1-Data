@@ -206,7 +206,7 @@ def check(bridge, work):
         refused = bridge.response("console_run", tabId=tab, request={"kind": "tablePage", "schema": "lab", "table": table, "page": 0, "query": unsafe})
         assert refused["status"] == "error", refused
         assert bridge.rows(bridge.run(observer, f"SELECT COUNT_BIG(*) FROM {qualified}")) == [[["1"]]]
-        sort = bridge.invoke("table_order", db=db, orderBy="", edit={"kind": "Cycle", "column": "a]b", "additive": False})
+        sort = bridge.invoke("table_order", db=db, schema="lab", table="awkward names", orderBy="", edit={"kind": "Cycle", "column": "a]b", "additive": False})
         assert sort["sql"] == "[a]]b] ASC" and sort["keys"] == [{"column": "a]b", "desc": False}], sort
         print("PASS catalog, typed staged edits, trigger row counts, filters and injection rejection")
 

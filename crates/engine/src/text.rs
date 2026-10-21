@@ -417,9 +417,28 @@ pub fn table_script(kind: DatabaseKind, schema: &str, table: &str) -> String {
     format!("SELECT * FROM {}.{}", quote(schema), quote(table))
 }
 
-pub fn table_order(kind: DatabaseKind, order_by: &str, edit: TableOrderEdit) -> TableOrderView {
+pub fn table_order(kind: DatabaseKind, relation: Option<&Relation>, order_by: &str, edit: TableOrderEdit) -> Result<TableOrderView, String> {
     let parsed = match kind { DatabaseKind::Postgres => sql::order::parse(order_by), DatabaseKind::SqlServer => sql::tsql::parse_order_by(order_by) };
-    let Some(mut keys) = parsed else { return TableOrderView { sql: order_by.to_owned(), keys: None }; };
+    if kind == DatabaseKind::SqlServer {
+        let known = |name: &str| relation.is_some_and(|r| r.columns.iter().any(|c| c.name == name));
+        let resolved = parsed.as_ref().is_some_and(|keys| keys.iter().all(|(name, _)| known(name))) && relation.is_some();
+        match &edit {
+            TableOrderEdit::Inspect if !resolved => return Ok(TableOrderView { sql: order_by.to_owned(), keys: None }),
+            TableOrderEdit::Cycle { column, additive } => {
+                if relation.is_none() {
+                    return Err("Table columns are unavailable. Connect and refresh the table catalog before sorting.".into());
+                }
+                if !known(column) {
+                    return Err(format!("Column {column:?} is not in this table's catalog. Refresh the catalog before sorting."));
+                }
+                if *additive && !resolved {
+                    return Err("To add a header sort, ORDER BY must use exact table column names. Edit ORDER BY, or click without Shift to replace a simple column order.".into());
+                }
+            }
+            TableOrderEdit::Inspect => {}
+        }
+    }
+    let Some(mut keys) = parsed else { return Ok(TableOrderView { sql: order_by.to_owned(), keys: None }); };
     if let TableOrderEdit::Cycle { column, additive } = edit {
         let previous = keys.iter().find(|(name,_)| *name == column).map(|(_,desc)| *desc);
         if !additive { keys.retain(|(name,_)| *name == column); }
@@ -428,12 +447,12 @@ pub fn table_order(kind: DatabaseKind, order_by: &str, edit: TableOrderEdit) -> 
             Some(false) => { if let Some((_,desc)) = keys.iter_mut().find(|(name,_)| *name == column) { *desc = true; } },
             Some(true) => keys.retain(|(name,_)| *name != column),
         }
-    } else { return TableOrderView { sql: order_by.to_owned(), keys: Some(keys.into_iter().map(|(column,desc)| TableSortKey { column,desc }).collect()) }; }
+    } else { return Ok(TableOrderView { sql: order_by.to_owned(), keys: Some(keys.into_iter().map(|(column,desc)| TableSortKey { column,desc }).collect()) }); }
     let sql = match kind {
         DatabaseKind::Postgres => keys.iter().map(|(column,desc)| format!("{}{}",quote_ident(column),if *desc { " DESC" } else { "" })).collect::<Vec<_>>().join(", "),
         DatabaseKind::SqlServer => sql::tsql::format_order_by(&keys),
     };
-    TableOrderView { sql, keys: Some(keys.into_iter().map(|(column,desc)| TableSortKey { column,desc }).collect()) }
+    Ok(TableOrderView { sql, keys: Some(keys.into_iter().map(|(column,desc)| TableSortKey { column,desc }).collect()) })
 }
 
 pub fn table_browse(kind: DatabaseKind, schema: &str, table: &str, relation: Option<&Relation>, query: &TableQuery, limit: u32, offset: u64) -> Result<String, String> {

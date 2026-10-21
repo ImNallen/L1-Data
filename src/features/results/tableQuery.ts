@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { create } from "zustand";
 import { commands, type ColumnFilter, type FilterOp, type TabId, type TableOrderView, type TableQuery, type TableSortKey } from "../../ipc/bindings";
+import { useCatalog, viewFor } from "../../state/catalog";
 import { sameDb } from "../../state/dbKey";
 import { isTableTab, useWorkspace, type TableTab } from "../../state/workspace";
 import { updateTableQuery } from "../editor/runActions";
@@ -24,12 +25,15 @@ export const takesValue = (op: FilterOp) => FILTER_OPS.find((o) => o.op === op)?
 
 export function useTableOrder(tab: TableTab | null): TableSortKey[] {
   const db = tab?.console.db;
+  const schema = tab?.table.schema;
+  const table = tab?.table.table;
   const orderBy = tab?.table.query.orderBy;
+  const catalogVersion = useCatalog((s) => viewFor(s.views, db)?.catalog.version);
   const [view, setView] = useState<{ key: string; value: TableOrderView } | null>(null);
-  const key = JSON.stringify([db, orderBy]);
+  const key = JSON.stringify([db, schema, table, catalogVersion, orderBy]);
   useEffect(() => {
     let stale = false;
-    if (db && orderBy !== undefined) void commands.tableOrder(db, orderBy, { kind: "Inspect" }).then((res) => {
+    if (db && schema !== undefined && table !== undefined && orderBy !== undefined) void commands.tableOrder(db, schema, table, orderBy, { kind: "Inspect" }).then((res) => {
       if (!stale && res.status === "ok") setView({ key, value: res.data });
     });
     return () => { stale = true; };
@@ -44,10 +48,10 @@ export function cycleTableOrder(tab: TableTab, column: string, additive: boolean
   const queue = orderQueues.get(tab.id) ?? { query: tab.table.query, tail: Promise.resolve() };
   const write = queue.tail.then(async () => {
     const current = useWorkspace.getState().tabs[tab.id];
-    if (!isTableTab(current) || !sameDb(current.console.db, tab.console.db) || current.table.query !== queue.query) return;
-    const res = await commands.tableOrder(current.console.db, queue.query.orderBy, { kind: "Cycle", column, additive });
+    if (!isTableTab(current) || !sameDb(current.console.db, tab.console.db) || current.table.schema !== tab.table.schema || current.table.table !== tab.table.table || current.table.query !== queue.query) return;
+    const res = await commands.tableOrder(current.console.db, current.table.schema, current.table.table, queue.query.orderBy, { kind: "Cycle", column, additive });
     const latest = useWorkspace.getState().tabs[tab.id];
-    if (!isTableTab(latest) || !sameDb(latest.console.db, current.console.db) || latest.table.query !== queue.query) return;
+    if (!isTableTab(latest) || !sameDb(latest.console.db, current.console.db) || latest.table.schema !== current.table.schema || latest.table.table !== current.table.table || latest.table.query !== queue.query) return;
     if (res.status === "error") return useWorkspace.getState().notify(res.error);
     if (res.data.sql !== queue.query.orderBy) {
       queue.query = { ...queue.query, orderBy: res.data.sql };
