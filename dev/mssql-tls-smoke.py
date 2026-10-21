@@ -1,6 +1,4 @@
 #!/usr/bin/env python3
-"""Prove the public Engine SQL Server TLS modes against a disposable server."""
-
 import json
 import os
 from pathlib import Path

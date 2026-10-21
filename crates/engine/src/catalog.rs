@@ -11,4 +11,3 @@ impl Relation {
         self.columns.iter().filter(|c| c.pk).map(|c| c.name.clone()).collect()
     }
 }
-

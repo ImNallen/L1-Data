@@ -461,4 +461,3 @@ pub fn statement_line(statement: u16, sql: &str) -> OutputBody {
     };
     OutputBody::Statement { statement, text }
 }
-
