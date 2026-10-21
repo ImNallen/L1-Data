@@ -114,7 +114,7 @@ async fn restored_targets_catalogs_table_results_and_history_share_the_canonical
     assert_eq!(engine.catalog(db.clone()).await.unwrap().version, catalog.version);
     let orders = catalog.schemas.iter().find(|s| s.name == "dbo").unwrap().relations.iter().find(|r| r.name == "orders").unwrap();
     assert_eq!(engine.relation_detail(alias.clone(), orders.oid).await.unwrap().db, db);
-    assert_eq!(engine.exact_row_count(alias, "dbo".into(), "orders".into(), TableQuery::default()).await.unwrap(), u64::from(meta.row_count));
+    assert_eq!(engine.exact_row_count(table.id, alias, "dbo".into(), "orders".into(), TableQuery::default()).await.unwrap(), u64::from(meta.row_count));
     let reconfigured = engine.console_configure(table.id, console(config.id, "SHOP")).await.unwrap();
     assert_eq!(reconfigured.config.database, "shop");
     assert!(matches!((state.session, reconfigured.session), (SessionState::Open { backend_pid: a }, SessionState::Open { backend_pid: b }) if a == b));

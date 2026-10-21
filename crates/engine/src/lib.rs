@@ -950,10 +950,44 @@ impl Engine {
         }
     }
 
-    /// `count(*)` with the query's filters, on the database's metadata session.
-    pub async fn exact_row_count(&self, db: DatabaseRef, schema: String, table: String, query: TableQuery) -> Result<u64, CountError> {
+    /// Counts on the SQL Server tab's native session, or PostgreSQL's metadata session.
+    pub async fn exact_row_count(&self, tab_id: TabId, db: DatabaseRef, schema: String, table: String, query: TableQuery) -> Result<u64, CountError> {
         let (instance, slot) = self.shared.slot(&db).map_err(|_| CountError::NotConnected)?;
-        let catalog = if instance.config.database_kind == DatabaseKind::SqlServer && !query.filters.is_empty() {
+        if instance.config.database_kind == DatabaseKind::Postgres {
+            let sql = text::table_count(DatabaseKind::Postgres, &schema, &table, None, &query).map_err(|message| CountError::Failed { message })?;
+            let mut meta = slot.meta.lock().await;
+            let session = self.shared.session_in(&instance, &slot, &mut meta).await.map_err(|e| CountError::Failed { message: connection::connect_error_text(&e) })?;
+            return session.count(&sql).await.map_err(|e| CountError::Failed { message: e.message });
+        }
+
+        let s = &self.shared;
+        let failed = |message: &str| CountError::Failed { message: message.into() };
+        let console = s.console(tab_id).ok_or_else(|| failed("The count tab is not configured."))?;
+        let validate = |inner: &console::ConsoleInner| {
+            if !s.instance(db.connection_id).is_some_and(|current| Arc::ptr_eq(&current, &instance)) {
+                return Err(CountError::NotConnected);
+            }
+            if console.closed.load(Ordering::Relaxed)
+                || !s.console(tab_id).is_some_and(|current| Arc::ptr_eq(&current, &console))
+                || inner.config.connection_id != db.connection_id
+                || instance.canonical_database(&inner.config.database) != instance.canonical_database(&db.database)
+            {
+                return Err(failed("The count tab's target changed."));
+            }
+            let current = s.config(inner.config.connection_id).ok_or_else(|| failed("The count tab is not configured."))?;
+            if current.database_kind != DatabaseKind::SqlServer || inner.config.mode != TxnMode::AutoCommit {
+                return Err(failed("SQL Server counts require a native Auto-commit tab."));
+            }
+            if matches!(inner.session, SessionSlot::Busy { .. }) {
+                return Err(failed("The count tab is busy."));
+            }
+            Ok(())
+        };
+        {
+            let inner = console.inner.lock().await;
+            validate(&inner)?;
+        }
+        let catalog = if !query.filters.is_empty() {
             Some(self.shared.catalog(&db).await.map_err(|error| match error {
                 CatalogError::Failed { message } => CountError::Failed { message },
                 _ => CountError::Failed { message: "Cannot load column types for table filters.".into() },
@@ -962,10 +996,31 @@ impl Engine {
             None
         };
         let relation = catalog.as_ref().and_then(|catalog| catalog.relation(&schema, &table));
-        let sql = text::table_count(instance.config.database_kind, &schema, &table, relation, &query).map_err(|message| CountError::Failed { message })?;
-        let mut meta = slot.meta.lock().await;
-        let session = self.shared.session_in(&instance, &slot, &mut meta).await.map_err(|e| CountError::Failed { message: connection::connect_error_text(&e) })?;
-        session.count(&sql).await.map_err(|e| CountError::Failed { message: e.message })
+        let (config, needs_session) = {
+            let inner = console.inner.lock().await;
+            validate(&inner)?;
+            (inner.config.clone(), matches!(inner.session, SessionSlot::Empty | SessionSlot::Lost { .. }))
+        };
+        let sql = text::table_count(DatabaseKind::SqlServer, &schema, &table, relation, &query).map_err(|message| CountError::Failed { message })?;
+        let fresh = if needs_session {
+            let params = s.session_params(config.connection_id, &config.database).map_err(|error| CountError::Failed { message: connection::connect_error_text(&error) })?;
+            Some(Session::open(&params, config.schema.as_deref(), &s.timezone).await.map_err(|error| CountError::Failed { message: connection::connect_error_text(&error) })?)
+        } else { None };
+        let run_id = s.next_run_id();
+        let mut inner = console.inner.lock().await;
+        validate(&inner)?;
+        if let Some(session) = fresh {
+            if matches!(inner.session, SessionSlot::Empty | SessionSlot::Lost { .. }) {
+                inner.session = SessionSlot::Idle(session);
+            }
+        }
+        let (session, stop) = console.take_session(&mut inner, run_id).ok_or_else(|| failed("The count tab is busy."))?;
+        console.publish(&mut inner, s);
+        drop(inner);
+
+        let (reply, result) = tokio::sync::oneshot::channel();
+        s.spawn(console::count_task(console, s.clone(), session, run_id, sql, stop, reply));
+        result.await.unwrap_or_else(|_| Err(failed("The count task stopped.")))
     }
 
     /// Defaults, keys, indexes, and triggers of one relation, read on the database's metadata
@@ -1686,6 +1741,50 @@ mod tests {
         assert!(engine.shared.instance(connection.id).is_none());
         assert!(matches!(legacy.inner.lock().await.session, SessionSlot::Empty));
         assert_eq!(engine.boot().workspace.tabs[0].console.mode, TxnMode::Manual);
+    }
+
+    #[tokio::test]
+    async fn mssql_count_revalidates_the_tab_after_awaiting_its_catalog() {
+        for change in ["target", "close", "disconnect", "legacy mode"] {
+            let (engine, _dir) = engine().await;
+            let refuser = Refuser::start();
+            let config = engine.save_connection(ConnectionDraft {
+                database_kind: DatabaseKind::SqlServer, host: "127.0.0.1".into(), port: refuser.port, ..draft("count setup race")
+            }).await.unwrap();
+            let db = DatabaseRef { connection_id: config.id, database: config.database.clone() };
+            let catalog = Arc::new(Catalog { database_kind: DatabaseKind::SqlServer, db: db.clone(), version: 1, default_schema: Some("dbo".into()), schemas: Vec::new() });
+            let home = DbSlot::new(db.clone());
+            home.set(CatalogSlot::Ready(catalog.clone()));
+            let instance = Arc::new(Instance::new(config.clone(), ServerInfo { version: "count fixture".into(), version_num: 0, encoding: "UTF8".into() },
+                db.database.clone(), vec![connection::DatabaseInfo { name: db.database.clone(), system: false, access: DbAccess::Ok }], ConnectionView::initial(), home));
+            engine.shared.set_connection(config.id, ConnSlot::Connected(instance.clone()));
+            let tab = TabId(uuid::Uuid::new_v4());
+            let c = ConsoleConfig { connection_id: config.id, database: db.database.clone(), schema: None, mode: TxnMode::AutoCommit };
+            engine.console_configure(tab, c.clone()).await.unwrap();
+            let slot = instance.slot(&db.database).unwrap();
+            let meta = slot.meta.lock().await;
+            slot.set(CatalogSlot::Opening);
+            let query = TableQuery { filters: vec![ColumnFilter { column: "id".into(), op: FilterOp::Eq, value: "1".into() }], ..Default::default() };
+            let mut count = Box::pin(engine.exact_row_count(tab, db, "dbo".into(), "unused_count_table".into(), query));
+            assert!(futures_util::poll!(count.as_mut()).is_pending(), "count must wait for the catalog");
+            match change {
+                "target" => { engine.console_configure(tab, ConsoleConfig { database: "unconfigured_count_target".into(), ..c }).await.unwrap(); }
+                "close" => { engine.console_close(tab, true).await.unwrap(); }
+                "disconnect" => { engine.disconnect(config.id, true).await.unwrap(); }
+                "legacy mode" => { engine.shared.console(tab).unwrap().inner.lock().await.config.mode = TxnMode::Manual; }
+                _ => unreachable!(),
+            }
+            slot.set(CatalogSlot::Ready(catalog));
+            drop(meta);
+            let result = tokio::time::timeout(Duration::from_secs(5), count).await.unwrap();
+            match change {
+                "disconnect" => assert!(matches!(result, Err(CountError::NotConnected)), "{result:?}"),
+                "legacy mode" => assert!(matches!(result, Err(CountError::Failed { ref message }) if message.contains("native Auto-commit")), "{result:?}"),
+                _ => assert!(matches!(result, Err(CountError::Failed { ref message }) if message.contains("target changed")), "{result:?}"),
+            }
+            assert_eq!(refuser.accepted.load(Ordering::SeqCst), 0, "stale count must not open a native session");
+            engine.shutdown().await;
+        }
     }
 
     #[cfg(feature = "mssql-tests")]

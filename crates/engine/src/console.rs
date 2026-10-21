@@ -424,6 +424,42 @@ pub async fn run_task(console: Arc<Console>, shared: Arc<Shared>, mut session: S
     Ok(())
 }
 
+pub async fn count_task(console: Arc<Console>, shared: Arc<Shared>, mut session: Session, run_id: RunId, sql: String, stop: Arc<AtomicBool>, mut reply: tokio::sync::oneshot::Sender<Result<u64, CountError>>) {
+    let result = if stop.load(Ordering::Relaxed) {
+        Err(crate::session::error("Count cancelled."))
+    } else {
+        tokio::select! {
+            biased;
+            _ = reply.closed() => Err(crate::session::error("Count request was abandoned.")),
+            result = session.count(&sql) => result,
+        }
+    };
+    let fatal = result.as_ref().err().filter(|e| e.severity == "FATAL").map(|e| e.message.clone());
+    let lost = session.closed_reason_settled(fatal).await;
+    let retired = lost.is_some();
+    let mut released = session.closed_watch();
+    let txn = session.observed_txn().expect("SQL Server observes native transaction presence");
+    let edited = console.edit(&shared, run_id, |inner| {
+        let due = Console::return_session(inner, session, txn, lost);
+        due.or_else(|| inner.finish_refreshes(false))
+    }).await;
+    let result = match edited {
+        Err(_) => Err(CountError::Failed { message: "The count tab's session was discarded.".into() }),
+        Ok(due) => {
+            if let Some((db, owed)) = due {
+                if retired { while released.changed().await.is_ok() {} }
+                shared.schedule_refreshes(db, owed);
+            }
+            if stop.load(Ordering::Relaxed) {
+                Err(CountError::Failed { message: "Count cancelled.".into() })
+            } else {
+                result.map_err(|e| CountError::Failed { message: e.message })
+            }
+        }
+    };
+    let _ = reply.send(result);
+}
+
 async fn set_status(console: &Console, shared: &Shared, run_id: RunId, index: u16, status: StmtStatus) -> Result<(), Orphaned> {
     console.edit(shared, run_id, |inner| Console::statements_mut(inner)[index as usize].status = status).await
 }

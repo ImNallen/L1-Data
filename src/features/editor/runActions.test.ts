@@ -11,7 +11,7 @@ import { markDeleted, pendingCount, setCell, useTableEdits } from "../../state/t
 import { useWorkspace, workspaceSnapshot } from "../../state/workspace";
 import { gridEditing } from "../results/ResultGrid";
 import { dropEditor, editorStateOf, insertAtCursor, moveCursor, seedEditor, textOf } from "./editorStates";
-import { browseTemplate, formatActive, loadTableOnce, openTableTab, saveSettings, setTabMode, setTabTarget, runOrChoose, openSqlTab, isBrowsing, submitEdits } from "./runActions";
+import { browseTemplate, formatActive, lastTablePage, loadTableOnce, openTableTab, saveSettings, setTabMode, setTabTarget, runOrChoose, openSqlTab, isBrowsing, submitEdits } from "./runActions";
 
 afterEach(() => {
   vi.unstubAllGlobals();
@@ -112,6 +112,77 @@ async function openWithConsole(mode: "AutoCommit" | "Manual" = "AutoCommit") {
   useLive.setState({ consoles: { [id]: console } });
   return id;
 }
+
+it("Last counts on its own tab and loads the exact last table page", async () => {
+  const id = await openWithConsole();
+  const requests: { cmd: string; args: unknown }[] = [];
+  let finish: (count: number) => void = () => { throw new Error("count was not requested"); };
+  mockIPC((cmd, args) => {
+    requests.push({ cmd, args });
+    if (cmd === "exact_row_count") return new Promise<number>((resolve) => { finish = resolve; });
+    if (cmd === "console_run") return { runId: 7, statements: [] };
+    return null;
+  });
+  const pending = lastTablePage(id);
+  expect(requests).toEqual([{ cmd: "exact_row_count", args: { tabId: id, db: orders.db, schema: "public", table: "orders", query: { orderBy: "", filters: [], where: "" } } }]);
+  expect(useWorkspace.getState().tabs[id]?.table?.page).toBe(0);
+  finish(1251);
+  await pending;
+  expect(requests[1]).toEqual({ cmd: "console_run", args: { tabId: id, request: { kind: "tablePage", schema: "public", table: "orders", page: 2, query: { orderBy: "", filters: [], where: "" } } } });
+  expect(useWorkspace.getState().tabs[id]?.table).toMatchObject({ page: 2, exactRowCount: 1251 });
+});
+
+it.each(["target", "query", "page", "table", "text", "close", "page size"])("Last discards a deferred count after its %s changes", async (change) => {
+  const id = await openWithConsole();
+  const requests: string[] = [];
+  let finish: (count: number) => void = () => { throw new Error("count was not requested"); };
+  mockIPC((cmd) => {
+    requests.push(cmd);
+    if (cmd === "exact_row_count") return new Promise<number>((resolve) => { finish = resolve; });
+    return null;
+  });
+  const pending = lastTablePage(id);
+  const state = useWorkspace.getState();
+  if (change === "target") state.patchConsole(id, { db: { connectionId: "other", database: "reporting" } });
+  if (change === "query") state.setTableQuery(id, { orderBy: "id DESC", filters: [], where: "id > 10" });
+  if (change === "page") state.setTablePage(id, 3);
+  if (change === "table") {
+    const tab = state.tabs[id]!;
+    useWorkspace.setState({ tabs: { ...state.tabs, [id]: { ...tab, table: { ...tab.table!, table: "customers" } } } });
+  }
+  if (change === "text") insertAtCursor(id, "SELECT 42; ");
+  if (change === "close") { state.closeTab(id); dropEditor(id); }
+  if (change === "page size") state.setSettings({ ...state.settings, tablePageSize: 100 });
+  const current = useWorkspace.getState().tabs[id];
+  const text = change === "close" ? undefined : textOf(id);
+  const consoles = useLive.getState().consoles;
+  finish(1251);
+  await pending;
+  expect(requests).toEqual(["exact_row_count"]);
+  expect(useWorkspace.getState().tabs[id]).toBe(current);
+  expect(useLive.getState().consoles).toBe(consoles);
+  if (text !== undefined) expect(textOf(id)).toBe(text);
+});
+
+it("Last drops its counted page if the query changes during console setup", async () => {
+  const id = await openWithConsole();
+  useLive.setState({ consoles: {} });
+  const requests: string[] = [];
+  let configure: () => void = () => { throw new Error("console setup was not requested"); };
+  mockIPC((cmd) => {
+    requests.push(cmd);
+    if (cmd === "exact_row_count") return 1251;
+    if (cmd === "console_configure") return new Promise<null>((resolve) => { configure = () => resolve(null); });
+    return null;
+  });
+  const pending = lastTablePage(id);
+  await vi.waitFor(() => expect(requests).toContain("console_configure"));
+  useWorkspace.getState().setTableQuery(id, { orderBy: "", filters: [], where: "id = 1" });
+  configure();
+  await pending;
+  expect(requests).toEqual(["exact_row_count", "console_configure"]);
+  expect(useWorkspace.getState().tabs[id]?.table).toMatchObject({ page: 0, exactRowCount: undefined, query: { where: "id = 1" } });
+});
 
 it("switches a table tab to manual transactions through console_configure", async () => {
   vi.stubGlobal("window", { crypto });

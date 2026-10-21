@@ -382,11 +382,12 @@ async fn connect_reports_server_and_catalog_has_the_mockup_tables() {
 #[tokio::test]
 async fn exact_row_count_is_exact_and_reports_missing_tables() {
     let h = Harness::start().await;
-    assert!(matches!(h.engine.exact_row_count(h.db(), "public".into(), "coupons".into(), TableQuery::default()).await, Err(CountError::NotConnected)));
+    let tab = TabId(uuid::Uuid::new_v4());
+    assert!(matches!(h.engine.exact_row_count(tab, h.db(), "public".into(), "coupons".into(), TableQuery::default()).await, Err(CountError::NotConnected)));
     h.engine.connect(h.conn).await.unwrap();
-    assert_eq!(h.engine.exact_row_count(h.db(), "public".into(), "coupons".into(), TableQuery::default()).await.unwrap(), 3);
-    assert_eq!(h.engine.exact_row_count(h.db(), "lab".into(), "type_zoo".into(), TableQuery::default()).await.unwrap(), 2);
-    let missing = h.engine.exact_row_count(h.db(), "public".into(), "nope".into(), TableQuery::default()).await;
+    assert_eq!(h.engine.exact_row_count(tab, h.db(), "public".into(), "coupons".into(), TableQuery::default()).await.unwrap(), 3);
+    assert_eq!(h.engine.exact_row_count(tab, h.db(), "lab".into(), "type_zoo".into(), TableQuery::default()).await.unwrap(), 2);
+    let missing = h.engine.exact_row_count(tab, h.db(), "public".into(), "nope".into(), TableQuery::default()).await;
     assert!(matches!(&missing, Err(CountError::Failed { message }) if message.contains("does not exist")), "{missing:?}");
 }
 
@@ -989,7 +990,7 @@ async fn table_pages_sort_and_filter_in_the_engine() {
     assert!(rows.iter().all(|r| r[3].as_deref() == Some("APAC") && r[1].as_deref().unwrap().starts_with("user1")));
     let created: Vec<&str> = rows.iter().map(|r| r[4].as_deref().unwrap()).collect();
     assert!(created.windows(2).all(|w| w[0] >= w[1]), "newest first");
-    assert_eq!(h.engine.exact_row_count(h.db(), "public".into(), "customers".into(), query).await.unwrap(), u64::from(expected));
+    assert_eq!(h.engine.exact_row_count(tab, h.db(), "public".into(), "customers".into(), query).await.unwrap(), u64::from(expected));
 
     for smuggled in [
         TableQuery { r#where: "true; drop table customers".into(), ..Default::default() },
@@ -1015,7 +1016,7 @@ async fn sql_comments_in_where_and_order_by_keep_the_page_limit() {
     let meta = Harness::result(&state, 0);
     assert_eq!(meta.row_count, 500, "the comment must not swallow LIMIT");
     let apac = h.scalar(tab, "select count(*) from customers where region = 'APAC'").await.parse::<u64>().unwrap();
-    assert_eq!(h.engine.exact_row_count(h.db(), "public".into(), "customers".into(), query).await.unwrap(), apac);
+    assert_eq!(h.engine.exact_row_count(tab, h.db(), "public".into(), "customers".into(), query).await.unwrap(), apac);
 }
 
 #[tokio::test]
@@ -1134,7 +1135,7 @@ async fn ddl_burst_coalesces_refreshes() {
     let (engine, db, held) = (h.engine.clone(), h.db(), gate.clone());
     let slow = tokio::spawn(async move {
         let query = TableQuery { r#where: "pg_sleep(3)::text = ''".into(), ..Default::default() };
-        engine.exact_row_count(db, "public".into(), held, query).await
+        engine.exact_row_count(tab, db, "public".into(), held, query).await
     });
     tokio::time::sleep(Duration::from_millis(200)).await;
     let tables: Vec<String> = (0..30).map(|i| format!("{}_{i}", unique("t_burst"))).collect();

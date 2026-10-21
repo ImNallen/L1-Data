@@ -213,7 +213,7 @@ def check(bridge, work, assistant=True):
         assert bridge.rows(bridge.run(observer, f"SELECT [value], [amount] FROM {qualified} WHERE id = 1")) == [[[original + " changed", precise]]]
         refused_apply(deletes=[[cell("id", "1")]])
         filtered = {**query, "filters": [{"column": "value", "op": "Contains", "value": "%_[x]"}]}
-        assert bridge.invoke("exact_row_count", db=db, schema="lab", table=table, query=filtered) == 1
+        assert bridge.invoke("exact_row_count", tabId=tab, db=db, schema="lab", table=table, query=filtered) == 1
         accepted = bridge.invoke("console_run", tabId=tab, request={"kind": "tablePage", "schema": "lab", "table": table, "page": 0, "query": filtered})
         assert bridge.rows(bridge.finished(tab, accepted["runId"])) == [[["1", original + " changed", precise, cash]]]
         unsafe = {**query, "where": f"1=1 DELETE FROM {qualified}"}

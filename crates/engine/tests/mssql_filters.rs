@@ -93,7 +93,7 @@ impl Harness {
     async fn filter(&mut self, table: &str, column: &str, op: FilterOp, value: &str, expected: &[&str]) {
         let query = TableQuery { filters: vec![ColumnFilter { column: column.into(), op, value: value.into() }], ..Default::default() };
         let rows = self.page(table, query.clone()).await;
-        let count = self.engine.exact_row_count(self.db.clone(), "dbo".into(), table.into(), query).await.unwrap();
+        let count = self.engine.exact_row_count(self.tab, self.db.clone(), "dbo".into(), table.into(), query).await.unwrap();
         assert_eq!(rows.iter().map(|r| r[0].as_deref().unwrap()).collect::<Vec<_>>(), expected, "{column} {op:?} {value}");
         assert_eq!(count, expected.len() as u64, "{column} {op:?} {value}");
     }
@@ -153,7 +153,7 @@ async fn displayed_text_lobs_and_xml_support_page_and_count_filters() {
             h.filter(&table, column, FilterOp::StartsWith, &value[..60], &["1"]).await;
             for op in [FilterOp::Contains, FilterOp::StartsWith] {
                 let query = TableQuery { filters: vec![ColumnFilter { column: column.into(), op, value: value.into() }], ..Default::default() };
-                assert!(matches!(h.engine.exact_row_count(h.db.clone(), "dbo".into(), table.clone(), query.clone()).await,
+                assert!(matches!(h.engine.exact_row_count(h.tab, h.db.clone(), "dbo".into(), table.clone(), query.clone()).await,
                     Err(CountError::Failed { message }) if message.contains("4000")));
                 assert!(matches!(h.engine.console_run(h.tab, RunRequest::TablePage { schema: "dbo".into(), table: table.clone(), page: 0, query }).await,
                     Err(RunError::BadFilter)));
@@ -204,7 +204,7 @@ async fn approximate_numbers_keep_typed_equality_and_refuse_inexact_text_search(
             h.filter(&table, column, FilterOp::IsNull, "ignored", &["3"]).await;
             for op in [FilterOp::Contains, FilterOp::StartsWith] {
                 let query = TableQuery { filters: vec![ColumnFilter { column: column.into(), op, value: selected.into() }], ..Default::default() };
-                let count = h.engine.exact_row_count(h.db.clone(), "dbo".into(), table.clone(), query.clone()).await;
+                let count = h.engine.exact_row_count(h.tab, h.db.clone(), "dbo".into(), table.clone(), query.clone()).await;
                 assert!(matches!(&count, Err(CountError::Failed { message }) if message.contains("canonical") && message.contains("comparison")), "{column} {op:?}: {count:?}");
                 assert!(matches!(h.engine.console_run(h.tab, RunRequest::TablePage { schema: "dbo".into(), table: table.clone(), page: 0, query }).await,
                     Err(RunError::BadFilter)));

@@ -148,10 +148,10 @@ async fn catalogs_details_browse_counts_and_exact_text_use_sql_server() {
     assert!(csv.contains("12345678901234567890.123456789012"));
     assert!(csv.contains(&"😀".repeat(3000)));
     let query = TableQuery { filters: vec![ColumnFilter { column: "a]b".into(), op: FilterOp::Contains, value: "%_[".into() }], ..Default::default() };
-    assert_eq!(h.engine.exact_row_count(h.db(), "lab".into(), "awkward names".into(), query).await.unwrap(), 1);
+    assert_eq!(h.engine.exact_row_count(h.tab, h.db(), "lab".into(), "awkward names".into(), query).await.unwrap(), 1);
     for injection in ["1=1 DELETE FROM dbo.orders", "1=1; SELECT 2", "1=1 -- ignored"] {
         let query = TableQuery { r#where: injection.into(), ..Default::default() };
-        assert!(h.engine.exact_row_count(h.db(), "dbo".into(), "orders".into(), query).await.is_err(), "{injection}");
+        assert!(h.engine.exact_row_count(h.tab, h.db(), "dbo".into(), "orders".into(), query).await.is_err(), "{injection}");
     }
 }
 

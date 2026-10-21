@@ -87,7 +87,7 @@ impl Harness {
 
     async fn filtered(&mut self, table: &str, column: &str, op: FilterOp, value: &str) -> Vec<Vec<Option<String>>> {
         let query = TableQuery { filters: vec![ColumnFilter { column: column.into(), op, value: value.into() }], ..Default::default() };
-        let count = self.engine.exact_row_count(self.db.clone(), "dbo".into(), table.into(), query.clone()).await.unwrap();
+        let count = self.engine.exact_row_count(self.tab, self.db.clone(), "dbo".into(), table.into(), query.clone()).await.unwrap();
         let accepted = self.engine.console_run(self.tab, RunRequest::TablePage { schema: "dbo".into(), table: table.into(), page: 0, query }).await.unwrap();
         let state = self.finish(accepted).await;
         let rows = self.rows(&state);
@@ -183,7 +183,7 @@ async fn selected_binary_filters_compare_bytes_and_search_displayed_hex() {
             [("bytes", "DEADBEEF"), ("bytes", "0xABC"), ("bytes", "0x0001020304"), ("bytes", "0x'; DROP TABLE dbo.orders;--"), ("missing", "1")]
         {
             let query = TableQuery { filters: vec![ColumnFilter { column: column.into(), op: FilterOp::Eq, value: value.into() }], ..Default::default() };
-            assert!(h.engine.exact_row_count(h.db.clone(), "dbo".into(), table.clone(), query.clone()).await.is_err());
+            assert!(h.engine.exact_row_count(h.tab, h.db.clone(), "dbo".into(), table.clone(), query.clone()).await.is_err());
             assert!(matches!(
                 h.engine.console_run(h.tab, RunRequest::TablePage { schema: "dbo".into(), table: table.clone(), page: 0, query }).await,
                 Err(RunError::BadFilter)

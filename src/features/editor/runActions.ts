@@ -123,7 +123,13 @@ export async function formatActive(): Promise<void> {
   applyFormatEdit(id, res.data);
 }
 
-type PageTarget = { page: number; exactRowCount?: number };
+type CountContext = { tab: TableTab; text: string; pageSize: number };
+type PageTarget = { page: number; exactRowCount?: number; countContext?: CountContext };
+
+function isCurrentCount({ tab, text, pageSize }: CountContext): boolean {
+  const current = ws().tabs[tab.id];
+  return isTableTab(current) && current.console === tab.console && current.table === tab.table && textOf(tab.id) === text && ws().settings.tablePageSize === pageSize;
+}
 
 // A page change is saved on the tab only once the engine accepts the run. One that arrives mid-run waits for that
 // run to finish, and the latest one wins. It runs only as a page load, never as the editor's script.
@@ -132,12 +138,14 @@ const queuedPages = new Map<TabId, PageTarget>();
 async function runTab(tabId: TabId, target?: PageTarget, script?: RunTarget): Promise<void> {
   const tab = ws().tabs[tabId];
   if (!tab) return;
+  if (target?.countContext && !isCurrentCount(target.countContext)) return;
   if (target && !isBrowsing(tab)) return;
   if (isRunning(useLive.getState().consoles[tabId])) {
     if (target) queuedPages.set(tabId, target);
     return;
   }
   if (!(await ensureConsole(tab)) || (target && !isBrowsing(tab))) return;
+  if (target?.countContext && !isCurrentCount(target.countContext)) return;
 
   let request: RunRequest;
   let text = "";
@@ -156,6 +164,7 @@ async function runTab(tabId: TabId, target?: PageTarget, script?: RunTarget): Pr
     notify(runErrorText(res.error));
     return;
   }
+  if (target?.countContext && !isCurrentCount(target.countContext)) return;
   showResults();
   if (target && request.kind === "tablePage") ws().setTablePage(tabId, target.page, target.exactRowCount);
   if (request.kind === "script") {
@@ -324,14 +333,16 @@ export async function saveSettings(patch: Partial<Settings>): Promise<void> {
 
 export async function lastTablePage(tabId: TabId): Promise<void> {
   const tab = ws().tabs[tabId];
-  if (!isTableTab(tab)) return;
+  if (!isTableTab(tab) || !isBrowsing(tab)) return;
   const { schema, table, query } = tab.table;
-  const res = await commands.exactRowCount(tab.console.db, schema, table, query);
+  const countContext = { tab, text: textOf(tabId), pageSize: ws().settings.tablePageSize };
+  const res = await commands.exactRowCount(tabId, tab.console.db, schema, table, query);
+  if (!isCurrentCount(countContext)) return;
   if (res.status === "error") {
     notify(res.error.kind === "NotConnected" ? "Connect to jump to the last page." : res.error.message);
     return;
   }
-  setTablePage(tabId, Math.max(0, Math.ceil(res.data / ws().settings.tablePageSize) - 1), res.data);
+  await runTab(tabId, { page: Math.max(0, Math.ceil(res.data / countContext.pageSize) - 1), exactRowCount: res.data, countContext });
 }
 
 export function setTablePage(tabId: TabId, page: number, exactRowCount?: number): void {
