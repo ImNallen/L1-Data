@@ -54,13 +54,14 @@ async function ensureConsole(tab: Tab): Promise<boolean> {
     return false;
   }
   const live = useLive.getState().consoles[tab.id];
-  if (live && sameConfig(live.config, config)) return true;
-  const res = await commands.consoleConfigure(tab.id, config);
-  if (res.status === "error") {
-    notify(configureErrorText(res.error));
-    return false;
+  if (!live || !sameConfig(live.config, config)) {
+    const res = await commands.consoleConfigure(tab.id, config);
+    if (res.status === "error") {
+      notify(configureErrorText(res.error));
+      return false;
+    }
   }
-  return true;
+  return ws().tabs[tab.id]?.console === tab.console;
 }
 
 const sent = new Map<TabId, { runId: number; text: string }>();

@@ -250,3 +250,22 @@ it("does not run an outline response after switching the target with unchanged t
   expect(requests).toEqual([{ text: "select 1", cursor: 0, databaseKind: "SqlServer" }]);
   expect(runs).toEqual([]);
 });
+
+it.each(["database", "mode"])("drops a pending run when its %s changes during console setup", async (change) => {
+  const calls: string[] = [];
+  let finish: () => void = () => { throw new Error("console setup was not requested"); };
+  const id = openSqlTab({ db: { connectionId: "c1", database: "shop" }, text: "SELECT 1" });
+  mockIPC((cmd) => {
+    calls.push(cmd);
+    if (cmd === "console_configure") return new Promise<null>((resolve) => { finish = () => resolve(null); });
+    if (cmd === "script_outline") return { statements: [{ from: 0, to: 8 }], atCursor: 0, unitKind: "Statement" };
+    return null;
+  });
+  const pending = runOrChoose();
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  if (change === "database") await setTabTarget(id, { connectionId: "ms", database: "master" });
+  else await setTabMode(id, "Manual");
+  finish();
+  await pending;
+  expect(calls).toEqual(["console_configure"]);
+});
