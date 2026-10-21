@@ -2,7 +2,7 @@ import * as Menu from "@radix-ui/react-dropdown-menu";
 import { IconChevronDown, IconIndentIncrease, IconPlayerPlayFilled, IconPlayerStopFilled } from "@tabler/icons-react";
 import { ConnectionColorDot } from "../features/connections/connectionColors";
 import { cancelActive, endTransaction, formatActive, runOrChoose, setTabMode, setTabTarget } from "../features/editor/runActions";
-import type { TxnMode } from "../ipc/bindings";
+import type { TransactionLoss, TxnMode } from "../ipc/bindings";
 import { homeDb } from "../state/dbKey";
 import { useLive } from "../state/live";
 import { connectionTone, hasUncommittedWork, isRunning } from "../state/status";
@@ -12,6 +12,11 @@ import { SidebarToggle, WindowEdgeActions, windowEdgeInset, windowLeadingInset }
 import type { HostedWindow } from "./hostedWindow";
 
 const MODE_LABEL: Record<TxnMode, string> = { AutoCommit: "Auto-commit", Manual: "Manual" };
+const LOSS_LABEL: Record<TransactionLoss, { label: string; title: string } | null> = {
+  None: null,
+  RolledBack: { label: "rolled back", title: "Transaction rolled back: connection lost" },
+  Unknown: { label: "session reset", title: "Session reset. Earlier commits remain committed; the last transaction outcome may be unknown." },
+};
 
 export function TopBar({ hosted }: { hosted: HostedWindow | null }) {
   const tab = useWorkspace((s) => (s.active ? s.tabs[s.active] : undefined));
@@ -25,7 +30,7 @@ export function TopBar({ hosted }: { hosted: HostedWindow | null }) {
   const txn = liveConsole?.txn;
   const txnDepth = liveConsole?.txnDepth;
   const sqlServer = config?.databaseKind === "SqlServer";
-  const txnLost = liveConsole?.session.kind === "Lost" && liveConsole.session.txnLost;
+  const loss = liveConsole?.session.kind === "Lost" ? LOSS_LABEL[liveConsole.session.transaction] : null;
 
   return (
     <header
@@ -73,14 +78,14 @@ export function TopBar({ hosted }: { hosted: HostedWindow | null }) {
         <Menu.Root modal={false}>
           <Menu.Trigger
             data-testid="tx-mode"
-            title={txnLost ? "Transaction rolled back: connection lost" : undefined}
+            title={loss?.title}
             className="inline-flex h-7 items-center gap-1 rounded-md pr-1.5 pl-2 text-ui-12.5 text-muted outline-none hover:bg-hover hover:text-fg data-[state=open]:bg-hover data-[state=open]:text-fg"
           >
             {MODE_LABEL[tab.console.mode]}
             {txn && txn !== "Idle" && (
               <span className={txn === "Aborted" ? "text-danger" : "text-fg"}> · {txn === "Aborted" ? "aborted" : "in transaction"}{txnDepth !== null && txnDepth !== undefined && txnDepth > 1 ? ` (${txnDepth})` : ""}</span>
             )}
-            {txnLost && <span className="text-danger"> · rolled back</span>}
+            {loss && <span className="text-danger"> · {loss.label}</span>}
             <IconChevronDown size={13} />
           </Menu.Trigger>
           <MenuContent align="end">

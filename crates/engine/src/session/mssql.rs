@@ -157,7 +157,7 @@ impl MsSession {
         MsCancel(self.cancel.clone())
     }
     pub(super) fn closed_reason(&self) -> Option<String> {
-        self.closed.borrow().clone().or_else(|| (*self.cancel.borrow() != 0).then(|| "Cancelled SQL Server session was retired; its open transaction was lost.".into()))
+        self.closed.borrow().clone().or_else(|| (*self.cancel.borrow() != 0).then(|| "Cancelled SQL Server session was retired; earlier commits remain committed; the last transaction outcome may be unknown.".into()))
     }
     pub(super) fn closed_watch(&self) -> watch::Receiver<Option<String>> {
         self.closed.subscribe()
@@ -198,7 +198,7 @@ impl MsSession {
             }
             if cancelled {
                 let _ = tokio::time::timeout(ATTENTION_TIMEOUT, lease.client().cancel_query()).await;
-                lease.retire("Cancelled SQL Server operation. The session was retired and its open transaction was lost.".into());
+                lease.retire("Cancelled SQL Server operation. The session was retired and earlier commits remain committed; the last transaction outcome may be unknown.".into());
                 yield Err(error("Cancelled"));
                 return;
             }

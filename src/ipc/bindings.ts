@@ -931,7 +931,7 @@ export type ServerInfo = {
 	encoding: string,
 };
 
-export type SessionState = { kind: "None" } | { kind: "Open"; backendPid: number } | { kind: "Lost"; reason: string; txnLost: boolean };
+export type SessionState = { kind: "None" } | { kind: "Open"; backendPid: number } | { kind: "Lost"; reason: string; transaction: TransactionLoss };
 
 export type Settings = {
 	maxRows: number,
@@ -1065,6 +1065,8 @@ export type ToolStatus = { kind: "Running" } | { kind: "AwaitingApproval"; appro
 export type ToolUse = { kind: "DescribeTables"; tables: string[] } | { kind: "SearchCatalog"; query: string } | { kind: "RunQuery"; sql: string; purpose: string; relations: string[] } | 
 /**  A tool the engine does not serve. Always refused. */
 { kind: "Other"; name: string };
+
+export type TransactionLoss = "None" | "RolledBack" | "Unknown";
 
 export type TriggerEvent = "Insert" | "Update" | "Delete" | "Truncate";
 

@@ -649,7 +649,7 @@ async fn terminated_backend_becomes_lost_and_the_next_run_reopens() {
     let oracle = h.oracle().await;
     oracle.simple_query(&format!("select pg_terminate_backend({backend_pid})")).await.unwrap();
     let state = h.run(tab, "select 1").await;
-    assert!(matches!(state.session, SessionState::Lost { txn_lost: true, .. }), "{:?}", state.session);
+    assert!(matches!(state.session, SessionState::Lost { transaction: TransactionLoss::RolledBack, .. }), "{:?}", state.session);
     assert_eq!(state.txn, TxnState::Idle);
     assert!(h.outputs(tab).iter().any(|o| matches!(o, OutputBody::Info { message } if message.starts_with("Transaction rolled back"))));
 
@@ -668,7 +668,7 @@ async fn terminated_backend_becomes_lost_and_the_next_run_reopens() {
     oracle.simple_query(&format!("select pg_terminate_backend({auto_pid})")).await.unwrap();
     tokio::time::sleep(Duration::from_millis(200)).await;
     let state = h.run(auto, "select 3").await;
-    assert!(matches!(state.session, SessionState::Lost { txn_lost: false, .. }), "{:?}", state.session);
+    assert!(matches!(state.session, SessionState::Lost { transaction: TransactionLoss::None, .. }), "{:?}", state.session);
     assert_eq!(h.scalar(auto, "select 4").await, "4", "an idle lost session is replaced transparently");
 }
 

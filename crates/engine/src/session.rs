@@ -87,6 +87,13 @@ impl Session {
             Driver::SqlServer(s) => Some(s.txn),
         }
     }
+    pub fn transaction_loss(&self, txn: TxnState) -> TransactionLoss {
+        match &self.driver {
+            Driver::SqlServer(_) => TransactionLoss::Unknown,
+            Driver::Postgres(_) if txn != TxnState::Idle => TransactionLoss::RolledBack,
+            Driver::Postgres(_) => TransactionLoss::None,
+        }
+    }
     pub fn cancel_handle(&self) -> CancelHandle {
         match &self.driver {
             Driver::Postgres(p) => CancelHandle(CancelDriver::Postgres(p.cancel_handle())),

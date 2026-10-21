@@ -72,7 +72,7 @@ pub enum SessionSlot {
     },
     Lost {
         reason: String,
-        txn_lost: bool,
+        transaction: TransactionLoss,
     },
 }
 
@@ -122,7 +122,7 @@ impl Console {
                 SessionSlot::Empty => SessionState::None,
                 SessionSlot::Idle(s) => SessionState::Open { backend_pid: s.backend_pid },
                 SessionSlot::Busy { backend_pid, .. } => SessionState::Open { backend_pid: *backend_pid },
-                SessionSlot::Lost { reason, txn_lost } => SessionState::Lost { reason: reason.clone(), txn_lost: *txn_lost },
+                SessionSlot::Lost { reason, transaction } => SessionState::Lost { reason: reason.clone(), transaction: *transaction },
             },
             txn: inner.txn,
             txn_depth: inner.txn_depth,
@@ -186,11 +186,11 @@ impl Console {
         inner.txn_depth = session.txn_depth();
         inner.session = match lost {
             Some(reason) => {
-                let txn_lost = inner.txn != TxnState::Idle || session.txn_depth().is_some();
+                let transaction = session.transaction_loss(txn);
                 inner.txn = TxnState::Idle;
                 inner.txn_depth = None;
                 inner.owed = Owed::default();
-                SessionSlot::Lost { reason, txn_lost }
+                SessionSlot::Lost { reason, transaction }
             }
             None => SessionSlot::Idle(session),
         };
@@ -358,7 +358,11 @@ pub async fn run_task(console: Arc<Console>, shared: Arc<Shared>, mut session: S
         for s in statements.iter_mut().skip(index) { if matches!(s.status, StmtStatus::Pending) { s.status = StmtStatus::Skipped; } }
         let statements = statements.clone();
         if let Some(reason) = &lost {
-            let message = if txn != TxnState::Idle { if plan.connection.database_kind == DatabaseKind::Postgres { format!("Transaction rolled back: connection lost ({reason})") } else { format!("Transaction lost: connection retired ({reason})") } } else { format!("Session reset: connection lost ({reason})") };
+            let message = match session.transaction_loss(txn) {
+                TransactionLoss::RolledBack => format!("Transaction rolled back: connection lost ({reason})"),
+                TransactionLoss::None => format!("Session reset: connection lost ({reason})"),
+                TransactionLoss::Unknown => format!("Session reset: earlier commits remain committed; the last transaction outcome may be unknown ({reason})"),
+            };
             console.output(&shared, run_id, OutputBody::Info { message });
         }
         Console::return_session(inner, session, txn, lost);

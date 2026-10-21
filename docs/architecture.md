@@ -254,7 +254,8 @@ pub enum TxnState { Idle, Active, Aborted }   // Aborted: only ROLLBACK [TO SAVE
 
 #[derive(Clone, Serialize, Type)]
 #[serde(tag = "kind")]
-pub enum SessionState { None, Open { backend_pid: i32 }, Lost { reason: String, txn_lost: bool } }
+pub enum SessionState { None, Open { backend_pid: i32 }, Lost { reason: String, transaction: TransactionLoss } }
+pub enum TransactionLoss { None, RolledBack, Unknown }
 
 #[derive(Clone, Serialize, Type)]
 pub struct ConsoleState {
@@ -724,7 +725,7 @@ pub enum SessionSlot {
     Empty,
     Idle(Session),
     Busy { run_id: RunId, backend_pid: i32, cancel: CancelHandle, stop: Arc<AtomicBool> },  // a run task or a commit owns the Session
-    Lost { reason: String, txn_lost: bool },
+    Lost { reason: String, transaction: TransactionLoss },
 }
 
 // session.rs
@@ -817,7 +818,7 @@ async fn run_task(console: Arc<Console>, shared: Arc<Shared>, mut session: Sessi
         if outcome.failed() && settings.stop_on_error { mark rest Skipped; break }
         if ok { owed.add(kind.invalidates()) }; if txn == Idle { shared.schedule_refreshes(console db, owed.take()) }  // inside a txn: owed until commit
     }
-    // if session.closed has Some(reason): slot = Lost { reason, txn_lost: txn != Idle }; txn = Idle
+    // if session.closed has Some(reason): slot = Lost { reason, transaction: session.transaction_loss(txn) }; txn = Idle
     // else slot = Idle(session)
     // run = Finished { .. }; emit ConsoleChanged
 }
@@ -827,7 +828,7 @@ Session-loss rules:
 
 - **Death detection.** Driver-task exit, or TCP keepalive (`keepalives_idle = 30s`), sets `closed`.
 - **Lost while idle with no transaction.** The next run opens a fresh session transparently and logs `Info("Session reset")`.
-- **Lost with a transaction open.** The slot becomes `Lost { txn_lost: true }` and the UI shows a persistent banner: "Transaction rolled back: connection lost". The next run starts a fresh session and clears the banner.
+- **Lost with a transaction open.** The slot records `TransactionLoss::RolledBack` for a PostgreSQL transaction and the UI shows "Transaction rolled back: connection lost". SQL Server retirement records `TransactionLoss::Unknown`: the UI says "session reset", preserves the fact that earlier commits remain committed, and warns that the last transaction outcome may be unknown. Idle PostgreSQL loss records `None`. The next run starts a fresh session and clears the notice.
 - **Metadata session death.** The home database's session marks `ConnectionState` `Lost` and closes the instance, which drops every slot and its session. Another database's session marks only that database's `CatalogStatus` `Failed`, keeping the last catalog's version; the next load on it reopens the session. Consoles are independent. A disconnect closes the instance the same way, and a slot's watch task holds the instance weakly so it cannot keep a session alive past that.
 
 `disconnect(force=false)` checks every console of that connection that is `Active` or `Aborted`. To compute `has_writes` it runs `SELECT pg_current_xact_id_if_assigned() IS NOT NULL` (PG13+, else `true`) on the idle session.
@@ -929,7 +930,7 @@ The UI derives its status values instead of storing them:
 | Derived status | Source |
 |---|---|
 | Run button: Run or Cancel | `isRunning(consoles[tab])`, from `run.kind` |
-| Transaction mode in the TopBar | A menu on every tab: `config.mode`, `txn` in manual mode, and "rolled back" while `session` is `Lost { txnLost }` |
+| Transaction mode in the TopBar | A menu on every tab: `config.mode`, `txn` in manual mode, and a rollback or session-reset notice from `session.transaction` while the session is `Lost` |
 | Ln/Col in the results header | Every tab. `cursor` in the workspace store, set by the editor's update listener and again by `SqlEditor` on a tab switch, because `setState` runs no update listeners |
 | Commit/Rollback visibility | Every tab, while `hasUncommittedWork` (`config.mode === "Manual" && txn !== "Idle"`) |
 | "6 rows · 38 ms" in the results toolbar (`result-status`) | `runSummary(run, picked, now)` from `ResultMeta` |
@@ -1045,7 +1046,7 @@ Tracing a run from the button to the grid takes four files: `runActions.ts` → 
    - error position maps to the right UTF-16 offset
    - cancel `pg_sleep(30)` finishes `Cancelled` in under 2 s
    - manual isolation and commit (call site 4); error leads to `Aborted`, then rollback leads to `Idle`
-   - `pg_terminate_backend` of a console pid gives `Lost { txn_lost }`
+   - `pg_terminate_backend` of a console pid gives `Lost { transaction }`
    - `generate_series(1, 300000)` truncates at `max_rows` with `rows_seen = 300000`
    - CSV export equals `COPY ... TO STDOUT CSV` output
    - history persists across `Engine::open` on the same dir

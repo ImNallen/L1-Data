@@ -286,7 +286,7 @@ async fn errors_and_cancellation_leave_no_manual_write_committed() {
         h.engine.console_cancel(h.manual).await;
         let state = h.finish(h.manual, accepted.run_id).await;
         assert!(matches!(state.run, RunState::Finished { outcome: RunOutcome::Cancelled, .. }));
-        assert!(matches!(state.session, SessionState::Lost { txn_lost: true, .. }));
+        assert!(matches!(state.session, SessionState::Lost { transaction: TransactionLoss::Unknown, .. }));
         assert_eq!(h.scalar(h.observer, &format!("SELECT n FROM [{}]", h.table)).await, "1");
         transaction(&h.ok(h.manual, &format!("UPDATE [{}] SET n=5", h.table)).await, 1);
         h.engine.console_rollback(h.manual).await.unwrap();
@@ -397,6 +397,31 @@ async fn every_module_definition_family_keeps_trailing_control_from_executing() 
                 assert_eq!(h.scalar(h.observer, &format!("SELECT n FROM [{}]", h.table)).await, "1", "{sql}");
                 assert_eq!(h.scalar(h.observer, &definition).await, original, "{sql}");
             }
+        }
+    }.boxed()).await;
+}
+
+#[tokio::test]
+async fn cancellation_does_not_claim_committed_work_was_rolled_back() {
+    check(|h| async move {
+        h.configure(h.manual, TxnMode::AutoCommit).await;
+        for (sql, expected) in [
+            (format!("UPDATE [{}] SET n=2\nGO\nWAITFOR DELAY '00:00:30'", h.table), "2"),
+            (format!("BEGIN TRANSACTION; UPDATE [{}] SET n=3; COMMIT TRANSACTION; WAITFOR DELAY '00:00:30'", h.table), "3"),
+        ] {
+            let accepted = h.engine.console_run(h.manual, RunRequest::Script { text: sql, target: RunTarget::All }).await.unwrap();
+            tokio::time::timeout(Duration::from_secs(3), async {
+                loop {
+                    let SessionState::Open { backend_pid } = h.state(h.manual).session else { continue };
+                    if h.scalar(h.observer, &format!("SELECT COUNT_BIG(*) FROM sys.dm_exec_requests WHERE session_id={backend_pid} AND command='WAITFOR'")).await == "1" { break; }
+                }
+            }).await.unwrap();
+            assert_eq!(h.scalar(h.observer, &format!("SELECT n FROM [{}]", h.table)).await, expected);
+            h.engine.console_cancel(h.manual).await;
+            let state = h.finish(h.manual, accepted.run_id).await;
+            assert!(matches!(state.run, RunState::Finished { outcome: RunOutcome::Cancelled, .. }));
+            assert!(matches!(state.session, SessionState::Lost { transaction: TransactionLoss::Unknown, .. }), "Cancellation must not claim a confirmed rollback: {:?}", state.session);
+            assert_eq!(h.scalar(h.observer, &format!("SELECT n FROM [{}]", h.table)).await, expected);
         }
     }.boxed()).await;
 }

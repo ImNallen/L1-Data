@@ -451,7 +451,14 @@ pub enum TxnState {
 pub enum SessionState {
     None,
     Open { backend_pid: i32 },
-    Lost { reason: String, txn_lost: bool },
+    Lost { reason: String, transaction: TransactionLoss },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Type)]
+pub enum TransactionLoss {
+    None,
+    RolledBack,
+    Unknown,
 }
 
 #[derive(Debug, Clone, Serialize, Type)]

@@ -224,7 +224,7 @@ async fn cancelling_waitfor_retires_the_session_and_stops_the_server_request() {
         tokio::time::timeout(Duration::from_secs(1), h.engine.console_cancel(h.tab)).await.unwrap();
         let state = h.finish(id).await;
         assert!(matches!(state.run, RunState::Finished { outcome: RunOutcome::Cancelled, .. }), "{:?}", state.run);
-        assert!(matches!(state.session, SessionState::Lost { txn_lost: true, .. }), "{:?}", state.session);
+        assert!(matches!(state.session, SessionState::Lost { transaction: TransactionLoss::Unknown, .. }), "{:?}", state.session);
         let state = h.ok(&format!("SELECT COUNT_BIG(*) FROM sys.dm_exec_requests WHERE session_id={pid} AND session_id <> @@SPID")).await;
         assert_eq!(h.rows(Harness::rowsets(&state)[0])[0][0].as_deref(), Some("0"));
     }
