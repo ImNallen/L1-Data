@@ -112,6 +112,7 @@ For SQL Server development, run `pnpm db:mssql:up`. It starts SQL Server 2022 De
 cargo test --workspace   # engine units, bindings drift test, bridge coverage test
 cargo test -p engine --features pg-tests   # engine against PostgreSQL
 cargo test -p engine --features mssql-tests   # engine against SQL Server; needs pnpm db:mssql:up
+python3 dev/mssql-tls-smoke.py   # public Engine VerifyFull CA/name checks against a disposable SQL Server
 pnpm typecheck
 pnpm test                # vitest
 pnpm build               # production frontend bundle
@@ -123,6 +124,8 @@ pnpm bindings            # rewrites src/ipc/bindings.ts after an IPC type or com
 pnpm icons               # rewrites src-tauri/icons from src-tauri/app-icon.svg
 pnpm screenshot          # macOS: rewrites docs/images/l1-data.png from the running app
 ```
+
+The SQL Server TLS smoke needs Docker, OpenSSL, Rust, and the cached `mcr.microsoft.com/mssql/server:2022-latest` image. It builds the engine and a temporary public-API probe, starts its own container on a free loopback port, and uses generated fixture credentials and certificates. It checks trusted `localhost`, hostname rejection on `127.0.0.1`, unrelated-CA rejection, and **Require** controls. Each probe child gets isolated `SSL_CERT_FILE` and `SSL_CERT_DIR` settings. The script removes its container and temporary files on success or failure. It does not use the seeded databases or bridge.
 
 A debug binary rewrites `src/ipc/bindings.ts` each time it starts, so `pnpm tauri dev` and `pnpm self-check` keep it current too.
 
