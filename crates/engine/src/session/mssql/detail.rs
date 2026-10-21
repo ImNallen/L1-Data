@@ -2,6 +2,10 @@ use super::{MsSession, error, native_object_id, number, required};
 use crate::model::*;
 use crate::sql::tsql::quote_ident;
 
+#[cfg(all(test, feature = "mssql-tests"))]
+#[path = "mssql_metadata_visibility.rs"]
+mod mssql_metadata_visibility;
+
 fn action(n: u8) -> Result<FkAction, QueryError> {
     match n {
         0 => Ok(FkAction::NoAction),
