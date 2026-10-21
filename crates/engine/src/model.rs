@@ -473,7 +473,7 @@ pub struct ConsoleState {
     pub run: RunState,
 }
 
-#[derive(Debug, Clone, Serialize, Type)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Type)]
 #[serde(rename_all = "camelCase")]
 pub struct ConsoleConfigView {
     pub connection_id: ConnectionId,
@@ -1377,6 +1377,7 @@ pub enum ConfigureError {
     TransactionOpen,
     Busy,
     UnknownConnection,
+    Unsupported { what: String },
 }
 
 #[derive(Debug, Clone, Serialize, Type)]
@@ -1463,6 +1464,7 @@ pub struct ApplySummary {
 pub enum ApplyError {
     Busy,
     NotConfigured,
+    Unsupported { what: String },
     Connect { error: ConnectError },
     /// The tab's transaction already failed; roll it back first.
     TransactionAborted,

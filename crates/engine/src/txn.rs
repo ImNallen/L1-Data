@@ -7,18 +7,20 @@ pub enum TransactionPlan {
     Native,
 }
 
-pub fn plan(database: DatabaseKind, mode: TxnMode, kind: &StmtKind, sql: &str) -> Result<TransactionPlan, String> {
-    if mode == TxnMode::AutoCommit {
-        return Ok(TransactionPlan::Native);
+pub fn validate_mode(database: DatabaseKind, mode: TxnMode) -> Result<(), String> {
+    if database == DatabaseKind::SqlServer && mode == TxnMode::Manual {
+        return Err("SQL Server Manual mode is unavailable because server-side code can end the app-managed transaction. Select Auto-commit and use explicit BEGIN TRANSACTION, COMMIT, or ROLLBACK statements.".into());
     }
-    match database {
-        DatabaseKind::SqlServer => crate::sql::tsql::manual_transaction(sql),
-        DatabaseKind::Postgres => Ok(if needs_implicit_begin(mode, TxnState::Idle, kind) {
-            TransactionPlan::BeginIfIdle
-        } else {
-            TransactionPlan::Native
-        }),
-    }
+    Ok(())
+}
+
+pub fn plan(database: DatabaseKind, mode: TxnMode, kind: &StmtKind) -> Result<TransactionPlan, String> {
+    validate_mode(database, mode)?;
+    Ok(if needs_implicit_begin(mode, TxnState::Idle, kind) {
+        TransactionPlan::BeginIfIdle
+    } else {
+        TransactionPlan::Native
+    })
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

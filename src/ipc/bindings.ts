@@ -75,7 +75,7 @@ export type AppEvent = {
 
 export type Appearance = "light" | "dark";
 
-export type ApplyError = { kind: "Busy" } | { kind: "NotConfigured" } | { kind: "Connect"; error: ConnectError } | 
+export type ApplyError = { kind: "Busy" } | { kind: "NotConfigured" } | { kind: "Unsupported"; what: string } | { kind: "Connect"; error: ConnectError } | 
 /**  The tab's transaction already failed; roll it back first. */
 { kind: "TransactionAborted" } | 
 /**  Updates and deletes need the table's full primary key. */
@@ -263,7 +263,7 @@ export type ColumnSource = {
 
 export type ConfigureError = 
 /**  Mode or connection change requested while a transaction is open. */
-{ kind: "TransactionOpen" } | { kind: "Busy" } | { kind: "UnknownConnection" };
+{ kind: "TransactionOpen" } | { kind: "Busy" } | { kind: "UnknownConnection" } | { kind: "Unsupported"; what: string };
 
 export type ConnStatus = { kind: "Disconnected" } | { kind: "Connecting" } | 
 /**

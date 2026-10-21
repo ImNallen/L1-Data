@@ -126,7 +126,7 @@ def check_assistant(bridge, db, tab):
         bridge.invoke("settings_set", settings=saved)
 
 
-def check(bridge, work):
+def check(bridge, work, assistant=True):
     pg = bridge.invoke("connection_save", draft=draft(
         os.environ.get("L1_DATA_TEST_PG", "postgres://l1data:l1data@localhost:5433/shop"),
         "Postgres", "smoke-postgres"))
@@ -152,10 +152,22 @@ def check(bridge, work):
         return next((r for s in catalog["schemas"] if s["name"] == "lab"
                      for r in s["relations"] if r["name"] == table), None)
 
-    def apply(**changes):
-        return bridge.invoke("table_apply", tabId=tab, changes={
+    def refused_apply(**changes):
+        before = bridge.console(tab)
+        response = bridge.response("table_apply", tabId=tab, changes={
             "schema": "lab", "table": table, "inserts": [], "updates": [], "deletes": [], **changes,
         })
+        assert response["status"] == "error" and response["error"]["kind"] == "Unsupported", response
+        assert bridge.console(tab) == before
+
+    def refused_manual():
+        before = bridge.console(tab)
+        response = bridge.response("console_configure", tabId=tab, config={
+            "connectionId": ms["id"], "database": ms["database"], "schema": None, "mode": "Manual",
+        })
+        assert response["status"] == "error" and response["error"]["kind"] == "Unsupported", response
+        assert "Select Auto-commit" in response["error"]["what"], response
+        assert bridge.console(tab) == before
 
     cell = lambda column, value: {"column": column, "value": value}
     query = {"where": "", "orderBy": "", "filters": []}
@@ -187,17 +199,19 @@ def check(bridge, work):
         precise = "12345678901234567890.123456789012"
         cash = "922337203685477.5807"
         original = "quote ' and 世界 %_[x]"
-        assert apply(inserts=[[cell("id", "1"), cell("value", original), cell("amount", precise), cell("cash", cash)]])["committed"]
-        oversized = bridge.response("table_apply", tabId=tab, changes={"schema": "lab", "table": table,
-            "inserts": [[cell("id", "3"), cell("value", "x" * 101)]], "updates": [], "deletes": []})
-        assert oversized["status"] == "error", oversized
+        quoted = original.replace("'", "''")
+        bridge.run(tab, f"INSERT INTO {qualified} ([id],[value],[amount],[cash]) VALUES (1,N'{quoted}',{precise},{cash})")
+        refused_manual()
+        refused_apply()
+        refused_apply(inserts=[[cell("id", "3"), cell("value", "x" * 101)]])
         assert bridge.rows(bridge.run(observer, f"SELECT COUNT_BIG(*) FROM {qualified} WHERE id = 3")) == [[["0"]]]
         bridge.run(tab, f"CREATE TRIGGER [lab].[trg_{table}] ON {qualified} AFTER UPDATE AS BEGIN SET NOCOUNT ON; SELECT 99 AS trigger_result; END")
-        apply(updates=[{"key": [cell("id", "1")], "set": [cell("value", original + " changed")]}])
+        refused_apply(updates=[{"key": [cell("id", "1")], "set": [cell("value", "must not save")]}])
+        assert bridge.rows(bridge.run(observer, f"SELECT [value] FROM {qualified} WHERE id=1")) == [[[original]]]
+        state = bridge.run(tab, f"UPDATE {qualified} SET [value]=N'{quoted} changed' WHERE id=1")
+        assert bridge.rows(state) == [[["99"]]]
         assert bridge.rows(bridge.run(observer, f"SELECT [value], [amount] FROM {qualified} WHERE id = 1")) == [[[original + " changed", precise]]]
-        mismatch = bridge.response("table_apply", tabId=tab, changes={"schema": "lab", "table": table,
-            "inserts": [], "updates": [{"key": [cell("id", "999")], "set": [cell("value", "wrong")]}], "deletes": []})
-        assert mismatch["status"] == "error" and mismatch["error"]["kind"] == "RowMismatch", mismatch
+        refused_apply(deletes=[[cell("id", "1")]])
         filtered = {**query, "filters": [{"column": "value", "op": "Contains", "value": "%_[x]"}]}
         assert bridge.invoke("exact_row_count", db=db, schema="lab", table=table, query=filtered) == 1
         accepted = bridge.invoke("console_run", tabId=tab, request={"kind": "tablePage", "schema": "lab", "table": table, "page": 0, "query": filtered})
@@ -208,7 +222,7 @@ def check(bridge, work):
         assert bridge.rows(bridge.run(observer, f"SELECT COUNT_BIG(*) FROM {qualified}")) == [[["1"]]]
         sort = bridge.invoke("table_order", db=db, schema="lab", table="awkward names", orderBy="", edit={"kind": "Cycle", "column": "a]b", "additive": False})
         assert sort["sql"] == "[a]]b] ASC" and sort["keys"] == [{"column": "a]b", "desc": False}], sort
-        print("PASS catalog, typed staged edits, trigger row counts, filters and injection rejection")
+        print("PASS catalog, native writes and trigger results, capability refusals, filters and injection rejection")
 
         accepted = bridge.invoke("console_run", tabId=tab, request={"kind": "tablePage", "schema": "lab", "table": "type_zoo", "page": 0, "query": query})
         state = bridge.finished(tab, accepted["runId"])
@@ -232,15 +246,16 @@ def check(bridge, work):
         bridge.run(tab, "SELECT CAST(922337203685477.5807 AS money)", outcome="Failed")
         print("PASS precise text, money cast, long-cell retrieval and CSV export")
 
-        bridge.configure(ms["id"], ms["database"], "Manual", tab)
-        assert not apply(inserts=[[cell("id", "2"), cell("value", "rollback")]])["committed"]
+        bridge.run(tab, f"SET XACT_ABORT ON; BEGIN TRANSACTION; INSERT INTO {qualified} ([id],[value]) VALUES(2,N'rollback')")
         assert bridge.console(tab)["txn"] == "Active"
+        refused_manual()
+        refused_apply(inserts=[[cell("id", "1"), cell("value", "duplicate")]])
+        assert bridge.rows(bridge.run(tab, f"SELECT [value],@@TRANCOUNT,XACT_STATE() FROM {qualified} WHERE id=2")) == [[["rollback", "1", "1"]]]
         bridge.invoke("console_rollback", tabId=tab)
         assert bridge.rows(bridge.run(observer, f"SELECT COUNT_BIG(*) FROM {qualified} WHERE id = 2")) == [[["0"]]]
-        apply(inserts=[[cell("id", "2"), cell("value", "commit")]])
+        bridge.run(tab, f"BEGIN TRANSACTION; INSERT INTO {qualified} ([id],[value]) VALUES(2,N'commit')")
         bridge.invoke("console_commit", tabId=tab)
         assert bridge.rows(bridge.run(observer, f"SELECT [value] FROM {qualified} WHERE id = 2")) == [[["commit"]]]
-        bridge.configure(ms["id"], ms["database"], "AutoCommit", tab)
         bridge.run(tab, "BEGIN TRANSACTION; BEGIN TRANSACTION;")
         assert bridge.console(tab)["txn"] == "Active" and bridge.console(tab)["txnDepth"] == 2
         bridge.invoke("console_commit", tabId=tab)
@@ -258,9 +273,10 @@ def check(bridge, work):
             lambda rows: rows == [[["0"]]])
         assert bridge.rows(bridge.run(tab, "SELECT 29")) == [[["29"]]]
         assert bridge.rows(bridge.run(tab, "SELECT OBJECT_ID(N'tempdb..#l1_scope')")) == [[[None]]]
-        print("PASS manual rollback/commit, nested transactions and cancellation retirement")
+        print("PASS native rollback/commit, preserved outer work after refusal, nested transactions and cancellation retirement")
 
-        check_assistant(bridge, db, tab)
+        if assistant:
+            check_assistant(bridge, db, tab)
         history = bridge.invoke("history_list", query={"text": None, "connectionId": ms["id"], "beforeId": None, "limit": 100})
         assert history["entries"] and all(h["databaseKind"] == "SqlServer" for h in history["entries"])
     finally:
@@ -268,6 +284,7 @@ def check(bridge, work):
             bridge.response("console_rollback", tabId=current)
         bridge.configure(ms["id"], ms["database"], "AutoCommit", tab)
         bridge.run(tab, f"DROP TABLE IF EXISTS {qualified}")
+        assert bridge.rows(bridge.run(tab, f"SELECT COUNT_BIG(*) FROM sys.objects WHERE name IN (N'{table}',N'trg_{table}')")) == [[["0"]]]
         for current in (tab, observer, pg_tab):
             bridge.invoke("console_close", tabId=current, force=True)
         bridge.invoke("connection_delete", id=ms["id"])
@@ -280,6 +297,7 @@ def check(bridge, work):
 def main():
     parser = argparse.ArgumentParser(description="Exercise PostgreSQL and SQL Server through the real dev bridge.")
     parser.add_argument("--bridge", help="Use an existing bridge instead of starting a temporary engine on :7077.")
+    parser.add_argument("--skip-assistant", action="store_true", help="Skip fake-provider configuration and assistant turns.")
     args = parser.parse_args()
     with tempfile.TemporaryDirectory(prefix="l1data-mssql-smoke-") as directory:
         work = Path(directory)
@@ -309,7 +327,7 @@ def main():
                     if time.monotonic() >= deadline:
                         raise
                     time.sleep(0.1)
-            check(bridge, work)
+            check(bridge, work, assistant=not args.skip_assistant)
         except Exception:
             if log is not None:
                 log.flush()

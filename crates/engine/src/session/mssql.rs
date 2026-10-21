@@ -1,6 +1,5 @@
 mod catalog;
 mod detail;
-pub(super) mod edits;
 mod values;
 
 use super::{QueryEvent, QueryStream, error};
@@ -122,7 +121,7 @@ impl MsSession {
         };
         let mut client = tokio::time::timeout(CONNECT_TIMEOUT, connection).await.map_err(|_| ConnectError::Network { message: "SQL Server connection timed out".into() })??;
         let initialize = async {
-            let mut stream = native_query(&mut client, "SELECT CONVERT(int, @@SPID), CONVERT(nvarchar(128), SERVERPROPERTY('ProductVersion')), DB_NAME()", &[]);
+            let mut stream = native_query(&mut client, "SELECT CONVERT(int, @@SPID), CONVERT(nvarchar(128), SERVERPROPERTY('ProductVersion')), DB_NAME()");
             let mut rows = Vec::new();
             while let Some(event) = stream.next().await {
                 if let QueryEvent::Row(row) = event? {
@@ -164,10 +163,6 @@ impl MsSession {
     }
 
     pub(super) fn query<'a>(&'a mut self, sql: &'a str) -> QueryStream<'a> {
-        self.query_parameters(sql, &[])
-    }
-
-    fn query_parameters<'a>(&'a mut self, sql: &'a str, parameters: &'a [Option<String>]) -> QueryStream<'a> {
         Box::pin(async_stream::stream! {
             let Some(client) = self.client.take() else { yield Err(error(self.closed_reason().unwrap_or_else(|| "SQL Server session is retired".into()))); return; };
             let database = self.database.clone();
@@ -181,7 +176,7 @@ impl MsSession {
             let mut cancelled = false;
             let mut failed = None;
             {
-                let events = native_query(lease.client(), sql, parameters);
+                let events = native_query(lease.client(), sql);
                 let mut events = std::pin::pin!(events);
                 loop {
                     let next = tokio::select! {
@@ -236,7 +231,6 @@ impl MsSession {
         Ok(rows)
     }
     pub(super) async fn batch(&mut self, sql: &str) -> Result<(), QueryError> {
-        let sql = if sql == "BEGIN" { "BEGIN TRANSACTION" } else { sql };
         let mut stream = self.query(sql);
         while let Some(event) = stream.next().await {
             event?;
@@ -252,11 +246,9 @@ impl MsSession {
     }
 }
 
-fn native_query<'a>(client: &'a mut TdsClient, sql: &'a str, parameters: &'a [Option<String>]) -> QueryStream<'a> {
+fn native_query<'a>(client: &'a mut TdsClient, sql: &'a str) -> QueryStream<'a> {
     Box::pin(async_stream::try_stream! {
-        let mut query = tiberius::Query::new(sql);
-        for parameter in parameters { query.bind(parameter.clone()); }
-        let stream = if parameters.is_empty() { client.simple_query(sql).await } else { query.query(client).await }.map_err(query_error)?;
+        let stream = client.simple_query(sql).await.map_err(query_error)?;
         let mut stream = std::pin::pin!(stream);
         let mut has_rows = false;
         while let Some(item) = stream.try_next().await.map_err(query_error)? {

@@ -7,6 +7,8 @@ use futures_util::Stream;
 use std::pin::Pin;
 use tokio::sync::watch;
 
+pub const SQL_SERVER_EDITS_UNSUPPORTED: &str = "SQL Server staged grid edits are unavailable because server-side code can end the edit transaction. Use the SQL editor in Auto-commit mode with explicit transaction statements.";
+
 pub struct Session {
     driver: Driver,
     pub backend_pid: i32,
@@ -53,6 +55,13 @@ pub fn parse_postgres_url(url: &str, name: &str) -> Result<ConnectionDraft, Stri
 }
 
 impl Session {
+    pub fn database_kind(&self) -> DatabaseKind {
+        match &self.driver {
+            Driver::Postgres(_) => DatabaseKind::Postgres,
+            Driver::SqlServer(_) => DatabaseKind::SqlServer,
+        }
+    }
+
     pub async fn open(p: &ConnectParams, schema: Option<&str>, timezone: &str) -> Result<Self, ConnectError> {
         match p.database_kind {
             DatabaseKind::Postgres => {
@@ -141,13 +150,7 @@ impl Session {
     pub async fn execute_edit(&mut self, edit: &Edit) -> Result<u64, QueryError> {
         match &mut self.driver {
             Driver::Postgres(p) => p.execute_edit(&edit.sql).await,
-            Driver::SqlServer(s) => s.execute_edit(edit).await,
-        }
-    }
-    pub async fn prepare_edits(&mut self, changes: &TableChanges, relation: &Relation, plan: Vec<Edit>) -> Result<Vec<Edit>, ApplyError> {
-        match &mut self.driver {
-            Driver::Postgres(_) => Ok(plan),
-            Driver::SqlServer(s) => s.prepare_edits(changes, relation).await,
+            Driver::SqlServer(_) => Err(error(SQL_SERVER_EDITS_UNSUPPORTED)),
         }
     }
     pub fn query<'a>(&'a mut self, sql: &'a str) -> QueryStream<'a> {
@@ -203,10 +206,9 @@ impl Session {
 pub struct Edit {
     pub change: ChangeRef,
     pub sql: String,
-    parameters: Vec<Option<String>>,
 }
 
-pub fn plan_edits(kind: DatabaseKind, changes: &TableChanges, relation: &Relation) -> Result<Vec<Edit>, ApplyError> {
+pub fn plan_edits(changes: &TableChanges, relation: &Relation) -> Result<Vec<Edit>, ApplyError> {
     let valid = |cells: &[CellWrite], change| -> Result<(), ApplyError> {
         let mut names = std::collections::HashSet::new();
         for cell in cells {
@@ -222,12 +224,9 @@ pub fn plan_edits(kind: DatabaseKind, changes: &TableChanges, relation: &Relatio
     for (i, update) in changes.updates.iter().enumerate() {
         valid(&update.set, ChangeRef { kind: ChangeKind::Update, index: i as u32 })?;
     }
-    if kind == DatabaseKind::SqlServer {
-        return mssql::edits::plan(changes, relation);
-    }
     let mut edits = Vec::new();
     let (schema, table) = (&changes.schema, &changes.table);
-    let mut add = |kind, index, sql| edits.push(Edit { change: ChangeRef { kind, index }, sql, parameters: vec![] });
+    let mut add = |kind, index, sql| edits.push(Edit { change: ChangeRef { kind, index }, sql });
     for (i, key) in changes.deletes.iter().enumerate() {
         add(ChangeKind::Delete, i as u32, crate::text::delete_sql(schema, table, key));
     }
@@ -243,13 +242,6 @@ pub fn plan_edits(kind: DatabaseKind, changes: &TableChanges, relation: &Relatio
 }
 
 impl Session {
-    pub fn edit_transaction(&self, inside: bool, auto_commit: bool) -> (&'static str, Option<&'static str>, &'static str) {
-        match (&self.driver, inside) {
-            (Driver::Postgres(_), true) => ("SAVEPOINT l1_apply", Some("RELEASE SAVEPOINT l1_apply"), "ROLLBACK TO SAVEPOINT l1_apply; RELEASE SAVEPOINT l1_apply"),
-            (Driver::SqlServer(_), true) => ("SAVE TRANSACTION l1_apply", None, "ROLLBACK TRANSACTION l1_apply"),
-            (_, false) => ("BEGIN", auto_commit.then_some("COMMIT"), "ROLLBACK"),
-        }
-    }
     pub fn retire(&mut self, reason: String) {
         match &mut self.driver {
             Driver::Postgres(p) => p.retire(reason),

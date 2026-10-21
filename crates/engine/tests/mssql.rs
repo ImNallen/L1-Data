@@ -1,5 +1,7 @@
 #![cfg(feature = "mssql-tests")]
 use engine::model::*;
+use futures_util::FutureExt;
+use std::panic::AssertUnwindSafe;
 use engine::{AgentPath, Engine, EngineConfig, MemoryKeyStore};
 use std::sync::Arc;
 use std::time::Duration;
@@ -216,8 +218,8 @@ async fn every_batch_is_validated_before_any_execution_and_dynamic_use_stays_sco
 #[tokio::test]
 async fn cancelling_waitfor_retires_the_session_and_stops_the_server_request() {
     for sql in ["WAITFOR DELAY '00:00:30'; SELECT 99", "SELECT 1 AS first; WAITFOR DELAY '00:00:30'; SELECT 99"] {
-        let mut h = Harness::open(TxnMode::Manual).await;
-        let warm = h.ok("SELECT @@SPID").await;
+        let mut h = Harness::open(TxnMode::AutoCommit).await;
+        let warm = h.ok("BEGIN TRANSACTION; SELECT @@SPID").await;
         let pid: i32 = h.rows(Harness::rowsets(&warm)[0])[0][0].as_ref().unwrap().parse().unwrap();
         let id = h.start(sql).await.run_id;
         tokio::time::sleep(Duration::from_millis(150)).await;
@@ -235,74 +237,55 @@ async fn cancelling_waitfor_retires_the_session_and_stops_the_server_request() {
     assert!(matches!(state.session, SessionState::Lost { .. }), "{:?}", state.session);
 }
 
-fn cell(column: &str, value: Option<&str>) -> CellWrite {
-    CellWrite { column: column.into(), value: value.map(str::to_owned) }
-}
-fn changes(table: &str) -> TableChanges {
-    TableChanges { schema: "dbo".into(), table: table.into(), inserts: vec![], updates: vec![], deletes: vec![] }
-}
-
 #[tokio::test]
-async fn typed_staged_writes_keep_precision_defaults_and_counts_with_trigger_nocount() {
+async fn native_writes_keep_precision_defaults_trigger_results_and_metadata() {
     let mut h = Harness::open(TxnMode::AutoCommit).await;
     let table = format!("l1_edit_{}", uuid::Uuid::new_v4().simple());
     let trigger = format!("{table}_trigger");
     h.ok(&format!("CREATE TABLE dbo.[{table}] (id int IDENTITY PRIMARY KEY, [a]]b] nvarchar(200), n decimal(38,12), bytes varbinary(max), price money, state int DEFAULT 7, computed AS (state+1), version rowversion)")).await;
-    h.ok(&format!("CREATE TRIGGER dbo.[{trigger}] ON dbo.[{table}] AFTER INSERT,UPDATE,DELETE AS BEGIN SET NOCOUNT ON; SELECT 123 AS trigger_row; END")).await;
-    h.engine.refresh_catalog(h.db()).await.unwrap();
-    let catalog = h.engine.catalog(h.db()).await.unwrap();
-    let relation = catalog.schemas.iter().flat_map(|s| &s.relations).find(|r| r.name == table).unwrap();
-    for col in ["id", "computed", "version"] {
-        assert!(!relation.columns.iter().find(|c| c.name == col).unwrap().writable);
-    }
-    let detail = h.engine.relation_detail(h.db(), relation.oid).await.unwrap();
-    assert!(matches!(&detail.triggers[0].implementation,TriggerImplementation::SqlModule {definition:Some(definition)} if definition.contains("NOCOUNT")));
-    let mut edit = changes(&table);
-    edit.inserts.push(vec![
-        cell("a]b", Some("O'Neil 世界 😀 %_[")),
-        cell("n", Some("12345678901234567890.123456789012")),
-        cell("bytes", Some("0x0001FEFF")),
-        cell("price", Some("922337203685477.5807")),
-    ]);
-    assert!(h.engine.table_apply(h.tab, edit).await.unwrap().committed);
-    let state = h.ok(&format!("SELECT id,[a]]b],n,bytes,CAST(price AS decimal(19,4)),state,computed FROM dbo.[{table}]")).await;
-    let rows = h.rows(Harness::rowsets(&state)[0]);
-    assert_eq!(
-        rows[0],
-        vec![
-            Some("1".into()),
-            Some("O'Neil 世界 😀 %_[".into()),
-            Some("12345678901234567890.123456789012".into()),
-            Some("0x0001FEFF".into()),
-            Some("922337203685477.5807".into()),
-            Some("7".into()),
-            Some("8".into())
-        ]
-    );
-    let mut edit = changes(&table);
-    edit.updates.push(RowUpdate { key: vec![cell("id", Some("1"))], set: vec![cell("a]b", Some("changed")), cell("n", None)] });
-    h.engine.table_apply(h.tab, edit).await.unwrap();
-    let mut edit = changes(&table);
-    edit.updates.push(RowUpdate { key: vec![cell("id", Some("999999"))], set: vec![cell("a]b", Some("miss"))] });
-    assert!(matches!(h.engine.table_apply(h.tab, edit).await, Err(ApplyError::RowMismatch { rows: 0, .. })));
-    let mut edit = changes(&table);
-    edit.inserts.push(vec![cell("id", Some("2"))]);
-    assert!(matches!(h.engine.table_apply(h.tab, edit).await, Err(ApplyError::Failed { .. })));
-    h.engine.console_configure(h.tab, ConsoleConfig { connection_id: h.connection, database: "shop".into(), schema: None, mode: TxnMode::Manual }).await.unwrap();
-    let mut edit = changes(&table);
-    edit.updates.push(RowUpdate { key: vec![cell("id", Some("1"))], set: vec![cell("a]b", Some("uncommitted"))] });
-    assert!(!h.engine.table_apply(h.tab, edit).await.unwrap().committed);
-    h.engine.console_rollback(h.tab).await.unwrap();
-    let state = h.ok(&format!("SELECT [a]]b] FROM dbo.[{table}]")).await;
-    assert_eq!(h.rows(Harness::rowsets(&state)[0])[0][0].as_deref(), Some("changed"));
-    h.engine.console_rollback(h.tab).await.unwrap();
-    h.engine.console_configure(h.tab, ConsoleConfig { connection_id: h.connection, database: "shop".into(), schema: None, mode: TxnMode::AutoCommit }).await.unwrap();
-    let mut edit = changes(&table);
-    edit.deletes.push(vec![cell("id", Some("1"))]);
-    h.engine.table_apply(h.tab, edit).await.unwrap();
-    let state = h.ok(&format!("SELECT COUNT_BIG(*) FROM dbo.[{table}]")).await;
-    assert_eq!(h.rows(Harness::rowsets(&state)[0])[0][0].as_deref(), Some("0"));
+    let outcome = AssertUnwindSafe(async {
+        h.ok(&format!("CREATE TRIGGER dbo.[{trigger}] ON dbo.[{table}] AFTER INSERT,UPDATE,DELETE AS BEGIN SET NOCOUNT ON; SELECT 123 AS trigger_row; END")).await;
+        h.engine.refresh_catalog(h.db()).await.unwrap();
+        let catalog = h.engine.catalog(h.db()).await.unwrap();
+        let relation = catalog.schemas.iter().flat_map(|s| &s.relations).find(|r| r.name == table).unwrap();
+        for col in ["id", "computed", "version"] {
+            assert!(!relation.columns.iter().find(|c| c.name == col).unwrap().writable);
+        }
+        let detail = h.engine.relation_detail(h.db(), relation.oid).await.unwrap();
+        assert!(matches!(&detail.triggers[0].implementation,TriggerImplementation::SqlModule {definition:Some(definition)} if definition.contains("NOCOUNT")));
+        h.ok(&format!("INSERT INTO dbo.[{table}] ([a]]b],n,bytes,price) VALUES(N'O''Neil 世界 😀 %_[',12345678901234567890.123456789012,0x0001FEFF,922337203685477.5807)")).await;
+        let state = h.ok(&format!("SELECT id,[a]]b],n,bytes,CAST(price AS decimal(19,4)),state,computed FROM dbo.[{table}]")).await;
+        let rows = h.rows(Harness::rowsets(&state)[0]);
+        assert_eq!(
+            rows[0],
+            vec![
+                Some("1".into()),
+                Some("O'Neil 世界 😀 %_[".into()),
+                Some("12345678901234567890.123456789012".into()),
+                Some("0x0001FEFF".into()),
+                Some("922337203685477.5807".into()),
+                Some("7".into()),
+                Some("8".into())
+            ]
+        );
+        let state = h.ok(&format!("UPDATE dbo.[{table}] SET [a]]b]=N'changed',n=NULL WHERE id=1; SELECT [a]]b],n FROM dbo.[{table}]")).await;
+        let sets = Harness::rowsets(&state);
+        assert_eq!(sets.len(), 2);
+        assert_eq!(h.rows(sets[0]), vec![vec![Some("123".into())]]);
+        assert_eq!(h.rows(sets[1]), vec![vec![Some("changed".into()), None]]);
+        h.ok(&format!("BEGIN TRANSACTION; UPDATE dbo.[{table}] SET [a]]b]=N'uncommitted' WHERE id=1")).await;
+        h.engine.console_rollback(h.tab).await.unwrap();
+        let state = h.ok(&format!("SELECT [a]]b] FROM dbo.[{table}]")).await;
+        assert_eq!(h.rows(Harness::rowsets(&state)[0])[0][0].as_deref(), Some("changed"));
+        h.ok(&format!("DELETE FROM dbo.[{table}] WHERE id=1")).await;
+        let state = h.ok(&format!("SELECT COUNT_BIG(*) FROM dbo.[{table}]")).await;
+        assert_eq!(h.rows(Harness::rowsets(&state)[0])[0][0].as_deref(), Some("0"));
+    }).catch_unwind().await;
     h.ok(&format!("DROP TABLE dbo.[{table}]")).await;
+    let state = h.ok(&format!("SELECT COUNT_BIG(*) FROM sys.objects WHERE name IN (N'{table}',N'{trigger}')")).await;
+    assert_eq!(h.rows(Harness::rowsets(&state)[0]), vec![vec![Some("0".into())]]);
+    if let Err(panic) = outcome { std::panic::resume_unwind(panic); }
+
 }
 
 #[tokio::test]
@@ -335,34 +318,6 @@ async fn connection_kind_is_immutable_and_history_records_sql_server() {
 }
 
 #[tokio::test]
-async fn oversized_staged_text_and_binary_fail_without_applying_rows() {
-    let mut h = Harness::open(TxnMode::AutoCommit).await;
-    let table = format!("l1_length_{}", uuid::Uuid::new_v4().simple());
-    h.ok(&format!("CREATE TABLE dbo.[{table}] (id int IDENTITY PRIMARY KEY, ascii_value varchar(3), unicode_value nvarchar(3), bytes varbinary(3), fixed_bytes binary(3))")).await;
-    h.engine.refresh_catalog(h.db()).await.unwrap();
-    for (column, oversized) in [("ascii_value", "abcdef"), ("unicode_value", "😀😀"), ("bytes", "0x00010203"), ("fixed_bytes", "0x00010203")] {
-        let mut edit = changes(&table);
-        edit.inserts.push(vec![cell("ascii_value", Some("ok"))]);
-        edit.inserts.push(vec![cell(column, Some(oversized))]);
-        assert!(matches!(h.engine.table_apply(h.tab, edit).await, Err(ApplyError::Failed { .. })), "{column}");
-        let state = h.ok(&format!("SELECT COUNT_BIG(*) FROM dbo.[{table}]")).await;
-        assert_eq!(h.rows(Harness::rowsets(&state)[0])[0][0].as_deref(), Some("0"), "{column}");
-    }
-    let mut edit = changes(&table);
-    edit.inserts.push(vec![cell("ascii_value", Some("abc")), cell("unicode_value", Some("世😀")), cell("bytes", Some("0x0001FF"))]);
-    h.engine.table_apply(h.tab, edit).await.unwrap();
-    let state = h.ok(&format!("SELECT id, ascii_value, unicode_value, bytes FROM dbo.[{table}]")).await;
-    let row = &h.rows(Harness::rowsets(&state)[0])[0];
-    assert_eq!(&row[1..], &[Some("abc".into()), Some("世😀".into()), Some("0x0001FF".into())]);
-    let mut edit = changes(&table);
-    edit.updates.push(RowUpdate { key: vec![cell("id", row[0].as_deref())], set: vec![cell("ascii_value", Some("abcdef"))] });
-    assert!(matches!(h.engine.table_apply(h.tab, edit).await, Err(ApplyError::Failed { .. })));
-    let state = h.ok(&format!("SELECT ascii_value FROM dbo.[{table}]")).await;
-    assert_eq!(h.rows(Harness::rowsets(&state)[0])[0][0].as_deref(), Some("abc"));
-    h.ok(&format!("DROP TABLE dbo.[{table}]")).await;
-}
-
-#[tokio::test]
 async fn clr_columns_stay_in_the_catalog_and_browse_refuses_unsupported_values() {
     let mut h = Harness::open(TxnMode::AutoCommit).await;
     let table = format!("l1_clr_{}", uuid::Uuid::new_v4().simple());
@@ -384,9 +339,6 @@ async fn clr_columns_stay_in_the_catalog_and_browse_refuses_unsupported_values()
         state.run
     );
     assert!(Harness::rowsets(&state).is_empty());
-    let mut edit = changes(&table);
-    edit.updates.push(RowUpdate { key: vec![cell("id", Some("1"))], set: vec![cell("path", Some("/"))] });
-    assert!(matches!(h.engine.table_apply(h.tab, edit).await, Err(ApplyError::Failed { error, .. }) if error.message.contains("unsupported")));
     h.ok(&format!("DROP TABLE dbo.[{table}]")).await;
 }
 

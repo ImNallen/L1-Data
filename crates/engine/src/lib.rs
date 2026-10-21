@@ -974,9 +974,8 @@ impl Engine {
     /// connection or database change also resets the session.
     pub async fn console_configure(&self, tab: TabId, c: ConsoleConfig) -> Result<ConsoleState, ConfigureError> {
         let s = &self.shared;
-        if s.config(c.connection_id).is_none() {
-            return Err(ConfigureError::UnknownConnection);
-        }
+        let connection = s.config(c.connection_id).ok_or(ConfigureError::UnknownConnection)?;
+        txn::validate_mode(connection.database_kind, c.mode).map_err(|what| ConfigureError::Unsupported { what })?;
         let mut view = ConsoleConfigView { connection_id: c.connection_id, database: c.database, schema: c.schema, mode: c.mode };
         let console = {
             let mut map = s.consoles.write().unwrap();
@@ -1018,6 +1017,8 @@ impl Engine {
             let inner = console.inner.lock().await;
             (inner.config.clone(), matches!(inner.session, SessionSlot::Busy { .. }))
         };
+        let connection = s.config(config.connection_id).ok_or(RunError::NotConfigured)?;
+        txn::validate_mode(connection.database_kind, config.mode).map_err(|what| RunError::Unsupported { what })?;
         if busy {
             return Err(RunError::Busy);
         }
@@ -1027,7 +1028,6 @@ impl Engine {
         if instance.config.database_kind == DatabaseKind::SqlServer && !instance.knows(&config.database) {
             return Err(RunError::NotConfigured);
         }
-        let connection = s.config(config.connection_id).ok_or(RunError::NotConfigured)?;
 
         let mut table_relation = None;
         let (text, spans) = match r {
@@ -1058,7 +1058,7 @@ impl Engine {
         let statements: Vec<PlannedStmt> = spans.iter().map(|span| {
             let sql = span.text(&text);
             let kind = text::classify(sql, connection.database_kind);
-            let transaction = txn::plan(connection.database_kind, config.mode, &kind, sql).map_err(|what| RunError::Unsupported { what })?;
+            let transaction = txn::plan(connection.database_kind, config.mode, &kind).map_err(|what| RunError::Unsupported { what })?;
             Ok(PlannedStmt { span: *span, kind, transaction })
         }).collect::<Result<_, RunError>>()?;
         if statements.iter().any(|p| p.kind == sql::StmtKind::CopyStdio) {
@@ -1077,8 +1077,13 @@ impl Engine {
 
         let run_id = s.next_run_id();
         let mut inner = console.inner.lock().await;
+        let current = s.config(inner.config.connection_id).ok_or(RunError::NotConfigured)?;
+        txn::validate_mode(current.database_kind, inner.config.mode).map_err(|what| RunError::Unsupported { what })?;
         if inner.config.connection_id == instance.config.id {
             inner.config.database = instance.canonical_database(&inner.config.database).to_owned();
+        }
+        if inner.config != config {
+            return Err(RunError::Busy);
         }
         if let Some(session) = fresh {
             match inner.session {
@@ -1132,13 +1137,17 @@ impl Engine {
         self.shared.console_txn_command(tab, false).await
     }
 
-    /// Applies staged table edits on the tab's own session, all or nothing. With no transaction open, auto-commit
+    /// Applies PostgreSQL staged table edits on the tab's own session, all or nothing. With no transaction open, auto-commit
     /// mode commits them and manual mode leaves them in a new open transaction. Inside an open transaction they
     /// run under a savepoint, so a failure leaves that transaction as it was.
     pub async fn table_apply(&self, tab: TabId, changes: TableChanges) -> Result<ApplySummary, ApplyError> {
         let s = &self.shared;
         let console = s.console(tab).ok_or(ApplyError::NotConfigured)?;
         let config = console.inner.lock().await.config.clone();
+        let connection = s.config(config.connection_id).ok_or(ApplyError::NotConfigured)?;
+        if connection.database_kind == DatabaseKind::SqlServer {
+            return Err(ApplyError::Unsupported { what: session::SQL_SERVER_EDITS_UNSUPPORTED.into() });
+        }
         s.connect(config.connection_id).await.map_err(|error| ApplyError::Connect { error })?;
         let catalog = self.catalog(config.db()).await.map_err(|_| ApplyError::NotConfigured)?;
         let relation = catalog.relation(&changes.schema, &changes.table).ok_or(ApplyError::NotConfigured)?;
@@ -1148,7 +1157,7 @@ impl Engine {
             return Err(ApplyError::NoPrimaryKey);
         }
 
-        let plan = session::plan_edits(catalog.database_kind, &changes, relation)?;
+        let plan = session::plan_edits(&changes, relation)?;
 
         let needs_session = matches!(console.inner.lock().await.session, SessionSlot::Empty | SessionSlot::Lost { .. });
         let mut fresh = None;
@@ -1160,6 +1169,15 @@ impl Engine {
         let run_id = s.next_run_id();
         let (mut session, txn, stop) = {
             let mut inner = console.inner.lock().await;
+            let current = s.config(inner.config.connection_id).ok_or(ApplyError::NotConfigured)?;
+            if current.database_kind == DatabaseKind::SqlServer
+                || matches!(&inner.session, SessionSlot::Idle(session) if session.database_kind() == DatabaseKind::SqlServer)
+            {
+                return Err(ApplyError::Unsupported { what: session::SQL_SERVER_EDITS_UNSUPPORTED.into() });
+            }
+            if inner.config != config {
+                return Err(ApplyError::Busy);
+            }
             if let Some(session) = fresh {
                 match inner.session {
                     SessionSlot::Empty | SessionSlot::Lost { .. } => inner.session = SessionSlot::Idle(session),
@@ -1176,11 +1194,14 @@ impl Engine {
         };
 
         let inside = txn == TxnState::Active;
-        let (open, finish, undo) = session.edit_transaction(inside, config.mode == TxnMode::AutoCommit);
+        let (open, finish, undo) = if inside {
+            ("SAVEPOINT l1_apply", Some("RELEASE SAVEPOINT l1_apply"), "ROLLBACK TO SAVEPOINT l1_apply; RELEASE SAVEPOINT l1_apply")
+        } else {
+            ("BEGIN", (config.mode == TxnMode::AutoCommit).then_some("COMMIT"), "ROLLBACK")
+        };
         let mut lines = Vec::new();
         let mut outcome: Result<(), ApplyError> = async {
             session.batch(open).await.map_err(|e| ApplyError::Transaction { error: e })?;
-            let plan = session.prepare_edits(&changes, relation, plan).await?;
             for (i, edit) in plan.iter().enumerate() {
                 let change = &edit.change;
                 let sql = &edit.sql;
@@ -1586,6 +1607,144 @@ mod tests {
         assert!(matches!(engine.result_page(r, 0, 10), Err(ResultError::Gone)));
         assert!(matches!(engine.console_run(tab, RunRequest::Script { text: "select 1".into(), target: RunTarget::All }).await, Err(RunError::NotConfigured)));
         assert!(matches!(engine.console_commit(tab).await, Err(TxnError::NoTransaction)));
+    }
+
+    #[tokio::test]
+    async fn mssql_manual_configuration_refuses_without_creating_or_changing_a_console() {
+        let (engine, _dir) = engine().await;
+        let connection = engine.save_connection(ConnectionDraft { database_kind: DatabaseKind::SqlServer, ..draft("mssql") }).await.unwrap();
+        let tab = TabId(uuid::Uuid::new_v4());
+        let config = |mode| ConsoleConfig { connection_id: connection.id, database: "shop".into(), schema: None, mode };
+        let refused = engine.console_configure(tab, config(TxnMode::Manual)).await;
+        assert!(matches!(refused, Err(ConfigureError::Unsupported { ref what }) if what.contains("Select Auto-commit")), "{refused:?}");
+        assert!(engine.boot().consoles.is_empty());
+        let before = engine.console_configure(tab, config(TxnMode::AutoCommit)).await.unwrap();
+        let refused = engine.console_configure(tab, config(TxnMode::Manual)).await;
+        assert!(matches!(refused, Err(ConfigureError::Unsupported { .. })));
+        assert_eq!(serde_json::to_value(&engine.boot().consoles[0]).unwrap(), serde_json::to_value(before).unwrap());
+        assert!(engine.shared.instance(connection.id).is_none());
+        let pg = engine.save_connection(draft("postgres")).await.unwrap();
+        let pg_config = ConsoleConfig { connection_id: pg.id, database: "shop".into(), schema: None, mode: TxnMode::Manual };
+        assert_eq!(engine.console_configure(tab, pg_config).await.unwrap().config.mode, TxnMode::Manual);
+    }
+
+    #[tokio::test]
+    async fn restored_mssql_manual_tabs_keep_their_mode_and_refuse_before_network_work() {
+        let (engine, _dir) = engine().await;
+        let refuser = Refuser::start();
+        let connection = engine.save_connection(ConnectionDraft {
+            database_kind: DatabaseKind::SqlServer, host: "127.0.0.1".into(), port: refuser.port, ..draft("legacy")
+        }).await.unwrap();
+        let tab = TabId(uuid::Uuid::new_v4());
+        engine.save_workspace(Workspace {
+            tabs: vec![TabSnapshot {
+                id: tab, title: "Saved Manual".into(), text: Some("UPDATE dbo.target SET n=2".into()), table: None,
+                console: ConsoleConfigSnapshot { connection_id: Some(connection.id), database: Some("shop".into()), schema: None, mode: TxnMode::Manual },
+            }], active: Some(tab), ..Workspace::default()
+        });
+        let saved: Workspace = serde_json::from_value(serde_json::to_value(engine.boot().workspace).unwrap()).unwrap();
+        assert_eq!(saved.tabs[0].console.mode, TxnMode::Manual);
+        let config = ConsoleConfig { connection_id: connection.id, database: "shop".into(), schema: None, mode: saved.tabs[0].console.mode };
+        assert!(matches!(engine.console_configure(tab, config).await, Err(ConfigureError::Unsupported { .. })));
+        let legacy = Arc::new(Console::new(tab, ConsoleConfigView { connection_id: connection.id, database: "shop".into(), schema: None, mode: TxnMode::Manual }));
+        engine.shared.consoles.write().unwrap().insert(tab, legacy.clone());
+        let before = serde_json::to_value(legacy.snapshot(&*legacy.inner.lock().await)).unwrap();
+        for request in [
+            RunRequest::Script { text: "UPDATE dbo.target SET n=2".into(), target: RunTarget::All },
+            RunRequest::Script { text: "UPDATE dbo.target SET n=2\nGO\nSELECT 1".into(), target: RunTarget::All },
+            RunRequest::TablePage { schema: "dbo".into(), table: "target".into(), page: 0, query: TableQuery::default() },
+        ] {
+            let refused = engine.console_run(tab, request).await;
+            assert!(matches!(refused, Err(RunError::Unsupported { ref what }) if what.contains("Select Auto-commit")), "{refused:?}");
+            assert_eq!(serde_json::to_value(legacy.snapshot(&*legacy.inner.lock().await)).unwrap(), before);
+        }
+        let edit = TableChanges { schema: "missing".into(), table: "target".into(), inserts: vec![], updates: vec![], deletes: vec![] };
+        assert!(matches!(engine.table_apply(tab, edit.clone()).await, Err(ApplyError::Unsupported { .. })));
+        engine.console_configure(tab, ConsoleConfig { connection_id: connection.id, database: "shop".into(), schema: None, mode: TxnMode::AutoCommit }).await.unwrap();
+        assert!(matches!(engine.table_apply(tab, edit).await, Err(ApplyError::Unsupported { .. })));
+        assert_eq!(refuser.accepted.load(Ordering::SeqCst), 0);
+        assert!(engine.shared.instance(connection.id).is_none());
+        assert!(matches!(legacy.inner.lock().await.session, SessionSlot::Empty));
+        assert_eq!(engine.boot().workspace.tabs[0].console.mode, TxnMode::Manual);
+    }
+
+    #[cfg(feature = "mssql-tests")]
+    #[tokio::test]
+    async fn legacy_mssql_manual_requests_never_reach_a_committing_trigger() {
+        use futures_util::FutureExt;
+        use std::panic::AssertUnwindSafe;
+
+        async fn rows(engine: &Engine, tab: TabId, text: String) -> Vec<Vec<Option<String>>> {
+            let accepted = engine.console_run(tab, RunRequest::Script { text, target: RunTarget::All }).await.unwrap();
+            let state = tokio::time::timeout(Duration::from_secs(15), async {
+                loop {
+                    let state = engine.boot().consoles.into_iter().find(|s| s.tab_id == tab).unwrap();
+                    if matches!(state.run, RunState::Finished { run_id, .. } if run_id == accepted.run_id) { break state; }
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+            }).await.unwrap();
+            assert!(matches!(state.run, RunState::Finished { outcome: RunOutcome::Ok, .. }), "{:?}", state.run);
+            let RunState::Finished { statements, .. } = state.run else { unreachable!() };
+            statements.iter().flat_map(|s| &s.outputs).filter_map(|o| match o {
+                RunOutput::Rows { result, .. } => Some(engine.result_page(result.r#ref, 0, 100).unwrap().rows),
+                _ => None,
+            }).flatten().collect()
+        }
+
+        let (engine, _dir) = engine().await;
+        let connection = engine.save_connection(ConnectionDraft {
+            database_kind: DatabaseKind::SqlServer,
+            host: std::env::var("L1_DATA_TEST_MSSQL_HOST").unwrap_or_else(|_| "localhost".into()),
+            port: std::env::var("L1_DATA_TEST_MSSQL_PORT").ok().and_then(|p| p.parse().ok()).unwrap_or(1434),
+            user: "sa".into(), ssl_mode: SslMode::Require,
+            password: PasswordInput::Set(std::env::var("L1_DATA_TEST_MSSQL_PASSWORD").unwrap_or_else(|_| "L1Data_dev_Str0ng".into())),
+            ..draft("Legacy Manual trigger refusal")
+        }).await.unwrap();
+        let tab = TabId(uuid::Uuid::new_v4());
+        let observer = TabId(uuid::Uuid::new_v4());
+        for tab in [tab, observer] {
+            engine.console_configure(tab, ConsoleConfig { connection_id: connection.id, database: "shop".into(), schema: None, mode: TxnMode::AutoCommit }).await.unwrap();
+        }
+        let name = format!("l1_legacy_refusal_{}", uuid::Uuid::new_v4().simple());
+        let audit = format!("{name}_audit");
+        let trigger = format!("{name}_trigger");
+        let sequence = format!("{name}_sequence");
+        let outcome = AssertUnwindSafe(async {
+            rows(&engine, observer, format!("CREATE TABLE dbo.[{name}](id int PRIMARY KEY,n int); INSERT INTO dbo.[{name}] VALUES(1,1); CREATE TABLE dbo.[{audit}](n int); INSERT INTO dbo.[{audit}] VALUES(1); CREATE SEQUENCE dbo.[{sequence}] AS bigint START WITH 1")).await;
+            rows(&engine, observer, format!("CREATE TRIGGER dbo.[{trigger}] ON dbo.[{name}] AFTER UPDATE AS BEGIN SET NOCOUNT ON; DECLARE @attempt bigint = NEXT VALUE FOR dbo.[{sequence}]; WHILE @@TRANCOUNT > 0 COMMIT TRANSACTION; BEGIN TRANSACTION; UPDATE dbo.[{audit}] SET n=99; END")).await;
+            assert_eq!(rows(&engine, observer, format!("SELECT NEXT VALUE FOR dbo.[{sequence}]")).await, vec![vec![Some("1".into())]]);
+            rows(&engine, tab, "SELECT @@TRANCOUNT".into()).await;
+            let console = engine.shared.console(tab).unwrap();
+            let before = {
+                let mut inner = console.inner.lock().await;
+                inner.config.mode = TxnMode::Manual;
+                serde_json::to_value(console.publish(&mut inner, &engine.shared)).unwrap()
+            };
+            for request in [
+                RunRequest::Script { text: format!("UPDATE dbo.[{name}] SET n=2 WHERE id=1"), target: RunTarget::All },
+                RunRequest::Script { text: format!("UPDATE dbo.[{name}] SET n=2 WHERE id=1\nGO\nSELECT 1"), target: RunTarget::All },
+                RunRequest::TablePage { schema: "dbo".into(), table: name.clone(), page: 0, query: TableQuery::default() },
+            ] {
+                assert!(matches!(engine.console_run(tab, request).await, Err(RunError::Unsupported { .. })));
+                assert_eq!(serde_json::to_value(console.snapshot(&*console.inner.lock().await)).unwrap(), before);
+            }
+            let edit = TableChanges {
+                schema: "dbo".into(), table: name.clone(), inserts: vec![], deletes: vec![],
+                updates: vec![RowUpdate { key: vec![CellWrite { column: "id".into(), value: Some("1".into()) }], set: vec![CellWrite { column: "n".into(), value: Some("3".into()) }] }],
+            };
+            assert!(matches!(engine.table_apply(tab, edit).await, Err(ApplyError::Unsupported { .. })));
+            assert_eq!(serde_json::to_value(console.snapshot(&*console.inner.lock().await)).unwrap(), before);
+            assert_eq!(rows(&engine, observer, format!("SELECT n FROM dbo.[{name}]; SELECT n FROM dbo.[{audit}]; SELECT NEXT VALUE FOR dbo.[{sequence}]")).await,
+                vec![vec![Some("1".into())], vec![Some("1".into())], vec![Some("2".into())]]);
+            engine.console_configure(tab, ConsoleConfig { connection_id: connection.id, database: "shop".into(), schema: None, mode: TxnMode::AutoCommit }).await.unwrap();
+            assert_eq!(rows(&engine, tab, "SELECT @@TRANCOUNT; SELECT XACT_STATE()".into()).await, vec![vec![Some("0".into())], vec![Some("0".into())]]);
+        }).catch_unwind().await;
+        let _ = engine.console_rollback(tab).await;
+        engine.console_close(tab, true).await.unwrap();
+        rows(&engine, observer, format!("DROP TABLE IF EXISTS dbo.[{name}]; DROP TABLE IF EXISTS dbo.[{audit}]; DROP SEQUENCE IF EXISTS dbo.[{sequence}]")).await;
+        assert_eq!(rows(&engine, observer, format!("SELECT COUNT_BIG(*) FROM sys.objects WHERE name IN (N'{name}',N'{audit}',N'{trigger}',N'{sequence}')")).await, vec![vec![Some("0".into())]]);
+        engine.shutdown().await;
+        if let Err(panic) = outcome { std::panic::resume_unwind(panic); }
     }
 
     #[tokio::test]

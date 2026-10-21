@@ -103,16 +103,8 @@ impl Harness {
     }
 }
 
-fn cell(column: &str, value: Option<&str>) -> CellWrite {
-    CellWrite { column: column.into(), value: value.map(str::to_owned) }
-}
-
-fn changes(table: &str) -> TableChanges {
-    TableChanges { schema: "dbo".into(), table: table.into(), inserts: vec![], updates: vec![], deletes: vec![] }
-}
-
 #[tokio::test]
-async fn canonical_temporal_keys_and_assignments_round_trip_under_dmy_and_mdy() {
+async fn native_temporal_values_and_typed_filters_round_trip_under_dmy_and_mdy() {
     let mut h = Harness::open().await;
     for (native, january, february, inserted) in [
         ("datetime", "2024-01-02 03:04:05.123", "2024-02-01 03:04:05.123", "2024-03-04 05:06:07.127"),
@@ -127,9 +119,7 @@ async fn canonical_temporal_keys_and_assignments_round_trip_under_dmy_and_mdy() 
             h.sql(&format!("SET DATEFORMAT {dateformat}; CREATE TABLE dbo.[{table}] (id {native} PRIMARY KEY, assigned {native} NULL, n int NOT NULL); INSERT INTO dbo.[{table}] (id,n) VALUES (CONVERT({native},N'{}',126),1),(CONVERT({native},N'{}',126),2)", january.replace(' ', "T"), february.replace(' ', "T"))).await;
             let outcome = AssertUnwindSafe(async {
                 h.engine.refresh_catalog(h.db.clone()).await.unwrap();
-                let mut edit = changes(&table);
-                edit.updates.push(RowUpdate { key: vec![cell("id", Some(january))], set: vec![cell("assigned", Some(january)), cell("n", Some("11"))] });
-                assert!(h.engine.table_apply(h.tab, edit).await.unwrap().committed);
+                h.sql(&format!("UPDATE dbo.[{table}] SET assigned=CONVERT({native},N'{}',126),n=11 WHERE id=CONVERT({native},N'{}',126)", january.replace(' ', "T"), january.replace(' ', "T"))).await;
                 assert_eq!(
                     h.sql(&format!("SELECT id,assigned,n FROM dbo.[{table}] ORDER BY id")).await,
                     vec![vec![Some(january.into()), Some(january.into()), Some("11".into())], vec![Some(february.into()), None, Some("2".into())],],
@@ -140,14 +130,10 @@ async fn canonical_temporal_keys_and_assignments_round_trip_under_dmy_and_mdy() 
                     assert_eq!(rows.len(), 1, "{native} under {dateformat}, {column}");
                     assert_eq!(rows[0][0].as_deref(), Some(january));
                 }
-                let mut edit = changes(&table);
-                edit.inserts.push(vec![cell("id", Some(inserted)), cell("assigned", Some(inserted)), cell("n", Some("3"))]);
-                h.engine.table_apply(h.tab, edit).await.unwrap();
+                h.sql(&format!("INSERT INTO dbo.[{table}] (id,assigned,n) VALUES(CONVERT({native},N'{}',126),CONVERT({native},N'{}',126),3)", inserted.replace(' ', "T"), inserted.replace(' ', "T"))).await;
                 let rows = h.filtered(&table, "id", FilterOp::Eq, inserted).await;
                 assert_eq!(rows, vec![vec![Some(inserted.into()), Some(inserted.into()), Some("3".into())]]);
-                let mut edit = changes(&table);
-                edit.deletes.push(vec![cell("id", Some(january))]);
-                h.engine.table_apply(h.tab, edit).await.unwrap();
+                h.sql(&format!("DELETE FROM dbo.[{table}] WHERE id=CONVERT({native},N'{}',126)", january.replace(' ', "T"))).await;
                 assert_eq!(
                     h.sql(&format!("SELECT id,n FROM dbo.[{table}] ORDER BY id")).await,
                     vec![vec![Some(february.into()), Some("2".into())], vec![Some(inserted.into()), Some("3".into())],],
@@ -203,14 +189,6 @@ async fn selected_binary_filters_compare_bytes_and_search_displayed_hex() {
                 Err(RunError::BadFilter)
             ));
         }
-        let mut edit = changes(&table);
-        edit.updates.push(RowUpdate { key: vec![cell("id", Some("1"))], set: vec![cell("label", Some("must roll back"))] });
-        edit.updates.push(RowUpdate { key: vec![cell("id", Some("2"))], set: vec![cell("precise", Some("123456789012345678901234567890123456789"))] });
-        assert!(matches!(h.engine.table_apply(h.tab, edit).await, Err(ApplyError::Failed { .. })));
-        assert_eq!(
-            h.sql(&format!("SELECT label,precise FROM dbo.[{table}] WHERE id=1")).await,
-            vec![vec![Some("O'Brien ~%_[x]".into()), Some("12345678901234567890.123456789012".into())]]
-        );
     })
     .catch_unwind()
     .await;
@@ -218,7 +196,7 @@ async fn selected_binary_filters_compare_bytes_and_search_displayed_hex() {
 }
 
 #[tokio::test]
-async fn rowversion_primary_keys_allow_predicates_but_reject_assignments() {
+async fn rowversion_metadata_and_filters_track_native_updates() {
     let mut h = Harness::open().await;
     let table = format!("l1_rowversion_key_{}", uuid::Uuid::new_v4().simple());
     h.sql(&format!("CREATE TABLE dbo.[{table}] (version rowversion PRIMARY KEY, n int NULL); INSERT INTO dbo.[{table}] (n) VALUES (1)")).await;
@@ -230,26 +208,14 @@ async fn rowversion_primary_keys_allow_predicates_but_reject_assignments() {
         assert!(version.pk);
         assert!(!version.writable);
         let original = h.sql(&format!("SELECT version FROM dbo.[{table}]")).await[0][0].clone().unwrap();
-        let mut edit = changes(&table);
-        edit.updates.push(RowUpdate { key: vec![cell("version", Some(&original))], set: vec![cell("n", None)] });
-        h.engine.table_apply(h.tab, edit).await.unwrap();
+        h.sql(&format!("UPDATE dbo.[{table}] SET n=NULL WHERE version=CONVERT(varbinary(8),N'{original}',1)")).await;
         let rows = h.sql(&format!("SELECT version,n FROM dbo.[{table}]")).await;
         let current = rows[0][0].clone().unwrap();
         assert_ne!(original, current);
         assert_eq!(rows[0][1], None);
         assert_eq!(h.filtered(&table, "version", FilterOp::Eq, &current).await.len(), 1);
-        let mut edit = changes(&table);
-        edit.deletes.push(vec![cell("version", Some(&original))]);
-        assert!(matches!(h.engine.table_apply(h.tab, edit).await, Err(ApplyError::RowMismatch { rows: 0, .. })));
-        let mut edit = changes(&table);
-        edit.updates.push(RowUpdate { key: vec![cell("version", Some(&current))], set: vec![cell("version", Some(&original))] });
-        assert!(matches!(h.engine.table_apply(h.tab, edit).await, Err(ApplyError::Failed { .. })));
-        let mut edit = changes(&table);
-        edit.inserts.push(vec![cell("version", Some(&original))]);
-        assert!(matches!(h.engine.table_apply(h.tab, edit).await, Err(ApplyError::Failed { .. })));
-        let mut edit = changes(&table);
-        edit.deletes.push(vec![cell("version", Some(&current))]);
-        h.engine.table_apply(h.tab, edit).await.unwrap();
+        assert!(h.filtered(&table, "version", FilterOp::Eq, &original).await.is_empty());
+        h.sql(&format!("DELETE FROM dbo.[{table}] WHERE version=CONVERT(varbinary(8),N'{current}',1)")).await;
         assert_eq!(h.sql(&format!("SELECT COUNT_BIG(*) FROM dbo.[{table}]")).await, vec![vec![Some("0".into())]]);
     })
     .catch_unwind()

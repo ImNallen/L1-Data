@@ -1,12 +1,10 @@
 mod expression;
 mod format;
 mod table;
-mod transaction;
 
 pub(crate) use expression::validate_expression;
 pub(crate) use format::format;
 pub(crate) use table::{browse_sql, count_sql, format_order_by, parse_order_by};
-pub(crate) use transaction::manual_transaction;
 
 use super::{ByteTarget, DmlVerb, Invalidates, StmtKind, StmtSpan, relations::NameRef};
 

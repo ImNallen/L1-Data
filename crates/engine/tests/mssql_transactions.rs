@@ -10,7 +10,7 @@ use std::time::Duration;
 struct Harness {
     engine: Arc<Engine>,
     connection: ConnectionId,
-    manual: TabId,
+    tab: TabId,
     observer: TabId,
     table: String,
     objects: Vec<(&'static str, String)>,
@@ -28,7 +28,7 @@ impl Harness {
         let connection = engine.save_connection(ConnectionDraft {
             database_kind: DatabaseKind::SqlServer,
             id: None,
-            name: "Manual transaction regression".into(),
+            name: "Native transaction regression".into(),
             host: std::env::var("L1_DATA_TEST_MSSQL_HOST").unwrap_or_else(|_| "localhost".into()),
             port: std::env::var("L1_DATA_TEST_MSSQL_PORT").ok().and_then(|p| p.parse().ok()).unwrap_or(1434),
             database: "shop".into(),
@@ -39,15 +39,15 @@ impl Harness {
             color: None,
         }).await.unwrap().id;
         engine.connect(connection).await.unwrap();
-        let manual = TabId(uuid::Uuid::new_v4());
+        let tab = TabId(uuid::Uuid::new_v4());
         let observer = TabId(uuid::Uuid::new_v4());
         let h = Self {
-            engine, connection, manual, observer,
-            table: format!("##l1_manual_{}", uuid::Uuid::new_v4().simple()),
+            engine, connection, tab, observer,
+            table: format!("l1_native_{}", uuid::Uuid::new_v4().simple()),
             objects: Vec::new(),
             _dir: dir,
         };
-        h.configure(manual, TxnMode::Manual).await;
+        h.configure(tab, TxnMode::AutoCommit).await;
         h.configure(observer, TxnMode::AutoCommit).await;
         h.ok(observer, &format!("CREATE TABLE [{}] (id int PRIMARY KEY, n int); INSERT INTO [{}] VALUES(1,1)", h.table, h.table)).await;
         h
@@ -77,7 +77,7 @@ impl Harness {
                 }
                 tokio::time::sleep(Duration::from_millis(10)).await;
             }
-        }).await.expect("Manual transaction regression did not finish")
+        }).await.expect("Native transaction regression did not finish")
     }
 
     async fn ok(&self, tab: TabId, sql: &str) -> ConsoleState {
@@ -96,34 +96,28 @@ impl Harness {
         self.engine.result_page(result, 0, 1).unwrap().rows[0][0].clone().unwrap()
     }
 
-    async fn rejected(&self, sql: &str) {
-        let before = self.state(self.manual);
-        let result = self.engine.console_run(self.manual, RunRequest::Script { text: sql.into(), target: RunTarget::All }).await;
-        assert!(matches!(result, Err(RunError::Unsupported { ref what }) if what.contains("Manual") && what.contains("Auto-commit")), "{sql}: {result:?}");
-        let after = self.state(self.manual);
-        assert_eq!((after.rev, after.txn, after.txn_depth), (before.rev, before.txn, before.txn_depth), "Rejected SQL changed console state");
-    }
-
     fn procedure(&mut self) -> String {
         self.object("PROCEDURE")
     }
 
     fn object(&mut self, kind: &'static str) -> String {
-        let name = format!("l1_manual_{}", uuid::Uuid::new_v4().simple());
+        let name = format!("l1_tab_{}", uuid::Uuid::new_v4().simple());
         self.objects.push((kind, name.clone()));
         name
     }
 
     async fn cleanup(self) {
-        for tab in [self.manual, self.observer] {
+        for tab in [self.tab, self.observer] {
             let _ = self.engine.console_rollback(tab).await;
             self.engine.console_close(tab, true).await.unwrap();
         }
         self.configure(self.observer, TxnMode::AutoCommit).await;
         for (kind, name) in self.objects.iter().rev() {
             self.ok(self.observer, &format!("DROP {kind} IF EXISTS dbo.[{name}]")).await;
+            assert_eq!(self.scalar(self.observer, &format!("SELECT COUNT_BIG(*) FROM sys.objects WHERE name=N'{name}'")).await, "0");
         }
         self.ok(self.observer, &format!("DROP TABLE IF EXISTS [{}]", self.table)).await;
+        assert_eq!(self.scalar(self.observer, &format!("SELECT COUNT_BIG(*) FROM sys.tables WHERE name=N'{}'", self.table)).await, "0");
         self.engine.shutdown().await;
     }
 }
@@ -141,262 +135,149 @@ fn transaction(state: &ConsoleState, depth: u32) {
     assert_eq!((state.txn, state.txn_depth), (if depth == 0 { TxnState::Idle } else { TxnState::Active }, Some(depth)));
 }
 
+fn changes(table: &str) -> TableChanges {
+    TableChanges { schema: "dbo".into(), table: table.into(), inserts: vec![], updates: vec![], deletes: vec![] }
+}
+
+fn cell(column: &str, value: &str) -> CellWrite {
+    CellWrite { column: column.into(), value: Some(value.into()) }
+}
+
 #[tokio::test]
-async fn module_bodies_remain_rollbackable_and_conditional_control_cannot_commit_a_write() {
+async fn manual_configuration_and_staged_edits_refuse_before_trigger_execution() {
     check(|h| async move {
-        for body in ["SELECT 1", "BEGIN TRANSACTION; SELECT 1; COMMIT TRANSACTION"] {
+        let sequence = h.object("SEQUENCE");
+        let audit = h.object("TABLE");
+        let trigger = h.object("TRIGGER");
+        h.ok(h.observer, &format!("CREATE SEQUENCE dbo.[{sequence}] AS bigint START WITH 1; CREATE TABLE dbo.[{audit}](n int); INSERT INTO dbo.[{audit}] VALUES(1)")).await;
+        h.ok(h.observer, &format!("CREATE TRIGGER dbo.[{trigger}] ON dbo.[{}] AFTER UPDATE AS BEGIN SET NOCOUNT ON; DECLARE @attempt bigint = NEXT VALUE FOR dbo.[{sequence}]; WHILE @@TRANCOUNT > 0 COMMIT TRANSACTION; BEGIN TRANSACTION; UPDATE dbo.[{audit}] SET n=99; END", h.table)).await;
+        assert_eq!(h.scalar(h.observer, &format!("SELECT NEXT VALUE FOR dbo.[{sequence}]")).await, "1");
+        h.ok(h.tab, "SELECT @@TRANCOUNT").await;
+        let before = serde_json::to_value(h.state(h.tab)).unwrap();
+        let fresh = TabId(uuid::Uuid::new_v4());
+        for tab in [fresh, h.tab] {
+            let refused = h.engine.console_configure(tab, ConsoleConfig {
+                connection_id: h.connection, database: "shop".into(), schema: Some("lab".into()), mode: TxnMode::Manual,
+            }).await;
+            assert!(matches!(refused, Err(ConfigureError::Unsupported { ref what }) if what.contains("Select Auto-commit")), "{refused:?}");
+        }
+        assert!(!h.engine.boot().consoles.iter().any(|state| state.tab_id == fresh));
+        let mut edit = changes(&h.table);
+        edit.updates.push(RowUpdate { key: vec![cell("id", "1")], set: vec![cell("n", "2")] });
+        edit.inserts.push(vec![cell("id", "1"), cell("n", "3")]);
+        let mut delete = changes(&h.table);
+        delete.deletes.push(vec![cell("id", "1")]);
+        for edit in [changes(&h.table), changes("not_a_table"), edit, delete] {
+            let refused = h.engine.table_apply(h.tab, edit).await;
+            assert!(matches!(refused, Err(ApplyError::Unsupported { ref what }) if what.contains("SQL editor") && what.contains("Auto-commit")), "{refused:?}");
+            assert_eq!(serde_json::to_value(h.state(h.tab)).unwrap(), before);
+        }
+        assert_eq!(h.scalar(h.observer, &format!("SELECT n FROM dbo.[{}]", h.table)).await, "1");
+        assert_eq!(h.scalar(h.observer, &format!("SELECT n FROM dbo.[{audit}]")).await, "1");
+        assert_eq!(h.scalar(h.observer, &format!("SELECT NEXT VALUE FOR dbo.[{sequence}]")).await, "2", "A refused call reached the trigger");
+    }.boxed()).await;
+}
+
+#[tokio::test]
+async fn staged_refusal_preserves_xact_abort_and_prior_native_transaction_work() {
+    check(|h| async move {
+        h.ok(h.tab, "SET XACT_ABORT ON").await;
+        transaction(&h.ok(h.tab, &format!("BEGIN TRANSACTION; BEGIN TRANSACTION; UPDATE dbo.[{}] SET n=3 WHERE id=1", h.table)).await, 2);
+        assert_eq!(h.scalar(h.tab, "SELECT XACT_STATE()").await, "1");
+        let before = serde_json::to_value(h.state(h.tab)).unwrap();
+        let mut edit = changes(&h.table);
+        edit.inserts.push(vec![cell("id", "1"), cell("n", "99")]);
+        for edit in [edit, changes(&h.table)] {
+            assert!(matches!(h.engine.table_apply(h.tab, edit).await, Err(ApplyError::Unsupported { .. })));
+            assert_eq!(serde_json::to_value(h.state(h.tab)).unwrap(), before);
+        }
+        let refused = h.engine.console_configure(h.tab, ConsoleConfig {
+            connection_id: h.connection, database: "shop".into(), schema: None, mode: TxnMode::Manual,
+        }).await;
+        assert!(matches!(refused, Err(ConfigureError::Unsupported { .. })));
+        assert_eq!(serde_json::to_value(h.state(h.tab)).unwrap(), before);
+        assert_eq!(h.scalar(h.tab, &format!("SELECT n FROM dbo.[{}] WHERE id=1", h.table)).await, "3");
+        assert_eq!(h.scalar(h.tab, "SELECT @@TRANCOUNT").await, "2");
+        assert_eq!(h.scalar(h.tab, "SELECT XACT_STATE()").await, "1");
+        assert_eq!(h.scalar(h.tab, "SELECT CASE WHEN (@@OPTIONS & 16384)=16384 THEN 1 ELSE 0 END").await, "1");
+        assert_eq!(h.scalar(h.observer, &format!("SELECT n FROM dbo.[{}] WITH (READUNCOMMITTED) WHERE id=1", h.table)).await, "3");
+        h.engine.console_commit(h.tab).await.unwrap();
+        transaction(&h.state(h.tab), 0);
+        assert_eq!(h.scalar(h.observer, &format!("SELECT n FROM dbo.[{}] WHERE id=1", h.table)).await, "3");
+        h.ok(h.tab, &format!("BEGIN TRANSACTION; UPDATE dbo.[{}] SET n=4 WHERE id=1", h.table)).await;
+        h.engine.console_rollback(h.tab).await.unwrap();
+        transaction(&h.state(h.tab), 0);
+        assert_eq!(h.scalar(h.observer, &format!("SELECT n FROM dbo.[{}] WHERE id=1", h.table)).await, "3");
+    }.boxed()).await;
+}
+
+#[tokio::test]
+async fn native_explicit_transactions_keep_module_definitions_rollbackable() {
+    check(|h| async move {
+        for finish in [false, true] {
             let name = h.procedure();
-            let state = h.ok(h.manual, &format!("CREATE PROCEDURE dbo.[{name}] AS BEGIN {body}; END")).await;
-            transaction(&state, 1);
-            h.engine.console_rollback(h.manual).await.unwrap();
-            transaction(&h.state(h.manual), 0);
-            assert_eq!(h.scalar(h.observer, &format!("SELECT COUNT_BIG(*) FROM sys.procedures WHERE name=N'{name}'")).await, "0");
-        }
-        h.rejected(&format!("IF 1=0 ROLLBACK TRANSACTION; UPDATE [{}] SET n=2 WHERE id=1", h.table)).await;
-        assert_eq!(h.scalar(h.observer, &format!("SELECT n FROM [{}] WHERE id=1", h.table)).await, "1");
-        assert!(matches!(h.engine.console_rollback(h.manual).await, Err(TxnError::NoTransaction)));
-    }.boxed()).await;
-}
-
-#[tokio::test]
-async fn manual_refuses_every_unsafe_selected_batch_before_any_write() {
-    check(|h| async move {
-        let update = format!("UPDATE [{}] SET n=2 WHERE id=1", h.table);
-        for sql in [
-            format!("IF 1=0 BEGIN TRANSACTION; {update}"),
-            format!("IF 1=1 BEGIN TRANSACTION; {update}"),
-            format!("IF 1=0 COMMIT TRANSACTION; {update}"),
-            format!("IF 1=1 COMMIT TRANSACTION; {update}"),
-            format!("IF 1=0 ROLLBACK TRANSACTION; {update}"),
-            format!("IF 1=1 ROLLBACK TRANSACTION; {update}"),
-            format!("BEGIN TRANSACTION; {update}; COMMIT TRANSACTION"),
-            format!("{update}; COMMIT TRANSACTION"),
-            format!("ROLLBACK TRANSACTION; {update}"),
-            format!("{update}\nGO\nIF 1=0 ROLLBACK TRANSACTION"),
-            format!("{update}\nGO\nCOMMIT TRANSACTION\nGO\nIF 1=0 ROLLBACK TRANSACTION"),
-            format!("{update}\nGO\nSET IMPLICIT_TRANSACTIONS OFF"),
-            format!("{update}\nGO\nSET ANSI_DEFAULTS OFF"),
-            format!("{update}\nGO\nSET NOEXEC ON"),
-            format!("SET ANSI_PADDING, IMPLICIT_TRANSACTIONS ON; {update}"),
-            format!("{update}\nGO\nEXEC(N'ROLLBACK TRANSACTION; {update}')"),
-        ] {
-            h.rejected(&sql).await;
-            assert_eq!(h.scalar(h.observer, &format!("SELECT n FROM [{}]", h.table)).await, "1", "{sql}");
-        }
-        for option in ["IMPLICIT_TRANSACTIONS", "ANSI_DEFAULTS", "XACT_ABORT", "REMOTE_PROC_TRANSACTIONS", "NOEXEC", "PARSEONLY", "FMTONLY", "SHOWPLAN_ALL", "SHOWPLAN_TEXT", "SHOWPLAN_XML"] {
-            for value in ["ON", "OFF"] {
-                h.rejected(&format!("{update}\nGO\nSET {option} {value}")).await;
-                assert_eq!(h.scalar(h.observer, &format!("SELECT n FROM [{}]", h.table)).await, "1");
+            transaction(&h.ok(h.tab, "BEGIN TRANSACTION").await, 1);
+            transaction(&h.ok(h.tab, &format!("CREATE PROCEDURE dbo.[{name}] AS BEGIN SELECT 1 AS n END")).await, 1);
+            if finish {
+                h.engine.console_commit(h.tab).await.unwrap();
+            } else {
+                h.engine.console_rollback(h.tab).await.unwrap();
             }
+            transaction(&h.state(h.tab), 0);
+            assert_eq!(h.scalar(h.observer, &format!("SELECT COUNT_BIG(*) FROM sys.procedures WHERE name=N'{name}'")).await, if finish { "1" } else { "0" });
         }
-        let name = h.procedure();
-        h.ok(h.observer, &format!("CREATE PROCEDURE dbo.[{name}] @n int AS IF @@TRANCOUNT > 0 ROLLBACK TRANSACTION; UPDATE [{}] SET n=@n", h.table)).await;
-        for call in [format!("EXEC dbo.[{name}] @n=2"), format!("dbo.[{name}] @n=2"), format!("{name} @n=2")] {
-            h.rejected(&call).await;
-            h.rejected(&format!("{update}\nGO\n{call}")).await;
-            assert_eq!(h.scalar(h.observer, &format!("SELECT n FROM [{}]", h.table)).await, "1");
-        }
-        let selected = format!("{update}\nGO\nIF 1=0 ROLLBACK TRANSACTION");
-        let request = RunRequest::Script {
-            target: RunTarget::Selection { from: DocOffset(0), to: DocOffset(selected.encode_utf16().count() as u32) },
-            text: selected,
-        };
-        assert!(matches!(h.engine.console_run(h.manual, request).await, Err(RunError::Unsupported { .. })));
-        assert_eq!(h.scalar(h.observer, &format!("SELECT n FROM [{}]", h.table)).await, "1");
-        let accepted = h.engine.console_run(h.manual, RunRequest::Script {
-            text: format!("{update}\nGO\nIF 1=0 ROLLBACK TRANSACTION"), target: RunTarget::Cursor { offset: DocOffset(0) },
-        }).await.unwrap();
-        transaction(&h.finish(h.manual, accepted.run_id).await, 1);
-        h.engine.console_rollback(h.manual).await.unwrap();
-        assert_eq!(h.scalar(h.observer, &format!("SELECT n FROM [{}]", h.table)).await, "1");
-        h.ok(h.manual, &update).await;
-        h.rejected(&format!("COMMIT TRANSACTION; {update}")).await;
-        transaction(&h.state(h.manual), 1);
-        h.engine.console_rollback(h.manual).await.unwrap();
-        assert_eq!(h.scalar(h.observer, &format!("SELECT n FROM [{}]", h.table)).await, "1");
     }.boxed()).await;
 }
 
 #[tokio::test]
-async fn manual_keeps_scope_native_nesting_and_restarts_after_transaction_end() {
+async fn native_errors_and_cancellation_preserve_observable_transaction_state() {
     check(|h| async move {
-        transaction(&h.ok(h.manual, "BEGIN TRANSACTION").await, 1);
-        transaction(&h.ok(h.manual, "BEGIN TRANSACTION").await, 2);
-        let sql = format!("DECLARE @n int=3; UPDATE [{}] SET n=@n; SELECT @n", h.table);
-        assert_eq!(h.scalar(h.manual, &sql).await, "3");
-        transaction(&h.ok(h.manual, "COMMIT TRANSACTION").await, 1);
-        h.engine.console_rollback(h.manual).await.unwrap();
-        transaction(&h.state(h.manual), 0);
-        assert_eq!(h.scalar(h.observer, &format!("SELECT n FROM [{}]", h.table)).await, "1");
-
-        transaction(&h.ok(h.manual, "BEGIN TRAN; BEGIN TRAN;").await, 2);
-        h.ok(h.manual, &format!("UPDATE [{}] SET n=4", h.table)).await;
-        h.engine.console_commit(h.manual).await.unwrap();
-        transaction(&h.state(h.manual), 0);
-        assert_eq!(h.scalar(h.observer, &format!("SELECT n FROM [{}]", h.table)).await, "4");
-        assert_eq!(h.scalar(h.observer, "SELECT @@TRANCOUNT").await, "0");
-        assert!(matches!(h.engine.console_commit(h.manual).await, Err(TxnError::NoTransaction)));
-
-        let script = format!("UPDATE [{}] SET n=5\nGO\nCOMMIT TRANSACTION\nGO\nUPDATE [{}] SET n=6", h.table, h.table);
-        transaction(&h.ok(h.manual, &script).await, 1);
-        h.engine.console_rollback(h.manual).await.unwrap();
-        assert_eq!(h.scalar(h.observer, &format!("SELECT n FROM [{}]", h.table)).await, "5");
-
-        let script = format!("UPDATE [{}] SET n=7\nGO\nROLLBACK TRANSACTION\nGO\nUPDATE [{}] SET n=8", h.table, h.table);
-        transaction(&h.ok(h.manual, &script).await, 1);
-        h.engine.console_rollback(h.manual).await.unwrap();
-        assert_eq!(h.scalar(h.observer, &format!("SELECT n FROM [{}]", h.table)).await, "5");
-
-        h.ok(h.manual, &format!("UPDATE [{}] SET n=9", h.table)).await;
-        transaction(&h.ok(h.manual, "SAVE TRANSACTION [point]").await, 1);
-        h.ok(h.manual, &format!("UPDATE [{}] SET n=10", h.table)).await;
-        transaction(&h.ok(h.manual, "ROLLBACK TRANSACTION [point]").await, 1);
-        h.engine.console_commit(h.manual).await.unwrap();
-        assert_eq!(h.scalar(h.observer, &format!("SELECT n FROM [{}]", h.table)).await, "9");
-    }.boxed()).await;
-}
-
-#[tokio::test]
-async fn errors_and_cancellation_leave_no_manual_write_committed() {
-    check(|h| async move {
-        let state = h.run(h.manual, &format!("UPDATE [{}] SET n=2; RAISERROR('expected failure',16,1)", h.table)).await;
-        assert!(matches!(state.run, RunState::Finished { outcome: RunOutcome::Failed, .. }));
-        transaction(&state, 1);
-        h.engine.console_rollback(h.manual).await.unwrap();
-        assert_eq!(h.scalar(h.observer, &format!("SELECT n FROM [{}]", h.table)).await, "1");
-
-        let state = h.run(h.manual, &format!("UPDATE [{}] SET n=3; INSERT INTO [{}] VALUES(1,99)", h.table, h.table)).await;
-        assert!(matches!(state.run, RunState::Finished { outcome: RunOutcome::Failed, .. }));
-        transaction(&state, 1);
-        h.engine.console_rollback(h.manual).await.unwrap();
-        assert_eq!(h.scalar(h.observer, &format!("SELECT n FROM [{}]", h.table)).await, "1");
-
-        h.ok(h.manual, &format!("UPDATE [{}] SET n=4", h.table)).await;
-        let SessionState::Open { backend_pid } = h.state(h.manual).session else { panic!("Expected open manual session") };
-        let accepted = h.engine.console_run(h.manual, RunRequest::Script {
-            text: "WAITFOR DELAY '00:00:30'".into(), target: RunTarget::All,
-        }).await.unwrap();
-        tokio::time::timeout(Duration::from_secs(3), async {
+        let failed = h.run(h.tab, &format!("BEGIN TRANSACTION; UPDATE dbo.[{}] SET n=2; RAISERROR('expected failure',16,1)", h.table)).await;
+        assert!(matches!(failed.run, RunState::Finished { outcome: RunOutcome::Failed, .. }));
+        transaction(&failed, 1);
+        h.engine.console_rollback(h.tab).await.unwrap();
+        assert_eq!(h.scalar(h.observer, &format!("SELECT n FROM dbo.[{}]", h.table)).await, "1");
+        h.ok(h.tab, &format!("BEGIN TRANSACTION; UPDATE dbo.[{}] SET n=3", h.table)).await;
+        let SessionState::Open { backend_pid } = h.state(h.tab).session else { panic!("Expected native session") };
+        let accepted = h.engine.console_run(h.tab, RunRequest::Script { text: "WAITFOR DELAY '00:00:30'".into(), target: RunTarget::All }).await.unwrap();
+        tokio::time::timeout(Duration::from_secs(5), async {
             loop {
-                if h.scalar(h.observer, &format!("SELECT COUNT_BIG(*) FROM sys.dm_exec_requests WHERE session_id={backend_pid} AND command='WAITFOR'")).await == "1" {
-                    break;
-                }
+                if h.scalar(h.observer, &format!("SELECT COUNT_BIG(*) FROM sys.dm_exec_requests WHERE session_id={backend_pid} AND command='WAITFOR'")).await == "1" { break; }
+                tokio::time::sleep(Duration::from_millis(10)).await;
             }
         }).await.unwrap();
-        h.engine.console_cancel(h.manual).await;
-        let state = h.finish(h.manual, accepted.run_id).await;
+        h.engine.console_cancel(h.tab).await;
+        let state = h.finish(h.tab, accepted.run_id).await;
         assert!(matches!(state.run, RunState::Finished { outcome: RunOutcome::Cancelled, .. }));
         assert!(matches!(state.session, SessionState::Lost { transaction: TransactionLoss::Unknown, .. }));
-        assert_eq!(h.scalar(h.observer, &format!("SELECT n FROM [{}]", h.table)).await, "1");
-        transaction(&h.ok(h.manual, &format!("UPDATE [{}] SET n=5", h.table)).await, 1);
-        h.engine.console_rollback(h.manual).await.unwrap();
-        assert_eq!(h.scalar(h.observer, &format!("SELECT n FROM [{}]", h.table)).await, "1");
+        assert_eq!(h.scalar(h.observer, &format!("SELECT n FROM dbo.[{}]", h.table)).await, "1");
+        transaction(&h.ok(h.tab, "SELECT @@TRANCOUNT").await, 0);
     }.boxed()).await;
 }
 
 #[tokio::test]
 async fn autocommit_retains_native_conditionals_options_and_procedure_calls() {
     check(|h| async move {
-        h.configure(h.manual, TxnMode::AutoCommit).await;
-        transaction(&h.ok(h.manual, &format!("IF 1=0 ROLLBACK TRANSACTION; UPDATE [{}] SET n=2", h.table)).await, 0);
+        h.configure(h.tab, TxnMode::AutoCommit).await;
+        transaction(&h.ok(h.tab, &format!("IF 1=0 ROLLBACK TRANSACTION; UPDATE [{}] SET n=2", h.table)).await, 0);
         assert_eq!(h.scalar(h.observer, &format!("SELECT n FROM [{}]", h.table)).await, "2");
-        transaction(&h.ok(h.manual, &format!("BEGIN TRANSACTION; BEGIN TRANSACTION; UPDATE [{}] SET n=3; COMMIT TRANSACTION", h.table)).await, 1);
-        h.engine.console_rollback(h.manual).await.unwrap();
+        transaction(&h.ok(h.tab, &format!("BEGIN TRANSACTION; BEGIN TRANSACTION; UPDATE [{}] SET n=3; COMMIT TRANSACTION", h.table)).await, 1);
+        h.engine.console_rollback(h.tab).await.unwrap();
         assert_eq!(h.scalar(h.observer, &format!("SELECT n FROM [{}]", h.table)).await, "2");
-        transaction(&h.ok(h.manual, &format!("IF 1=1 BEGIN TRANSACTION; UPDATE [{}] SET n=4; IF 1=1 COMMIT TRANSACTION", h.table)).await, 0);
+        transaction(&h.ok(h.tab, &format!("IF 1=1 BEGIN TRANSACTION; UPDATE [{}] SET n=4; IF 1=1 COMMIT TRANSACTION", h.table)).await, 0);
         assert_eq!(h.scalar(h.observer, &format!("SELECT n FROM [{}]", h.table)).await, "4");
-        transaction(&h.ok(h.manual, &format!("SET IMPLICIT_TRANSACTIONS ON; UPDATE [{}] SET n=5", h.table)).await, 1);
-        h.engine.console_rollback(h.manual).await.unwrap();
-        transaction(&h.state(h.manual), 0);
+        transaction(&h.ok(h.tab, &format!("SET IMPLICIT_TRANSACTIONS ON; UPDATE [{}] SET n=5", h.table)).await, 1);
+        h.engine.console_rollback(h.tab).await.unwrap();
+        transaction(&h.state(h.tab), 0);
         assert_eq!(h.scalar(h.observer, &format!("SELECT n FROM [{}]", h.table)).await, "4");
-        transaction(&h.ok(h.manual, "SELECT @@TRANCOUNT, XACT_STATE(), DB_NAME()").await, 0);
-        transaction(&h.ok(h.manual, "SET IMPLICIT_TRANSACTIONS OFF").await, 0);
+        transaction(&h.ok(h.tab, "SELECT @@TRANCOUNT, XACT_STATE(), DB_NAME()").await, 0);
+        transaction(&h.ok(h.tab, "SET IMPLICIT_TRANSACTIONS OFF").await, 0);
 
         let name = h.procedure();
         h.ok(h.observer, &format!("CREATE PROCEDURE dbo.[{name}] @n int AS UPDATE [{}] SET n=@n", h.table)).await;
         for call in [format!("EXEC dbo.[{name}] @n=6"), format!("dbo.[{name}] @n=6"), format!("{name} @n=6")] {
-            transaction(&h.ok(h.manual, &call).await, 0);
+            transaction(&h.ok(h.tab, &call).await, 0);
             assert_eq!(h.scalar(h.observer, &format!("SELECT n FROM [{}]", h.table)).await, "6");
-        }
-    }.boxed()).await;
-}
-
-#[tokio::test]
-async fn inherited_options_keep_truthful_depth_and_cannot_skip_the_manual_wrapper() {
-    check(|h| async move {
-        for (option, depth) in [("IMPLICIT_TRANSACTIONS", 2), ("ANSI_DEFAULTS", 2), ("XACT_ABORT", 1)] {
-            h.configure(h.manual, TxnMode::AutoCommit).await;
-            transaction(&h.ok(h.manual, &format!("SET {option} ON")).await, 0);
-            h.configure(h.manual, TxnMode::Manual).await;
-            transaction(&h.ok(h.manual, &format!("UPDATE [{}] SET n=2", h.table)).await, depth);
-            h.engine.console_rollback(h.manual).await.unwrap();
-            transaction(&h.state(h.manual), 0);
-            assert_eq!(h.scalar(h.observer, &format!("SELECT n FROM [{}]", h.table)).await, "1");
-            h.configure(h.manual, TxnMode::AutoCommit).await;
-            transaction(&h.ok(h.manual, &format!("SET {option} OFF")).await, 0);
-        }
-        h.ok(h.manual, "SET XACT_ABORT ON").await;
-        h.configure(h.manual, TxnMode::Manual).await;
-        let failed = h.run(h.manual, &format!("UPDATE [{}] SET n=3; INSERT INTO [{}] VALUES(1,99); UPDATE [{}] SET n=4", h.table, h.table, h.table)).await;
-        assert!(matches!(failed.run, RunState::Finished { outcome: RunOutcome::Failed, .. }));
-        transaction(&failed, 0);
-        assert_eq!(h.scalar(h.observer, &format!("SELECT n FROM [{}]", h.table)).await, "1");
-        transaction(&h.ok(h.manual, &format!("UPDATE [{}] SET n=5", h.table)).await, 1);
-        h.engine.console_rollback(h.manual).await.unwrap();
-        assert_eq!(h.scalar(h.observer, &format!("SELECT n FROM [{}]", h.table)).await, "1");
-
-        h.configure(h.manual, TxnMode::AutoCommit).await;
-        let failed = h.run(h.manual, "SET NOEXEC ON").await;
-        assert!(matches!(failed.run, RunState::Finished { outcome: RunOutcome::Failed, .. }));
-        assert!(matches!(failed.session, SessionState::Lost { .. }));
-        h.configure(h.manual, TxnMode::Manual).await;
-        transaction(&h.ok(h.manual, &format!("UPDATE [{}] SET n=6", h.table)).await, 1);
-        h.engine.console_rollback(h.manual).await.unwrap();
-        assert_eq!(h.scalar(h.observer, &format!("SELECT n FROM [{}]", h.table)).await, "1");
-    }.boxed()).await;
-}
-
-#[tokio::test]
-async fn every_module_definition_family_keeps_trailing_control_from_executing() {
-    check(|h| async move {
-        let trigger_table = h.object("TABLE");
-        h.ok(h.observer, &format!("CREATE TABLE dbo.[{trigger_table}](n int)")).await;
-        for (keyword, kind, accepts_tail) in [
-            ("PROCEDURE", "PROCEDURE", true), ("PROC", "PROCEDURE", true),
-            ("VIEW", "VIEW", false), ("FUNCTION", "FUNCTION", false), ("TRIGGER", "TRIGGER", true),
-        ] {
-            let body = match kind {
-                "PROCEDURE" => "AS BEGIN SELECT 1 AS n END".into(),
-                "VIEW" => "AS SELECT 1 AS n".into(),
-                "FUNCTION" => "() RETURNS int AS BEGIN RETURN 1 END".into(),
-                "TRIGGER" => format!("ON dbo.[{trigger_table}] AFTER INSERT AS BEGIN PRINT N'body' END"),
-                _ => unreachable!(),
-            };
-            for verb in ["CREATE", "CREATE OR ALTER"] {
-                let name = h.object(kind);
-                let sql = format!("{verb} {keyword} dbo.[{name}] {body}; COMMIT TRANSACTION; UPDATE [{}] SET n=2", h.table);
-                let state = h.run(h.manual, &sql).await;
-                let expected = if accepts_tail { RunOutcome::Ok } else { RunOutcome::Failed };
-                assert!(matches!(state.run, RunState::Finished { outcome, .. } if outcome == expected), "{sql}: {:?}", state.run);
-                transaction(&state, 1);
-                h.engine.console_rollback(h.manual).await.unwrap();
-                assert_eq!(h.scalar(h.observer, &format!("SELECT n FROM [{}]", h.table)).await, "1", "{sql}");
-                assert_eq!(h.scalar(h.observer, &format!("SELECT COUNT_BIG(*) FROM sys.objects WHERE name=N'{name}'")).await, "0", "{sql}");
-            }
-            let name = h.object(kind);
-            h.ok(h.observer, &format!("CREATE {keyword} dbo.[{name}] {body}")).await;
-            let definition = format!("SELECT OBJECT_DEFINITION(OBJECT_ID(N'dbo.{name}'))");
-            let original = h.scalar(h.observer, &definition).await;
-            for verb in ["ALTER", "CREATE OR ALTER"] {
-                let sql = format!("{verb} {keyword} dbo.[{name}] {body}; COMMIT TRANSACTION; UPDATE [{}] SET n=2", h.table);
-                let state = h.run(h.manual, &sql).await;
-                let expected = if accepts_tail { RunOutcome::Ok } else { RunOutcome::Failed };
-                assert!(matches!(state.run, RunState::Finished { outcome, .. } if outcome == expected), "{sql}: {:?}", state.run);
-                transaction(&state, 1);
-                h.engine.console_rollback(h.manual).await.unwrap();
-                assert_eq!(h.scalar(h.observer, &format!("SELECT n FROM [{}]", h.table)).await, "1", "{sql}");
-                assert_eq!(h.scalar(h.observer, &definition).await, original, "{sql}");
-            }
         }
     }.boxed()).await;
 }
@@ -404,21 +285,21 @@ async fn every_module_definition_family_keeps_trailing_control_from_executing() 
 #[tokio::test]
 async fn cancellation_does_not_claim_committed_work_was_rolled_back() {
     check(|h| async move {
-        h.configure(h.manual, TxnMode::AutoCommit).await;
+        h.configure(h.tab, TxnMode::AutoCommit).await;
         for (sql, expected) in [
             (format!("UPDATE [{}] SET n=2\nGO\nWAITFOR DELAY '00:00:30'", h.table), "2"),
             (format!("BEGIN TRANSACTION; UPDATE [{}] SET n=3; COMMIT TRANSACTION; WAITFOR DELAY '00:00:30'", h.table), "3"),
         ] {
-            let accepted = h.engine.console_run(h.manual, RunRequest::Script { text: sql, target: RunTarget::All }).await.unwrap();
+            let accepted = h.engine.console_run(h.tab, RunRequest::Script { text: sql, target: RunTarget::All }).await.unwrap();
             tokio::time::timeout(Duration::from_secs(3), async {
                 loop {
-                    let SessionState::Open { backend_pid } = h.state(h.manual).session else { continue };
+                    let SessionState::Open { backend_pid } = h.state(h.tab).session else { continue };
                     if h.scalar(h.observer, &format!("SELECT COUNT_BIG(*) FROM sys.dm_exec_requests WHERE session_id={backend_pid} AND command='WAITFOR'")).await == "1" { break; }
                 }
             }).await.unwrap();
             assert_eq!(h.scalar(h.observer, &format!("SELECT n FROM [{}]", h.table)).await, expected);
-            h.engine.console_cancel(h.manual).await;
-            let state = h.finish(h.manual, accepted.run_id).await;
+            h.engine.console_cancel(h.tab).await;
+            let state = h.finish(h.tab, accepted.run_id).await;
             assert!(matches!(state.run, RunState::Finished { outcome: RunOutcome::Cancelled, .. }));
             assert!(matches!(state.session, SessionState::Lost { transaction: TransactionLoss::Unknown, .. }), "Cancellation must not claim a confirmed rollback: {:?}", state.session);
             assert_eq!(h.scalar(h.observer, &format!("SELECT n FROM [{}]", h.table)).await, expected);
