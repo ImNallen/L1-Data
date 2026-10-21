@@ -137,6 +137,9 @@ The `claude-smoke` test needs the `claude` CLI installed and signed in, and the 
 | `L1_DATA_SELF_CHECK_URL` | The database for the self-check. Default `postgres://l1data:l1data@localhost:5433/shop`. |
 | `L1_DATA_TEST_PG` | The database for `pg-tests` and `claude-smoke`. Same default. |
 | `L1_DATA_TEST_MSSQL` | SQL Server URL for the mixed bridge smoke. Default `mssql://sa:L1Data_dev_Str0ng@localhost:1434/shop`. |
+| `L1_DATA_TEST_MSSQL_HOST` | Host for the SQL Server Rust integration tests. Default `localhost`. |
+| `L1_DATA_TEST_MSSQL_PORT` | Port for the SQL Server Rust integration tests. Default `1434`. |
+| `L1_DATA_TEST_MSSQL_PASSWORD` | The `sa` password for the SQL Server Rust integration tests. Default is the development fixture password above. |
 | `UPDATE_BINDINGS=1` | Makes the bindings drift test rewrite `src/ipc/bindings.ts` instead of failing. |
 
 ## Layout
