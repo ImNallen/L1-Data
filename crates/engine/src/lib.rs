@@ -405,7 +405,15 @@ impl Shared {
 
     pub(crate) fn schedule_refreshes(self: &Arc<Self>, db: DatabaseRef, owed: Owed) {
         if owed.catalog {
-            self.schedule_catalog_refresh(db.clone());
+            match self.instance(db.connection_id) {
+                Some(instance) if instance.config.database_kind == DatabaseKind::SqlServer => {
+                    let tracked_slots: Vec<_> = instance.slots.lock().unwrap().values().cloned().collect();
+                    for slot in tracked_slots {
+                        self.schedule_slot_catalog_refresh(instance.clone(), slot);
+                    }
+                }
+                _ => self.schedule_catalog_refresh(db.clone()),
+            }
         }
         if owed.databases {
             self.schedule_database_list_refresh(db.connection_id);
@@ -414,6 +422,10 @@ impl Shared {
 
     fn schedule_catalog_refresh(self: &Arc<Self>, db: DatabaseRef) {
         let Ok((instance, slot)) = self.slot(&db) else { return };
+        self.schedule_slot_catalog_refresh(instance, slot);
+    }
+
+    fn schedule_slot_catalog_refresh(self: &Arc<Self>, instance: Arc<Instance>, slot: Arc<DbSlot>) {
         if !slot.refresh.request() {
             return;
         }

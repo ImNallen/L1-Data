@@ -131,6 +131,17 @@ impl Harness {
         self.scalar(&sql).await == "1"
     }
 
+    async fn catalog_after(&self, database: &str, before: u64) -> Arc<Catalog> {
+        tokio::time::timeout(Duration::from_secs(4), async {
+            loop {
+                let catalog = self.engine.catalog(self.db(database)).await.unwrap();
+                assert_eq!(catalog.db, self.db(database));
+                if catalog.version > before { return catalog; }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        }).await.unwrap_or_else(|_| panic!("{database} catalog did not refresh after version {before}"))
+    }
+
     #[cfg(feature = "mssql-tests")]
     async fn refreshed(&self, before: u64, table: &str) -> Arc<Catalog> {
         let result = tokio::time::timeout(Duration::from_secs(4), async {
@@ -199,7 +210,7 @@ async fn rollback_button_refreshes_ddl_committed_before_native_begin() {
         assert_eq!(h.state(h.tab).txn, TxnState::Idle);
         h.configure(h.tab, "reporting", TxnMode::AutoCommit).await;
         h.refreshed(before, &table).await;
-        assert_eq!(h.engine.catalog(h.db("reporting")).await.unwrap().version, other, "Refresh escaped its original DatabaseRef");
+        h.catalog_after("reporting", other).await;
     }.boxed()).await;
 }
 
@@ -270,7 +281,7 @@ async fn force_closing_running_native_batch_refreshes_its_committed_ddl() {
 
 #[cfg(feature = "mssql-tests")]
 #[tokio::test]
-async fn commit_and_typed_rollback_keep_database_scoped_refreshes() {
+async fn commit_and_typed_rollback_refresh_tracked_catalogs() {
     check(DatabaseKind::SqlServer, |h| async move {
         for commit in [false, true] {
             let table = h.table();
@@ -280,12 +291,36 @@ async fn commit_and_typed_rollback_keep_database_scoped_refreshes() {
             if commit { h.engine.console_commit(h.tab).await.unwrap(); }
             else { h.ok(h.tab, "ROLLBACK TRANSACTION").await; }
             h.refreshed(before, &table).await;
+            let other = h.catalog_after("reporting", other).await.version;
             h.ok(h.tab, "SELECT 1").await;
             let version = h.engine.catalog(h.db("shop")).await.unwrap().version;
             h.ok(h.tab, "SELECT 2").await;
             assert_eq!(h.engine.catalog(h.db("shop")).await.unwrap().version, version, "Reads scheduled a catalog refresh");
             assert_eq!(h.engine.catalog(h.db("reporting")).await.unwrap().version, other);
         }
+    }.boxed()).await;
+}
+
+#[cfg(feature = "pg-tests")]
+#[tokio::test]
+async fn postgres_commit_refreshes_only_its_database() {
+    check(DatabaseKind::Postgres, |h| async move {
+        let table = h.table();
+        let before = h.engine.catalog(h.db("shop")).await.unwrap().version;
+        let other = h.engine.catalog(h.db("reporting")).await.unwrap().version;
+        let state = h.ok(h.tab, &format!("CREATE TABLE {} (id int)", h.qualified(&table))).await;
+        assert_eq!(state.txn, TxnState::Active);
+        assert_eq!(h.engine.catalog(h.db("shop")).await.unwrap().version, before);
+        assert!(!h.table_exists(&table).await);
+        h.engine.console_commit(h.tab).await.unwrap();
+        let catalog = h.catalog_after("shop", before).await;
+        assert!(catalog.relation("public", &table).is_some());
+        assert!(h.table_exists(&table).await);
+        for _ in 0..10 {
+            assert_eq!(h.engine.catalog(h.db("reporting")).await.unwrap().version, other, "PostgreSQL refresh escaped its DatabaseRef");
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        eprintln!("PostgreSQL commit: shop {before} -> {}, reporting unchanged at {other}", catalog.version);
     }.boxed()).await;
 }
 
