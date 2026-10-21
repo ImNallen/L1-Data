@@ -15,3 +15,21 @@ services:
       interval: 1s
       timeout: 3s
       retries: 60
+  mssql:
+    profiles: [mssql]
+    image: mcr.microsoft.com/mssql/server:2022-latest
+    platform: linux/amd64
+    container_name: l1-data-mssql
+    environment:
+      ACCEPT_EULA: "Y"
+      MSSQL_PID: Developer
+      MSSQL_SA_PASSWORD: L1Data_dev_Str0ng
+    ports:
+      - "1434:1433"
+    volumes:
+      - ./mssql-seed.sql:/seed.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "/opt/mssql-tools18/bin/sqlcmd -S localhost -U sa -P \"$$MSSQL_SA_PASSWORD\" -C -b -Q 'SELECT 1' > /dev/null"]
+      interval: 2s
+      timeout: 5s
+      retries: 60
