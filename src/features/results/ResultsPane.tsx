@@ -20,6 +20,7 @@ import { commands, type OutputEntry, type QueryError, type ResultMeta, type RunS
 import { exportErrorText } from "../../ipc/errors";
 import { useLive } from "../../state/live";
 import {
+  isBusy,
   outputTone,
   resultView,
   rowResults,
@@ -65,6 +66,7 @@ const PAGER_INSET = 52;
 
 function TablePager({ tab, rows }: { tab: TableTab; rows: number }) {
   const size = useWorkspace((s) => s.settings.tablePageSize);
+  const busy = useLive((s) => isBusy(s.consoles[tab.id]));
   const { schema, table, page, query, exactRowCount } = tab.table;
   const estimate = useCatalog(
     (s) =>
@@ -103,7 +105,7 @@ function TablePager({ tab, rows }: { tab: TableTab; rows: number }) {
       <IconButton aria-label="Next page" disabled={isLast} onClick={() => setTablePage(tab.id, page + 1)}>
         <IconChevronRight size={15} />
       </IconButton>
-      <IconButton aria-label="Last page" disabled={isLast} onClick={() => void lastTablePage(tab.id)}>
+      <IconButton aria-label="Last page" disabled={isLast || busy} onClick={() => void lastTablePage(tab.id)}>
         <IconChevronRightPipe size={15} />
       </IconButton>
     </div>
@@ -283,7 +285,9 @@ export function ResultsPane({ tabId }: { tabId: TabId | null }) {
   const picked = useWorkspace((s) => (tabId ? s.activeResult[tabId] : undefined));
   const databaseKind = useWorkspace((s) => databaseKindFor(tab?.console.db ?? null, s.configs));
   const setActiveResult = useWorkspace((s) => s.setActiveResult);
-  const run = useLive((s) => (tabId ? s.consoles[tabId]?.run : undefined)) ?? { kind: "Idle" as const };
+  const console = useLive((s) => (tabId ? s.consoles[tabId] : undefined));
+  const run = console?.run ?? { kind: "Idle" as const };
+  const busy = isBusy(console);
   const now = useNow(run.kind === "Running", 100);
   const results = rowResults(run);
   const shown = shownResult(run, picked);
@@ -321,7 +325,7 @@ export function ResultsPane({ tabId }: { tabId: TabId | null }) {
   return (
     <section className="flex h-full min-h-0 flex-col bg-bg">
       <div className="flex h-[41px] shrink-0 items-center gap-3 border-b border-grid pr-2 pl-2.5">
-        <EditBar tabId={tabId} editable={editing !== null && tabId !== null} canSubmit={databaseKind !== "SqlServer" && shown?.meta.databaseKind !== "SqlServer"} actions={actions} />
+        <EditBar tabId={tabId} editable={!busy && editing !== null && tabId !== null} canSubmit={!busy && databaseKind !== "SqlServer" && shown?.meta.databaseKind !== "SqlServer"} actions={actions} />
         {results.length > 1 && (
           <div data-testid="result-selector" className="flex items-center gap-0.5 rounded-md border border-control p-0.5">
             {results.map((r, i) => (
@@ -370,7 +374,7 @@ export function ResultsPane({ tabId }: { tabId: TabId | null }) {
             data-testid="export-btn"
             aria-label="Export CSV"
             title="Export CSV"
-            disabled={!shown || run.kind === "Running"}
+            disabled={!shown || busy}
             onClick={() => shown && void exportCsv(shown.meta)}
           >
             <IconDownload size={16} />

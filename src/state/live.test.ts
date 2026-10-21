@@ -12,7 +12,7 @@ function consoleAt(rev: number, txn: ConsoleState["txn"] = "Idle"): ConsoleState
     config: { connectionId: CONN, database: "shop", schema: "public", mode: "Manual" },
     session: { kind: "None" },
     txn,
-    txnDepth: null,
+    txnDepth: null, work: null,
     run: { kind: "Idle" },
   };
 }

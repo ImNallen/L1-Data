@@ -1,7 +1,7 @@
 import { undo } from "@codemirror/commands";
 import { mockIPC } from "@tauri-apps/api/mocks";
-import { afterEach, beforeEach, expect, it, vi } from "vitest";
-import type { ApplyError, ConsoleState, Settings, TableQuery, TableScript, TabSnapshot } from "../../ipc/bindings";
+import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
+import type { ApplyError, ConsoleState, DatabaseKind, Settings, TableQuery, TableScript, TabSnapshot } from "../../ipc/bindings";
 import { connectionConfig } from "../../testing/connections";
 import { shopCatalog } from "../../testing/shopCatalog";
 import { buildCatalogView, useCatalog } from "../../state/catalog";
@@ -11,7 +11,7 @@ import { markDeleted, pendingCount, setCell, useTableEdits } from "../../state/t
 import { useWorkspace, workspaceSnapshot } from "../../state/workspace";
 import { gridEditing } from "../results/ResultGrid";
 import { dropEditor, editorStateOf, insertAtCursor, moveCursor, seedEditor, textOf } from "./editorStates";
-import { browseTemplate, formatActive, lastTablePage, loadTableOnce, openTableTab, saveSettings, setTabMode, setTabTarget, runOrChoose, openSqlTab, isBrowsing, submitEdits } from "./runActions";
+import { browseTemplate, formatActive, lastTablePage, loadTableOnce, openTableTab, saveSettings, setTabMode, setTabTarget, runOrChoose, openSqlTab, isBrowsing, submitEdits, cancelActive, installRunBehavior, setTablePage, updateTableQuery } from "./runActions";
 
 afterEach(() => {
   vi.unstubAllGlobals();
@@ -106,7 +106,7 @@ async function openWithConsole(mode: "AutoCommit" | "Manual" = "AutoCommit") {
     config: { connectionId: "c1", database: "shop", schema: null, mode },
     session: { kind: "None" },
     txn: "Idle",
-    txnDepth: null,
+    txnDepth: null, work: null,
     run: { kind: "Idle" },
   };
   useLive.setState({ consoles: { [id]: console } });
@@ -541,4 +541,151 @@ it.each(["database", "mode"])("drops a pending run when its %s changes during co
   finish();
   await pending;
   expect(calls).toEqual(["console_configure"]);
+});
+
+describe("pages during an exact count", () => {
+  beforeAll(() => installRunBehavior());
+
+  function publish(id: string, patch: Partial<ConsoleState>) {
+    const state = useLive.getState().consoles[id]!;
+    useLive.getState().apply({ kind: "ConsoleChanged", ...state, ...patch, rev: state.rev + 1 });
+  }
+
+  async function pendingCount(databaseKind: DatabaseKind = "SqlServer") {
+    useWorkspace.getState().upsertConfig({ ...connectionConfig("c1", "dev"), databaseKind });
+    const id = await openWithConsole();
+    publish(id, { session: { kind: "Open", backendPid: 1 }, run: { kind: "Finished", runId: 7, elapsedMs: 1, outcome: "Ok", statements: [] } });
+    let finish: (count: number) => void = () => { throw new Error("count was not requested"); };
+    const requests: { cmd: string; args: unknown }[] = [];
+    mockIPC((cmd, args) => {
+      requests.push({ cmd, args });
+      if (cmd === "exact_row_count") return new Promise<number>((resolve) => { finish = resolve; });
+      if (cmd === "console_run") return { runId: 8, statements: [] };
+      return null;
+    });
+    const pending = lastTablePage(id);
+    return { id, pending, requests, finish };
+  }
+
+  it.each([false, true])("keeps only the latest page intent before the saved page changes, Busy published=%s", async (published) => {
+    const { id, pending, requests, finish } = await pendingCount();
+    if (published) publish(id, { work: "Count" });
+    setTablePage(id, 1);
+    setTablePage(id, 3);
+    await Promise.resolve();
+    expect(requests.map((r) => r.cmd)).toEqual(["exact_row_count"]);
+    expect(useWorkspace.getState().tabs[id]?.table?.page).toBe(0);
+    if (published) publish(id, { work: null });
+    expect(requests.map((r) => r.cmd)).toEqual(["exact_row_count"]);
+    finish(1251);
+    await pending;
+    await vi.waitFor(() => expect(requests.filter((r) => r.cmd === "console_run")).toHaveLength(1));
+    expect(requests.at(-1)?.args).toMatchObject({ request: { kind: "tablePage", page: 3 } });
+    await vi.waitFor(() => expect(useWorkspace.getState().tabs[id]?.table?.page).toBe(3));
+    expect(useWorkspace.getState().tabs[id]?.table?.exactRowCount).toBeUndefined();
+  });
+
+  it("lets PostgreSQL load a newer page while its metadata count is pending", async () => {
+    const { id, pending, requests, finish } = await pendingCount("Postgres");
+    setTablePage(id, 1);
+    await vi.waitFor(() => expect(useWorkspace.getState().tabs[id]?.table?.page).toBe(1));
+    finish(1251);
+    await pending;
+    expect(requests.map((r) => r.cmd)).toEqual(["exact_row_count", "console_run"]);
+    expect(requests[1]?.args).toMatchObject({ request: { kind: "tablePage", page: 1 } });
+    expect(useWorkspace.getState().tabs[id]?.table?.page).toBe(1);
+  });
+
+  it("waits for the ownership snapshot when the count reply arrives first", async () => {
+    const { id, pending, requests, finish } = await pendingCount();
+    publish(id, { work: "Count" });
+    finish(1251);
+    await pending;
+    expect(requests.map((r) => r.cmd)).toEqual(["exact_row_count"]);
+    publish(id, { work: null });
+    await vi.waitFor(() => expect(useWorkspace.getState().tabs[id]?.table?.page).toBe(2));
+    expect(requests.at(-1)?.args).toMatchObject({ request: { kind: "tablePage", page: 2 } });
+  });
+
+  it("lets Escape discard a counted page queued before the clearing snapshot", async () => {
+    const { id, pending, requests, finish } = await pendingCount();
+    publish(id, { work: "Count" });
+    finish(1251);
+    await pending;
+    expect(cancelActive()).toBe(true);
+    publish(id, { work: null, session: { kind: "Lost", reason: "cancelled", transaction: "Unknown" } });
+    publish(id, { work: null, session: { kind: "Open", backendPid: 2 } });
+    await Promise.resolve();
+    expect(requests.map((r) => r.cmd)).toEqual(["exact_row_count", "console_cancel"]);
+    expect(useWorkspace.getState().tabs[id]?.table?.page).toBe(0);
+  });
+
+  it("queues a changed filter and drops the older Last result", async () => {
+    const { id, pending, requests, finish } = await pendingCount();
+    publish(id, { work: "Count" });
+    updateTableQuery(id, (query) => ({ ...query, where: "id > 9" }));
+    finish(1251);
+    await pending;
+    expect(requests.map((r) => r.cmd)).toEqual(["exact_row_count"]);
+    publish(id, { work: null });
+    await vi.waitFor(() => expect(requests).toHaveLength(2));
+    expect(requests[1]?.args).toMatchObject({ request: { kind: "tablePage", page: 0, query: { where: "id > 9" } } });
+  });
+
+  it.each(["cancel", "close", "disconnect"])("does not run a queued page or repeat a count after %s", async (action) => {
+    const { id, pending, requests, finish } = await pendingCount();
+    publish(id, { work: "Count" });
+    setTablePage(id, 1);
+    if (action === "cancel") {
+      expect(cancelActive()).toBe(true);
+      expect(requests.map((r) => r.cmd)).toEqual(["exact_row_count", "console_cancel"]);
+      publish(id, { work: null, session: { kind: "Lost", reason: "cancelled", transaction: "Unknown" } });
+    } else if (action === "close") {
+      useWorkspace.getState().closeTab(id);
+      publish(id, { work: null, session: { kind: "None" } });
+    } else {
+      publish(id, { work: null, session: { kind: "None" } });
+    }
+    finish(1251);
+    await pending;
+    publish(id, { work: null, session: { kind: "Open", backendPid: 2 } });
+    await Promise.resolve();
+    expect(requests.filter((r) => r.cmd === "console_run")).toEqual([]);
+    expect(requests.filter((r) => r.cmd === "exact_row_count")).toHaveLength(1);
+  });
+
+  it("keeps ordinary run page queuing and cancellation", async () => {
+    const id = await openWithConsole();
+    const requests: { cmd: string; args: unknown }[] = [];
+    mockIPC((cmd, args) => {
+      requests.push({ cmd, args });
+      if (cmd === "console_run") return { runId: 8, statements: [] };
+      return null;
+    });
+    publish(id, { work: "Run", session: { kind: "Open", backendPid: 1 }, run: { kind: "Running", runId: 7, startedAtMs: 1, statements: [] } });
+    setTablePage(id, 1);
+    setTablePage(id, 2);
+    expect(requests).toEqual([]);
+    publish(id, { work: null, run: { kind: "Finished", runId: 7, elapsedMs: 1, outcome: "Ok", statements: [] } });
+    await vi.waitFor(() => expect(useWorkspace.getState().tabs[id]?.table?.page).toBe(2));
+    expect(requests).toHaveLength(1);
+    expect(requests[0]?.args).toMatchObject({ request: { kind: "tablePage", page: 2 } });
+    publish(id, { work: "Run", run: { kind: "Running", runId: 8, startedAtMs: 1, statements: [] } });
+    setTablePage(id, 3);
+    expect(cancelActive()).toBe(true);
+    publish(id, { work: null, run: { kind: "Finished", runId: 8, elapsedMs: 1, outcome: "Cancelled", statements: [] } });
+    await Promise.resolve();
+    expect(requests.map((r) => r.cmd)).toEqual(["console_run", "console_cancel"]);
+  });
+
+  it("does not allow Escape to cancel transaction, edit or probe work", async () => {
+    const id = await openWithConsole();
+    const requests: string[] = [];
+    mockIPC((cmd) => { requests.push(cmd); });
+    for (const work of ["Transaction", "Edit", "Probe"] as const) {
+      publish(id, { work });
+      expect(cancelActive()).toBe(false);
+    }
+    expect(requests).toEqual([]);
+  });
 });

@@ -347,9 +347,12 @@ export type ConsoleState = {
 	rev: number,
 	config: ConsoleConfigView,
 	session: SessionState,
+	work: ConsoleWork | null,
 	txn: TxnState,
 	run: RunState,
 };
+
+export type ConsoleWork = "Run" | "Count" | "Transaction" | "Edit" | "Probe";
 
 export type CountError = { kind: "NotConnected" } | { kind: "Failed"; message: string };
 

@@ -94,6 +94,7 @@ pub enum SessionSlot {
     Idle(Session),
     Busy {
         run_id: RunId,
+        work: ConsoleWork,
         backend_pid: i32,
         cancel: CancelHandle,
         stop: Arc<AtomicBool>,
@@ -125,6 +126,7 @@ impl Console {
             rev: 0,
             config: inner.config.clone(),
             session: SessionState::None,
+            work: None,
             txn: TxnState::Idle,
             txn_depth: None,
             run: RunState::Idle,
@@ -154,6 +156,10 @@ impl Console {
                 SessionSlot::Lost { reason, transaction } => SessionState::Lost { reason: reason.clone(), transaction: *transaction },
             },
             txn: inner.txn,
+            work: match &inner.session {
+                SessionSlot::Busy { work, .. } => Some(*work),
+                _ => None,
+            },
             txn_depth: inner.txn_depth,
             run: inner.run.clone(),
         }
@@ -184,12 +190,13 @@ impl Console {
         });
     }
 
-    pub fn take_session(&self, inner: &mut ConsoleInner, run_id: RunId) -> Option<(Session, Arc<AtomicBool>)> {
+    pub fn take_session(&self, inner: &mut ConsoleInner, run_id: RunId, work: ConsoleWork) -> Option<(Session, Arc<AtomicBool>)> {
         let SessionSlot::Idle(_) = inner.session else { return None };
         let SessionSlot::Idle(session) = std::mem::replace(&mut inner.session, SessionSlot::Empty) else { unreachable!() };
         let stop = Arc::new(AtomicBool::new(false));
         inner.session = SessionSlot::Busy {
             run_id,
+            work,
             backend_pid: session.backend_pid,
             cancel: session.cancel_handle(),
             stop: stop.clone(),

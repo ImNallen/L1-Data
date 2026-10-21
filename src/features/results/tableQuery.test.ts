@@ -85,7 +85,7 @@ it("keeps the query, editor and displayed rows when the engine refuses an additi
   const console: ConsoleState = {
     tabId: raw.id, rev: 3,
     config: { connectionId: "ms", database: "shop", schema: "dbo", mode: "AutoCommit" },
-    session: { kind: "Open", backendPid: 1 }, txn: "Idle", txnDepth: 0,
+    session: { kind: "Open", backendPid: 1 }, txn: "Idle", txnDepth: 0, work: null,
     run: { kind: "Finished", runId: 7, elapsedMs: 1, outcome: "Ok", statements: [{ index: 0, range: { from: 0, to: 30 }, status: { kind: "Finished" }, outputs: [{ kind: "Rows", result, state: "Complete" }] }] },
   };
   useLive.getState().apply({ kind: "ConsoleChanged", ...console });

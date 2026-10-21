@@ -26,7 +26,7 @@ const finished = (statements: StatementRun[], outcome: "Ok" | "Failed" | "Cancel
 });
 
 function consoleWith(mode: "AutoCommit" | "Manual", txn: ConsoleState["txn"]): ConsoleState {
-  return { tabId: "t", rev: 1, config: { connectionId: "c", database: "shop", schema: null, mode }, session: { kind: "None" }, txnDepth: null, txn, run: { kind: "Idle" } };
+  return { tabId: "t", rev: 1, config: { connectionId: "c", database: "shop", schema: null, mode }, session: { kind: "None" }, txnDepth: null, work: null, txn, run: { kind: "Idle" } };
 }
 
 describe("hasUncommittedWork", () => {

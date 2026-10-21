@@ -5,7 +5,7 @@ import { cancelActive, endTransaction, formatActive, runOrChoose, setTabMode, se
 import type { TransactionLoss, TxnMode } from "../ipc/bindings";
 import { homeDb } from "../state/dbKey";
 import { useLive } from "../state/live";
-import { connectionTone, hasUncommittedWork, isRunning } from "../state/status";
+import { canCancel, connectionTone, hasUncommittedWork, isBusy } from "../state/status";
 import { tabTarget, useWorkspace } from "../state/workspace";
 import { Button, Kbd, MenuContent, MenuItem, MenuLabel, StatusDot, cx } from "../ui/primitives";
 import { SidebarToggle, WindowEdgeActions, windowEdgeInset, windowLeadingInset } from "./WindowEdgeActions";
@@ -26,7 +26,8 @@ export function TopBar({ hosted }: { hosted: HostedWindow | null }) {
   const liveConsole = useLive((s) => (tab ? s.consoles[tab.id] : undefined));
   const connections = useLive((s) => s.connections);
   const config = connectionId ? configs[connectionId] : undefined;
-  const running = isRunning(liveConsole);
+  const busy = isBusy(liveConsole);
+  const cancellable = canCancel(liveConsole);
   const txn = liveConsole?.txn;
   const txnDepth = liveConsole?.txnDepth;
   const sqlServer = config?.databaseKind === "SqlServer";
@@ -101,10 +102,10 @@ export function TopBar({ hosted }: { hosted: HostedWindow | null }) {
 
       {tab && hasUncommittedWork(liveConsole) && (
         <>
-          <Button data-testid="commit-btn" title={sqlServer ? "Commit all transaction nesting levels" : undefined} disabled={running} onClick={() => void endTransaction(tab.id, "commit")}>
+          <Button data-testid="commit-btn" title={sqlServer ? "Commit all transaction nesting levels" : undefined} disabled={busy} onClick={() => void endTransaction(tab.id, "commit")}>
             Commit
           </Button>
-          <Button data-testid="rollback-btn" disabled={running} onClick={() => void endTransaction(tab.id, "rollback")}>
+          <Button data-testid="rollback-btn" disabled={busy} onClick={() => void endTransaction(tab.id, "rollback")}>
             Rollback
           </Button>
         </>
@@ -117,8 +118,10 @@ export function TopBar({ hosted }: { hosted: HostedWindow | null }) {
         </Button>
       )}
 
+      {tab && liveConsole?.work === "Count" && <span data-testid="counting-status" role="status" className="text-ui-13 text-dim">Counting…</span>}
+
       {tab &&
-        (running ? (
+        (cancellable ? (
           <Button data-testid="cancel-btn" title={sqlServer ? "Cancel resets the SQL Server session. Earlier commits remain committed." : undefined} className="w-[104px] justify-center bg-hover" onClick={() => cancelActive()}>
             <IconPlayerStopFilled size={10} className="text-muted" />
             Cancel
@@ -127,6 +130,7 @@ export function TopBar({ hosted }: { hosted: HostedWindow | null }) {
         ) : (
           <Button
             data-testid="run-btn"
+            disabled={busy}
             variant="primary"
             title="Run the selection or the marked statement (⌘↵). On a blank line, or with ⌘⇧↵, choose which statement to run."
             className="w-[104px] justify-center pr-2 pl-2.5 font-medium"

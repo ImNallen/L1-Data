@@ -9,6 +9,14 @@ export function isRunning(console: ConsoleState | undefined): boolean {
   return console?.run.kind === "Running";
 }
 
+export function isBusy(console: ConsoleState | undefined): boolean {
+  return console?.work != null || isRunning(console);
+}
+
+export function canCancel(console: ConsoleState | undefined): boolean {
+  return console?.work === "Count" || isRunning(console);
+}
+
 export type Tone = "live" | "pending" | "off" | "error";
 
 export function connectionTone(state: ConnectionState | undefined): Tone {

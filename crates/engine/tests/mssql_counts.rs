@@ -87,7 +87,7 @@ impl Harness {
     }
 
     async fn blocked_count(&self) -> tokio::task::JoinHandle<Result<u64, CountError>> {
-        self.sql(self.tab, "SELECT 42 AS original_result").await;
+        let before = self.sql(self.tab, "SELECT 42 AS original_result").await;
         self.sql(self.control, &format!("BEGIN TRANSACTION; SELECT * FROM dbo.[{}] WITH (TABLOCKX,HOLDLOCK)", self.table)).await;
         let rev = self.state(self.tab).rev;
         let (engine, tab, db, table) = (self.engine.clone(), self.tab, self.db.clone(), self.table.clone());
@@ -99,6 +99,10 @@ impl Harness {
                 tokio::time::sleep(Duration::from_millis(10)).await;
             }
         }).await.expect("count did not become busy");
+        let during = self.state(self.tab);
+        assert_eq!(during.work, Some(ConsoleWork::Count));
+        assert_eq!(serde_json::to_value(&during.run).unwrap(), serde_json::to_value(&before.run).unwrap());
+        assert_eq!(self.rows(&during), self.rows(&before));
         count
     }
 
@@ -133,6 +137,8 @@ async fn native_settings_and_uncommitted_rows_match_pages_without_replacing_resu
             let history = h.engine.history(HistoryQuery { text: None, connection_id: Some(h.db.connection_id), before_id: None, limit: 100 }).entries;
             assert_eq!(h.count(query).await.unwrap(), 1, "{settings} {predicate}");
             let after = h.state(h.tab);
+            assert_eq!(after.work, None);
+            assert!(after.rev > before.rev);
             assert_eq!(serde_json::to_value((&after.run, &after.session, after.txn)).unwrap(), serde_json::to_value((&before.run, &before.session, before.txn)).unwrap());
             assert_eq!(h.rows(&after), h.rows(&before));
             assert_eq!(serde_json::to_value(h.engine.history(HistoryQuery { text: None, connection_id: Some(h.db.connection_id), before_id: None, limit: 100 }).entries).unwrap(), serde_json::to_value(history).unwrap());
@@ -145,6 +151,7 @@ async fn native_settings_and_uncommitted_rows_match_pages_without_replacing_resu
         assert_eq!(h.rows(&before).len(), 1);
         assert_eq!(h.count(query).await.unwrap(), 1);
         let after = h.state(h.tab);
+        assert_eq!(after.work, None);
         assert_eq!(serde_json::to_value((&after.run, &after.session, after.txn, after.txn_depth)).unwrap(), serde_json::to_value((&before.run, &before.session, TxnState::Open, Option::<u32>::None)).unwrap());
         assert!(matches!(h.engine.console_close(h.tab, false).await, Err(DisconnectError::OpenTransactions { .. })));
         assert!(matches!(h.engine.disconnect(h.db.connection_id, false).await, Err(DisconnectError::OpenTransactions { .. })));
@@ -154,6 +161,7 @@ async fn native_settings_and_uncommitted_rows_match_pages_without_replacing_resu
         let before = h.sql(h.tab, "SET IMPLICIT_TRANSACTIONS ON").await;
         assert_eq!(h.count(TableQuery::default()).await.unwrap(), 3);
         let after = h.state(h.tab);
+        assert_eq!(after.work, None);
         assert_eq!(after.txn, TxnState::Open);
         assert_eq!(after.txn_depth, None);
         assert_eq!(serde_json::to_value(after.run).unwrap(), serde_json::to_value(before.run).unwrap());
@@ -174,6 +182,8 @@ async fn a_native_count_error_settles_refreshes_when_the_server_ends_the_transac
         let query = TableQuery { r#where: "1 / ([id] - 1) = 0".into(), ..Default::default() };
         assert!(matches!(h.count(query).await, Err(CountError::Failed { message }) if message.contains("Divide by zero")));
         let after = h.state(h.tab);
+        assert_eq!(after.work, None);
+        assert!(after.rev > before.rev);
         assert_eq!(after.txn, TxnState::Idle);
         assert_eq!(serde_json::to_value(after.run).unwrap(), serde_json::to_value(before.run).unwrap());
         let catalog = tokio::time::timeout(Duration::from_secs(5), async {
@@ -198,6 +208,7 @@ async fn lazy_count_validates_expected_target_and_recovers_from_query_errors() {
         let before = h.state(h.tab);
         let bad = TableQuery { r#where: "missing_count_column = 1".into(), ..Default::default() };
         assert!(matches!(h.count(bad).await, Err(CountError::Failed { message }) if message.contains("Invalid column")));
+        assert_eq!(h.state(h.tab).work, None);
         assert_eq!(h.count(TableQuery::default()).await.unwrap(), 3);
         assert_eq!(serde_json::to_value(h.state(h.tab).session).unwrap(), serde_json::to_value(before.session).unwrap());
         h.engine.console_configure(h.tab, h.config("reporting")).await.unwrap();
@@ -227,7 +238,9 @@ async fn busy_count_refuses_competitors_and_cancel_preserves_original_results() 
         h.engine.console_cancel(h.tab).await;
         assert!(tokio::time::timeout(Duration::from_secs(5), count).await.unwrap().unwrap().is_err());
         let after = h.state(h.tab);
+        assert_eq!(after.work, None);
         assert!(matches!(after.session, SessionState::Lost { transaction: TransactionLoss::Unknown, .. }));
+        assert!(after.rev > before.rev);
         assert_eq!(after.txn, TxnState::Idle);
         assert_eq!(serde_json::to_value(&after.run).unwrap(), serde_json::to_value(&before.run).unwrap());
         assert_eq!(h.rows(&after), vec![vec![Some("42".into())]]);
@@ -249,12 +262,14 @@ async fn close_and_disconnect_orphan_a_count_without_stealing_the_replacement_se
             } else {
                 h.engine.disconnect(h.db.connection_id, true).await.unwrap();
                 assert!(matches!(h.state(h.tab).session, SessionState::None));
+                assert_eq!(h.state(h.tab).work, None);
                 h.engine.connect(h.db.connection_id).await.unwrap();
             }
             h.engine.console_configure(h.tab, h.config("reporting")).await.unwrap();
             let replacement = h.sql(h.tab, "SELECT 99 AS replacement").await;
             assert!(tokio::time::timeout(Duration::from_secs(5), count).await.unwrap().unwrap().is_err());
             let after = h.state(h.tab);
+            assert_eq!(after.work, None);
             assert_eq!(serde_json::to_value((&after.run, &after.session, &after.config)).unwrap(), serde_json::to_value((&replacement.run, &replacement.session, &replacement.config)).unwrap());
             assert_eq!(h.rows(&after), vec![vec![Some("99".into())]]);
         }).catch_unwind().await;
@@ -276,6 +291,8 @@ async fn abandoned_count_retires_its_lease_and_clears_busy() {
                 tokio::time::sleep(Duration::from_millis(10)).await;
             }
         }).await.expect("abandoned count left its session busy");
+        assert_eq!(h.state(h.tab).work, None);
+        assert!(h.state(h.tab).rev > before.rev);
         assert_eq!(serde_json::to_value(h.state(h.tab).run).unwrap(), serde_json::to_value(&before.run).unwrap());
         assert_eq!(h.rows(&h.state(h.tab)), vec![vec![Some("42".into())]]);
         h.engine.console_rollback(h.control).await.unwrap();

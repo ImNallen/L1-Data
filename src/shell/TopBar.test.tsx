@@ -1,6 +1,6 @@
 import { renderToStaticMarkup } from "react-dom/server";
 import { afterEach, expect, it } from "vitest";
-import type { ConsoleState, TransactionLoss } from "../ipc/bindings";
+import type { ConsoleState, ConsoleWork, TransactionLoss } from "../ipc/bindings";
 import { useLive } from "../state/live";
 import { useWorkspace, type Tab } from "../state/workspace";
 import { TopBar } from "./TopBar";
@@ -23,6 +23,7 @@ function lostSession(transaction: TransactionLoss): string {
     session: { kind: "Lost", reason: "cancelled", transaction },
     txn: "Idle",
     txnDepth: null,
+    work: null,
     run: { kind: "Idle" },
   };
   Object.assign(workspace, { tabs: { [tab.id]: tab }, active: tab.id });
@@ -61,4 +62,29 @@ it("shows an open transaction without claiming its depth or committability", () 
   expect(html).toContain('data-testid="rollback-btn"');
   expect(html).not.toContain("aborted");
   expect(html).not.toContain("in transaction (1)");
+});
+
+function workingConsole(work: ConsoleWork): string {
+  lostSession("None");
+  const state = live.consoles.t1!;
+  live.consoles = { t1: { ...state, work, session: { kind: "Open", backendPid: 1 }, txn: "Open", run: { kind: "Finished", runId: 7, elapsedMs: 1, outcome: "Ok", statements: [] } } };
+  return renderToStaticMarkup(<TopBar hosted={null} />);
+}
+
+it("shows Counting and Cancel with Esc while retaining the finished run", () => {
+  const html = workingConsole("Count");
+  expect(html).toContain("Counting");
+  expect(html).toContain('data-testid="cancel-btn"');
+  expect(html).toContain("Esc");
+  expect(html).not.toContain('data-testid="run-btn"');
+  expect(html).toMatch(/data-testid="commit-btn"[^>]*disabled/);
+  expect(html).toMatch(/data-testid="rollback-btn"[^>]*disabled/);
+  expect(live.consoles.t1?.run.kind).toBe("Finished");
+});
+
+it.each(["Transaction", "Edit", "Probe"] satisfies ConsoleWork[])("keeps %s ownership busy without offering Cancel", (work) => {
+  const html = workingConsole(work);
+  expect(html).not.toContain('data-testid="cancel-btn"');
+  expect(html).not.toContain("Counting");
+  expect(html).toMatch(/data-testid="run-btn"[^>]*disabled/);
 });

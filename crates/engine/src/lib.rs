@@ -537,7 +537,9 @@ impl Shared {
                 if inner.txn == TxnState::Idle {
                     continue;
                 }
-                console.take_session(&mut inner, run_id)
+                let taken = console.take_session(&mut inner, run_id, ConsoleWork::Probe);
+                if taken.is_some() { console.publish(&mut inner, self); }
+                taken
             };
             let has_writes = match taken {
                 None => true,
@@ -571,7 +573,8 @@ impl Shared {
                 SessionSlot::Idle(_) => {}
             }
             let aborted = inner.txn == TxnState::Aborted;
-            let (session, _stop) = console.take_session(&mut inner, run_id).expect("slot is idle");
+            let (session, _stop) = console.take_session(&mut inner, run_id, ConsoleWork::Transaction).expect("slot is idle");
+            console.publish(&mut inner, self);
             (session, aborted)
         };
         let (kind, sql) = if commit && !aborted { (sql::StmtKind::Commit, "COMMIT") } else { (sql::StmtKind::Rollback, "ROLLBACK") };
@@ -1014,7 +1017,7 @@ impl Engine {
                 inner.session = SessionSlot::Idle(session);
             }
         }
-        let (session, stop) = console.take_session(&mut inner, run_id).ok_or_else(|| failed("The count tab is busy."))?;
+        let (session, stop) = console.take_session(&mut inner, run_id, ConsoleWork::Count).ok_or_else(|| failed("The count tab is busy."))?;
         console.publish(&mut inner, s);
         drop(inner);
 
@@ -1165,7 +1168,7 @@ impl Engine {
                 SessionSlot::Busy { .. } => return Err(RunError::Busy),
             }
         }
-        let Some((session, stop)) = console.take_session(&mut inner, run_id) else { return Err(RunError::Busy) };
+        let Some((session, stop)) = console.take_session(&mut inner, run_id, ConsoleWork::Run) else { return Err(RunError::Busy) };
         let txn = inner.txn;
         console.results.lock().unwrap().clear();
         inner.run = RunState::Running {
@@ -1262,7 +1265,8 @@ impl Engine {
                 return Err(ApplyError::TransactionAborted);
             }
             let txn = inner.txn;
-            let Some((session, stop)) = console.take_session(&mut inner, run_id) else { return Err(ApplyError::Busy) };
+            let Some((session, stop)) = console.take_session(&mut inner, run_id, ConsoleWork::Edit) else { return Err(ApplyError::Busy) };
+            console.publish(&mut inner, s);
             (session, txn, stop)
         };
 

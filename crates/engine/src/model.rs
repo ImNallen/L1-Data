@@ -463,6 +463,15 @@ pub enum TransactionLoss {
     Unknown,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Type)]
+pub enum ConsoleWork {
+    Run,
+    Count,
+    Transaction,
+    Edit,
+    Probe,
+}
+
 #[derive(Debug, Clone, Serialize, Type)]
 #[serde(rename_all = "camelCase")]
 pub struct ConsoleState {
@@ -471,6 +480,7 @@ pub struct ConsoleState {
     pub rev: u64,
     pub config: ConsoleConfigView,
     pub session: SessionState,
+    pub work: Option<ConsoleWork>,
     pub txn: TxnState,
     pub run: RunState,
 }
