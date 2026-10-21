@@ -90,12 +90,12 @@ impl MsSession {
                 columns: vec![],
             });
         }
-        let rows = self.rows(&format!("SELECT c.object_id,c.column_id,c.name,COALESCE(t.name,declared.name),c.max_length,c.precision,c.scale,c.is_nullable,c.is_identity,c.is_computed,
+        let rows = self.rows(&format!("SELECT c.object_id,c.column_id,c.name,COALESCE(t.name,declared.name,'unknown'),c.max_length,c.precision,c.scale,c.is_nullable,c.is_identity,c.is_computed,
             CASE WHEN EXISTS (SELECT 1 FROM sys.indexes i JOIN sys.index_columns ic ON ic.object_id=i.object_id AND ic.index_id=i.index_id WHERE i.object_id=c.object_id AND i.is_primary_key=1 AND ic.column_id=c.column_id) THEN 1 ELSE 0 END,
             CASE WHEN EXISTS (SELECT 1 FROM sys.foreign_key_columns fk WHERE fk.parent_object_id=c.object_id AND fk.parent_column_id=c.column_id) THEN 1 ELSE 0 END,
             c.generated_always_type
             FROM sys.all_columns c JOIN sys.all_objects o ON o.object_id=c.object_id JOIN sys.schemas s ON s.schema_id=o.schema_id
-            JOIN sys.types declared ON declared.user_type_id=c.user_type_id
+            LEFT JOIN sys.types declared ON declared.user_type_id=c.user_type_id
             LEFT JOIN sys.types t ON t.user_type_id=c.system_type_id AND t.system_type_id=t.user_type_id
             WHERE o.type IN ('U','V') AND {filter} ORDER BY c.object_id,c.column_id")).await?;
         for r in rows {
@@ -114,7 +114,7 @@ impl MsSession {
                 fk: number::<u8>(&r, 11)? != 0,
             });
         }
-        let rows = self.rows(&format!("SELECT o.object_id,s.name,o.name,o.type,COALESCE(TYPE_NAME(p.user_type_id),'') FROM sys.objects o JOIN sys.schemas s ON s.schema_id=o.schema_id LEFT JOIN sys.parameters p ON p.object_id=o.object_id AND p.parameter_id=0 WHERE o.type IN ('P','PC','FN','IF','TF','FS','FT') AND NOT {SYSTEM} ORDER BY o.name,o.object_id")).await?;
+        let rows = self.rows(&format!("SELECT o.object_id,s.name,o.name,o.type,COALESCE(TYPE_NAME(p.user_type_id),TYPE_NAME(p.system_type_id),CASE WHEN p.parameter_id=0 THEN 'unknown' ELSE '' END) FROM sys.objects o JOIN sys.schemas s ON s.schema_id=o.schema_id LEFT JOIN sys.parameters p ON p.object_id=o.object_id AND p.parameter_id=0 WHERE o.type IN ('P','PC','FN','IF','TF','FS','FT') AND NOT {SYSTEM} ORDER BY o.name,o.object_id")).await?;
         for r in rows {
             let si = *schema_index.get(required(&r, 1)?).ok_or_else(|| error("Routine schema changed during load"))?;
             let oid = object_id(&r, 0)?;
@@ -127,7 +127,7 @@ impl MsSession {
             });
         }
         let rows =
-            self.rows("SELECT p.object_id,p.name,TYPE_NAME(p.user_type_id),p.is_output FROM sys.parameters p WHERE p.parameter_id>0 ORDER BY p.object_id,p.parameter_id").await?;
+            self.rows("SELECT p.object_id,p.name,COALESCE(TYPE_NAME(p.user_type_id),TYPE_NAME(p.system_type_id),'unknown'),p.is_output FROM sys.parameters p WHERE p.parameter_id>0 ORDER BY p.object_id,p.parameter_id").await?;
         for r in rows {
             let oid = object_id(&r, 0)?;
             if let Some(f) = schemas.iter_mut().flat_map(|s| &mut s.functions).find(|f| f.oid == oid) {
