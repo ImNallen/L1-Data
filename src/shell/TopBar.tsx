@@ -90,10 +90,11 @@ export function TopBar({ hosted }: { hosted: HostedWindow | null }) {
           </Menu.Trigger>
           <MenuContent align="end">
             {(["AutoCommit", "Manual"] as const).map((m) => (
-              <MenuItem key={m} testId={`tx-mode-${m}`} checked={m === tab.console.mode} onSelect={() => void setTabMode(tab.id, m)}>
-                {MODE_LABEL[m]}
+              <MenuItem key={m} testId={`tx-mode-${m}`} checked={m === tab.console.mode} disabled={sqlServer && m === "Manual"} onSelect={() => void setTabMode(tab.id, m)}>
+                {MODE_LABEL[m]}{sqlServer && m === "Manual" ? " (unavailable for SQL Server)" : ""}
               </MenuItem>
             ))}
+            {sqlServer && <MenuLabel>Use BEGIN, COMMIT and ROLLBACK in SQL scripts.</MenuLabel>}
           </MenuContent>
         </Menu.Root>
       )}

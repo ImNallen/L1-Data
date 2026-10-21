@@ -161,9 +161,9 @@ function Empty({ children }: { children: React.ReactNode }) {
   return <div className="grid flex-1 place-items-center bg-bg text-ui-13 text-dim">{children}</div>;
 }
 
-function EditBar({ tabId, editable, actions }: { tabId: TabId | null; editable: boolean; actions: RefObject<GridActions | null> }) {
+function EditBar({ tabId, editable, canSubmit, actions }: { tabId: TabId | null; editable: boolean; canSubmit: boolean; actions: RefObject<GridActions | null> }) {
   const edits = useTableEdits((s) => (tabId ? s.byTab[tabId] : undefined) ?? NO_EDITS);
-  const pending = editable ? pendingCount(edits) : 0;
+  const pending = pendingCount(edits);
   const busy = useTableEdits((s) => (tabId ? s.submitting[tabId] === true : false));
   return (
     <div data-testid="edit-bar" className="flex items-center gap-0.5">
@@ -182,8 +182,8 @@ function EditBar({ tabId, editable, actions }: { tabId: TabId | null; editable: 
       <IconButton
         data-testid="submit-edits"
         aria-label="Submit changes"
-        title="Submit changes (⌘S)"
-        disabled={pending === 0 || busy}
+        title={canSubmit ? "Submit changes (⌘S)" : "SQL Server staged edits are unavailable. Use SQL scripts."}
+        disabled={!canSubmit || pending === 0 || busy}
         className={cx(pending > 0 && "text-green!")}
         onClick={() => tabId && void submitEdits(tabId)}
       >
@@ -313,15 +313,15 @@ export function ResultsPane({ tabId }: { tabId: TabId | null }) {
   }, [tabId, isTable]);
   const catalogView = useCatalog((s) => viewFor(s.views, browsingTable?.console.db));
   const editing = useMemo(
-    () => browsingTable && shown ? gridEditing(catalogView, browsingTable.table.schema, browsingTable.table.table, shown.meta) : null,
-    [browsingTable?.console.db, browsingTable?.table.schema, browsingTable?.table.table, catalogView, shown?.meta],
+    () => browsingTable && shown && databaseKind === "Postgres" ? gridEditing(catalogView, browsingTable.table.schema, browsingTable.table.table, shown.meta) : null,
+    [browsingTable?.console.db, browsingTable?.table.schema, browsingTable?.table.table, catalogView, shown?.meta, databaseKind],
   );
   const actions = useRef<GridActions | null>(null);
 
   return (
     <section className="flex h-full min-h-0 flex-col bg-bg">
       <div className="flex h-[41px] shrink-0 items-center gap-3 border-b border-grid pr-2 pl-2.5">
-        <EditBar tabId={tabId} editable={editing !== null && tabId !== null} actions={actions} />
+        <EditBar tabId={tabId} editable={editing !== null && tabId !== null} canSubmit={databaseKind !== "SqlServer" && shown?.meta.databaseKind !== "SqlServer"} actions={actions} />
         {results.length > 1 && (
           <div data-testid="result-selector" className="flex items-center gap-0.5 rounded-md border border-control p-0.5">
             {results.map((r, i) => (
@@ -402,6 +402,7 @@ export function ResultsPane({ tabId }: { tabId: TabId | null }) {
       </div>
 
       {(databaseKind === "SqlServer" || shown?.meta.databaseKind === "SqlServer") && <p data-testid="sqlserver-output-limit" className="border-b border-grid px-3 py-1 text-ui-11.5 text-dim">SQL Server PRINT and informational messages are unavailable. Affected row counts may be unknown.</p>}
+      {browsingTable && databaseKind === "SqlServer" && <p data-testid="sqlserver-edit-limit" className="border-b border-grid px-3 py-1 text-ui-11.5 text-dim">SQL Server table results are read-only. Use SQL scripts to insert, update or delete rows.</p>}
       {browsingTable && <FilterBar tab={browsingTable} />}
 
       <div className="relative flex min-h-0 flex-1 flex-col">

@@ -62,7 +62,7 @@ export function applyErrorText(e: ApplyError): string {
     case "TransactionAborted":
       return "This tab's transaction failed. Roll it back, then submit again.";
     case "NoPrimaryKey":
-      return "Editing rows needs the table's primary key.";
+      return "Editing rows needs the table's current primary key. Reload the table before retrying.";
     case "Failed":
     case "Transaction":
       return `Could not apply edits. ${e.error.message}`;
