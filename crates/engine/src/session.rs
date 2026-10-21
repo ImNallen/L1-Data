@@ -3,7 +3,6 @@ mod postgres;
 
 use crate::connection::{ConnectParams, DatabaseInfo};
 use crate::model::*;
-use crate::sql::StmtKind;
 use futures_util::Stream;
 use std::pin::Pin;
 use tokio::sync::watch;
@@ -184,12 +183,6 @@ impl Session {
         match &mut self.driver {
             Driver::Postgres(p) => p.batch(if commit { "COMMIT" } else { "ROLLBACK" }).await,
             Driver::SqlServer(s) => s.finish_transaction(commit).await,
-        }
-    }
-    pub fn implicit_begin(&self, mode: TxnMode, txn: TxnState, kind: &StmtKind, sql: &str) -> bool {
-        match self.driver {
-            Driver::Postgres(_) => crate::txn::needs_implicit_begin(mode, txn, kind),
-            Driver::SqlServer(_) => mode == TxnMode::Manual && txn == TxnState::Idle && !crate::sql::tsql::has_transaction_control(sql),
         }
     }
 }

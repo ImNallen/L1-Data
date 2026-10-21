@@ -1,5 +1,25 @@
-use crate::model::{TxnMode, TxnState};
+use crate::model::{DatabaseKind, TxnMode, TxnState};
 use crate::sql::StmtKind;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TransactionPlan {
+    BeginIfIdle,
+    Native,
+}
+
+pub fn plan(database: DatabaseKind, mode: TxnMode, kind: &StmtKind, sql: &str) -> Result<TransactionPlan, String> {
+    if mode == TxnMode::AutoCommit {
+        return Ok(TransactionPlan::Native);
+    }
+    match database {
+        DatabaseKind::SqlServer => crate::sql::tsql::manual_transaction(sql),
+        DatabaseKind::Postgres => Ok(if needs_implicit_begin(mode, TxnState::Idle, kind) {
+            TransactionPlan::BeginIfIdle
+        } else {
+            TransactionPlan::Native
+        }),
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StmtOutcome {

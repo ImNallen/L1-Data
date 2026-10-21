@@ -1,10 +1,12 @@
 mod expression;
 mod format;
 mod table;
+mod transaction;
 
 pub(crate) use expression::validate_expression;
 pub(crate) use format::format;
 pub(crate) use table::{browse_sql, count_sql, format_order_by, parse_order_by};
+pub(crate) use transaction::manual_transaction;
 
 use super::{ByteTarget, DmlVerb, Invalidates, StmtKind, StmtSpan, relations::NameRef};
 
@@ -339,10 +341,6 @@ fn transaction_at(tokens: &[Token<'_>], at: usize) -> Option<StmtKind> {
     } else {
         None
     }
-}
-
-pub(crate) fn has_transaction_control(text: &str) -> bool {
-    significant(text).map_or(true, |tokens| (0..tokens.len()).any(|i| transaction_at(&tokens, i).is_some()))
 }
 
 fn ddl_at(tokens: &[Token<'_>], at: usize) -> Option<StmtKind> {
@@ -740,7 +738,6 @@ mod tests {
             "BEGIN TRY SELECT 1 END TRY BEGIN CATCH SELECT 2 END CATCH",
             "SELECT [COMMIT], \"ROLLBACK\", N'BEGIN TRAN', @COMMIT; /* SAVE TRAN */",
         ] {
-            assert!(!has_transaction_control(text), "{text}");
             assert!(!matches!(classify(text), StmtKind::Begin | StmtKind::Commit | StmtKind::Rollback));
         }
         for (text, kind) in [
@@ -754,10 +751,7 @@ mod tests {
             ("SAVE TRANSACTION [save]", StmtKind::Savepoint),
         ] {
             assert_eq!(classify(text), kind, "{text}");
-            assert!(has_transaction_control(text));
-            assert!(has_transaction_control(&format!("DECLARE @x int; {text}")));
         }
-        assert!(has_transaction_control("'unclosed"));
     }
 
     #[test]

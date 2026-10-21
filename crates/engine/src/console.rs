@@ -12,7 +12,7 @@ use crate::session::{CancelHandle, Session, QueryEvent};
 use crate::sql::{Invalidates, StmtKind, StmtSpan};
 use crate::store::HistoryInsert;
 use crate::text::{OffsetMap, synthesize_tag};
-use crate::txn::{StmtOutcome, txn_after};
+use crate::txn::{StmtOutcome, TransactionPlan, txn_after};
 
 const STREAM_EMIT_INTERVAL: Duration = Duration::from_millis(100);
 
@@ -245,7 +245,6 @@ pub struct RunPlan {
     pub run_id: RunId,
     pub text: String,
     pub statements: Vec<PlannedStmt>,
-    pub mode: TxnMode,
     pub txn: TxnState,
     pub schema: Option<String>,
     /// The database the session is on; catalog refreshes and history rows name it.
@@ -257,6 +256,7 @@ pub struct RunPlan {
 pub struct PlannedStmt {
     pub span: StmtSpan,
     pub kind: StmtKind,
+    pub transaction: TransactionPlan,
 }
 
 pub fn now_ms() -> i64 {
@@ -295,7 +295,7 @@ pub async fn run_task(console: Arc<Console>, shared: Arc<Shared>, mut session: S
             break;
         }
         let sql = stmt.span.text(&plan.text);
-        if session.implicit_begin(plan.mode, txn, &stmt.kind, sql) {
+        if stmt.transaction == TransactionPlan::BeginIfIdle && txn == TxnState::Idle {
             match session.batch("BEGIN").await {
                 Ok(()) => {
                     txn = TxnState::Active;

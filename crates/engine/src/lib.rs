@@ -1055,7 +1055,12 @@ impl Engine {
         if connection.database_kind == DatabaseKind::SqlServer {
             for span in &spans { sql::tsql::validate_batch(span.text(&text)).map_err(|what| RunError::Unsupported { what })?; }
         }
-        let statements: Vec<PlannedStmt> = spans.iter().map(|span| PlannedStmt { span: *span, kind: text::classify(span.text(&text), connection.database_kind) }).collect();
+        let statements: Vec<PlannedStmt> = spans.iter().map(|span| {
+            let sql = span.text(&text);
+            let kind = text::classify(sql, connection.database_kind);
+            let transaction = txn::plan(connection.database_kind, config.mode, &kind, sql).map_err(|what| RunError::Unsupported { what })?;
+            Ok(PlannedStmt { span: *span, kind, transaction })
+        }).collect::<Result<_, RunError>>()?;
         if statements.iter().any(|p| p.kind == sql::StmtKind::CopyStdio) {
             return Err(RunError::Unsupported { what: "COPY FROM STDIN / TO STDOUT".into() });
         }
@@ -1097,7 +1102,7 @@ impl Engine {
         console.publish(&mut inner, s);
         drop(inner);
 
-        let plan = RunPlan { run_id, text, statements, mode: config.mode, txn, schema: config.schema.clone(), database: config.database.clone(), connection, table: table_relation };
+        let plan = RunPlan { run_id, text, statements, txn, schema: config.schema.clone(), database: config.database.clone(), connection, table: table_relation };
         s.spawn(console::run_task(console.clone(), s.clone(), session, plan, stop));
         Ok(RunAccepted { run_id, statements: ranges })
     }
