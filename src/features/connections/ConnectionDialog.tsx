@@ -3,10 +3,11 @@ import { IconAlertCircle, IconCheck, IconEye, IconEyeOff, IconLock, IconPlus, Ic
 import { useEffect, useId, useRef, useState, type ReactNode } from "react";
 import { commands, type ConnectionConfig, type ConnectionDraft, type ConnectionId, type PasswordInput, type SslMode } from "../../ipc/bindings";
 import { connectErrorText } from "../../ipc/errors";
+import { DATABASE_LABEL } from "../../state/databaseKind";
 import { useLive } from "../../state/live";
 import { connectionTone } from "../../state/status";
 import { useWorkspace } from "../../state/workspace";
-import { Button, cx, DialogBackdrop, IconButton, inputClass, Modal, PgBadge, Spinner, StatusDot } from "../../ui/primitives";
+import { Button, cx, DatabaseBadge, DialogBackdrop, IconButton, inputClass, Modal, Spinner, StatusDot } from "../../ui/primitives";
 import { connect } from "./connectionActions";
 import { CONNECTION_COLORS, ConnectionColorDot, connectionColorId, type ConnectionColorId } from "./connectionColors";
 import { initialFields, initialPassword, isDirty, type Fields, type PasswordEdit } from "./connectionForm";
@@ -209,6 +210,7 @@ function ConnectionForm({
   const [urlError, setUrlError] = useState<string | null>(null);
   const [urlBlurred, setUrlBlurred] = useState(false);
   const urlRequest = useRef(0);
+  const probeRequest = useRef(0);
   const [probe, setProbe] = useState<Probe>({ kind: "idle" });
   const [saving, setSaving] = useState(false);
   const [saveError, setSaveError] = useState<string | null>(null);
@@ -220,6 +222,7 @@ function ConnectionForm({
   }, [dirty, onDirtyChange]);
 
   const update = (patch: Partial<Fields>) => {
+    ++probeRequest.current;
     setFields((f) => ({ ...f, ...patch }));
     setProbe({ kind: "idle" });
   };
@@ -239,7 +242,7 @@ function ConnectionForm({
     }
     const d = res.data;
     setUrlError(null);
-    update({ host: d.host, port: String(d.port), database: d.database, user: d.user, sslMode: d.sslMode });
+    update({ databaseKind: d.databaseKind, caCertPath: d.caCertPath ?? "", host: d.host, port: String(d.port), database: d.database, user: d.user, sslMode: d.sslMode });
     setPassword(typeof d.password === "object" ? { kind: "set", value: d.password.Set } : initialPassword(existing));
   };
   // A half-typed URL fails to parse, so its error waits for a blur or until it reads like a URL or a key=value string.
@@ -251,20 +254,23 @@ function ConnectionForm({
 
   const draft = (): ConnectionDraft => ({
     id: existing?.id ?? null,
+    databaseKind: fields.databaseKind,
     name: fields.name.trim() || fallbackName,
     host: fields.host.trim(),
     port,
     database: fields.database.trim(),
     user: fields.user.trim(),
     sslMode: fields.sslMode,
-    caCertPath: existing?.caCertPath ?? null,
+    caCertPath: fields.caCertPath.trim() || null,
     password: toPasswordInput(password),
     color: fields.color,
   });
 
   const test = async () => {
+    const request = ++probeRequest.current;
     setProbe({ kind: "testing" });
     const res = await commands.connectionTest(draft());
+    if (request !== probeRequest.current) return;
     setProbe(res.status === "ok" ? { kind: "ok", version: res.data.version } : { kind: "error", message: connectErrorText(res.error) });
   };
 
@@ -283,7 +289,8 @@ function ConnectionForm({
   };
 
   const passwordPlaceholder = password.kind === "keep" ? "Saved password" : password.kind === "clear" && existing?.hasPassword ? "Password will be removed" : "password";
-  const sslHint = SSL_MODES.find((m) => m.value === fields.sslMode)?.hint;
+  const sslModes = fields.databaseKind === "SqlServer" ? SSL_MODES.filter((m) => m.value === "VerifyFull" || m.value === "Require") : SSL_MODES;
+  const sslHint = sslModes.find((m) => m.value === fields.sslMode)?.hint;
 
   return (
     <form
@@ -294,7 +301,7 @@ function ConnectionForm({
       className="flex min-w-0 flex-1 flex-col"
     >
       <div className="flex h-12 shrink-0 items-center gap-2.5 border-b border-border pr-3 pl-5">
-        <PgBadge />
+        <DatabaseBadge databaseKind={fields.databaseKind} />
         <Dialog.Title className="min-w-0 flex-1 truncate text-ui-14 font-semibold text-fg">{existing ? existing.name : "New connection"}</Dialog.Title>
         <Dialog.Description className="sr-only">Saved connections, and the settings of the selected one.</Dialog.Description>
         <Dialog.Close asChild>
@@ -305,6 +312,29 @@ function ConnectionForm({
       </div>
 
       <div className="min-h-0 flex-1 overflow-y-auto px-5 py-1">
+        <FormRow label="Database kind" htmlFor={`${ids}-kind`} hint={existing ? "Create a new connection to use another database kind." : undefined}>
+          <select
+            id={`${ids}-kind`}
+            data-testid="conn-kind"
+            className={inputClass}
+            value={fields.databaseKind}
+            disabled={existing !== undefined}
+            onChange={(e) => {
+              const databaseKind = e.target.value;
+              if (databaseKind !== "Postgres" && databaseKind !== "SqlServer") return;
+              ++urlRequest.current;
+              setUrl("");
+              setUrlError(null);
+              const defaults = initialFields(undefined, databaseKind);
+              update({ ...defaults, name: fields.name, host: fields.host, color: fields.color });
+              setPassword({ kind: "clear" });
+            }}
+          >
+            {Object.entries(DATABASE_LABEL).map(([kind, label]) => (
+              <option key={kind} value={kind}>{label}</option>
+            ))}
+          </select>
+        </FormRow>
         {!existing && (
           <FormRow
             label="URL"
@@ -318,7 +348,7 @@ function ConnectionForm({
               spellCheck={false}
               className={cx(inputClass, "font-mono")}
               value={url}
-              placeholder="postgres://user@host:5432/database"
+              placeholder={fields.databaseKind === "SqlServer" ? "sqlserver://user@host:1433/master" : "postgres://user@host:5432/database"}
               onChange={(e) => {
                 setUrl(e.target.value);
                 void parseUrl(e.target.value);
@@ -341,19 +371,26 @@ function ConnectionForm({
           <input id={`${ids}-database`} data-testid="conn-database" className={inputClass} value={fields.database} onChange={set("database")} />
         </FormRow>
         <FormRow
-          label="Sign in"
+          label={fields.databaseKind === "SqlServer" ? "SQL login" : "Sign in"}
           htmlFor={`${ids}-user`}
           hint={
-            existing?.hasPassword && (
-              <button
-                type="button"
-                data-testid="conn-password-clear"
-                onClick={() => setPassword(password.kind === "clear" ? { kind: "keep" } : { kind: "clear" })}
-                className="hover:text-fg"
-              >
-                {password.kind === "clear" ? "Keep the saved password" : "Remove the saved password"}
-              </button>
-            )
+            <>
+              {fields.databaseKind === "SqlServer" && <span className="block">SQL login over TCP. Windows and Microsoft Entra authentication are not supported.</span>}
+              {existing?.hasPassword && (
+                <button
+                  type="button"
+                  data-testid="conn-password-clear"
+                  onClick={() => {
+                    ++probeRequest.current;
+                    setProbe({ kind: "idle" });
+                    setPassword(password.kind === "clear" ? { kind: "keep" } : { kind: "clear" });
+                  }}
+                  className="hover:text-fg"
+                >
+                  {password.kind === "clear" ? "Keep the saved password" : "Remove the saved password"}
+                </button>
+              )}
+            </>
           }
         >
           <div className="flex gap-2">
@@ -368,6 +405,7 @@ function ConnectionForm({
                 placeholder={passwordPlaceholder}
                 onChange={(e) => {
                   const value = e.target.value;
+                  ++probeRequest.current;
                   setProbe({ kind: "idle" });
                   setPassword(value ? { kind: "set", value } : initialPassword(existing));
                 }}
@@ -385,7 +423,7 @@ function ConnectionForm({
             </div>
           </div>
         </FormRow>
-        <FormRow label="SSL" htmlFor={`${ids}-ssl`} hint={sslHint}>
+        <FormRow label="TLS" htmlFor={`${ids}-ssl`} hint={sslHint}>
           <div className="relative">
             <select
               id={`${ids}-ssl`}
@@ -393,11 +431,11 @@ function ConnectionForm({
               className={cx(inputClass, "appearance-none pr-8")}
               value={fields.sslMode}
               onChange={(e) => {
-                const mode = SSL_MODES.find((m) => m.value === e.target.value);
+                const mode = sslModes.find((m) => m.value === e.target.value);
                 if (mode) update({ sslMode: mode.value });
               }}
             >
-              {SSL_MODES.map((m) => (
+              {sslModes.map((m) => (
                 <option key={m.value} value={m.value}>
                   {m.label}
                 </option>
@@ -406,6 +444,11 @@ function ConnectionForm({
             <IconSelector size={14} className="pointer-events-none absolute top-1/2 right-2.5 -translate-y-1/2 text-dim" />
           </div>
         </FormRow>
+        {fields.databaseKind === "Postgres" && (
+          <FormRow label="CA certificate" htmlFor={`${ids}-ca`} hint="Optional path to a PEM certificate file.">
+            <input id={`${ids}-ca`} data-testid="conn-ca-cert" className={inputClass} value={fields.caCertPath} onChange={(e) => update({ caCertPath: e.target.value })} />
+          </FormRow>
+        )}
         <FormRow label="Name" htmlFor={`${ids}-name`} hint="Leave empty to use the host and database.">
           <input
             id={`${ids}-name`}
@@ -435,7 +478,7 @@ function ConnectionForm({
           {probe.kind === "ok" && (
             <span className="flex items-center gap-1.5 text-fg">
               <IconCheck size={14} className="shrink-0 text-green" />
-              <span className="truncate">Connected to PostgreSQL {probe.version}</span>
+              <span className="truncate">Connected to {DATABASE_LABEL[fields.databaseKind]} {probe.version}</span>
             </span>
           )}
           {probe.kind === "error" && <ErrorLine message={probe.message} />}

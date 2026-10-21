@@ -2,16 +2,21 @@ import * as Menu from "@radix-ui/react-dropdown-menu";
 import { IconChevronDown, IconIndentIncrease, IconPlayerPlayFilled, IconPlayerStopFilled } from "@tabler/icons-react";
 import { ConnectionColorDot } from "../features/connections/connectionColors";
 import { cancelActive, endTransaction, formatActive, runOrChoose, setTabMode, setTabTarget } from "../features/editor/runActions";
-import type { TxnMode } from "../ipc/bindings";
+import type { TransactionLoss, TxnMode } from "../ipc/bindings";
 import { homeDb } from "../state/dbKey";
 import { useLive } from "../state/live";
-import { connectionTone, hasUncommittedWork, isRunning } from "../state/status";
+import { canCancel, connectionTone, hasUncommittedWork, isBusy } from "../state/status";
 import { tabTarget, useWorkspace } from "../state/workspace";
 import { Button, Kbd, MenuContent, MenuItem, MenuLabel, StatusDot, cx } from "../ui/primitives";
 import { SidebarToggle, WindowEdgeActions, windowEdgeInset, windowLeadingInset } from "./WindowEdgeActions";
 import type { HostedWindow } from "./hostedWindow";
 
 const MODE_LABEL: Record<TxnMode, string> = { AutoCommit: "Auto-commit", Manual: "Manual" };
+const LOSS_LABEL: Record<TransactionLoss, { label: string; title: string } | null> = {
+  None: null,
+  RolledBack: { label: "rolled back", title: "Transaction rolled back: connection lost" },
+  Unknown: { label: "session reset", title: "Session reset. Earlier commits remain committed; the last transaction outcome may be unknown." },
+};
 
 export function TopBar({ hosted }: { hosted: HostedWindow | null }) {
   const tab = useWorkspace((s) => (s.active ? s.tabs[s.active] : undefined));
@@ -21,9 +26,12 @@ export function TopBar({ hosted }: { hosted: HostedWindow | null }) {
   const liveConsole = useLive((s) => (tab ? s.consoles[tab.id] : undefined));
   const connections = useLive((s) => s.connections);
   const config = connectionId ? configs[connectionId] : undefined;
-  const running = isRunning(liveConsole);
+  const busy = isBusy(liveConsole);
+  const cancellable = canCancel(liveConsole);
   const txn = liveConsole?.txn;
-  const txnLost = liveConsole?.session.kind === "Lost" && liveConsole.session.txnLost;
+  const txnDepth = liveConsole?.txnDepth;
+  const sqlServer = config?.databaseKind === "SqlServer";
+  const loss = liveConsole?.session.kind === "Lost" ? LOSS_LABEL[liveConsole.session.transaction] : null;
 
   return (
     <header
@@ -71,32 +79,33 @@ export function TopBar({ hosted }: { hosted: HostedWindow | null }) {
         <Menu.Root modal={false}>
           <Menu.Trigger
             data-testid="tx-mode"
-            title={txnLost ? "Transaction rolled back: connection lost" : undefined}
+            title={loss?.title ?? (txn === "Open" ? "Transaction open. SQL Server does not report nesting depth or committability through the protocol." : undefined)}
             className="inline-flex h-7 items-center gap-1 rounded-md pr-1.5 pl-2 text-ui-12.5 text-muted outline-none hover:bg-hover hover:text-fg data-[state=open]:bg-hover data-[state=open]:text-fg"
           >
             {MODE_LABEL[tab.console.mode]}
-            {tab.console.mode === "Manual" && txn && txn !== "Idle" && (
-              <span className={txn === "Aborted" ? "text-danger" : "text-fg"}> · {txn === "Aborted" ? "aborted" : "in transaction"}</span>
+            {txn && txn !== "Idle" && (
+              <span className={txn === "Aborted" ? "text-danger" : "text-fg"}> · {txn === "Aborted" ? "aborted" : "in transaction"}{txnDepth !== null && txnDepth !== undefined && txnDepth > 1 ? ` (${txnDepth})` : ""}</span>
             )}
-            {txnLost && <span className="text-danger"> · rolled back</span>}
+            {loss && <span className="text-danger"> · {loss.label}</span>}
             <IconChevronDown size={13} />
           </Menu.Trigger>
           <MenuContent align="end">
             {(["AutoCommit", "Manual"] as const).map((m) => (
-              <MenuItem key={m} testId={`tx-mode-${m}`} checked={m === tab.console.mode} onSelect={() => void setTabMode(tab.id, m)}>
-                {MODE_LABEL[m]}
+              <MenuItem key={m} testId={`tx-mode-${m}`} checked={m === tab.console.mode} disabled={sqlServer && m === "Manual"} onSelect={() => void setTabMode(tab.id, m)}>
+                {MODE_LABEL[m]}{sqlServer && m === "Manual" ? " (unavailable for SQL Server)" : ""}
               </MenuItem>
             ))}
+            {sqlServer && <MenuLabel>Use BEGIN, COMMIT and ROLLBACK in SQL scripts.</MenuLabel>}
           </MenuContent>
         </Menu.Root>
       )}
 
       {tab && hasUncommittedWork(liveConsole) && (
         <>
-          <Button data-testid="commit-btn" disabled={running} onClick={() => void endTransaction(tab.id, "commit")}>
+          <Button data-testid="commit-btn" title={sqlServer ? "Commit all transaction nesting levels" : undefined} disabled={busy} onClick={() => void endTransaction(tab.id, "commit")}>
             Commit
           </Button>
-          <Button data-testid="rollback-btn" disabled={running} onClick={() => void endTransaction(tab.id, "rollback")}>
+          <Button data-testid="rollback-btn" disabled={busy} onClick={() => void endTransaction(tab.id, "rollback")}>
             Rollback
           </Button>
         </>
@@ -109,9 +118,11 @@ export function TopBar({ hosted }: { hosted: HostedWindow | null }) {
         </Button>
       )}
 
+      {tab && liveConsole?.work === "Count" && <span data-testid="counting-status" role="status" className="text-ui-13 text-dim">Counting…</span>}
+
       {tab &&
-        (running ? (
-          <Button data-testid="cancel-btn" className="w-[104px] justify-center bg-hover" onClick={() => cancelActive()}>
+        (cancellable ? (
+          <Button data-testid="cancel-btn" title={sqlServer ? "Cancel resets the SQL Server session. Earlier commits remain committed." : undefined} className="w-[104px] justify-center bg-hover" onClick={() => cancelActive()}>
             <IconPlayerStopFilled size={10} className="text-muted" />
             Cancel
             <Kbd className="bg-control text-muted">Esc</Kbd>
@@ -119,6 +130,7 @@ export function TopBar({ hosted }: { hosted: HostedWindow | null }) {
         ) : (
           <Button
             data-testid="run-btn"
+            disabled={busy}
             variant="primary"
             title="Run the selection or the marked statement (⌘↵). On a blank line, or with ⌘⇧↵, choose which statement to run."
             className="w-[104px] justify-center pr-2 pl-2.5 font-medium"

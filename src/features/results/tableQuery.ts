@@ -1,8 +1,12 @@
+import { useEffect, useState } from "react";
 import { create } from "zustand";
-import type { ColumnFilter, FilterOp, TabId } from "../../ipc/bindings";
-import { sqlIdent } from "../editor/sqlIdent";
+import { commands, type ColumnFilter, type FilterOp, type TabId, type TableOrderView, type TableQuery, type TableSortKey } from "../../ipc/bindings";
+import { useCatalog, viewFor } from "../../state/catalog";
+import { sameDb } from "../../state/dbKey";
+import { isTableTab, useWorkspace, type TableTab } from "../../state/workspace";
+import { updateTableQuery } from "../editor/runActions";
 
-export type SortKey = { column: string; desc: boolean };
+export type SortKey = TableSortKey;
 
 export const FILTER_OPS: readonly { op: FilterOp; label: string; takesValue: boolean }[] = [
   { op: "Eq", label: "=", takesValue: true },
@@ -19,34 +23,46 @@ export const FILTER_OPS: readonly { op: FilterOp; label: string; takesValue: boo
 
 export const takesValue = (op: FilterOp) => FILTER_OPS.find((o) => o.op === op)?.takesValue ?? true;
 
-export function nextSort(sort: SortKey[], column: string, additive: boolean): SortKey[] {
-  const current = sort.find((k) => k.column === column);
-  const cycle = (k: SortKey | undefined): SortKey | null => (!k ? { column, desc: false } : k.desc ? null : { column, desc: true });
-  const next = cycle(current);
-  if (!additive) return next ? [next] : [];
-  if (!current) return [...sort, next!];
-  return sort.flatMap((k) => (k.column !== column ? [k] : next ? [next] : []));
+export function useTableOrder(tab: TableTab | null): TableSortKey[] {
+  const db = tab?.console.db;
+  const schema = tab?.table.schema;
+  const table = tab?.table.table;
+  const orderBy = tab?.table.query.orderBy;
+  const catalogVersion = useCatalog((s) => viewFor(s.views, db)?.catalog.version);
+  const [view, setView] = useState<{ key: string; value: TableOrderView } | null>(null);
+  const key = JSON.stringify([db, schema, table, catalogVersion, orderBy]);
+  useEffect(() => {
+    let stale = false;
+    if (db && schema !== undefined && table !== undefined && orderBy !== undefined) void commands.tableOrder(db, schema, table, orderBy, { kind: "Inspect" }).then((res) => {
+      if (!stale && res.status === "ok") setView({ key, value: res.data });
+    });
+    return () => { stale = true; };
+  }, [key]);
+  return view?.key === key ? view.value.keys ?? [] : [];
 }
 
-const ORDER_KEY = /^\s*("(?:[^"]|"")+"|[A-Za-z_][A-Za-z0-9_$]*)(?:\s+(ASC|DESC))?\s*(,|$)/i;
+type OrderQueue = { query: TableQuery; tail: Promise<void> };
+const orderQueues = new Map<TabId, OrderQueue>();
 
-export function parseOrderBy(text: string): SortKey[] | null {
-  const keys: SortKey[] = [];
-  let rest = text.trim();
-  while (rest) {
-    const m = ORDER_KEY.exec(rest);
-    if (!m) return null;
-    const ident = m[1]!;
-    const column = ident.startsWith('"') ? ident.slice(1, -1).replaceAll('""', '"') : ident.toLowerCase();
-    keys.push({ column, desc: m[2]?.toUpperCase() === "DESC" });
-    rest = rest.slice(m[0].length).trim();
-    if (m[3] === "," && !rest) return null;
-  }
-  return keys;
-}
-
-export function formatOrderBy(keys: SortKey[]): string {
-  return keys.map((k) => `${sqlIdent(k.column)}${k.desc ? " DESC" : ""}`).join(", ");
+export function cycleTableOrder(tab: TableTab, column: string, additive: boolean): Promise<void> {
+  const queue = orderQueues.get(tab.id) ?? { query: tab.table.query, tail: Promise.resolve() };
+  const write = queue.tail.then(async () => {
+    const current = useWorkspace.getState().tabs[tab.id];
+    if (!isTableTab(current) || !sameDb(current.console.db, tab.console.db) || current.table.schema !== tab.table.schema || current.table.table !== tab.table.table || current.table.query !== queue.query) return;
+    const res = await commands.tableOrder(current.console.db, current.table.schema, current.table.table, queue.query.orderBy, { kind: "Cycle", column, additive });
+    const latest = useWorkspace.getState().tabs[tab.id];
+    if (!isTableTab(latest) || !sameDb(latest.console.db, current.console.db) || latest.table.schema !== current.table.schema || latest.table.table !== current.table.table || latest.table.query !== queue.query) return;
+    if (res.status === "error") return useWorkspace.getState().notify(res.error);
+    if (res.data.sql !== queue.query.orderBy) {
+      queue.query = { ...queue.query, orderBy: res.data.sql };
+      updateTableQuery(tab.id, () => queue.query);
+    }
+  });
+  const tail = write.catch(() => {});
+  queue.tail = tail;
+  orderQueues.set(tab.id, queue);
+  void tail.then(() => { if (orderQueues.get(tab.id)?.tail === tail) orderQueues.delete(tab.id); });
+  return write;
 }
 
 export function filterForValue(column: string, value: string | null, negate: boolean): ColumnFilter {

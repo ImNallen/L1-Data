@@ -1,3 +1,4 @@
+import { syntaxTree } from "@codemirror/language";
 import { CompletionContext, type CompletionResult } from "@codemirror/autocomplete";
 import { afterEach, expect, it } from "vitest";
 import { buildCatalogView } from "../../state/catalog";
@@ -26,4 +27,16 @@ it("completes the columns of an aliased table in the default schema", async () =
 
 it("completes the columns of an aliased table in another schema", async () => {
   expect(await completeAtEnd("SELECT * FROM lab.type_zoo z WHERE z.")).toEqual(["id", "tstz", "m"]);
+});
+
+it("changes to SQL Server syntax before a catalog arrives while retaining the document", () => {
+  seedEditor("t1", "SELECT @name FROM [line items]");
+  configureSql("t1", undefined, "SqlServer");
+  const state = editorStateOf("t1");
+  const names: string[] = [];
+  syntaxTree(state).iterate({ enter: (node) => { if (node.from === 18) names.push(node.name); } });
+  expect(names).toContain("QuotedIdentifier");
+  expect(state.doc.toString()).toBe("SELECT @name FROM [line items]");
+  configureSql("t1", undefined, "Postgres");
+  expect(syntaxTree(editorStateOf("t1")).toString()).not.toContain("QuotedIdentifier");
 });

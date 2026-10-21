@@ -17,10 +17,12 @@ export const commands = {
 	connectionEditView: (id: ConnectionId, edit: ViewEdit) => typedError<null, CatalogError>(__TAURI_INVOKE("connection_edit_view", { id, edit })),
 	connectionProbeDatabases: (id: ConnectionId, databases: string[]) => __TAURI_INVOKE<void>("connection_probe_databases", { id, databases }),
 	relationDetail: (db: DatabaseRef, oid: number) => typedError<RelationDetail, DetailError>(__TAURI_INVOKE("relation_detail", { db, oid })),
-	exactRowCount: (db: DatabaseRef, schema: string, table: string, query: TableQuery) => typedError<number, CountError>(__TAURI_INVOKE("exact_row_count", { db, schema, table, query })),
+	exactRowCount: (tabId: TabId, db: DatabaseRef, schema: string, table: string, query: TableQuery) => typedError<number, CountError>(__TAURI_INVOKE("exact_row_count", { tabId, db, schema, table, query })),
 	consoleConfigure: (tabId: TabId, config: ConsoleConfig) => typedError<ConsoleState, ConfigureError>(__TAURI_INVOKE("console_configure", { tabId, config })),
-	scriptOutline: (text: string, cursor: DocOffset) => __TAURI_INVOKE<ScriptOutline>("script_outline", { text, cursor }),
-	editorFormat: (text: string, target: RunTarget) => typedError<FormatEdit, FormatError>(__TAURI_INVOKE("editor_format", { text, target })),
+	scriptOutline: (text: string, cursor: DocOffset, databaseKind: DatabaseKind) => __TAURI_INVOKE<ScriptOutline>("script_outline", { text, cursor, databaseKind }),
+	editorFormat: (text: string, target: RunTarget, databaseKind: DatabaseKind) => typedError<FormatEdit, FormatError>(__TAURI_INVOKE("editor_format", { text, target, databaseKind })),
+	tableScript: (db: DatabaseRef, schema: string, table: string) => typedError<TableScript, string>(__TAURI_INVOKE("table_script", { db, schema, table })),
+	tableOrder: (db: DatabaseRef, schema: string, table: string, orderBy: string, edit: TableOrderEdit) => typedError<TableOrderView, string>(__TAURI_INVOKE("table_order", { db, schema, table, orderBy, edit })),
 	consoleRun: (tabId: TabId, request: RunRequest) => typedError<RunAccepted, RunError>(__TAURI_INVOKE("console_run", { tabId, request })),
 	consoleCancel: (tabId: TabId) => __TAURI_INVOKE<void>("console_cancel", { tabId }),
 	consoleCommit: (tabId: TabId) => typedError<null, TxnError>(__TAURI_INVOKE("console_commit", { tabId })),
@@ -73,8 +75,7 @@ export type AppEvent = {
 
 export type Appearance = "light" | "dark";
 
-/**  Nothing is applied when any of these comes back. */
-export type ApplyError = { kind: "Busy" } | { kind: "NotConfigured" } | { kind: "Connect"; error: ConnectError } | 
+export type ApplyError = { kind: "Busy" } | { kind: "NotConfigured" } | { kind: "Unsupported"; what: string } | { kind: "Connect"; error: ConnectError } | 
 /**  The tab's transaction already failed; roll it back first. */
 { kind: "TransactionAborted" } | 
 /**  Updates and deletes need the table's full primary key. */
@@ -82,7 +83,7 @@ export type ApplyError = { kind: "Busy" } | { kind: "NotConfigured" } | { kind: 
 /**  An update or delete matched `rows` rows instead of one, so the row changed underneath. */
 { kind: "RowMismatch"; change: ChangeRef; rows: number } | 
 /**  Opening or committing the transaction failed. */
-{ kind: "Transaction"; error: QueryError };
+{ kind: "Transaction"; error: QueryError } | { kind: "OutcomeUnknown"; error: QueryError };
 
 export type ApplySummary = {
 	/**  False when the changes wait in the tab's open transaction (manual mode) for Commit. */
@@ -123,6 +124,7 @@ export type BootSnapshot = {
 };
 
 export type Catalog = {
+	databaseKind: DatabaseKind,
 	db: DatabaseRef,
 	version: number,
 	/**
@@ -237,6 +239,7 @@ export type ColumnFilter = {
 };
 
 export type ColumnInfo = {
+	writable: boolean,
 	attnum: number,
 	name: string,
 	typeDisplay: string,
@@ -249,7 +252,7 @@ export type ColumnInfo = {
 
 export type ColumnMeta = {
 	name: string,
-	type: PgTypeRef,
+	type: SqlTypeRef,
 	source: ColumnSource | null,
 };
 
@@ -260,7 +263,7 @@ export type ColumnSource = {
 
 export type ConfigureError = 
 /**  Mode or connection change requested while a transaction is open. */
-{ kind: "TransactionOpen" } | { kind: "Busy" } | { kind: "UnknownConnection" };
+{ kind: "TransactionOpen" } | { kind: "Busy" } | { kind: "UnknownConnection" } | { kind: "Unsupported"; what: string };
 
 export type ConnStatus = { kind: "Disconnected" } | { kind: "Connecting" } | 
 /**
@@ -276,6 +279,7 @@ export type ConnectError = { kind: "Network"; message: string } | { kind: "Tls";
 } & QueryError | { kind: "Keychain"; message: string };
 
 export type ConnectionConfig = {
+	databaseKind: DatabaseKind,
 	id: ConnectionId,
 	name: string,
 	host: string,
@@ -289,6 +293,7 @@ export type ConnectionConfig = {
 };
 
 export type ConnectionDraft = {
+	databaseKind: DatabaseKind,
 	/**  `None` creates a new connection. */
 	id: ConnectionId | null,
 	name: string,
@@ -337,13 +342,17 @@ export type ConsoleConfigView = {
 };
 
 export type ConsoleState = {
+	txnDepth: number | null,
 	tabId: TabId,
 	rev: number,
 	config: ConsoleConfigView,
 	session: SessionState,
+	work: ConsoleWork | null,
 	txn: TxnState,
 	run: RunState,
 };
+
+export type ConsoleWork = "Run" | "Count" | "Transaction" | "Edit" | "Probe";
 
 export type CountError = { kind: "NotConnected" } | { kind: "Failed"; message: string };
 
@@ -361,6 +370,8 @@ export type CustomThemeVariant = {
 	appearance: Appearance,
 	colors: { [key in string]: string },
 };
+
+export type DatabaseKind = "Postgres" | "SqlServer";
 
 /**
  *  One database on one saved connection. Postgres catalogs and OIDs are per database, so every
@@ -452,6 +463,8 @@ export type EntrySnapshot = {
 	entry: Entry,
 };
 
+export type ExecutionUnitKind = "Statement" | "Batch";
+
 export type ExportError = { kind: "Gone" } | { kind: "Io"; message: string };
 
 export type ExportSummary = {
@@ -479,7 +492,7 @@ export type FormatEdit = {
 	insert: string,
 };
 
-export type FormatError = 
+export type FormatError = { kind: "Unsupported" } | 
 /**  No statement at the cursor or in the selection. */
 { kind: "NothingToFormat" } | 
 /**  The laid-out text would lex differently from the original, so the engine refused it. */
@@ -491,6 +504,7 @@ export type FunctionInfo = {
 	args: string,
 	returns: string,
 	kind: FnKind,
+	insertText: string,
 };
 
 export type HistoryBrowsePage = {
@@ -515,6 +529,7 @@ export type HistoryCounts = {
 };
 
 export type HistoryEntry = {
+	databaseKind: DatabaseKind,
 	id: number,
 	atMs: number,
 	connectionId: ConnectionId,
@@ -530,6 +545,7 @@ export type HistoryError = { kind: "Stale" } | { kind: "Unavailable"; message: s
 export type HistoryFilter = "All" | "Failed" | "Writes";
 
 export type HistoryGroupPage = {
+	databaseKind: DatabaseKind,
 	sql: string,
 	runs: HistoryRun[],
 	hasMore: boolean,
@@ -545,6 +561,7 @@ export type HistoryGroupQuery = {
 };
 
 export type HistoryGroupSummary = {
+	databaseKind: DatabaseKind,
 	id: number,
 	latestId: number,
 	latestAtMs: number,
@@ -599,6 +616,7 @@ export type IndexInfo = {
  *  single source of catalog versions.
  */
 export type InstanceState = {
+	configuredDatabase: string,
 	/**  `ConnectionConfig.database` as the server spells it. */
 	home: string,
 	/**  The database picker lists system databases only while this is on. */
@@ -707,13 +725,6 @@ export type Permission =
  */
 "Auto";
 
-export type PgTypeRef = {
-	oid: number,
-	/**  `"bigint"`, `"integer[]"`, `"order_status"`. */
-	display: string,
-	category: TypeCategory,
-};
-
 /**  The quick actions of a picker. `None` is an explicit empty selection. */
 export type Preset = "All" | "DefaultOnly" | "None";
 
@@ -774,6 +785,7 @@ export type QueryError = {
 export type RelKind = "Table" | "PartitionedTable" | "View" | "MaterializedView" | "ForeignTable";
 
 export type Relation = {
+	qualifiedName: string,
 	oid: number,
 	name: string,
 	kind: RelKind,
@@ -809,6 +821,7 @@ export type ReplyBlock = { kind: "Markdown"; text: string } |
 export type ResultError = { kind: "Gone" } | { kind: "OutOfRange" };
 
 export type ResultMeta = {
+	databaseKind: DatabaseKind,
 	ref: ResultRef,
 	/**
 	 *  The database the rows came from. Column sources are its OIDs, so PK lookups key on this,
@@ -843,6 +856,8 @@ export type RowUpdate = {
 	set: CellWrite[],
 };
 
+export type RowsState = "Streaming" | "Complete" | "Failed" | "Cancelled";
+
 export type RunAccepted = {
 	runId: RunId,
 	statements: DocRange[],
@@ -858,6 +873,8 @@ export type RunError = { kind: "Busy" } | { kind: "NoStatement" } | { kind: "Not
 export type RunId = number;
 
 export type RunOutcome = "Ok" | "Failed" | "Cancelled";
+
+export type RunOutput = { kind: "Rows"; result: ResultMeta; state: RowsState } | { kind: "Command"; tag: string; affectedRows: number | null; elapsedMs: number };
 
 export type RunRequest = { kind: "script"; text: string; target: RunTarget } | { kind: "tablePage"; schema: string; table: string; page: number; query?: TableQuery };
 
@@ -886,6 +903,7 @@ export type SchemaInfo = {
 
 /**  The statements of a script and the one a run at the cursor would pick. */
 export type ScriptOutline = {
+	unitKind: ExecutionUnitKind,
 	statements: DocRange[],
 	atCursor: number | null,
 };
@@ -902,6 +920,7 @@ export type SendRequest = {
 };
 
 export type SentContext = {
+	databaseKind: DatabaseKind | null,
 	db: DatabaseRef | null,
 	/**  As named at send, so the chip reads right after a rename or a delete. */
 	connectionName: string | null,
@@ -915,7 +934,7 @@ export type ServerInfo = {
 	encoding: string,
 };
 
-export type SessionState = { kind: "None" } | { kind: "Open"; backendPid: number } | { kind: "Lost"; reason: string; txnLost: boolean };
+export type SessionState = { kind: "None" } | { kind: "Open"; backendPid: number } | { kind: "Lost"; reason: string; transaction: TransactionLoss };
 
 export type Settings = {
 	maxRows: number,
@@ -949,17 +968,22 @@ export type SourceLimits = {
 	outcome: LimitsOutcome,
 };
 
+export type SqlTypeRef = {
+	/**  `"bigint"`, `"integer[]"`, `"order_status"`. */
+	display: string,
+	category: TypeCategory,
+};
+
 export type SslMode = "Disable" | "Prefer" | "Require" | "VerifyCa" | "VerifyFull";
 
 export type StatementRun = {
+	outputs: RunOutput[],
 	index: number,
 	range: DocRange,
 	status: StmtStatus,
 };
 
-export type StmtStatus = { kind: "Pending" } | { kind: "Preparing" } | { kind: "Rows"; result: ResultMeta; done: boolean } | 
-/**  `tag` reads like `"UPDATE 3"`. */
-{ kind: "Command"; tag: string; elapsedMs: number } | { kind: "Failed"; error: QueryError } | { kind: "Cancelled" } | 
+export type StmtStatus = { kind: "Pending" } | { kind: "Preparing" } | { kind: "Running" } | { kind: "Finished" } | { kind: "Failed"; error: QueryError } | { kind: "Cancelled" } | 
 /**  An earlier statement failed or was cancelled. */
 { kind: "Skipped" };
 
@@ -998,6 +1022,13 @@ export type TableChanges = {
 	deletes: CellWrite[][],
 };
 
+export type TableOrderEdit = { kind: "Inspect" } | { kind: "Cycle"; column: string; additive: boolean };
+
+export type TableOrderView = {
+	sql: string,
+	keys: TableSortKey[] | null,
+};
+
 export type TableQuery = {
 	/**  SQL after `ORDER BY`, e.g. `"created_at" DESC`; empty means primary key order. */
 	orderBy: string,
@@ -1006,12 +1037,23 @@ export type TableQuery = {
 	where: string,
 };
 
+export type TableScript = {
+	text: string,
+	/**  Browse documents after trimming outer whitespace. Includes the canonical text. */
+	acceptedTexts: string[],
+};
+
 /**  The table a tab opened from the sidebar browses, in the tab's console database. */
 export type TableSnapshot = {
 	schema: string,
 	table: string,
 	page: number,
 	query: TableQuery,
+};
+
+export type TableSortKey = {
+	column: string,
+	desc: boolean,
 };
 
 /**  The provider's id for one tool use (`toolu_…` for Claude). Opaque outside the codec. */
@@ -1033,7 +1075,11 @@ export type ToolUse = { kind: "DescribeTables"; tables: string[] } | { kind: "Se
 /**  A tool the engine does not serve. Always refused. */
 { kind: "Other"; name: string };
 
+export type TransactionLoss = "None" | "RolledBack" | "Unknown";
+
 export type TriggerEvent = "Insert" | "Update" | "Delete" | "Truncate";
+
+export type TriggerImplementation = { kind: "Function"; name: string } | { kind: "SqlModule"; definition: string | null };
 
 export type TriggerInfo = {
 	name: string,
@@ -1042,8 +1088,7 @@ export type TriggerInfo = {
 	events: TriggerEvent[],
 	perRow: boolean,
 	enabled: boolean,
-	/**  Schema-qualified only when the function is not on the search path: `set_updated_at`. */
-	function: string,
+	implementation: TriggerImplementation,
 };
 
 export type TriggerTiming = "Before" | "After" | "InsteadOf";
@@ -1067,9 +1112,8 @@ export type TxnError = { kind: "Busy" } | { kind: "NoTransaction" } | { kind: "R
 
 export type TxnMode = "AutoCommit" | "Manual";
 
-export type TxnState = "Idle" | "Active" | 
-/**  Only `ROLLBACK [TO SAVEPOINT]` is accepted. */
-"Aborted";
+/**  `Aborted` permits only rollback. `Open` reports presence without known committability. */
+export type TxnState = "Idle" | "Active" | "Aborted" | "Open";
 
 export type TypeCategory = 
 /**  int2, int4, int8, oid. */

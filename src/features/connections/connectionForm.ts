@@ -1,20 +1,23 @@
-import type { ConnectionConfig, SslMode } from "../../ipc/bindings";
+import type { ConnectionConfig, DatabaseKind, SslMode } from "../../ipc/bindings";
 import { connectionColorId, type ConnectionColorId } from "./connectionColors";
 
-export type Fields = { name: string; host: string; port: string; database: string; user: string; sslMode: SslMode; color: ConnectionColorId | null };
+export type Fields = { databaseKind: DatabaseKind; name: string; host: string; port: string; database: string; user: string; sslMode: SslMode; caCertPath: string; color: ConnectionColorId | null };
 
 export type PasswordEdit = { kind: "keep" } | { kind: "set"; value: string } | { kind: "clear" };
 
 export type FormState = { fields: Fields; password: PasswordEdit; url: string };
 
-export function initialFields(c: ConnectionConfig | undefined): Fields {
+export function initialFields(c: ConnectionConfig | undefined, databaseKind: DatabaseKind = c?.databaseKind ?? "Postgres"): Fields {
+  const sqlServer = databaseKind === "SqlServer";
   return {
+    databaseKind,
     name: c?.name ?? "",
     host: c?.host ?? "localhost",
-    port: String(c?.port ?? 5432),
-    database: c?.database ?? "postgres",
-    user: c?.user ?? "postgres",
-    sslMode: c?.sslMode ?? "Prefer",
+    port: String(c?.port ?? (sqlServer ? 1433 : 5432)),
+    database: c?.database ?? (sqlServer ? "master" : "postgres"),
+    user: c?.user ?? (sqlServer ? "sa" : "postgres"),
+    sslMode: c?.sslMode ?? (sqlServer ? "VerifyFull" : "Prefer"),
+    caCertPath: c?.caCertPath ?? "",
     color: connectionColorId(c?.color ?? null),
   };
 }

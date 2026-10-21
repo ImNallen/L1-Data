@@ -1,4 +1,4 @@
-use crate::model::{Attachment, Catalog, DatabaseRef, RelKind, Relation};
+use crate::model::{Attachment, Catalog, DatabaseKind, DatabaseRef, RelKind, Relation};
 use crate::results::ResultSet;
 use crate::sql::StmtSpan;
 
@@ -13,6 +13,7 @@ pub(crate) const ATTACHMENT_ROWS: u32 = 100;
 pub(crate) const CELL_CHARS: usize = 200;
 
 pub(crate) struct ConnectionFacts<'a> {
+    pub database_kind: DatabaseKind,
     pub name: &'a str,
     pub server_version: Option<&'a str>,
     pub connected: Result<(), &'a str>,
@@ -47,10 +48,11 @@ pub(crate) fn build(input: &ContextInput<'_>) -> String {
     let mut out = String::from("<l1_context>\n");
     match (&input.connection, input.db) {
         (Some(c), Some(db)) => {
-            let version = c.server_version.map(|v| format!(" (PostgreSQL {v})")).unwrap_or_default();
+            let dialect = match c.database_kind { DatabaseKind::Postgres=>"PostgreSQL",DatabaseKind::SqlServer=>"SQL Server / T-SQL" };
+            let version = c.server_version.map_or_else(|| format!(" ({dialect})"),|v| format!(" ({dialect} {v})"));
             match c.connected {
                 Ok(()) => out.push_str(&format!("Connection: {}{version}, database {}, connected.\n", c.name, db.database)),
-                Err(reason) => out.push_str(&format!("Connection: {}, database {}. Not connected: {reason}\n", c.name, db.database)),
+                Err(reason) => out.push_str(&format!("Connection: {}{version}, database {}. Not connected: {reason}\n", c.name, db.database)),
             }
         }
         _ => out.push_str("No database is selected: the active tab has no connection, so the tools cannot run.\n"),
@@ -230,25 +232,25 @@ mod tests {
     use crate::model::{ColumnInfo, ConnectionId, Relation, SchemaInfo, TypeCategory};
 
     fn column(name: &str, pk: bool, fk: bool) -> ColumnInfo {
-        ColumnInfo { attnum: 1, name: name.into(), type_display: "bigint".into(), category: TypeCategory::Integer, not_null: true, pk, fk }
+        ColumnInfo { writable: true, attnum: 1, name: name.into(), type_display: "bigint".into(), category: TypeCategory::Integer, not_null: true, pk, fk }
     }
 
     fn catalog(tables: usize) -> Catalog {
         let relations = (0..tables)
-            .map(|i| Relation { oid: i as u32, name: format!("table_{i}"), kind: RelKind::Table, row_estimate: Some(10 * i as i64), columns: vec![column("id", true, false), column("customer_id", false, true), column("total", false, false)] })
+            .map(|i| Relation { qualified_name: String::new(), oid: i as u32, name: format!("table_{i}"), kind: RelKind::Table, row_estimate: Some(10 * i as i64), columns: vec![column("id", true, false), column("customer_id", false, true), column("total", false, false)] })
             .collect();
-        Catalog {
+        Catalog { database_kind: crate::model::DatabaseKind::Postgres,
             db: DatabaseRef { connection_id: ConnectionId(uuid::Uuid::nil()), database: "shop".into() },
             version: 1,
             default_schema: Some("public".into()),
-            schemas: vec![SchemaInfo { name: "public".into(), system: false, table_count: tables as u32, relations, functions: Vec::new() }, SchemaInfo { name: "hidden".into(), system: false, table_count: 1, relations: vec![Relation { oid: 9, name: "secret".into(), kind: RelKind::View, row_estimate: None, columns: vec![] }], functions: Vec::new() }],
+            schemas: vec![SchemaInfo { name: "public".into(), system: false, table_count: tables as u32, relations, functions: Vec::new() }, SchemaInfo { name: "hidden".into(), system: false, table_count: 1, relations: vec![Relation { qualified_name: String::new(), oid: 9, name: "secret".into(), kind: RelKind::View, row_estimate: None, columns: vec![] }], functions: Vec::new() }],
         }
     }
 
     static PUBLIC: std::sync::LazyLock<Vec<String>> = std::sync::LazyLock::new(|| vec!["public".to_owned()]);
 
     fn input<'a>(catalog: &'a Catalog, db: &'a DatabaseRef, tab: Option<TabFacts<'a>>, attachment: Option<&'a Attachment>) -> ContextInput<'a> {
-        ContextInput { connection: Some(ConnectionFacts { name: "dev", server_version: Some("16.4"), connected: Ok(()) }), db: Some(db), catalog: Some(catalog), shown_schemas: &PUBLIC, tab, tab_sql: Repeat::Full, attachment, outline: Repeat::Full }
+        ContextInput { connection: Some(ConnectionFacts { database_kind: DatabaseKind::Postgres, name: "dev", server_version: Some("16.4"), connected: Ok(()) }), db: Some(db), catalog: Some(catalog), shown_schemas: &PUBLIC, tab, tab_sql: Repeat::Full, attachment, outline: Repeat::Full }
     }
 
     #[test]
@@ -278,8 +280,8 @@ mod tests {
         let none = build(&ContextInput { connection: None, db: None, catalog: None, shown_schemas: &[], tab: None, tab_sql: Repeat::Full, attachment: None, outline: Repeat::Full });
         assert_eq!(none, "<l1_context>\nNo database is selected: the active tab has no connection, so the tools cannot run.\n</l1_context>");
         let mut disconnected = input(&c, &db, None, None);
-        disconnected.connection = Some(ConnectionFacts { name: "dev", server_version: None, connected: Err("password missing") });
-        assert!(build(&disconnected).contains("Connection: dev, database shop. Not connected: password missing\n"));
+        disconnected.connection = Some(ConnectionFacts { database_kind: DatabaseKind::Postgres, name: "dev", server_version: None, connected: Err("password missing") });
+        assert!(build(&disconnected).contains("Connection: dev (PostgreSQL), database shop. Not connected: password missing\n"));
     }
 
     #[test]

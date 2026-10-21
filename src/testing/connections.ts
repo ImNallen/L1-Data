@@ -2,6 +2,7 @@ import type { ConnectionConfig, ConnectionState, DatabaseState } from "../ipc/bi
 
 export const connectionConfig = (id: string, name: string): ConnectionConfig => ({
   id,
+  databaseKind: "Postgres",
   name,
   host: "localhost",
   port: 5432,
@@ -27,5 +28,5 @@ export const databaseState = (name: string, shown: boolean, shownSchemas: string
 export const connectedState = (id: string, databases: DatabaseState[]): ConnectionState => ({
   id,
   rev: 1,
-  status: { kind: "Connected", server: { version: "16.4", versionNum: 160004, encoding: "UTF8" }, instance: { home: "shop", showSystemDatabases: false, databases } },
+  status: { kind: "Connected", server: { version: "16.4", versionNum: 160004, encoding: "UTF8" }, instance: { configuredDatabase: "shop", home: "shop", showSystemDatabases: false, databases } },
 });

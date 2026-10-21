@@ -2,7 +2,6 @@ mod assistant;
 mod catalog;
 mod connection;
 mod console;
-mod detail;
 mod history;
 pub mod model;
 mod provider;
@@ -131,6 +130,16 @@ impl Shared {
         self.store.connections().ok()?.into_iter().find(|c| c.id == id)
     }
 
+    fn resolve_workspace(&self, workspace: &mut Workspace) {
+        for tab in &mut workspace.tabs {
+            if let (Some(id), Some(database)) = (tab.console.connection_id, &mut tab.console.database) {
+                if let Some(instance) = self.instance(id) {
+                    *database = instance.canonical_database(database).to_owned();
+                }
+            }
+        }
+    }
+
     fn params(&self, config: &ConnectionConfig, database: &str) -> Result<ConnectParams, ConnectError> {
         let password = if config.has_password { self.saved_password(config.id)? } else { None };
         Ok(ConnectParams::for_database(config, database, password))
@@ -139,7 +148,10 @@ impl Shared {
     /// Parameters for a console session on `database`, from the config as saved now.
     fn session_params(&self, id: ConnectionId, database: &str) -> Result<ConnectParams, ConnectError> {
         let config = self.config(id).ok_or_else(|| ConnectError::Network { message: "unknown connection".into() })?;
-        self.params(&config, database)
+        match self.instance(id) {
+            Some(instance) => self.params(&config, instance.canonical_database(database)),
+            None => self.params(&config, database),
+        }
     }
 
     fn next_catalog_version(&self) -> u64 {
@@ -210,6 +222,7 @@ impl Shared {
     /// missing afterwards only when the instance closed or the database left `pg_database`.
     fn slot(self: &Arc<Self>, db: &DatabaseRef) -> Result<(Arc<Instance>, Arc<DbSlot>), CatalogError> {
         let instance = self.instance(db.connection_id).ok_or(CatalogError::NotConnected)?;
+        let db = DatabaseRef { connection_id: db.connection_id, database: instance.canonical_database(&db.database).to_owned() };
         if !instance.knows(&db.database) {
             return Err(CatalogError::UnknownDatabase { database: db.database.clone() });
         }
@@ -264,8 +277,8 @@ impl Shared {
             }
         };
         let version = self.next_catalog_version();
-        let extra = view::system_schemas_to_load(&instance.view.read().unwrap().database(&slot.db.database, &instance.home));
-        match catalog::load(&session.client, slot.db.clone(), version, &extra).await {
+        let extra = view::system_schemas_to_load(&instance.view.read().unwrap().database(&slot.db.database, &instance.home),instance.config.database_kind);
+        match session.catalog(slot.db.clone(), version, &extra).await {
             Ok(catalog) => {
                 let catalog = Arc::new(catalog);
                 slot.set(CatalogSlot::Ready(catalog.clone()));
@@ -282,7 +295,7 @@ impl Shared {
                         *meta = None;
                         reason
                     }
-                    None => connection::error_text(&e),
+                    None => e.message,
                 };
                 slot.fail(message.clone());
                 if slot.db.database == instance.home && meta.is_none() {
@@ -323,14 +336,14 @@ impl Shared {
         let home = instance.slot(&instance.home).ok_or(CatalogError::NotConnected)?;
         let mut meta = home.meta.lock().await;
         let session = self.session_in(instance, &home, &mut meta).await.map_err(|e| failed(connection::connect_error_text(&e)))?;
-        let (databases, _) = catalog::list_databases(&session.client).await.map_err(|e| failed(connection::error_text(&e)))?;
+        let (databases, _) = session.list_databases().await.map_err(|e| failed(e.message))?;
         instance.probes.lock().unwrap().clear();
         *instance.databases.write().unwrap() = Arc::new(databases);
         Ok(())
     }
 
     /// The slot's open session, reopened if it died or was never opened.
-    async fn session_in<'m>(self: &Arc<Self>, instance: &Arc<Instance>, slot: &DbSlot, meta: &'m mut Option<Session>) -> Result<&'m Session, ConnectError> {
+    async fn session_in<'m>(self: &Arc<Self>, instance: &Arc<Instance>, slot: &DbSlot, meta: &'m mut Option<Session>) -> Result<&'m mut Session, ConnectError> {
         if meta.as_ref().is_some_and(|s| s.closed_reason().is_some()) {
             *meta = None;
         }
@@ -343,7 +356,7 @@ impl Shared {
             self.watch_slot_session(instance, &slot.db, session.backend_pid, session.closed_watch());
             *meta = Some(session);
         }
-        Ok(meta.as_ref().expect("opened above"))
+        Ok(meta.as_mut().expect("opened above"))
     }
 
     fn republish_connection(&self, id: ConnectionId) {
@@ -392,7 +405,15 @@ impl Shared {
 
     pub(crate) fn schedule_refreshes(self: &Arc<Self>, db: DatabaseRef, owed: Owed) {
         if owed.catalog {
-            self.schedule_catalog_refresh(db.clone());
+            match self.instance(db.connection_id) {
+                Some(instance) if instance.config.database_kind == DatabaseKind::SqlServer => {
+                    let tracked_slots: Vec<_> = instance.slots.lock().unwrap().values().cloned().collect();
+                    for slot in tracked_slots {
+                        self.schedule_slot_catalog_refresh(instance.clone(), slot);
+                    }
+                }
+                _ => self.schedule_catalog_refresh(db.clone()),
+            }
         }
         if owed.databases {
             self.schedule_database_list_refresh(db.connection_id);
@@ -401,6 +422,10 @@ impl Shared {
 
     fn schedule_catalog_refresh(self: &Arc<Self>, db: DatabaseRef) {
         let Ok((instance, slot)) = self.slot(&db) else { return };
+        self.schedule_slot_catalog_refresh(instance, slot);
+    }
+
+    fn schedule_slot_catalog_refresh(self: &Arc<Self>, instance: Arc<Instance>, slot: Arc<DbSlot>) {
         if !slot.refresh.request() {
             return;
         }
@@ -452,6 +477,16 @@ impl Shared {
             Ok((instance, home_pid, home_closed)) => {
                 let server = instance.server.clone();
                 self.set_connection(id, ConnSlot::Connected(instance.clone()));
+                for console in self.all_consoles() {
+                    let mut inner = console.inner.lock().await;
+                    if inner.config.connection_id == id {
+                        let database = instance.canonical_database(&inner.config.database);
+                        if database != inner.config.database {
+                            inner.config.database = database.to_owned();
+                            console.publish(&mut inner, self);
+                        }
+                    }
+                }
                 let home = DatabaseRef { connection_id: id, database: instance.home.clone() };
                 self.watch_slot_session(&instance, &home, home_pid, home_closed);
                 self.reconcile(id);
@@ -468,8 +503,8 @@ impl Shared {
     async fn open_instance(&self, id: ConnectionId) -> Result<(Arc<Instance>, i32, tokio::sync::watch::Receiver<Option<String>>), ConnectError> {
         let config = self.config(id).ok_or_else(|| ConnectError::Network { message: "unknown connection".into() })?;
         let params = self.params(&config, &config.database)?;
-        let session = Session::open(&params, None, &self.timezone).await?;
-        let (databases, home) = catalog::list_databases(&session.client).await.map_err(connection::connect_error)?;
+        let mut session = Session::open(&params, None, &self.timezone).await?;
+        let (databases, home) = session.list_databases().await.map_err(ConnectError::Server)?;
         let (server, pid, closed) = (session.server.clone(), session.backend_pid, session.closed_watch());
         let slot = DbSlot::new(DatabaseRef { connection_id: id, database: home.clone() });
         *slot.meta.lock().await = Some(session);
@@ -493,7 +528,7 @@ impl Shared {
 
     /// Consoles of `id` with an open transaction, with `has_writes` probed on their idle sessions.
     /// The probe takes the session out like a run does, so the lock is not held across the query.
-    async fn open_transactions(&self, consoles: &[Arc<Console>]) -> Vec<OpenTxn> {
+    async fn open_transactions(self: &Arc<Self>, consoles: &[Arc<Console>]) -> Vec<OpenTxn> {
         let mut open = Vec::new();
         for console in consoles {
             let run_id = self.next_run_id();
@@ -502,22 +537,22 @@ impl Shared {
                 if inner.txn == TxnState::Idle {
                     continue;
                 }
-                console.take_session(&mut inner, run_id)
+                let taken = console.take_session(&mut inner, run_id, ConsoleWork::Probe);
+                if taken.is_some() { console.publish(&mut inner, self); }
+                taken
             };
             let has_writes = match taken {
                 None => true,
-                Some((session, _stop)) => {
-                    let has_writes = match session.client.simple_query("SELECT pg_current_xact_id_if_assigned() IS NOT NULL").await {
-                        Ok(msgs) => msgs.iter().any(|m| matches!(m, tokio_postgres::SimpleQueryMessage::Row(r) if r.get(0) == Some("t"))),
-                        Err(_) => true,
-                    };
+                Some((mut session, _stop)) => {
+                    let has_writes = session.has_writes().await;
                     let lost = session.closed_reason();
-                    let _ = console
+                    let edited = console
                         .edit(self, run_id, |inner| {
                             let txn = inner.txn;
-                            Console::return_session(inner, session, txn, lost);
+                            Console::return_session(inner, session, txn, lost)
                         })
                         .await;
+                    if let Ok(Some((db, owed))) = edited { self.schedule_refreshes(db, owed); }
                     has_writes
                 }
             };
@@ -538,16 +573,19 @@ impl Shared {
                 SessionSlot::Idle(_) => {}
             }
             let aborted = inner.txn == TxnState::Aborted;
-            let (session, _stop) = console.take_session(&mut inner, run_id).expect("slot is idle");
+            let (session, _stop) = console.take_session(&mut inner, run_id, ConsoleWork::Transaction).expect("slot is idle");
+            console.publish(&mut inner, self);
             (session, aborted)
         };
         let (kind, sql) = if commit && !aborted { (sql::StmtKind::Commit, "COMMIT") } else { (sql::StmtKind::Rollback, "ROLLBACK") };
         let started = std::time::Instant::now();
-        let result = session.client.batch_execute(sql).await;
+        let mut result = session.finish_transaction(commit && !aborted).await;
         let elapsed_ms = started.elapsed().as_millis().min(u32::MAX as u128) as u32;
-        let fatal = result.as_ref().err().and_then(|e| e.as_db_error()).filter(|db| db.severity() == "FATAL").map(|db| db.message().to_owned());
+        let fatal = result.as_ref().err().filter(|e| e.severity == "FATAL").map(|e| e.message.clone());
         let lost = session.closed_reason_settled(fatal).await;
-        let result = result.map_err(|e| e.as_db_error().map_or_else(|| connection::transport_error(&e), |db| connection::query_error(db, None)));
+        if commit && !aborted && lost.is_some() {
+            if let Err(error) = &mut result { error.message = format!("Commit outcome is unknown because the session was lost: {}", error.message); }
+        }
         let mut lines = vec![console::statement_line(0, sql)];
         lines.extend(console::notice_lines(&mut session));
         lines.push(match &result {
@@ -558,11 +596,10 @@ impl Shared {
         let outcome = if result.is_ok() { txn::StmtOutcome::Ok } else { txn::StmtOutcome::Err };
         let edited = console
             .edit(self, run_id, |inner| {
-                let txn = txn::txn_after(inner.txn, &kind, outcome);
-                Console::return_session(inner, session, txn, lost);
-                let owed = if inner.txn == TxnState::Idle { inner.owed.take() } else { Owed::default() };
+                let txn = session.observed_txn().unwrap_or_else(|| txn::txn_after(inner.txn, &kind, outcome));
+                let retired = Console::return_session(inner, session, txn, lost);
                 let committed = commit && !aborted && result.is_ok();
-                committed.then(|| (inner.config.db(), owed))
+                retired.or_else(|| inner.finish_refreshes(committed))
             })
             .await;
         if let Ok(Some((db, owed))) = edited {
@@ -636,10 +673,11 @@ impl Engine {
             eprintln!("connections load failed: {e}");
             Vec::new()
         });
-        let workspace = s.store.kv_get(KV_WORKSPACE).unwrap_or_else(|e| {
+        let mut workspace = s.store.kv_get(KV_WORKSPACE).unwrap_or_else(|e| {
             eprintln!("workspace load failed: {e}");
             None
-        });
+        }).unwrap_or_default();
+        s.resolve_workspace(&mut workspace);
         let chats = s.store.chats(BOOT_CHATS).unwrap_or_else(|e| {
             eprintln!("chats load failed: {e}");
             Vec::new()
@@ -649,7 +687,7 @@ impl Engine {
             .into_iter()
             .map(|(id, r)| live_chats.remove(&id).unwrap_or_else(|| ChatState { id, rev: 0, title: r.title, updated_at_ms: r.updated_at_ms, options: r.options, status: ChatStatus::Idle, entry_count: r.entry_count }))
             .collect();
-        BootSnapshot { connections, live, consoles, workspace: workspace.unwrap_or_default(), settings: s.settings(), providers: s.provider_states(), chats }
+        BootSnapshot { connections, live, consoles, workspace, settings: s.settings(), providers: s.provider_states(), chats }
     }
 
     pub async fn save_connection(&self, d: ConnectionDraft) -> Result<ConnectionConfig, SaveError> {
@@ -671,6 +709,9 @@ impl Engine {
             return Err(invalid("user is required"));
         }
         let existing = d.id.and_then(|id| s.config(id));
+        if existing.as_ref().is_some_and(|c| c.database_kind != d.database_kind) {
+            return Err(invalid("An existing connection cannot change database kind. Create a new connection."));
+        }
         let id = d.id.unwrap_or_else(|| ConnectionId(uuid::Uuid::new_v4()));
         let store = |e: StoreError| SaveError::Store { message: e.to_string() };
         let has_password = match &d.password {
@@ -686,6 +727,7 @@ impl Engine {
             PasswordInput::Keep => existing.as_ref().is_some_and(|c| c.has_password),
         };
         let config = ConnectionConfig {
+            database_kind: d.database_kind,
             id,
             name: d.name.trim().to_owned(),
             host: d.host.trim().to_owned(),
@@ -715,13 +757,28 @@ impl Engine {
     }
 
     /// The statement chooser and the editor's run mark. Pure, so the sync command never needs the runtime.
-    pub fn script_outline(&self, text: &str, cursor: DocOffset) -> ScriptOutline {
-        text::script_outline(text, cursor)
+    pub fn script_outline(&self, text: &str, cursor: DocOffset, database_kind: DatabaseKind) -> ScriptOutline {
+        text::script_outline(text, cursor, database_kind)
     }
 
     /// The editor's format action. Pure, so the sync command never needs the runtime.
-    pub fn editor_format(&self, text: &str, target: RunTarget) -> Result<FormatEdit, FormatError> {
-        text::format_edit(text, target)
+    pub fn editor_format(&self, text: &str, target: RunTarget, database_kind: DatabaseKind) -> Result<FormatEdit, FormatError> {
+        text::format_edit(text, target, database_kind)
+    }
+
+    pub fn table_script(&self, db: DatabaseRef, schema: &str, table: &str) -> Result<TableScript,String> {
+        let kind = self.shared.config(db.connection_id).ok_or("Unknown connection")?.database_kind;
+        Ok(text::table_script(kind,schema,table))
+    }
+    pub fn table_order(&self, db: DatabaseRef, schema: &str, table: &str, order_by: &str, edit: TableOrderEdit) -> Result<TableOrderView,String> {
+        let kind = self.shared.config(db.connection_id).ok_or("Unknown connection")?.database_kind;
+        let catalog = match kind {
+            DatabaseKind::Postgres => None,
+            DatabaseKind::SqlServer => self.shared.instance(db.connection_id)
+                .and_then(|instance| instance.slot(instance.canonical_database(&db.database)))
+                .and_then(|slot| slot.last()),
+        };
+        text::table_order(kind, catalog.as_ref().and_then(|c| c.relation(schema, table)), order_by, edit)
     }
 
     pub async fn test_connection(&self, d: ConnectionDraft) -> Result<ServerInfo, ConnectError> {
@@ -833,7 +890,7 @@ impl Engine {
         let reload: Vec<String> = instance
             .slot_names()
             .into_iter()
-            .filter(|db| view::system_schemas_to_load(&view.database(db, &instance.home)) != view::system_schemas_to_load(&next.database(db, &instance.home)))
+            .filter(|db| view::system_schemas_to_load(&view.database(db, &instance.home),instance.config.database_kind) != view::system_schemas_to_load(&next.database(db, &instance.home),instance.config.database_kind))
             .collect();
         *instance.view.write().unwrap() = next;
         s.reconcile_instance(&instance);
@@ -873,8 +930,8 @@ impl Engine {
                 }
                 let probe = async {
                     let params = shared.params(&instance.config, &name).map_err(|e| connection::connect_error_text(&e))?;
-                    let session = Session::open(&params, None, &shared.timezone).await.map_err(|e| connection::connect_error_text(&e))?;
-                    catalog::count_schemas(&session.client).await.map_err(|e| connection::error_text(&e))
+                    let mut session = Session::open(&params, None, &shared.timezone).await.map_err(|e| connection::connect_error_text(&e))?;
+                    session.count_schemas().await.map_err(|e| e.message)
                 };
                 let count = match tokio::time::timeout(PROBE_TIMEOUT, probe).await {
                     Ok(Ok(count)) => SchemaCount::Known { count },
@@ -896,17 +953,77 @@ impl Engine {
         }
     }
 
-    /// `count(*)` with the query's filters, on the database's metadata session.
-    pub async fn exact_row_count(&self, db: DatabaseRef, schema: String, table: String, query: TableQuery) -> Result<u64, CountError> {
+    /// Counts on the SQL Server tab's native session, or PostgreSQL's metadata session.
+    pub async fn exact_row_count(&self, tab_id: TabId, db: DatabaseRef, schema: String, table: String, query: TableQuery) -> Result<u64, CountError> {
         let (instance, slot) = self.shared.slot(&db).map_err(|_| CountError::NotConnected)?;
-        let sql = text::count_sql(&schema, &table, &query);
-        if sql::split_statements(&sql).len() != 1 {
-            return Err(CountError::Failed { message: "The filter must be a single expression.".into() });
+        if instance.config.database_kind == DatabaseKind::Postgres {
+            let sql = text::table_count(DatabaseKind::Postgres, &schema, &table, None, &query).map_err(|message| CountError::Failed { message })?;
+            let mut meta = slot.meta.lock().await;
+            let session = self.shared.session_in(&instance, &slot, &mut meta).await.map_err(|e| CountError::Failed { message: connection::connect_error_text(&e) })?;
+            return session.count(&sql).await.map_err(|e| CountError::Failed { message: e.message });
         }
-        let mut meta = slot.meta.lock().await;
-        let session = self.shared.session_in(&instance, &slot, &mut meta).await.map_err(|e| CountError::Failed { message: connection::connect_error_text(&e) })?;
-        let row = session.client.query_one(&sql, &[]).await.map_err(|e| CountError::Failed { message: connection::error_text(&e) })?;
-        Ok(row.get::<_, i64>(0) as u64)
+
+        let s = &self.shared;
+        let failed = |message: &str| CountError::Failed { message: message.into() };
+        let console = s.console(tab_id).ok_or_else(|| failed("The count tab is not configured."))?;
+        let validate = |inner: &console::ConsoleInner| {
+            if !s.instance(db.connection_id).is_some_and(|current| Arc::ptr_eq(&current, &instance)) {
+                return Err(CountError::NotConnected);
+            }
+            if console.closed.load(Ordering::Relaxed)
+                || !s.console(tab_id).is_some_and(|current| Arc::ptr_eq(&current, &console))
+                || inner.config.connection_id != db.connection_id
+                || instance.canonical_database(&inner.config.database) != instance.canonical_database(&db.database)
+            {
+                return Err(failed("The count tab's target changed."));
+            }
+            let current = s.config(inner.config.connection_id).ok_or_else(|| failed("The count tab is not configured."))?;
+            if current.database_kind != DatabaseKind::SqlServer || inner.config.mode != TxnMode::AutoCommit {
+                return Err(failed("SQL Server counts require a native Auto-commit tab."));
+            }
+            if matches!(inner.session, SessionSlot::Busy { .. }) {
+                return Err(failed("The count tab is busy."));
+            }
+            Ok(())
+        };
+        {
+            let inner = console.inner.lock().await;
+            validate(&inner)?;
+        }
+        let catalog = if !query.filters.is_empty() {
+            Some(self.shared.catalog(&db).await.map_err(|error| match error {
+                CatalogError::Failed { message } => CountError::Failed { message },
+                _ => CountError::Failed { message: "Cannot load column types for table filters.".into() },
+            })?)
+        } else {
+            None
+        };
+        let relation = catalog.as_ref().and_then(|catalog| catalog.relation(&schema, &table));
+        let (config, needs_session) = {
+            let inner = console.inner.lock().await;
+            validate(&inner)?;
+            (inner.config.clone(), matches!(inner.session, SessionSlot::Empty | SessionSlot::Lost { .. }))
+        };
+        let sql = text::table_count(DatabaseKind::SqlServer, &schema, &table, relation, &query).map_err(|message| CountError::Failed { message })?;
+        let fresh = if needs_session {
+            let params = s.session_params(config.connection_id, &config.database).map_err(|error| CountError::Failed { message: connection::connect_error_text(&error) })?;
+            Some(Session::open(&params, config.schema.as_deref(), &s.timezone).await.map_err(|error| CountError::Failed { message: connection::connect_error_text(&error) })?)
+        } else { None };
+        let run_id = s.next_run_id();
+        let mut inner = console.inner.lock().await;
+        validate(&inner)?;
+        if let Some(session) = fresh {
+            if matches!(inner.session, SessionSlot::Empty | SessionSlot::Lost { .. }) {
+                inner.session = SessionSlot::Idle(session);
+            }
+        }
+        let (session, stop) = console.take_session(&mut inner, run_id, ConsoleWork::Count).ok_or_else(|| failed("The count tab is busy."))?;
+        console.publish(&mut inner, s);
+        drop(inner);
+
+        let (reply, result) = tokio::sync::oneshot::channel();
+        s.spawn(console::count_task(console, s.clone(), session, run_id, sql, stop, reply));
+        result.await.unwrap_or_else(|_| Err(failed("The count task stopped.")))
     }
 
     /// Defaults, keys, indexes, and triggers of one relation, read on the database's metadata
@@ -920,9 +1037,9 @@ impl Engine {
         };
         let mut meta = slot.meta.lock().await;
         let session = self.shared.session_in(&instance, &slot, &mut meta).await.map_err(|e| DetailError::Failed { message: connection::connect_error_text(&e) })?;
-        detail::load(&session.client, db, oid, version)
+        session.detail(slot.db.clone(), oid, version)
             .await
-            .map_err(|e| DetailError::Failed { message: connection::error_text(&e) })?
+            .map_err(|e| DetailError::Failed { message: e.message })?
             .ok_or(DetailError::Gone)
     }
 
@@ -930,15 +1047,17 @@ impl Engine {
     /// connection or database change also resets the session.
     pub async fn console_configure(&self, tab: TabId, c: ConsoleConfig) -> Result<ConsoleState, ConfigureError> {
         let s = &self.shared;
-        if s.config(c.connection_id).is_none() {
-            return Err(ConfigureError::UnknownConnection);
-        }
-        let view = ConsoleConfigView { connection_id: c.connection_id, database: c.database, schema: c.schema, mode: c.mode };
+        let connection = s.config(c.connection_id).ok_or(ConfigureError::UnknownConnection)?;
+        txn::validate_mode(connection.database_kind, c.mode).map_err(|what| ConfigureError::Unsupported { what })?;
+        let mut view = ConsoleConfigView { connection_id: c.connection_id, database: c.database, schema: c.schema, mode: c.mode };
         let console = {
             let mut map = s.consoles.write().unwrap();
             map.entry(tab).or_insert_with(|| Arc::new(Console::new(tab, view.clone()))).clone()
         };
         let mut inner = console.inner.lock().await;
+        if let Some(instance) = s.instance(view.connection_id) {
+            view.database = instance.canonical_database(&view.database).to_owned();
+        }
         let previous = inner.config.connection_id;
         let target_changed = inner.config.connection_id != view.connection_id || inner.config.database != view.database;
         let mode_changed = inner.config.mode != view.mode;
@@ -950,12 +1069,16 @@ impl Engine {
                 return Err(ConfigureError::TransactionOpen);
             }
         }
-        if target_changed {
+        let due = if target_changed {
+            let due = inner.finish_refreshes(false);
             inner.session = SessionSlot::Empty;
-        }
+            inner.txn_depth = None;
+            due
+        } else { None };
         inner.config = view.clone();
         let state = console.publish(&mut inner, s);
         drop(inner);
+        if let Some((db, owed)) = due { s.schedule_refreshes(db, owed); }
         s.reconcile(view.connection_id);
         if previous != view.connection_id {
             s.reconcile(previous);
@@ -966,38 +1089,54 @@ impl Engine {
     pub async fn console_run(&self, tab: TabId, r: RunRequest) -> Result<RunAccepted, RunError> {
         let s = &self.shared;
         let console = s.console(tab).ok_or(RunError::NotConfigured)?;
-        let (config, busy) = {
+        let (mut config, busy) = {
             let inner = console.inner.lock().await;
             (inner.config.clone(), matches!(inner.session, SessionSlot::Busy { .. }))
         };
+        let connection = s.config(config.connection_id).ok_or(RunError::NotConfigured)?;
+        txn::validate_mode(connection.database_kind, config.mode).map_err(|what| RunError::Unsupported { what })?;
         if busy {
             return Err(RunError::Busy);
         }
         s.connect(config.connection_id).await.map_err(|error| RunError::Connect { error })?;
-        let connection = s.config(config.connection_id).ok_or(RunError::NotConfigured)?;
+        let instance = s.instance(config.connection_id).ok_or(RunError::NotConfigured)?;
+        config.database = instance.canonical_database(&config.database).to_owned();
+        if instance.config.database_kind == DatabaseKind::SqlServer && !instance.knows(&config.database) {
+            return Err(RunError::NotConfigured);
+        }
 
+        let mut table_relation = None;
         let (text, spans) = match r {
             RunRequest::Script { text, target } => {
                 let target = text::OffsetMap::new(&text).target(target);
-                let spans = sql::pick(&sql::split_statements(&text), &text, target);
+                let spans = text::pick(&text, target, connection.database_kind).map_err(|what| RunError::Unsupported { what })?;
                 (text, spans)
             }
             RunRequest::TablePage { schema, table, page, query } => {
                 let catalog = self.catalog(config.db()).await.map_err(|_| RunError::NotConfigured)?;
-                let pk = catalog.relation(&schema, &table).map(|r| r.pk_columns()).unwrap_or_default();
+                table_relation = catalog.relation(&schema, &table).cloned();
                 let size = s.settings().table_page_size.max(1);
-                let text = text::browse_sql(&schema, &table, &pk, &query, size, u64::from(page) * u64::from(size));
-                let spans = sql::split_statements(&text);
+                let text = text::table_browse(connection.database_kind, &schema, &table, table_relation.as_ref(), &query, size, u64::from(page) * u64::from(size)).map_err(|_| RunError::BadFilter)?;
+                let spans = text::pick(&text, sql::ByteTarget::All, connection.database_kind).map_err(|_| RunError::BadFilter)?;
                 if spans.len() != 1 {
                     return Err(RunError::BadFilter);
                 }
                 (text, spans)
             }
         };
+        if spans.len() > usize::from(u16::MAX) { return Err(RunError::Unsupported { what: "Too many execution units".into() }); }
         if spans.is_empty() {
             return Err(RunError::NoStatement);
         }
-        let statements: Vec<PlannedStmt> = spans.iter().map(|span| PlannedStmt { span: *span, kind: sql::classify(span.text(&text)) }).collect();
+        if connection.database_kind == DatabaseKind::SqlServer {
+            for span in &spans { sql::tsql::validate_batch(span.text(&text)).map_err(|what| RunError::Unsupported { what })?; }
+        }
+        let statements: Vec<PlannedStmt> = spans.iter().map(|span| {
+            let sql = span.text(&text);
+            let kind = text::classify(sql, connection.database_kind);
+            let transaction = txn::plan(connection.database_kind, config.mode, &kind).map_err(|what| RunError::Unsupported { what })?;
+            Ok(PlannedStmt { span: *span, kind, transaction })
+        }).collect::<Result<_, RunError>>()?;
         if statements.iter().any(|p| p.kind == sql::StmtKind::CopyStdio) {
             return Err(RunError::Unsupported { what: "COPY FROM STDIN / TO STDOUT".into() });
         }
@@ -1014,6 +1153,14 @@ impl Engine {
 
         let run_id = s.next_run_id();
         let mut inner = console.inner.lock().await;
+        let current = s.config(inner.config.connection_id).ok_or(RunError::NotConfigured)?;
+        txn::validate_mode(current.database_kind, inner.config.mode).map_err(|what| RunError::Unsupported { what })?;
+        if inner.config.connection_id == instance.config.id {
+            inner.config.database = instance.canonical_database(&inner.config.database).to_owned();
+        }
+        if inner.config != config {
+            return Err(RunError::Busy);
+        }
         if let Some(session) = fresh {
             match inner.session {
                 SessionSlot::Empty | SessionSlot::Lost { .. } => inner.session = SessionSlot::Idle(session),
@@ -1021,7 +1168,7 @@ impl Engine {
                 SessionSlot::Busy { .. } => return Err(RunError::Busy),
             }
         }
-        let Some((session, stop)) = console.take_session(&mut inner, run_id) else { return Err(RunError::Busy) };
+        let Some((session, stop)) = console.take_session(&mut inner, run_id, ConsoleWork::Run) else { return Err(RunError::Busy) };
         let txn = inner.txn;
         console.results.lock().unwrap().clear();
         inner.run = RunState::Running {
@@ -1030,13 +1177,13 @@ impl Engine {
             statements: ranges
                 .iter()
                 .enumerate()
-                .map(|(i, range)| StatementRun { index: i as u16, range: *range, status: StmtStatus::Pending })
+                .map(|(i, range)| StatementRun { index: i as u16, range: *range, status: StmtStatus::Pending, outputs: Vec::new() })
                 .collect(),
         };
         console.publish(&mut inner, s);
         drop(inner);
 
-        let plan = RunPlan { run_id, text, statements, mode: config.mode, txn, schema: config.schema.clone(), database: config.database.clone(), connection };
+        let plan = RunPlan { run_id, text, statements, txn, schema: config.schema.clone(), database: config.database.clone(), connection, table: table_relation };
         s.spawn(console::run_task(console.clone(), s.clone(), session, plan, stop));
         Ok(RunAccepted { run_id, statements: ranges })
     }
@@ -1066,29 +1213,27 @@ impl Engine {
         self.shared.console_txn_command(tab, false).await
     }
 
-    /// Applies staged table edits on the tab's own session, all or nothing. With no transaction open, auto-commit
+    /// Applies PostgreSQL staged table edits on the tab's own session, all or nothing. With no transaction open, auto-commit
     /// mode commits them and manual mode leaves them in a new open transaction. Inside an open transaction they
     /// run under a savepoint, so a failure leaves that transaction as it was.
     pub async fn table_apply(&self, tab: TabId, changes: TableChanges) -> Result<ApplySummary, ApplyError> {
         let s = &self.shared;
         let console = s.console(tab).ok_or(ApplyError::NotConfigured)?;
         let config = console.inner.lock().await.config.clone();
+        let connection = s.config(config.connection_id).ok_or(ApplyError::NotConfigured)?;
+        if connection.database_kind == DatabaseKind::SqlServer {
+            return Err(ApplyError::Unsupported { what: session::SQL_SERVER_EDITS_UNSUPPORTED.into() });
+        }
         s.connect(config.connection_id).await.map_err(|error| ApplyError::Connect { error })?;
         let catalog = self.catalog(config.db()).await.map_err(|_| ApplyError::NotConfigured)?;
-        let pk = catalog.relation(&changes.schema, &changes.table).map(|r| r.pk_columns()).unwrap_or_default();
+        let relation = catalog.relation(&changes.schema, &changes.table).ok_or(ApplyError::NotConfigured)?;
+        let pk = relation.pk_columns();
         let full_key = |key: &[CellWrite]| !pk.is_empty() && key.len() == pk.len() && pk.iter().all(|p| key.iter().any(|k| &k.column == p));
         if !changes.deletes.iter().all(|k| full_key(k)) || !changes.updates.iter().all(|u| full_key(&u.key)) {
             return Err(ApplyError::NoPrimaryKey);
         }
 
-        let (schema, table) = (&changes.schema, &changes.table);
-        let at = |kind, index: usize| ChangeRef { kind, index: index as u32 };
-        let mut plan: Vec<(ChangeRef, String)> = Vec::new();
-        plan.extend(changes.deletes.iter().enumerate().map(|(i, key)| (at(ChangeKind::Delete, i), text::delete_sql(schema, table, key))));
-        plan.extend(
-            changes.updates.iter().enumerate().filter(|(_, u)| !u.set.is_empty()).map(|(i, u)| (at(ChangeKind::Update, i), text::update_sql(schema, table, &u.key, &u.set))),
-        );
-        plan.extend(changes.inserts.iter().enumerate().map(|(i, cells)| (at(ChangeKind::Insert, i), text::insert_sql(schema, table, cells))));
+        let plan = session::plan_edits(&changes, relation)?;
 
         let needs_session = matches!(console.inner.lock().await.session, SessionSlot::Empty | SessionSlot::Lost { .. });
         let mut fresh = None;
@@ -1098,8 +1243,17 @@ impl Engine {
         }
 
         let run_id = s.next_run_id();
-        let (mut session, txn) = {
+        let (mut session, txn, stop) = {
             let mut inner = console.inner.lock().await;
+            let current = s.config(inner.config.connection_id).ok_or(ApplyError::NotConfigured)?;
+            if current.database_kind == DatabaseKind::SqlServer
+                || matches!(&inner.session, SessionSlot::Idle(session) if session.database_kind() == DatabaseKind::SqlServer)
+            {
+                return Err(ApplyError::Unsupported { what: session::SQL_SERVER_EDITS_UNSUPPORTED.into() });
+            }
+            if inner.config != config {
+                return Err(ApplyError::Busy);
+            }
             if let Some(session) = fresh {
                 match inner.session {
                     SessionSlot::Empty | SessionSlot::Lost { .. } => inner.session = SessionSlot::Idle(session),
@@ -1111,8 +1265,9 @@ impl Engine {
                 return Err(ApplyError::TransactionAborted);
             }
             let txn = inner.txn;
-            let Some((session, _stop)) = console.take_session(&mut inner, run_id) else { return Err(ApplyError::Busy) };
-            (session, txn)
+            let Some((session, stop)) = console.take_session(&mut inner, run_id, ConsoleWork::Edit) else { return Err(ApplyError::Busy) };
+            console.publish(&mut inner, s);
+            (session, txn, stop)
         };
 
         let inside = txn == TxnState::Active;
@@ -1121,21 +1276,23 @@ impl Engine {
         } else {
             ("BEGIN", (config.mode == TxnMode::AutoCommit).then_some("COMMIT"), "ROLLBACK")
         };
-        let as_query_error = |e: &tokio_postgres::Error| e.as_db_error().map_or_else(|| connection::transport_error(e), |db| connection::query_error(db, None));
         let mut lines = Vec::new();
-        let outcome: Result<(), ApplyError> = async {
-            session.client.batch_execute(open).await.map_err(|e| ApplyError::Transaction { error: as_query_error(&e) })?;
-            for (i, (change, sql)) in plan.iter().enumerate() {
+        let mut outcome: Result<(), ApplyError> = async {
+            session.batch(open).await.map_err(|e| ApplyError::Transaction { error: e })?;
+            for (i, edit) in plan.iter().enumerate() {
+                let change = &edit.change;
+                let sql = &edit.sql;
+                if stop.load(Ordering::Relaxed) { return Err(ApplyError::Transaction { error: session::error("Cancelled") }); }
                 let statement = i as u16;
                 lines.push(console::statement_line(statement, sql));
                 let started = std::time::Instant::now();
-                let executed = session.client.execute(sql.as_str(), &[]).await;
+                let executed = session.execute_edit(edit).await;
                 let elapsed_ms = started.elapsed().as_millis().min(u32::MAX as u128) as u32;
                 lines.extend(console::notice_lines(&mut session));
                 let rows = match executed {
                     Ok(rows) => rows,
                     Err(e) => {
-                        let error = as_query_error(&e);
+                        let error = e;
                         lines.push(OutputBody::Error { statement: Some(statement), error: error.clone() });
                         return Err(ApplyError::Failed { change: *change, error });
                     }
@@ -1151,26 +1308,32 @@ impl Engine {
                 }
             }
             if let Some(finish) = finish {
-                session.client.batch_execute(finish).await.map_err(|e| ApplyError::Transaction { error: as_query_error(&e) })?;
+                session.batch(finish).await.map_err(|error| ApplyError::OutcomeUnknown { error })?;
             }
             Ok(())
         }
         .await;
         if outcome.is_err() {
-            let _ = session.client.batch_execute(undo).await;
+            if let Err(rollback) = session.batch(undo).await {
+                let message = format!("Staged edits failed; rollback also failed: {}. The session was retired. Commit outcome may be unknown.",rollback.message);
+                session.retire(message.clone());
+                outcome = Err(ApplyError::OutcomeUnknown { error: session::error(message) });
+            }
         }
-        let after = match (&outcome, inside, finish) {
+        let after = session.observed_txn().unwrap_or(match (&outcome, inside, finish) {
             (_, true, _) => TxnState::Active,
             (Ok(()), false, None) => TxnState::Active,
             _ => TxnState::Idle,
-        };
+        });
         let lost = session.closed_reason_settled(None).await;
         lines.extend(console::notice_lines(&mut session));
-        if let Err(ApplyError::Transaction { error }) = &outcome {
+        if let Err(ApplyError::Transaction { error } | ApplyError::OutcomeUnknown { error }) = &outcome {
             lines.push(OutputBody::Error { statement: None, error: error.clone() });
         }
         console.output_all(s, run_id, lines);
-        let _ = console.edit(s, run_id, |inner| Console::return_session(inner, session, after, lost)).await;
+        if let Ok(Some((db, owed))) = console.edit(s, run_id, |inner| Console::return_session(inner, session, after, lost)).await {
+            s.schedule_refreshes(db, owed);
+        }
         outcome.map(|()| ApplySummary { committed: after == TxnState::Idle })
     }
 
@@ -1235,7 +1398,8 @@ impl Engine {
         }
     }
 
-    pub fn save_workspace(&self, w: Workspace) {
+    pub fn save_workspace(&self, mut w: Workspace) {
+        self.shared.resolve_workspace(&mut w);
         if let Err(e) = self.shared.store.kv_set(KV_WORKSPACE, &w) {
             eprintln!("workspace save failed: {e}");
         }
@@ -1316,7 +1480,7 @@ mod tests {
     }
 
     fn draft(name: &str) -> ConnectionDraft {
-        ConnectionDraft {
+        ConnectionDraft { database_kind: crate::model::DatabaseKind::Postgres,
             id: None,
             name: name.into(),
             host: "localhost".into(),
@@ -1337,6 +1501,40 @@ mod tests {
         let boot = engine.boot();
         assert!(boot.connections.is_empty() && boot.consoles.is_empty());
         assert_eq!(boot.settings.max_rows, 200_000);
+    }
+
+    #[tokio::test]
+    async fn postgres_header_sort_does_not_require_a_connection_or_catalog() {
+        let (engine, _dir) = engine().await;
+        let config = engine.save_connection(ConnectionDraft { password: PasswordInput::Clear, ..draft("sort") }).await.unwrap();
+        let db = DatabaseRef { connection_id: config.id, database: "shop".into() };
+        let inspected = engine.table_order(db.clone(), "public", "orders", "ID DESC", TableOrderEdit::Inspect).unwrap();
+        assert_eq!(inspected.sql, "ID DESC");
+        let keys = inspected.keys.unwrap();
+        assert_eq!((keys[0].column.as_str(), keys[0].desc), ("id", true));
+        let sorted = engine.table_order(db.clone(), "public", "orders", "ID DESC", TableOrderEdit::Cycle { column: "id".into(), additive: true }).unwrap();
+        assert!(sorted.sql.is_empty() && sorted.keys.unwrap().is_empty());
+        let advanced = "lower(name) DESC";
+        let sorted = engine.table_order(db, "public", "orders", advanced, TableOrderEdit::Cycle { column: "id".into(), additive: false }).unwrap();
+        assert_eq!(sorted.sql, advanced);
+        assert!(sorted.keys.is_none());
+        engine.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn sql_server_header_sort_reports_an_unloaded_catalog_without_starting_work() {
+        let (engine, _dir) = engine().await;
+        let config = engine.save_connection(ConnectionDraft { database_kind: DatabaseKind::SqlServer, password: PasswordInput::Clear, ..draft("sort") }).await.unwrap();
+        let db = DatabaseRef { connection_id: config.id, database: "shop".into() };
+        let inspected = engine.table_order(db.clone(), "dbo", "orders", "ID DESC", TableOrderEdit::Inspect).unwrap();
+        assert_eq!(inspected.sql, "ID DESC");
+        assert!(inspected.keys.is_none());
+        let sort_engine = engine.clone();
+        let error = std::thread::spawn(move || sort_engine.table_order(db, "dbo", "orders", "", TableOrderEdit::Cycle { column: "id".into(), additive: false }))
+            .join().unwrap().unwrap_err();
+        assert!(error.contains("Connect") && error.contains("refresh") && error.contains("catalog"), "{error}");
+        assert!(engine.boot().live.is_empty());
+        engine.shutdown().await;
     }
 
     #[tokio::test]
@@ -1449,16 +1647,16 @@ mod tests {
     async fn format_edits_are_in_utf16_units_past_non_ascii_text() {
         let (engine, _dir) = engine().await;
         assert_eq!(
-            engine.editor_format("select 'café 😀';\nselect a,b from t;\n", RunTarget::Cursor { offset: DocOffset(20) }),
+            engine.editor_format("select 'café 😀';\nselect a,b from t;\n", RunTarget::Cursor { offset: DocOffset(20) }, DatabaseKind::Postgres),
             Ok(FormatEdit { from: DocOffset(18), to: DocOffset(35), insert: "SELECT a,\n  b\nFROM t".into() })
         );
         assert_eq!(
-            engine.editor_format("-- café 😀\nselect a,b from t", RunTarget::Cursor { offset: DocOffset(13) }),
+            engine.editor_format("-- café 😀\nselect a,b from t", RunTarget::Cursor { offset: DocOffset(13) }, DatabaseKind::Postgres),
             Ok(FormatEdit { from: DocOffset(0), to: DocOffset(28), insert: "-- café 😀\nSELECT a,\n  b\nFROM t".into() }),
             "a leading comment is part of its statement"
         );
         assert_eq!(
-            engine.editor_format("select '漢字';\nselect 'é', x from t; select 2", RunTarget::Cursor { offset: DocOffset(15) }),
+            engine.editor_format("select '漢字';\nselect 'é', x from t; select 2", RunTarget::Cursor { offset: DocOffset(15) }, DatabaseKind::Postgres),
             Ok(FormatEdit { from: DocOffset(13), to: DocOffset(33), insert: "SELECT 'é',\n  x\nFROM t".into() })
         );
     }
@@ -1468,14 +1666,14 @@ mod tests {
         let (engine, _dir) = engine().await;
         let text = "select 1;\nselect a,b from t;";
         let both = FormatEdit { from: DocOffset(0), to: DocOffset(27), insert: "SELECT 1;\nSELECT a,\n  b\nFROM t".into() };
-        assert_eq!(engine.editor_format(text, RunTarget::Selection { from: DocOffset(3), to: DocOffset(12) }), Ok(both.clone()));
-        assert_eq!(engine.editor_format(text, RunTarget::All), Ok(both));
+        assert_eq!(engine.editor_format(text, RunTarget::Selection { from: DocOffset(3), to: DocOffset(12) }, DatabaseKind::Postgres), Ok(both.clone()));
+        assert_eq!(engine.editor_format(text, RunTarget::All, DatabaseKind::Postgres), Ok(both));
         assert_eq!(
-            engine.editor_format(text, RunTarget::Selection { from: DocOffset(8), to: DocOffset(10) }),
+            engine.editor_format(text, RunTarget::Selection { from: DocOffset(8), to: DocOffset(10) }, DatabaseKind::Postgres),
             Err(FormatError::NothingToFormat),
             "only the semicolon and the newline"
         );
-        assert_eq!(engine.editor_format("select 1;\n\nselect 2", RunTarget::Cursor { offset: DocOffset(10) }), Err(FormatError::NothingToFormat));
+        assert_eq!(engine.editor_format("select 1;\n\nselect 2", RunTarget::Cursor { offset: DocOffset(10) }, DatabaseKind::Postgres), Err(FormatError::NothingToFormat));
     }
 
     #[tokio::test]
@@ -1488,6 +1686,188 @@ mod tests {
         assert!(matches!(engine.result_page(r, 0, 10), Err(ResultError::Gone)));
         assert!(matches!(engine.console_run(tab, RunRequest::Script { text: "select 1".into(), target: RunTarget::All }).await, Err(RunError::NotConfigured)));
         assert!(matches!(engine.console_commit(tab).await, Err(TxnError::NoTransaction)));
+    }
+
+    #[tokio::test]
+    async fn mssql_manual_configuration_refuses_without_creating_or_changing_a_console() {
+        let (engine, _dir) = engine().await;
+        let connection = engine.save_connection(ConnectionDraft { database_kind: DatabaseKind::SqlServer, ..draft("mssql") }).await.unwrap();
+        let tab = TabId(uuid::Uuid::new_v4());
+        let config = |mode| ConsoleConfig { connection_id: connection.id, database: "shop".into(), schema: None, mode };
+        let refused = engine.console_configure(tab, config(TxnMode::Manual)).await;
+        assert!(matches!(refused, Err(ConfigureError::Unsupported { ref what }) if what.contains("Select Auto-commit")), "{refused:?}");
+        assert!(engine.boot().consoles.is_empty());
+        let before = engine.console_configure(tab, config(TxnMode::AutoCommit)).await.unwrap();
+        let refused = engine.console_configure(tab, config(TxnMode::Manual)).await;
+        assert!(matches!(refused, Err(ConfigureError::Unsupported { .. })));
+        assert_eq!(serde_json::to_value(&engine.boot().consoles[0]).unwrap(), serde_json::to_value(before).unwrap());
+        assert!(engine.shared.instance(connection.id).is_none());
+        let pg = engine.save_connection(draft("postgres")).await.unwrap();
+        let pg_config = ConsoleConfig { connection_id: pg.id, database: "shop".into(), schema: None, mode: TxnMode::Manual };
+        assert_eq!(engine.console_configure(tab, pg_config).await.unwrap().config.mode, TxnMode::Manual);
+    }
+
+    #[tokio::test]
+    async fn restored_mssql_manual_tabs_keep_their_mode_and_refuse_before_network_work() {
+        let (engine, _dir) = engine().await;
+        let refuser = Refuser::start();
+        let connection = engine.save_connection(ConnectionDraft {
+            database_kind: DatabaseKind::SqlServer, host: "127.0.0.1".into(), port: refuser.port, ..draft("legacy")
+        }).await.unwrap();
+        let tab = TabId(uuid::Uuid::new_v4());
+        engine.save_workspace(Workspace {
+            tabs: vec![TabSnapshot {
+                id: tab, title: "Saved Manual".into(), text: Some("UPDATE dbo.target SET n=2".into()), table: None,
+                console: ConsoleConfigSnapshot { connection_id: Some(connection.id), database: Some("shop".into()), schema: None, mode: TxnMode::Manual },
+            }], active: Some(tab), ..Workspace::default()
+        });
+        let saved: Workspace = serde_json::from_value(serde_json::to_value(engine.boot().workspace).unwrap()).unwrap();
+        assert_eq!(saved.tabs[0].console.mode, TxnMode::Manual);
+        let config = ConsoleConfig { connection_id: connection.id, database: "shop".into(), schema: None, mode: saved.tabs[0].console.mode };
+        assert!(matches!(engine.console_configure(tab, config).await, Err(ConfigureError::Unsupported { .. })));
+        let legacy = Arc::new(Console::new(tab, ConsoleConfigView { connection_id: connection.id, database: "shop".into(), schema: None, mode: TxnMode::Manual }));
+        engine.shared.consoles.write().unwrap().insert(tab, legacy.clone());
+        let before = serde_json::to_value(legacy.snapshot(&*legacy.inner.lock().await)).unwrap();
+        for request in [
+            RunRequest::Script { text: "UPDATE dbo.target SET n=2".into(), target: RunTarget::All },
+            RunRequest::Script { text: "UPDATE dbo.target SET n=2\nGO\nSELECT 1".into(), target: RunTarget::All },
+            RunRequest::TablePage { schema: "dbo".into(), table: "target".into(), page: 0, query: TableQuery::default() },
+        ] {
+            let refused = engine.console_run(tab, request).await;
+            assert!(matches!(refused, Err(RunError::Unsupported { ref what }) if what.contains("Select Auto-commit")), "{refused:?}");
+            assert_eq!(serde_json::to_value(legacy.snapshot(&*legacy.inner.lock().await)).unwrap(), before);
+        }
+        let edit = TableChanges { schema: "missing".into(), table: "target".into(), inserts: vec![], updates: vec![], deletes: vec![] };
+        assert!(matches!(engine.table_apply(tab, edit.clone()).await, Err(ApplyError::Unsupported { .. })));
+        engine.console_configure(tab, ConsoleConfig { connection_id: connection.id, database: "shop".into(), schema: None, mode: TxnMode::AutoCommit }).await.unwrap();
+        assert!(matches!(engine.table_apply(tab, edit).await, Err(ApplyError::Unsupported { .. })));
+        assert_eq!(refuser.accepted.load(Ordering::SeqCst), 0);
+        assert!(engine.shared.instance(connection.id).is_none());
+        assert!(matches!(legacy.inner.lock().await.session, SessionSlot::Empty));
+        assert_eq!(engine.boot().workspace.tabs[0].console.mode, TxnMode::Manual);
+    }
+
+    #[tokio::test]
+    async fn mssql_count_revalidates_the_tab_after_awaiting_its_catalog() {
+        for change in ["target", "close", "disconnect", "legacy mode"] {
+            let (engine, _dir) = engine().await;
+            let refuser = Refuser::start();
+            let config = engine.save_connection(ConnectionDraft {
+                database_kind: DatabaseKind::SqlServer, host: "127.0.0.1".into(), port: refuser.port, ..draft("count setup race")
+            }).await.unwrap();
+            let db = DatabaseRef { connection_id: config.id, database: config.database.clone() };
+            let catalog = Arc::new(Catalog { database_kind: DatabaseKind::SqlServer, db: db.clone(), version: 1, default_schema: Some("dbo".into()), schemas: Vec::new() });
+            let home = DbSlot::new(db.clone());
+            home.set(CatalogSlot::Ready(catalog.clone()));
+            let instance = Arc::new(Instance::new(config.clone(), ServerInfo { version: "count fixture".into(), version_num: 0, encoding: "UTF8".into() },
+                db.database.clone(), vec![connection::DatabaseInfo { name: db.database.clone(), system: false, access: DbAccess::Ok }], ConnectionView::initial(), home));
+            engine.shared.set_connection(config.id, ConnSlot::Connected(instance.clone()));
+            let tab = TabId(uuid::Uuid::new_v4());
+            let c = ConsoleConfig { connection_id: config.id, database: db.database.clone(), schema: None, mode: TxnMode::AutoCommit };
+            engine.console_configure(tab, c.clone()).await.unwrap();
+            let slot = instance.slot(&db.database).unwrap();
+            let meta = slot.meta.lock().await;
+            slot.set(CatalogSlot::Opening);
+            let query = TableQuery { filters: vec![ColumnFilter { column: "id".into(), op: FilterOp::Eq, value: "1".into() }], ..Default::default() };
+            let mut count = Box::pin(engine.exact_row_count(tab, db, "dbo".into(), "unused_count_table".into(), query));
+            assert!(futures_util::poll!(count.as_mut()).is_pending(), "count must wait for the catalog");
+            match change {
+                "target" => { engine.console_configure(tab, ConsoleConfig { database: "unconfigured_count_target".into(), ..c }).await.unwrap(); }
+                "close" => { engine.console_close(tab, true).await.unwrap(); }
+                "disconnect" => { engine.disconnect(config.id, true).await.unwrap(); }
+                "legacy mode" => { engine.shared.console(tab).unwrap().inner.lock().await.config.mode = TxnMode::Manual; }
+                _ => unreachable!(),
+            }
+            slot.set(CatalogSlot::Ready(catalog));
+            drop(meta);
+            let result = tokio::time::timeout(Duration::from_secs(5), count).await.unwrap();
+            match change {
+                "disconnect" => assert!(matches!(result, Err(CountError::NotConnected)), "{result:?}"),
+                "legacy mode" => assert!(matches!(result, Err(CountError::Failed { ref message }) if message.contains("native Auto-commit")), "{result:?}"),
+                _ => assert!(matches!(result, Err(CountError::Failed { ref message }) if message.contains("target changed")), "{result:?}"),
+            }
+            assert_eq!(refuser.accepted.load(Ordering::SeqCst), 0, "stale count must not open a native session");
+            engine.shutdown().await;
+        }
+    }
+
+    #[cfg(feature = "mssql-tests")]
+    #[tokio::test]
+    async fn legacy_mssql_manual_requests_never_reach_a_committing_trigger() {
+        use futures_util::FutureExt;
+        use std::panic::AssertUnwindSafe;
+
+        async fn rows(engine: &Engine, tab: TabId, text: String) -> Vec<Vec<Option<String>>> {
+            let accepted = engine.console_run(tab, RunRequest::Script { text, target: RunTarget::All }).await.unwrap();
+            let state = tokio::time::timeout(Duration::from_secs(15), async {
+                loop {
+                    let state = engine.boot().consoles.into_iter().find(|s| s.tab_id == tab).unwrap();
+                    if matches!(state.run, RunState::Finished { run_id, .. } if run_id == accepted.run_id) { break state; }
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+            }).await.unwrap();
+            assert!(matches!(state.run, RunState::Finished { outcome: RunOutcome::Ok, .. }), "{:?}", state.run);
+            let RunState::Finished { statements, .. } = state.run else { unreachable!() };
+            statements.iter().flat_map(|s| &s.outputs).filter_map(|o| match o {
+                RunOutput::Rows { result, .. } => Some(engine.result_page(result.r#ref, 0, 100).unwrap().rows),
+                _ => None,
+            }).flatten().collect()
+        }
+
+        let (engine, _dir) = engine().await;
+        let connection = engine.save_connection(ConnectionDraft {
+            database_kind: DatabaseKind::SqlServer,
+            host: std::env::var("L1_DATA_TEST_MSSQL_HOST").unwrap_or_else(|_| "localhost".into()),
+            port: std::env::var("L1_DATA_TEST_MSSQL_PORT").ok().and_then(|p| p.parse().ok()).unwrap_or(1434),
+            user: "sa".into(), ssl_mode: SslMode::Require,
+            password: PasswordInput::Set(std::env::var("L1_DATA_TEST_MSSQL_PASSWORD").unwrap_or_else(|_| "L1Data_dev_Str0ng".into())),
+            ..draft("Legacy Manual trigger refusal")
+        }).await.unwrap();
+        let tab = TabId(uuid::Uuid::new_v4());
+        let observer = TabId(uuid::Uuid::new_v4());
+        for tab in [tab, observer] {
+            engine.console_configure(tab, ConsoleConfig { connection_id: connection.id, database: "shop".into(), schema: None, mode: TxnMode::AutoCommit }).await.unwrap();
+        }
+        let name = format!("l1_legacy_refusal_{}", uuid::Uuid::new_v4().simple());
+        let audit = format!("{name}_audit");
+        let trigger = format!("{name}_trigger");
+        let sequence = format!("{name}_sequence");
+        let outcome = AssertUnwindSafe(async {
+            rows(&engine, observer, format!("CREATE TABLE dbo.[{name}](id int PRIMARY KEY,n int); INSERT INTO dbo.[{name}] VALUES(1,1); CREATE TABLE dbo.[{audit}](n int); INSERT INTO dbo.[{audit}] VALUES(1); CREATE SEQUENCE dbo.[{sequence}] AS bigint START WITH 1")).await;
+            rows(&engine, observer, format!("CREATE TRIGGER dbo.[{trigger}] ON dbo.[{name}] AFTER UPDATE AS BEGIN SET NOCOUNT ON; DECLARE @attempt bigint = NEXT VALUE FOR dbo.[{sequence}]; WHILE @@TRANCOUNT > 0 COMMIT TRANSACTION; BEGIN TRANSACTION; UPDATE dbo.[{audit}] SET n=99; END")).await;
+            assert_eq!(rows(&engine, observer, format!("SELECT NEXT VALUE FOR dbo.[{sequence}]")).await, vec![vec![Some("1".into())]]);
+            rows(&engine, tab, "SELECT @@TRANCOUNT".into()).await;
+            let console = engine.shared.console(tab).unwrap();
+            let before = {
+                let mut inner = console.inner.lock().await;
+                inner.config.mode = TxnMode::Manual;
+                serde_json::to_value(console.publish(&mut inner, &engine.shared)).unwrap()
+            };
+            for request in [
+                RunRequest::Script { text: format!("UPDATE dbo.[{name}] SET n=2 WHERE id=1"), target: RunTarget::All },
+                RunRequest::Script { text: format!("UPDATE dbo.[{name}] SET n=2 WHERE id=1\nGO\nSELECT 1"), target: RunTarget::All },
+                RunRequest::TablePage { schema: "dbo".into(), table: name.clone(), page: 0, query: TableQuery::default() },
+            ] {
+                assert!(matches!(engine.console_run(tab, request).await, Err(RunError::Unsupported { .. })));
+                assert_eq!(serde_json::to_value(console.snapshot(&*console.inner.lock().await)).unwrap(), before);
+            }
+            let edit = TableChanges {
+                schema: "dbo".into(), table: name.clone(), inserts: vec![], deletes: vec![],
+                updates: vec![RowUpdate { key: vec![CellWrite { column: "id".into(), value: Some("1".into()) }], set: vec![CellWrite { column: "n".into(), value: Some("3".into()) }] }],
+            };
+            assert!(matches!(engine.table_apply(tab, edit).await, Err(ApplyError::Unsupported { .. })));
+            assert_eq!(serde_json::to_value(console.snapshot(&*console.inner.lock().await)).unwrap(), before);
+            assert_eq!(rows(&engine, observer, format!("SELECT n FROM dbo.[{name}]; SELECT n FROM dbo.[{audit}]; SELECT NEXT VALUE FOR dbo.[{sequence}]")).await,
+                vec![vec![Some("1".into())], vec![Some("1".into())], vec![Some("2".into())]]);
+            engine.console_configure(tab, ConsoleConfig { connection_id: connection.id, database: "shop".into(), schema: None, mode: TxnMode::AutoCommit }).await.unwrap();
+            assert_eq!(rows(&engine, tab, "SELECT @@TRANCOUNT; SELECT XACT_STATE()".into()).await, vec![vec![Some("0".into())], vec![Some("0".into())]]);
+        }).catch_unwind().await;
+        let _ = engine.console_rollback(tab).await;
+        engine.console_close(tab, true).await.unwrap();
+        rows(&engine, observer, format!("DROP TABLE IF EXISTS dbo.[{name}]; DROP TABLE IF EXISTS dbo.[{audit}]; DROP SEQUENCE IF EXISTS dbo.[{sequence}]")).await;
+        assert_eq!(rows(&engine, observer, format!("SELECT COUNT_BIG(*) FROM sys.objects WHERE name IN (N'{name}',N'{audit}',N'{trigger}',N'{sequence}')")).await, vec![vec![Some("0".into())]]);
+        engine.shutdown().await;
+        if let Err(panic) = outcome { std::panic::resume_unwind(panic); }
     }
 
     #[tokio::test]
@@ -1532,10 +1912,10 @@ mod tests {
         let home = config.database.clone();
         let db = DatabaseRef { connection_id: config.id, database: home.clone() };
         let slot = DbSlot::new(db.clone());
-        slot.set(CatalogSlot::Ready(Arc::new(Catalog { db, version: 1, default_schema: Some("public".into()), schemas: Vec::new() })));
+        slot.set(CatalogSlot::Ready(Arc::new(Catalog { database_kind: crate::model::DatabaseKind::Postgres, db, version: 1, default_schema: Some("public".into()), schemas: Vec::new() })));
         let list = std::iter::once(home.as_str())
             .chain(databases.iter().copied())
-            .map(|name| connection::PgDatabase { name: name.into(), system: false, access: DbAccess::Ok })
+            .map(|name| connection::DatabaseInfo { name: name.into(), system: false, access: DbAccess::Ok })
             .collect();
         let server = ServerInfo { version: "16.0".into(), version_num: 160000, encoding: "UTF8".into() };
         let instance = Arc::new(Instance::new(config.clone(), server, home, list, ConnectionView::initial(), slot));

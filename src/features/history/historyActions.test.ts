@@ -8,7 +8,7 @@ import { openSqlTab, openTableTab } from "../editor/runActions";
 import { insertHistoryQuery, openHistoryQuery } from "./historyActions";
 
 const group: HistoryGroupSummary = {
-  id: 1, latestId: 3, latestAtMs: 123, connectionId: "saved-connection", database: "reporting", title: "Revenue", excerpt: "select 42",
+  id: 1, latestId: 3, latestAtMs: 123, connectionId: "saved-connection", database: "reporting", databaseKind: "Postgres", title: "Revenue", excerpt: "select 42",
   runCount: 3, failedCount: 0, isWrite: false,
   representative: { id: 3, atMs: 123, connectionName: "dev", elapsedMs: 20, outcome: { kind: "Rows", rows: 1 } },
 };
@@ -29,9 +29,11 @@ it("opens the exact saved SQL and database in a new tab without changing the ori
   expect(textOf(original)).toBe("select 'untouched'");
 });
 
-it("inserts at the cursor of the active tab's editor, a table tab's too, and needs an open tab", () => {
+it("inserts at the cursor of the active tab's editor, a table tab's too, and needs an open tab", async () => {
   expect(insertHistoryQuery("select 42")).toBe(false);
-  openTableTab({ db: { connectionId: "c1", database: "shop" }, schema: "public", relation: "orders" });
+  vi.stubGlobal("window", { crypto });
+  mockIPC((cmd) => cmd === "table_script" ? { text: "SELECT * FROM public.orders", acceptedTexts: ["SELECT * FROM public.orders", "SELECT * FROM public.orders;"] } : null);
+  await openTableTab({ db: { connectionId: "c1", database: "shop" }, schema: "public", relation: "orders" });
   const tableId = useWorkspace.getState().active!;
   expect(insertHistoryQuery("select 42;\n")).toBe(true);
   expect(textOf(tableId)).toBe("select 42;\nSELECT * FROM public.orders");

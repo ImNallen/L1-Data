@@ -1,5 +1,5 @@
 import { memo, useEffect, useLayoutEffect, useMemo, useRef } from "react";
-import type { ChatId, ChatState, DatabaseRef, EntrySnapshot } from "../../ipc/bindings";
+import type { ChatId, ChatState, DatabaseKind, DatabaseRef, EntrySnapshot } from "../../ipc/bindings";
 import { useLive } from "../../state/live";
 import { groupTurns, type EndEntry, type TurnView, type UserEntry } from "../../state/transcript";
 import { useWorkspace } from "../../state/workspace";
@@ -21,13 +21,13 @@ function UserMessage({ seq, entry }: { seq: number; entry: UserEntry }) {
   );
 }
 
-const Item = memo(function Item({ chatId, snap, db }: { chatId: ChatId; snap: EntrySnapshot; db: DatabaseRef | null }) {
+const Item = memo(function Item({ chatId, snap, db, databaseKind }: { chatId: ChatId; snap: EntrySnapshot; db: DatabaseRef | null; databaseKind: DatabaseKind }) {
   const { entry, seq } = snap;
   switch (entry.kind) {
     case "Text":
-      return <ReplyText testId={`chat-text-${seq}`} blocks={entry.blocks} db={db} />;
+      return <ReplyText testId={`chat-text-${seq}`} blocks={entry.blocks} db={db} databaseKind={databaseKind} />;
     case "Tool":
-      return <ToolCard chatId={chatId} seq={seq} tool={entry.tool} status={entry.status} db={db} />;
+      return <ToolCard chatId={chatId} seq={seq} tool={entry.tool} status={entry.status} db={db} databaseKind={databaseKind} />;
     case "Notice":
       return <p className="text-ui-12.5 text-dim italic">{entry.text}</p>;
     case "Unreadable":
@@ -91,6 +91,7 @@ function EndBody({ chatId, end, user, last, idle, voice }: { chatId: ChatId; end
 
 function Turn({ chat, view, last, voice }: { chat: ChatState; view: TurnView; last: boolean; voice: ProviderVoice }) {
   const db = view.user?.entry.context?.db ?? null;
+  const databaseKind = view.user?.entry.context?.databaseKind ?? "Postgres";
   const status = chat.status;
   const phase = status.kind === "Running" && status.turn === view.turn ? status.phase : null;
   const waiting = (phase === "Starting" || phase === "Working") && !view.items.some((i) => i.entry.kind === "Text");
@@ -98,7 +99,7 @@ function Turn({ chat, view, last, voice }: { chat: ChatState; view: TurnView; la
     <div className="flex flex-col gap-3">
       {view.user && <UserMessage seq={view.user.seq} entry={view.user.entry} />}
       {view.items.map((snap) => (
-        <Item key={snap.seq} chatId={chat.id} snap={snap} db={db} />
+        <Item key={snap.seq} chatId={chat.id} snap={snap} db={db} databaseKind={databaseKind} />
       ))}
       {waiting && <p className="animate-pulse text-ui-12.5 text-dim">{phase === "Starting" ? `Starting ${voice.name}…` : "Thinking…"}</p>}
       {view.end && (

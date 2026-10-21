@@ -1,0 +1,210 @@
+--- a/Cargo.toml
++++ b/Cargo.toml
+@@ -106,69 +106,6 @@
+ name = "tiberius"
+ path = "src/lib.rs"
+ 
+-[[example]]
+-name = "aad-auth"
+-path = "examples/aad-auth.rs"
+-
+-[[example]]
+-name = "bulk"
+-path = "examples/bulk.rs"
+-
+-[[example]]
+-name = "named-pipes"
+-path = "examples/named-pipes.rs"
+-
+-[[example]]
+-name = "tokio"
+-path = "examples/tokio.rs"
+-
+-[[test]]
+-name = "bulk"
+-path = "tests/bulk.rs"
+-
+-[[test]]
+-name = "command"
+-path = "tests/command.rs"
+-
+-[[test]]
+-name = "custom-cert"
+-path = "tests/custom-cert.rs"
+-
+-[[test]]
+-name = "deadlocks"
+-path = "tests/deadlocks.rs"
+-
+-[[test]]
+-name = "login_errors"
+-path = "tests/login_errors.rs"
+-
+-[[test]]
+-name = "named-instance-smol"
+-path = "tests/named-instance-smol.rs"
+-required-features = ["sql-browser-smol"]
+-
+-[[test]]
+-name = "named-instance-tokio"
+-path = "tests/named-instance-tokio.rs"
+-required-features = ["sql-browser-tokio"]
+-
+-[[test]]
+-name = "query"
+-path = "tests/query.rs"
+-
+-[[test]]
+-name = "serde"
+-path = "tests/serde.rs"
+-required-features = ["serde"]
+-
+-[[test]]
+-name = "special_char_password"
+-path = "tests/special_char_password.rs"
+-
+-[[test]]
+-name = "transactions"
+-path = "tests/transactions.rs"
+-
+ [dependencies.async-io]
+ version = "2"
+ optional = true
+--- a/src/client.rs
++++ b/src/client.rs
+@@ -81,7 +81,42 @@
+     pub(crate) connection: Connection<S>,
+ }
+ 
++/// Session facts received from the server, without executing observation SQL.
++#[derive(Debug, Clone, Copy)]
++pub struct SessionState<'a> {
++    /// The latest database ENVCHANGE value. Login aliases need not be canonical.
++    pub database: &'a str,
++    /// Whether the server has an outstanding transaction descriptor.
++    /// Nesting depth and committability are not supplied by this protocol state.
++    pub has_transaction: bool,
++    /// The session identifier from the server's response packet header.
++    pub server_process_id: u16,
++    /// Major version, minor version, and build from LOGINACK.
++    pub server_version: (u8, u8, u16),
++}
++
+ impl<S: AsyncRead + AsyncWrite + Unpin + Send> Client<S> {
++    /// Reads protocol observations after login or a fully consumed response.
++    ///
++    /// This method sends no request. It fails when a response is incomplete or
++    /// the server used a transaction environment change this driver cannot track.
++    /// It does not make an abandoned or cancelled client safe to reuse.
++    pub fn session_state(&self) -> crate::Result<SessionState<'_>> {
++        let context = self.connection.context();
++        if !self.connection.is_eof() || !context.session_state_observable {
++            return Err(crate::Error::Protocol(
++                "session state is unavailable after an incomplete response or unsupported transaction environment change".into(),
++            ));
++        }
++        let missing = || crate::Error::Protocol("server did not supply session login information".into());
++        Ok(SessionState {
++            database: context.database.as_deref().ok_or_else(missing)?,
++            has_transaction: context.transaction_descriptor() != [0; 8],
++            server_process_id: context.server_process_id.ok_or_else(missing)?,
++            server_version: context.server_version.ok_or_else(missing)?,
++        })
++    }
++
+     /// Uses an instance of [`Config`] to specify the connection
+     /// options required to connect to the database using an established
+     /// tcp connection
+--- a/src/client/connection.rs
++++ b/src/client/connection.rs
+@@ -1210,6 +1210,9 @@
+ 
+         match ready!(this.transport.try_poll_next_unpin(cx)) {
+             Some(Ok(packet)) => {
++                if packet.header.spid() != 0 {
++                    this.context.server_process_id = Some(packet.header.spid());
++                }
+                 this.flushed = packet.is_last();
+                 Poll::Ready(Some(Ok(packet)))
+             }
+--- a/src/lib.rs
++++ b/src/lib.rs
+@@ -233,7 +233,7 @@
+ mod bulk_options;
+ 
+ pub use bulk_options::{ColumnOrderHint, SortOrder, SqlBulkCopyOption, SqlBulkCopyOptions};
+-pub use client::{AuthMethod, Client, Config, ConfigBuilder};
++pub use client::{AuthMethod, Client, Config, ConfigBuilder, SessionState};
+ pub use command::{Command, SqlTableData, SqlTableDataRow, TableValue, TableValueRow};
+ pub(crate) use error::Error;
+ pub use from_sql::{FromSql, FromSqlOwned};
+--- a/src/tds/codec/header.rs
++++ b/src/tds/codec/header.rs
+@@ -56,6 +56,10 @@
+ }
+ 
+ impl PacketHeader {
++    pub fn spid(&self) -> u16 {
++        self.spid
++    }
++
+     /// Builds a packet header with the given wire `length` (including the 8
+     /// header bytes) and packet `id`.
+     ///
+--- a/src/tds/context.rs
++++ b/src/tds/context.rs
+@@ -10,6 +10,10 @@
+     packet_size: u32,
+     packet_id: u8,
+     transaction_desc: [u8; 8],
++    pub(crate) database: Option<String>,
++    pub(crate) server_process_id: Option<u16>,
++    pub(crate) server_version: Option<(u8, u8, u16)>,
++    pub(crate) session_state_observable: bool,
+     last_meta: Option<Arc<TokenColMetaData<'static>>>,
+     /// Metadata for COMPUTE (BY) result sets (`ALTMETADATA`), keyed by the
+     /// COMPUTE clause id that the matching `ALTROW` rows refer back to.
+@@ -45,6 +49,10 @@
+             packet_size: 4096,
+             packet_id: 0,
+             transaction_desc: [0; 8],
++            database: None,
++            server_process_id: None,
++            server_version: None,
++            session_state_observable: true,
+             last_meta: None,
+             alt_metas: HashMap::new(),
+             spn: None,
+--- a/src/tds/stream/token.rs
++++ b/src/tds/stream/token.rs
+@@ -371,6 +371,9 @@
+         let change = TokenEnvChange::decode(self.conn).await?;
+ 
+         match change {
++            TokenEnvChange::Database { ref new, .. } => {
++                self.conn.context_mut().database = Some(new.clone());
++            }
+             TokenEnvChange::PacketSize { new: new_size, .. } => {
+                 // MS-TDS: a negotiated packet size must be within 512..=32767.
+                 // Reject an out-of-range value from the server: the subsequent
+@@ -392,6 +395,10 @@
+             | TokenEnvChange::DefectTransaction => {
+                 self.conn.context_mut().set_transaction_descriptor([0; 8]);
+             }
++            TokenEnvChange::Ignored(
++                crate::tds::codec::EnvChangeTy::EnlistDTCTransaction
++                | crate::tds::codec::EnvChangeTy::TransactionEnded,
++            ) => self.conn.context_mut().session_state_observable = false,
+             _ => (),
+         }
+ 
+@@ -408,6 +415,9 @@
+ 
+     async fn get_login_ack(&mut self) -> crate::Result<ReceivedToken> {
+         let ack = TokenLoginAck::decode(self.conn).await?;
++        let [major, minor, build_high, build_low] = ack.version.to_le_bytes();
++        self.conn.context_mut().server_version =
++            Some((major, minor, u16::from_be_bytes([build_high, build_low])));
+         event!(Level::DEBUG, "{} version {}", ack.prog_name, ack.version);
+ 
+         // Record the TDS version the server negotiated so version-dependent

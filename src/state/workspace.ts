@@ -2,6 +2,7 @@ import { create } from "zustand";
 import type {
   ConnectionConfig,
   ConnectionId,
+  ConnectionState,
   DatabaseRef,
   Layout,
   Settings,
@@ -12,7 +13,8 @@ import type {
   Workspace,
 } from "../ipc/bindings";
 import type { SettingsSectionId } from "../features/settings/settingsIndex";
-import { homeDb, sameDb } from "./dbKey";
+import { homeDb, resolveDb, sameDb } from "./dbKey";
+import { useLive } from "./live";
 import type { ResultPick } from "./status";
 
 /** A tab's console target. A tab never names a connection without a database. */
@@ -129,6 +131,7 @@ export function tabTarget(tab: Tab | undefined): DatabaseRef | null {
 
 type WorkspaceActions = {
   restore(w: Workspace, connections: ConnectionConfig[], settings: Settings): void;
+  resolveDatabases(connections: Record<ConnectionId, ConnectionState>): void;
   addTab(tab: Tab): void;
   closeTab(id: TabId): void;
   setActive(id: TabId): void;
@@ -185,6 +188,23 @@ export const useWorkspace = create<WorkspaceData & WorkspaceActions>()((set) => 
       settings,
     });
   },
+  resolveDatabases: (connections) =>
+    set((s) => {
+      const tabs = { ...s.tabs };
+      let changed = false;
+      for (const [id, tab] of Object.entries(tabs)) {
+        const previous = tab.console.db;
+        if (!previous) continue;
+        const db = resolveDb(previous, connections[previous.connectionId]);
+        if (db !== previous) {
+          tabs[id] = { ...tab, console: { ...tab.console, db } };
+          changed = true;
+        }
+      }
+      const selectedDb = s.selected && resolveDb(s.selected.db, connections[s.selected.db.connectionId]);
+      const selected = s.selected && selectedDb && selectedDb !== s.selected.db ? { ...s.selected, db: selectedDb } : s.selected;
+      return { ...(changed && { tabs }), ...(selected !== s.selected && { selected }) };
+    }),
   addTab: (tab) => set((s) => ({ tabs: { ...s.tabs, [tab.id]: tab }, order: [...s.order, tab.id], active: tab.id })),
   closeTab: (id) =>
     set((s) => {
@@ -221,14 +241,15 @@ export const useWorkspace = create<WorkspaceData & WorkspaceActions>()((set) => 
   upsertConfig: (c) =>
     set((s) => {
       const previous = s.configs[c.id];
+      const connection = useLive.getState().connections[c.id];
       // A tab on the connection's configured database follows an edit of that database. A tab bound
       // to a table stays on the database the table lives in.
       const follows = (db: DatabaseRef | null) =>
-        db === null || (previous !== undefined && previous.database !== c.database && sameDb(db, homeDb(previous)));
+        db === null || (previous !== undefined && previous.database !== c.database && sameDb(db, homeDb(previous, connection)));
       return {
         configs: { ...s.configs, [c.id]: c },
         tabs: Object.fromEntries(
-          Object.entries(s.tabs).map(([id, t]) => (t.table === null && follows(t.console.db) ? [id, { ...t, console: { ...t.console, db: homeDb(c) } }] : [id, t])),
+          Object.entries(s.tabs).map(([id, t]) => (t.table === null && follows(t.console.db) ? [id, { ...t, console: { ...t.console, db: homeDb(c, connection) } }] : [id, t])),
         ),
       };
     }),

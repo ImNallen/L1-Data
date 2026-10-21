@@ -1,7 +1,7 @@
 import { createContext, memo, useContext } from "react";
 import Markdown, { type Components } from "react-markdown";
 import remarkGfm from "remark-gfm";
-import type { DatabaseRef, ReplyBlock } from "../../ipc/bindings";
+import type { DatabaseKind, DatabaseRef, ReplyBlock } from "../../ipc/bindings";
 import { SqlCard } from "./SqlCard";
 
 const REMARK = [remarkGfm];
@@ -56,11 +56,11 @@ const MarkdownBlock = memo(function MarkdownBlock({ text }: { text: string }) {
   );
 });
 
-export function ReplyText({ blocks, db, testId }: { blocks: ReplyBlock[]; db: DatabaseRef | null; testId: string }) {
+export function ReplyText({ blocks, db, testId, databaseKind = "Postgres" }: { blocks: ReplyBlock[]; db: DatabaseRef | null; testId: string; databaseKind?: DatabaseKind }) {
   return (
     <div data-testid={testId} className="flex flex-col gap-3">
       {blocks.map((b, i) =>
-        b.kind === "Markdown" ? <MarkdownBlock key={i} text={b.text} /> : <SqlCard key={i} sql={b.sql} relations={b.relations} vetted={b.vetted} complete={b.complete} db={db} />,
+        b.kind === "Markdown" ? <MarkdownBlock key={i} text={b.text} /> : <SqlCard key={i} sql={b.sql} relations={b.relations} vetted={b.vetted} complete={b.complete} db={db} databaseKind={databaseKind} />,
       )}
     </div>
   );

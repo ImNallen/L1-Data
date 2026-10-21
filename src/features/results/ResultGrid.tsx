@@ -23,8 +23,8 @@ import { useEffect, useImperativeHandle, useLayoutEffect, useMemo, useRef, useSt
 import type { ColumnMeta, Density, FontSetting, ResultMeta, TypeCategory } from "../../ipc/bindings";
 import { DENSITY_FACTOR, gridRowHeight } from "../../shell/appearance";
 import { rowCacheFor, type RowCache } from "../../state/rowCache";
-import { isPrimaryKey, useCatalog, viewFor, type CatalogView } from "../../state/catalog";
-import type { DbKey } from "../../state/dbKey";
+import { findRelation, isPrimaryKey, useCatalog, viewFor, type CatalogView } from "../../state/catalog";
+import { sameDb, type DbKey } from "../../state/dbKey";
 import { NO_EDITS, markDeleted, removeNewRows, resetNewCell, rowKey, setCell, setNewCell, useTableEdits, type CellValue, type RowId, type TableEdits } from "../../state/tableEdits";
 import { useWorkspace } from "../../state/workspace";
 import { fontStack } from "../../themes/fonts";
@@ -54,8 +54,23 @@ const SORT_BADGE_W = 20;
 const FILTER_BUTTON_W = 20;
 const QUERY_CONTROLS = SORT_BADGE_W + FILTER_BUTTON_W + 2 * HEADER_GAP;
 
-export type GridEditing = { pkColumns: string[] };
+export type GridEditing = { pkColumns: string[]; writableColumns: ReadonlySet<string> };
 export type GridActions = { addRow(): void; deleteSelectedRows(): void };
+
+export function gridEditing(view: CatalogView | undefined, schema: string, table: string, meta: Pick<ResultMeta, "databaseKind" | "db" | "columns">): GridEditing | null {
+  if (view?.catalog.databaseKind !== "Postgres" || meta.databaseKind !== "Postgres") return null;
+  const relation = findRelation(view, schema, table);
+  if (!relation || relation.kind !== "Table" || !sameDb(view?.catalog.db, meta.db)) return null;
+  const pkColumns = relation.columns.filter((c) => c.pk).map((c) => c.name);
+  if (!pkColumns.length || !pkColumns.every((name) => meta.columns.some((c) => c.name === name))) return null;
+  if (!meta.columns.every((c) => c.source?.tableOid === relation.oid && relation.columns.some((column) => column.attnum === c.source?.attnum && column.name === c.name))) return null;
+  return { pkColumns, writableColumns: new Set(relation.columns.filter((c) => c.writable).map((c) => c.name)) };
+}
+
+export function gridKeyColumns(editing: GridEditing | null, edits: TableEdits): string[] {
+  const original = Object.values(edits.updates)[0]?.key ?? Object.values(edits.deletes)[0];
+  return original ? original.map((cell) => cell.column) : editing?.pkColumns ?? [];
+}
 
 const DEFAULT = Symbol("default");
 
@@ -256,24 +271,25 @@ export function ResultGrid({
   const views = useCatalog((s) => s.views);
   const pk = useMemo(() => primaryKeyColumns(views, meta), [views, meta]);
   const tabId = meta.ref.tabId;
-  const pkIdx = useMemo(() => editing?.pkColumns.map((n) => columns.findIndex((c) => c.name === n)) ?? [], [editing, columns]);
-  const editable = editing !== null && pkIdx.length > 0 && pkIdx.every((i) => i >= 0);
-  const edits = useTableEdits((s) => (editable ? (s.byTab[tabId] ?? NO_EDITS) : NO_EDITS));
+  const edits = useTableEdits((s) => s.byTab[tabId] ?? NO_EDITS);
+  const pkColumns = useMemo(() => gridKeyColumns(editing, edits), [editing, edits]);
+  const pkIdx = useMemo(() => pkColumns.map((n) => columns.findIndex((c) => c.name === n)), [pkColumns, columns]);
+  const hasKey = pkIdx.length > 0 && pkIdx.every((i) => i >= 0);
+  const editable = editing !== null && hasKey;
   const edit = (f: (e: TableEdits) => TableEdits) => useTableEdits.getState().edit(tabId, f);
   const total = rowCount + edits.inserts.length;
   const newRowAt = (row: number) => (row >= rowCount ? edits.inserts[row - rowCount] : undefined);
   const rowIdOf = (row: number): RowId | null => {
     const values = cache.get(row);
-    if (!values || row >= rowCount) return null;
-    const key = pkIdx.map((i) => values[i] ?? null);
-    return { key: rowKey(key), values: key };
+    if (!values || row >= rowCount || !hasKey) return null;
+    return pkIdx.map((index, i) => ({ column: pkColumns[i]!, value: values[index] ?? null }));
   };
   const cellValue = (row: number, col: number): CellValue | typeof DEFAULT | undefined => {
     const name = columns[col]!.name;
     const added = newRowAt(row);
     if (added) return name in added.values ? added.values[name]! : DEFAULT;
-    const id = editable ? rowIdOf(row) : null;
-    const changed = id ? edits.updates[id.key]?.values : undefined;
+    const id = rowIdOf(row);
+    const changed = id ? edits.updates[rowKey(id)]?.values : undefined;
     return changed && name in changed ? changed[name]! : cache.get(row)?.[col];
   };
   const codeFont = useWorkspace((s) => s.settings.codeFont);
@@ -360,11 +376,12 @@ export function ResultGrid({
   const [editingCell, setEditingCell] = useState<(Cell & { draft: string; initial: string; stored: CellValue }) | null>(null);
   const opening = useRef(0);
   const refused = () => useWorkspace.getState().notify("A submit is running. Try again when it finishes.");
+  const canWrite = (col: number) => editable && editing?.writableColumns.has(columns[col]?.name ?? "") === true;
   const startEdit = (row: number, col: number, typed?: string) => {
     const id = rowIdOf(row);
-    if (!editable || useTableEdits.getState().submitting[tabId] || (!newRowAt(row) && (!id || id.key in edits.deletes))) return;
+    if (!canWrite(col) || useTableEdits.getState().submitting[tabId] || (!newRowAt(row) && (!id || rowKey(id) in edits.deletes))) return;
     const name = columns[col]!.name;
-    const pending = newRowAt(row) || (id && name in (edits.updates[id.key]?.values ?? {}));
+    const pending = newRowAt(row) || (id && name in (edits.updates[rowKey(id)]?.values ?? {}));
     const open = (initial: string, stored: CellValue) =>
       setEditingCell((cur) =>
         typed !== undefined && cur?.row === row && cur.col === col
@@ -382,6 +399,7 @@ export function ResultGrid({
     });
   };
   const writeCell = (row: number, col: number, value: CellValue | typeof DEFAULT, stored = cache.get(row)?.[col] ?? null) => {
+    if (!canWrite(col)) return;
     const name = columns[col]!.name;
     const added = newRowAt(row);
     if (added) {
@@ -414,23 +432,29 @@ export function ResultGrid({
       deleting.current = false;
     }
     const added = picked.flatMap((r) => newRowAt(r)?.id ?? []);
-    const stored = storedRows.flatMap((r) => rowIdOf(r) ?? []);
+    const stored = storedRows.flatMap((r) => {
+      const id = rowIdOf(r);
+      return id ? [id] : [];
+    });
     const marked = useTableEdits.getState().byTab[tabId]?.deletes ?? {};
-    const restore = stored.length > 0 && stored.every((r) => r.key in marked);
+    const restore = stored.length > 0 && stored.every((r) => rowKey(r) in marked);
     if (!edit((e) => markDeleted(removeNewRows(e, added), stored, !restore))) refused();
   };
   const insertsSeen = useRef(edits.inserts.length);
   useEffect(() => {
     if (edits.inserts.length > insertsSeen.current) {
       const row = rowCount + edits.inserts.length - 1;
-      const col = Math.max(0, columns.findIndex((_, i) => !pkIdx.includes(i)));
+      const col = Math.max(0, columns.findIndex((c) => editing?.writableColumns.has(c.name)));
       rows.scrollToIndex(row);
       setSelection({ anchor: { row, col }, focus: { row, col } });
       scroller.current?.focus();
     }
     insertsSeen.current = edits.inserts.length;
-  }, [edits.inserts.length, rowCount, columns, pkIdx, rows]);
-  useImperativeHandle(actionsRef, () => ({ addRow: () => void useTableEdits.getState().addRow(tabId), deleteSelectedRows: () => void deleteSelectedRows() }));
+  }, [edits.inserts.length, rowCount, columns, editing, rows]);
+  useImperativeHandle<GridActions | null, GridActions | null>(actionsRef, () => {
+    if (!editable) return null;
+    return { addRow: () => void useTableEdits.getState().addRow(tabId), deleteSelectedRows: () => void deleteSelectedRows() };
+  });
 
 
   const onKeyDown = (e: KeyboardEvent) => {
@@ -452,7 +476,8 @@ export function ResultGrid({
       void copySelection(cache, selection, rowCount, total, (r, c) => {
         const shown = cellValue(r, c);
         if (shown === DEFAULT) return null;
-        return newRowAt(r) || (editable && edits.updates[rowIdOf(r)?.key ?? ""]?.values[columns[c]!.name] !== undefined) ? shown : undefined;
+        const id = rowIdOf(r);
+        return newRowAt(r) || (id && edits.updates[rowKey(id)]?.values[columns[c]!.name] !== undefined) ? shown : undefined;
       });
     } else if (mod && e.key.toLowerCase() === "a") {
       e.preventDefault();
@@ -476,7 +501,8 @@ export function ResultGrid({
   const [menuCell, setMenuCell] = useState<Cell | null>(null);
   const menuColumn = menuCell ? columns[menuCell.col]?.name : undefined;
   const menuValue = menuCell && menuCell.row < rowCount ? cache.get(menuCell.row)?.[menuCell.col] : undefined;
-  const menuRowDeleted = menuCell ? (rowIdOf(menuCell.row)?.key ?? "") in edits.deletes : false;
+  const menuRowId = menuCell ? rowIdOf(menuCell.row) : null;
+  const menuRowDeleted = menuRowId ? rowKey(menuRowId) in edits.deletes : false;
   const shortValue = (v: string) => (v.length > 24 ? `${v.slice(0, 24)}…` : v);
 
   const grid = (
@@ -484,7 +510,7 @@ export function ResultGrid({
       ref={scroller}
       data-testid="result-grid"
       data-row-count={rowCount}
-      data-pending={editable ? edits.inserts.length + Object.keys(edits.updates).length + Object.keys(edits.deletes).length : undefined}
+      data-pending={edits.inserts.length + Object.keys(edits.updates).length + Object.keys(edits.deletes).length}
       tabIndex={0}
       onKeyDown={onKeyDown}
       onContextMenu={(e) => {
@@ -509,7 +535,7 @@ export function ResultGrid({
               <div
                 key={vc.key}
                 data-testid={`grid-header-${vc.index}`}
-                title={query ? `${c.name} ${c.type.display}\nClick to sort, Shift-click to add to the sort` : `${c.name} ${c.type.display}`}
+                title={`${c.name} ${c.type.display}${editing && !editing.writableColumns.has(c.name) ? "\nRead-only column" : ""}${query ? "\nClick to sort, Shift-click to add to the sort" : ""}`}
                 onClick={query ? (e) => query.onSort(c.name, e.shiftKey) : undefined}
                 className={cx(
                   "group/header absolute top-0 flex h-full items-center gap-1.5 border-r border-grid px-2",
@@ -558,10 +584,11 @@ export function ResultGrid({
 
         {virtualRows.map((vr) => {
           const added = newRowAt(vr.index);
-          const id = editable && !added ? rowIdOf(vr.index) : null;
-          const deleted = id ? id.key in edits.deletes : false;
-          const changed = id ? edits.updates[id.key]?.values : undefined;
-          const failed = edits.failedAt && ("insert" in edits.failedAt ? added?.id === edits.failedAt.insert : id?.key === edits.failedAt.key);
+          const id = !added ? rowIdOf(vr.index) : null;
+          const key = id ? rowKey(id) : null;
+          const deleted = key ? key in edits.deletes : false;
+          const changed = key ? edits.updates[key]?.values : undefined;
+          const failed = edits.failedAt && ("insert" in edits.failedAt ? added?.id === edits.failedAt.insert : key === edits.failedAt.key);
           return (
             <div
               key={vr.key}
@@ -618,7 +645,7 @@ export function ResultGrid({
                       if (dragging.current === "cells") setSelection((sel) => (sel ? { ...sel, focus: { row: vr.index, col: vc.index } } : sel));
                       if (dragging.current === "rows") setSelection((sel) => (sel ? selectRows(sel.anchor.row, vr.index, columns.length) : sel));
                     }}
-                    onDoubleClick={() => (editable ? startEdit(vr.index, vc.index) : void openCell(vr.index, vc.index))}
+                    onDoubleClick={() => (canWrite(vc.index) ? startEdit(vr.index, vc.index) : void openCell(vr.index, vc.index))}
                     onContextMenu={() => {
                       const cell = { row: vr.index, col: vc.index };
                       setMenuCell(cell);
@@ -710,7 +737,7 @@ export function ResultGrid({
             {editable && (
               <>
                 <div className="my-1 h-px bg-control" />
-                {!menuRowDeleted && (
+                {!menuRowDeleted && canWrite(menuCell.col) && (
                   <>
                     <ContextMenuItem testId="grid-menu-edit" onSelect={() => startEdit(menuCell.row, menuCell.col)}>
                       Edit cell

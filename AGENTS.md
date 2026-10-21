@@ -1,6 +1,6 @@
 # AGENTS.md
 
-L1 Data is a desktop IDE for PostgreSQL. A Rust engine does the work, a Tauri 2 shell hosts it, and a React frontend draws it. [README.md](README.md) lists the features and the commands. [docs/architecture.md](docs/architecture.md) explains the design and records each place the code departs from it. Read the "Load-bearing decisions" section of that doc before you change how data moves between Rust and the webview.
+L1 Data is a desktop IDE for PostgreSQL and SQL Server. A Rust engine does the work, a Tauri 2 shell hosts it, and a React frontend draws it. [README.md](README.md) lists the features and the commands. [docs/architecture.md](docs/architecture.md) explains the design and records each place the code departs from it. Read the "Load-bearing decisions" section of that doc before you change how data moves between Rust and the webview.
 
 ## Keep the design rules
 
@@ -9,11 +9,11 @@ Each rule below keeps a class of bug out of the app. Break one only after you ch
 - `crates/engine` owns all behavior and has no Tauri dependency. Each command in `src-tauri/src/ipc.rs` is a one-line call into `Engine`.
 - Every type that crosses IPC lives in `crates/engine/src/model.rs`. `src/ipc/bindings.ts` is generated from it. Do not edit `bindings.ts` by hand.
 - Only Rust interprets SQL text. Statement splitting, classification, table-browse SQL, and the `INSERT`, `UPDATE`, and `DELETE` statements for staged edits are built in the engine with its own quoting. The frontend sends the document text and a cursor or selection, never SQL it built.
-- Cell values are PostgreSQL's text output, `string | null`. Do not add a per-type decoder. Rendering keys off the column's `TypeCategory`.
+- Cell values cross IPC as `string | null`. PostgreSQL uses its own text output. Only the SQL Server driver converts TDS values into canonical text. Do not add frontend or shared-result decoders. Rendering keys off the column's `TypeCategory`. Never round exact database values through floating point.
 - Rust owns result rows. The grid pulls windows with `result_page`, and `state/rowCache.ts` caches them. Do not send whole results to the webview.
 - Offsets that cross IPC are UTF-16 code units, which is CodeMirror's unit. The engine converts them once, at the boundary, in `text.rs`.
 - The backend emits whole `ConsoleState` and `ConnectionState` snapshots with a rising `rev`. `state/live.ts` keeps the higher `rev` and nothing else writes to it. Only the output log uses deltas.
-- A connection is a Postgres instance, and catalogs are per database. Key catalogs, catalog versions, primary-key lookups, and OID maps by `DatabaseRef { connectionId, database }`, never by `ConnectionId` alone, because OIDs repeat across databases. `ConnectionState` is the only source of catalog versions.
+- A connection is a database instance, and catalogs are per database. Key catalogs, catalog versions, primary-key lookups, and object-ID maps by `DatabaseRef { connectionId, database }`, never by `ConnectionId` alone, because object IDs repeat across databases. `ConnectionState` is the only source of catalog versions. `ConnectionConfig.databaseKind` selects both the private session driver and SQL dialect. An existing connection ID cannot change kind.
 - A run moves the tab's session into the run task. Commit, rollback, or a second run during a run returns `Busy`. Keep that shape so concurrent use of one session stays impossible.
 - SQL the model writes runs only through `assistant::tools::run_query`. It opens its own session, runs one statement in a `READ ONLY` transaction, and drops the session without a commit. On a tab's session the query could read or change the tab's open transaction, its `SET`s, and its temp tables. On a metadata session a `set_config` or an advisory lock would outlive the call. A structure test in `assistant/mod.rs` fails if a file under `assistant/` other than `tools.rs` calls a session's client.
 - A provider's protocol stays in `crates/engine/src/provider/<name>.rs`, behind the `Provider` and sans-IO `Codec` traits in `provider/mod.rs`. Keep its message shapes and flags out of `assistant/` and `model.rs`, so that a CLI update breaks one codec instead of the chat code and the contract. The same holds for the usage-limit reads: Claude's `get_usage` stays in `claude.rs`, and Codex's app-server protocol stays in `codex.rs`, each a sans-IO `Exchange` from `provider/agent.rs`. A structure test fails if a file under `assistant/` names a provider or its wire format.
@@ -39,11 +39,13 @@ Run the checks that cover your change before you open a PR. Docker is needed onl
 | Command | Covers | Needs |
 |---|---|---|
 | `cargo test --workspace` | engine units, the assistant against `fake-claude`, bindings drift, bridge coverage | nothing |
-| `cargo test -p engine --features pg-tests` | engine against a real server | `pnpm db:up` |
+| `cargo test -p engine --features pg-tests` | engine against PostgreSQL | `pnpm db:up` |
+| `cargo test -p engine --features mssql-tests` | engine against SQL Server | `pnpm db:mssql:up` |
 | `pnpm typecheck` | the frontend types | nothing |
 | `pnpm test` | vitest units for state, formatting, and shell | nothing |
 | `pnpm build` | the production bundle | nothing |
 | `pnpm self-check` | the engine booted inside the Tauri binary | `pnpm db:up` |
+| `python3 dev/mssql-smoke.py` | mixed PostgreSQL and SQL Server bridge flow | both databases and `cargo build -p dev-bridge -p engine`; free `:7077` |
 | `dev/bridge-smoke.sh` | the dev-bridge over HTTP, end to end | `pnpm db:up` and `cargo build -p dev-bridge` first. The script starts its own bridge. |
 | `cargo test -p engine --features claude-smoke --test claude_smoke -- --nocapture` | the assistant through the installed `claude`: its argv and environment, a resumed session, and an approval held for 75 s | `pnpm db:up` and a signed-in `claude`. It spends three Haiku turns on that account. |
 

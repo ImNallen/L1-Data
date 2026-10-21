@@ -5,6 +5,7 @@
   "type": "module",
   "scripts": {
     "db:up": "docker compose -f dev/docker-compose.yml up -d --wait",
+    "db:mssql:up": "bash dev/mssql-up.sh",
     "dev": "vite",
     "tauri": "tauri",
     "bridge": "concurrently -k -n bridge,vite -c cyan,magenta \"cargo run -q -p dev-bridge\" \"vite\"",

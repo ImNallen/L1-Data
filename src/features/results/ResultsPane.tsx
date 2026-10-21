@@ -20,6 +20,7 @@ import { commands, type OutputEntry, type QueryError, type ResultMeta, type RunS
 import { exportErrorText } from "../../ipc/errors";
 import { useLive } from "../../state/live";
 import {
+  isBusy,
   outputTone,
   resultView,
   rowResults,
@@ -30,6 +31,7 @@ import {
   type Summary,
 } from "../../state/status";
 import { useCatalog, viewFor } from "../../state/catalog";
+import { databaseKindFor } from "../../state/databaseKind";
 import { NO_EDITS, pendingCount, useTableEdits } from "../../state/tableEdits";
 import { isFiltered, isTableTab, useWorkspace, type TableTab } from "../../state/workspace";
 import { cx, IconButton, MenuContent, MenuItem, Spinner } from "../../ui/primitives";
@@ -42,14 +44,13 @@ import {
   saveSettings,
   setTablePage,
   submitEdits,
-  tablePrimaryKey,
   updateTableQuery,
 } from "../editor/runActions";
 import { FilterBar } from "./FilterBar";
 import { groupDigits, pageStatus, pluralRows } from "./format";
 import { ErrorBlock, OutputPanel } from "./OutputPanel";
-import { ResultGrid, type GridActions, type GridEditing, type GridQuery } from "./ResultGrid";
-import { filterForValue, formatOrderBy, nextSort, parseOrderBy, useFilterDrafts } from "./tableQuery";
+import { gridEditing, ResultGrid, type GridActions, type GridEditing, type GridQuery } from "./ResultGrid";
+import { cycleTableOrder, filterForValue, useFilterDrafts, useTableOrder } from "./tableQuery";
 
 const NO_OUTPUT: readonly OutputEntry[] = [];
 
@@ -65,6 +66,7 @@ const PAGER_INSET = 52;
 
 function TablePager({ tab, rows }: { tab: TableTab; rows: number }) {
   const size = useWorkspace((s) => s.settings.tablePageSize);
+  const busy = useLive((s) => isBusy(s.consoles[tab.id]));
   const { schema, table, page, query, exactRowCount } = tab.table;
   const estimate = useCatalog(
     (s) =>
@@ -103,7 +105,7 @@ function TablePager({ tab, rows }: { tab: TableTab; rows: number }) {
       <IconButton aria-label="Next page" disabled={isLast} onClick={() => setTablePage(tab.id, page + 1)}>
         <IconChevronRight size={15} />
       </IconButton>
-      <IconButton aria-label="Last page" disabled={isLast} onClick={() => void lastTablePage(tab.id)}>
+      <IconButton aria-label="Last page" disabled={isLast || busy} onClick={() => void lastTablePage(tab.id)}>
         <IconChevronRightPipe size={15} />
       </IconButton>
     </div>
@@ -161,9 +163,9 @@ function Empty({ children }: { children: React.ReactNode }) {
   return <div className="grid flex-1 place-items-center bg-bg text-ui-13 text-dim">{children}</div>;
 }
 
-function EditBar({ tabId, editable, actions }: { tabId: TabId | null; editable: boolean; actions: RefObject<GridActions | null> }) {
+function EditBar({ tabId, editable, canSubmit, actions }: { tabId: TabId | null; editable: boolean; canSubmit: boolean; actions: RefObject<GridActions | null> }) {
   const edits = useTableEdits((s) => (tabId ? s.byTab[tabId] : undefined) ?? NO_EDITS);
-  const pending = editable ? pendingCount(edits) : 0;
+  const pending = pendingCount(edits);
   const busy = useTableEdits((s) => (tabId ? s.submitting[tabId] === true : false));
   return (
     <div data-testid="edit-bar" className="flex items-center gap-0.5">
@@ -182,8 +184,8 @@ function EditBar({ tabId, editable, actions }: { tabId: TabId | null; editable: 
       <IconButton
         data-testid="submit-edits"
         aria-label="Submit changes"
-        title="Submit changes (⌘S)"
-        disabled={pending === 0 || busy}
+        title={canSubmit ? "Submit changes (⌘S)" : "SQL Server staged edits are unavailable. Use SQL scripts."}
+        disabled={!canSubmit || pending === 0 || busy}
         className={cx(pending > 0 && "text-green!")}
         onClick={() => tabId && void submitEdits(tabId)}
       >
@@ -225,7 +227,7 @@ function RunTail({ run }: { run: RunState }) {
   const error = failedError(run);
   if (error) return <ErrorBlock error={error} />;
   if (run.outcome === "Cancelled") return "Cancelled.";
-  const commands = runStatements(run).flatMap((s) => (s.status.kind === "Command" ? [s.status.tag] : []));
+  const commands = runStatements(run).flatMap((s) => s.outputs.flatMap((o) => o.kind === "Command" ? [o.tag] : []));
   if (commands.length) return commands.join(", ");
   return rowResults(run).length ? null : "The statement returned no rows.";
 }
@@ -281,8 +283,11 @@ function ResultBody({
 export function ResultsPane({ tabId }: { tabId: TabId | null }) {
   const tab = useWorkspace((s) => (tabId ? s.tabs[tabId] : undefined));
   const picked = useWorkspace((s) => (tabId ? s.activeResult[tabId] : undefined));
+  const databaseKind = useWorkspace((s) => databaseKindFor(tab?.console.db ?? null, s.configs));
   const setActiveResult = useWorkspace((s) => s.setActiveResult);
-  const run = useLive((s) => (tabId ? s.consoles[tabId]?.run : undefined)) ?? { kind: "Idle" as const };
+  const console = useLive((s) => (tabId ? s.consoles[tabId] : undefined));
+  const run = console?.run ?? { kind: "Idle" as const };
+  const busy = isBusy(console);
   const now = useNow(run.kind === "Running", 100);
   const results = rowResults(run);
   const shown = shownResult(run, picked);
@@ -298,11 +303,11 @@ export function ResultsPane({ tabId }: { tabId: TabId | null }) {
   const browsingTable = browsing && isTableTab(tab) ? tab : null;
   const pager = browsingTable && view.kind === "rows" ? browsingTable : null;
   const addDraft = useFilterDrafts((s) => s.add);
+  const sort = useTableOrder(browsingTable);
   const gridQuery: GridQuery | null = browsingTable && {
-    sort: parseOrderBy(browsingTable.table.query.orderBy) ?? [],
+    sort,
     filtered: new Set(browsingTable.table.query.filters.map((f) => f.column)),
-    onSort: (column, additive) =>
-      updateTableQuery(browsingTable.id, (q) => ({ ...q, orderBy: formatOrderBy(nextSort(parseOrderBy(q.orderBy) ?? [], column, additive)) })),
+    onSort: (column, additive) => void cycleTableOrder(browsingTable, column, additive),
     onFilterColumn: (column) => addDraft(browsingTable.id, column),
     onFilterValue: (column, value, negate) =>
       updateTableQuery(browsingTable.id, (q) => ({ ...q, filters: [...q.filters, filterForValue(column, value, negate)] })),
@@ -311,16 +316,16 @@ export function ResultsPane({ tabId }: { tabId: TabId | null }) {
     if (tabId && isTable) loadTableOnce(tabId);
   }, [tabId, isTable]);
   const catalogView = useCatalog((s) => viewFor(s.views, browsingTable?.console.db));
-  const editing = useMemo<GridEditing | null>(() => {
-    const pkColumns = browsingTable && catalogView ? tablePrimaryKey(browsingTable) : [];
-    return pkColumns.length ? { pkColumns } : null;
-  }, [browsingTable?.console.db, browsingTable?.table.schema, browsingTable?.table.table, catalogView]);
+  const editing = useMemo(
+    () => browsingTable && shown && databaseKind === "Postgres" ? gridEditing(catalogView, browsingTable.table.schema, browsingTable.table.table, shown.meta) : null,
+    [browsingTable?.console.db, browsingTable?.table.schema, browsingTable?.table.table, catalogView, shown?.meta, databaseKind],
+  );
   const actions = useRef<GridActions | null>(null);
 
   return (
     <section className="flex h-full min-h-0 flex-col bg-bg">
       <div className="flex h-[41px] shrink-0 items-center gap-3 border-b border-grid pr-2 pl-2.5">
-        <EditBar tabId={tabId} editable={editing !== null && tabId !== null} actions={actions} />
+        <EditBar tabId={tabId} editable={!busy && editing !== null && tabId !== null} canSubmit={!busy && databaseKind !== "SqlServer" && shown?.meta.databaseKind !== "SqlServer"} actions={actions} />
         {results.length > 1 && (
           <div data-testid="result-selector" className="flex items-center gap-0.5 rounded-md border border-control p-0.5">
             {results.map((r, i) => (
@@ -328,7 +333,7 @@ export function ResultsPane({ tabId }: { tabId: TabId | null }) {
                 key={r.index}
                 type="button"
                 data-testid={`result-pick-${r.index}`}
-                title={`Statement ${r.index + 1} · ${pluralRows(r.meta.rowCount)}`}
+                title={`Result ${i + 1} · ${pluralRows(r.meta.rowCount)}`}
                 onClick={() => tabId && setActiveResult(tabId, r.index)}
                 className={cx(
                   "h-5 min-w-6 rounded px-1.5 font-mono text-ui-11.5",
@@ -369,7 +374,7 @@ export function ResultsPane({ tabId }: { tabId: TabId | null }) {
             data-testid="export-btn"
             aria-label="Export CSV"
             title="Export CSV"
-            disabled={!shown || run.kind === "Running"}
+            disabled={!shown || busy}
             onClick={() => shown && void exportCsv(shown.meta)}
           >
             <IconDownload size={16} />
@@ -400,6 +405,8 @@ export function ResultsPane({ tabId }: { tabId: TabId | null }) {
         </div>
       </div>
 
+      {(databaseKind === "SqlServer" || shown?.meta.databaseKind === "SqlServer") && <p data-testid="sqlserver-output-limit" className="border-b border-grid px-3 py-1 text-ui-11.5 text-dim">SQL Server PRINT and informational messages are unavailable. Affected row counts may be unknown.</p>}
+      {browsingTable && databaseKind === "SqlServer" && <p data-testid="sqlserver-edit-limit" className="border-b border-grid px-3 py-1 text-ui-11.5 text-dim">SQL Server table results are read-only. Use SQL scripts to insert, update or delete rows.</p>}
       {browsingTable && <FilterBar tab={browsingTable} />}
 
       <div className="relative flex min-h-0 flex-1 flex-col">

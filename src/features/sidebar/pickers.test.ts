@@ -11,6 +11,7 @@ const config: ConnectionConfig = {
   user: "u",
   sslMode: "Prefer",
   caCertPath: null,
+  databaseKind: "Postgres",
   hasPassword: false,
   color: null,
 };
@@ -27,7 +28,7 @@ const db = (name: string, over: Partial<DatabaseState> = {}): DatabaseState => (
   ...over,
 });
 
-const instance = (databases: DatabaseState[], showSystemDatabases = false): InstanceState => ({ home: "shop", showSystemDatabases, databases });
+const instance = (databases: DatabaseState[], showSystemDatabases = false): InstanceState => ({ configuredDatabase: "shop", home: "shop", showSystemDatabases, databases });
 
 const prod = instance([
   db("legacy_crm", { schemaCount: { kind: "Known", count: 2 } }),
@@ -42,6 +43,7 @@ const prod = instance([
 const schema = (name: string, tableCount: number, system = false): SchemaInfo => ({ name, system, tableCount, relations: [], functions: [] });
 
 const shopCatalog: Catalog = {
+  databaseKind: "Postgres",
   db: { connectionId: "c1", database: "shop" },
   version: 3,
   defaultSchema: "public",

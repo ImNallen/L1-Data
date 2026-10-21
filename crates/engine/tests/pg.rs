@@ -233,8 +233,8 @@ impl Harness {
 
     fn result(state: &ConsoleState, index: usize) -> ResultMeta {
         match &state.run {
-            RunState::Finished { statements, .. } => match &statements[index].status {
-                StmtStatus::Rows { result, done: true } => result.clone(),
+            RunState::Finished { statements, .. } => match statements[index].outputs.first() {
+                Some(RunOutput::Rows { result, state: RowsState::Complete }) => result.clone(),
                 other => panic!("statement {index} is not a finished result: {other:?}"),
             },
             other => panic!("not finished: {other:?}"),
@@ -382,11 +382,12 @@ async fn connect_reports_server_and_catalog_has_the_mockup_tables() {
 #[tokio::test]
 async fn exact_row_count_is_exact_and_reports_missing_tables() {
     let h = Harness::start().await;
-    assert!(matches!(h.engine.exact_row_count(h.db(), "public".into(), "coupons".into(), TableQuery::default()).await, Err(CountError::NotConnected)));
+    let tab = TabId(uuid::Uuid::new_v4());
+    assert!(matches!(h.engine.exact_row_count(tab, h.db(), "public".into(), "coupons".into(), TableQuery::default()).await, Err(CountError::NotConnected)));
     h.engine.connect(h.conn).await.unwrap();
-    assert_eq!(h.engine.exact_row_count(h.db(), "public".into(), "coupons".into(), TableQuery::default()).await.unwrap(), 3);
-    assert_eq!(h.engine.exact_row_count(h.db(), "lab".into(), "type_zoo".into(), TableQuery::default()).await.unwrap(), 2);
-    let missing = h.engine.exact_row_count(h.db(), "public".into(), "nope".into(), TableQuery::default()).await;
+    assert_eq!(h.engine.exact_row_count(tab, h.db(), "public".into(), "coupons".into(), TableQuery::default()).await.unwrap(), 3);
+    assert_eq!(h.engine.exact_row_count(tab, h.db(), "lab".into(), "type_zoo".into(), TableQuery::default()).await.unwrap(), 2);
+    let missing = h.engine.exact_row_count(tab, h.db(), "public".into(), "nope".into(), TableQuery::default()).await;
     assert!(matches!(&missing, Err(CountError::Failed { message }) if message.contains("does not exist")), "{missing:?}");
 }
 
@@ -466,14 +467,11 @@ async fn multi_statement_run_tags_notices_and_history() {
     let accepted = h.start_run(tab, script).await;
     assert_eq!(accepted.statements.len(), 5);
     let state = h.wait_finished(tab, accepted.run_id).await;
-    let tags: Vec<String> = statuses(&state)
-        .iter()
-        .map(|s| match s {
-            StmtStatus::Command { tag, .. } => tag.clone(),
-            StmtStatus::Rows { result, .. } => format!("rows:{}", result.row_count),
-            other => format!("{other:?}"),
-        })
-        .collect();
+    let RunState::Finished { statements, .. } = &state.run else { panic!("not finished") };
+    let tags: Vec<String> = statements.iter().flat_map(|s| &s.outputs).map(|o| match o {
+        RunOutput::Command { tag, .. } => tag.clone(),
+        RunOutput::Rows { result, .. } => format!("rows:{}", result.row_count),
+    }).collect();
     assert_eq!(tags, ["CREATE TABLE", "INSERT 0 5", "UPDATE 3", "rows:1", "rows:1"]);
     assert_eq!(
         h.log(tab),
@@ -500,6 +498,28 @@ async fn multi_statement_run_tags_notices_and_history() {
     assert!(matches!(&history.entries[3].outcome, HistoryOutcome::Command { tag } if tag == "UPDATE 3"));
     assert_eq!(history.entries[5].sql, "create temp table t_multi (id int, v text)");
     assert!(h.seen.iter().filter(|e| matches!(e, AppEvent::HistoryAppended(_))).count() >= 6);
+}
+
+#[tokio::test]
+async fn notices_stream_before_a_waiting_command_finishes() {
+    let mut h = Harness::start().await;
+    let tab = h.sql_tab(TxnMode::AutoCommit).await;
+    let accepted = h.start_run(tab, "DO $$ BEGIN RAISE NOTICE 'before wait'; PERFORM pg_sleep(30); END $$").await;
+    let noticed = tokio::time::timeout(Duration::from_secs(3), async {
+        loop {
+            if let AppEvent::ConsoleOutput { tab_id, entries } = h.next_event().await
+                && tab_id == tab
+                && entries.iter().any(|e| matches!(&e.body, OutputBody::Notice { message, .. } if message == "before wait"))
+            {
+                break;
+            }
+        }
+    }).await;
+    h.engine.console_cancel(tab).await;
+    let state = h.wait_finished(tab, accepted.run_id).await;
+    assert!(noticed.is_ok(), "notice waited for command completion");
+    assert!(matches!(state.run, RunState::Finished { outcome: RunOutcome::Cancelled, .. }));
+    assert_eq!(h.scalar(tab, "SELECT 1").await, "1");
 }
 
 #[tokio::test]
@@ -630,7 +650,7 @@ async fn terminated_backend_becomes_lost_and_the_next_run_reopens() {
     let oracle = h.oracle().await;
     oracle.simple_query(&format!("select pg_terminate_backend({backend_pid})")).await.unwrap();
     let state = h.run(tab, "select 1").await;
-    assert!(matches!(state.session, SessionState::Lost { txn_lost: true, .. }), "{:?}", state.session);
+    assert!(matches!(state.session, SessionState::Lost { transaction: TransactionLoss::RolledBack, .. }), "{:?}", state.session);
     assert_eq!(state.txn, TxnState::Idle);
     assert!(h.outputs(tab).iter().any(|o| matches!(o, OutputBody::Info { message } if message.starts_with("Transaction rolled back"))));
 
@@ -649,7 +669,7 @@ async fn terminated_backend_becomes_lost_and_the_next_run_reopens() {
     oracle.simple_query(&format!("select pg_terminate_backend({auto_pid})")).await.unwrap();
     tokio::time::sleep(Duration::from_millis(200)).await;
     let state = h.run(auto, "select 3").await;
-    assert!(matches!(state.session, SessionState::Lost { txn_lost: false, .. }), "{:?}", state.session);
+    assert!(matches!(state.session, SessionState::Lost { transaction: TransactionLoss::None, .. }), "{:?}", state.session);
     assert_eq!(h.scalar(auto, "select 4").await, "4", "an idle lost session is replaced transparently");
 }
 
@@ -711,7 +731,7 @@ async fn a_run_orphaned_by_disconnect_never_writes_into_the_next_run() {
     assert!(runs[..first_new].iter().any(|(r, cancelled)| *r == old.run_id && *cancelled), "disconnect finished the old run as Cancelled: {runs:?}");
     assert!(matches!(state.run, RunState::Finished { outcome: RunOutcome::Ok, .. }), "{:?}", state.run);
     assert_eq!(statuses(&state).len(), 4);
-    assert!(statuses(&state).iter().all(|s| matches!(s, StmtStatus::Rows { done: true, .. })), "{:?}", state.run);
+    assert!(statuses(&state).iter().all(|s| matches!(s, StmtStatus::Finished)), "{:?}", state.run);
     assert_eq!(h.page(&Harness::result(&state, 3), 0, 1)[0][0].as_deref(), Some("b3"));
 }
 
@@ -970,7 +990,7 @@ async fn table_pages_sort_and_filter_in_the_engine() {
     assert!(rows.iter().all(|r| r[3].as_deref() == Some("APAC") && r[1].as_deref().unwrap().starts_with("user1")));
     let created: Vec<&str> = rows.iter().map(|r| r[4].as_deref().unwrap()).collect();
     assert!(created.windows(2).all(|w| w[0] >= w[1]), "newest first");
-    assert_eq!(h.engine.exact_row_count(h.db(), "public".into(), "customers".into(), query).await.unwrap(), u64::from(expected));
+    assert_eq!(h.engine.exact_row_count(tab, h.db(), "public".into(), "customers".into(), query).await.unwrap(), u64::from(expected));
 
     for smuggled in [
         TableQuery { r#where: "true; drop table customers".into(), ..Default::default() },
@@ -996,7 +1016,65 @@ async fn sql_comments_in_where_and_order_by_keep_the_page_limit() {
     let meta = Harness::result(&state, 0);
     assert_eq!(meta.row_count, 500, "the comment must not swallow LIMIT");
     let apac = h.scalar(tab, "select count(*) from customers where region = 'APAC'").await.parse::<u64>().unwrap();
-    assert_eq!(h.engine.exact_row_count(h.db(), "public".into(), "customers".into(), query).await.unwrap(), apac);
+    assert_eq!(h.engine.exact_row_count(tab, h.db(), "public".into(), "customers".into(), query).await.unwrap(), apac);
+}
+
+#[tokio::test]
+async fn table_page_preserves_nested_domain_native_metadata_and_primary_key() {
+    let mut h = Harness::start().await;
+    h.engine.connect(h.conn).await.unwrap();
+    let tab = h.sql_tab(TxnMode::AutoCommit).await;
+    let oracle = h.oracle().await;
+    let schema = unique("nested_domains");
+    oracle
+        .batch_execute(&format!(
+            "CREATE SCHEMA {schema};
+             CREATE DOMAIN {schema}.first_level AS int;
+             CREATE DOMAIN {schema}.second_level AS {schema}.first_level;
+             CREATE TABLE {schema}.items (id int PRIMARY KEY, value {schema}.second_level);
+             INSERT INTO {schema}.items VALUES (1, 42)"
+        ))
+        .await
+        .unwrap();
+    let check_schema = schema.clone();
+    let engine = h.engine.clone();
+    let checked = tokio::spawn(async move {
+        let schema = check_schema;
+        h.engine.refresh_catalog(h.db()).await.unwrap();
+        let catalog = h.engine.catalog(h.db()).await.unwrap();
+        let relation = catalog.relation(&schema, "items").unwrap();
+        let direct = h.run_ok(tab, &format!("SELECT * FROM {schema}.items")).await;
+        let native = Harness::result(&direct, 0);
+        assert_eq!(native.columns[1].r#type.category, TypeCategory::Integer);
+
+        let accepted = h.engine.console_run(tab, RunRequest::TablePage {
+            schema: schema.clone(), table: "items".into(), page: 0, query: TableQuery::default(),
+        }).await.unwrap();
+        let state = h.wait_finished(tab, accepted.run_id).await;
+        assert!(matches!(state.run, RunState::Finished { outcome: RunOutcome::Ok, .. }), "{:?}", state.run);
+        let meta = Harness::result(&state, 0);
+        assert_eq!(serde_json::to_value(&meta.columns).unwrap(), serde_json::to_value(&native.columns).unwrap());
+        let rows = h.page(&meta, 0, 1);
+        assert_eq!(rows, vec![vec![Some("1".into()), Some("42".into())]]);
+        let key = meta.columns.iter().zip(&rows[0]).filter_map(|(column, value)| {
+            let source = column.source?;
+            (source.table_oid == relation.oid && relation.columns.iter().any(|known| known.attnum == source.attnum && known.pk))
+                .then(|| cell(&column.name, value.as_deref()))
+        }).collect::<Vec<_>>();
+        assert_eq!(key.len(), 1, "native provenance identifies the complete primary key");
+        assert_eq!(key[0].column, "id");
+        let changes = TableChanges {
+            schema: schema.clone(), table: "items".into(), inserts: vec![], deletes: vec![],
+            updates: vec![RowUpdate { key, set: vec![cell("value", Some("43"))] }],
+        };
+        assert!(h.engine.table_apply(tab, changes).await.unwrap().committed);
+        assert_eq!(h.scalar(tab, &format!("SELECT value FROM {schema}.items WHERE id = 1")).await, "43");
+    }).await;
+    oracle.batch_execute(&format!("DROP SCHEMA {schema} CASCADE")).await.unwrap();
+    let remaining: i64 = oracle.query_one("SELECT count(*) FROM pg_namespace WHERE nspname = $1", &[&schema]).await.unwrap().get(0);
+    assert_eq!(remaining, 0);
+    engine.shutdown().await;
+    checked.unwrap();
 }
 
 #[tokio::test]
@@ -1057,7 +1135,7 @@ async fn ddl_burst_coalesces_refreshes() {
     let (engine, db, held) = (h.engine.clone(), h.db(), gate.clone());
     let slow = tokio::spawn(async move {
         let query = TableQuery { r#where: "pg_sleep(3)::text = ''".into(), ..Default::default() };
-        engine.exact_row_count(db, "public".into(), held, query).await
+        engine.exact_row_count(tab, db, "public".into(), held, query).await
     });
     tokio::time::sleep(Duration::from_millis(200)).await;
     let tables: Vec<String> = (0..30).map(|i| format!("{}_{i}", unique("t_burst"))).collect();
@@ -1310,7 +1388,7 @@ async fn relation_detail_reads_orders() {
         events: events.to_vec(),
         per_row: true,
         enabled: true,
-        function: function.into(),
+        implementation: TriggerImplementation::Function { name: function.into() },
     };
     assert_eq!(
         detail.triggers,
@@ -1374,7 +1452,7 @@ async fn relation_detail_hides_partition_clones_and_shows_inherited_triggers() {
         events: vec![TriggerEvent::Insert],
         per_row: true,
         enabled,
-        function: format!("{s}_noop"),
+        implementation: TriggerImplementation::Function { name: format!("{s}_noop") },
     };
     assert_eq!(t.triggers, [trigger("t_replica", false)], "a replica trigger does not fire in a normal session, and RI triggers stay hidden");
 
@@ -1630,7 +1708,7 @@ async fn formatting_keeps_the_value_of_every_awkward_literal() {
     let oracle = h.oracle().await;
     for literal in AWKWARD_LITERALS {
         let sql = format!("select {literal} as v");
-        let formatted = match h.engine.editor_format(&sql, RunTarget::All) {
+        let formatted = match h.engine.editor_format(&sql, RunTarget::All, DatabaseKind::Postgres) {
             Ok(edit) => apply(&sql, &edit),
             Err(FormatError::Unsafe) => continue,
             Err(e) => panic!("{sql:?}: {e:?}"),
@@ -1646,7 +1724,7 @@ async fn formatting_keeps_the_value_of_a_backslash_literal_with_standard_strings
     oracle.batch_execute("set standard_conforming_strings = off; set escape_string_warning = off").await.unwrap();
     for literal in BACKSLASH_LITERALS {
         let sql = format!("select {literal} as v");
-        let formatted = match h.engine.editor_format(&sql, RunTarget::All) {
+        let formatted = match h.engine.editor_format(&sql, RunTarget::All, DatabaseKind::Postgres) {
             Ok(edit) => apply(&sql, &edit),
             Err(FormatError::Unsafe) => continue,
             Err(e) => panic!("{sql:?}: {e:?}"),

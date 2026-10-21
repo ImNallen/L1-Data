@@ -1,5 +1,27 @@
-use crate::model::{TxnMode, TxnState};
+use crate::model::{DatabaseKind, TxnMode, TxnState};
 use crate::sql::StmtKind;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TransactionPlan {
+    BeginIfIdle,
+    Native,
+}
+
+pub fn validate_mode(database: DatabaseKind, mode: TxnMode) -> Result<(), String> {
+    if database == DatabaseKind::SqlServer && mode == TxnMode::Manual {
+        return Err("SQL Server Manual mode is unavailable because server-side code can end the app-managed transaction. Select Auto-commit and use explicit BEGIN TRANSACTION, COMMIT, or ROLLBACK statements.".into());
+    }
+    Ok(())
+}
+
+pub fn plan(database: DatabaseKind, mode: TxnMode, kind: &StmtKind) -> Result<TransactionPlan, String> {
+    validate_mode(database, mode)?;
+    Ok(if needs_implicit_begin(mode, TxnState::Idle, kind) {
+        TransactionPlan::BeginIfIdle
+    } else {
+        TransactionPlan::Native
+    })
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StmtOutcome {
@@ -15,6 +37,7 @@ pub fn txn_after(state: TxnState, kind: &StmtKind, outcome: StmtOutcome) -> TxnS
     use StmtOutcome::*;
     use TxnState::*;
     match (state, kind, outcome) {
+        (Open, _, _) => Open,
         (Idle, Begin, Ok) => Active,
         (Idle, _, _) => Idle,
         (_, Commit, Ok) | (_, Rollback, Ok) => Idle,
@@ -97,7 +120,7 @@ mod tests {
 
     #[test]
     fn the_machine_is_total() {
-        for state in [Idle, Active, Aborted] {
+        for state in [Idle, Active, Aborted, Open] {
             for kind in all_kinds() {
                 for outcome in [Ok, Err] {
                     let _ = txn_after(state, &kind, outcome);

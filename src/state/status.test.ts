@@ -1,11 +1,12 @@
 import { describe, expect, it } from "vitest";
-import type { ConnectionConfig, ConsoleState, OutputEntry, QueryError, ResultMeta, RunState, StatementRun, Workspace } from "../ipc/bindings";
+import type { ConnectionConfig, ConsoleState, OutputEntry, QueryError, ResultMeta, RunOutput, RunState, StatementRun, Workspace } from "../ipc/bindings";
 import { hasUncommittedWork, outputTone, resultView, rowResults, runSummary, shownResult } from "./status";
 import { nextUntitled, tabFromSnapshot, workspaceSnapshot, type Tab } from "./workspace";
 
 const meta = (index: number, rowCount: number, extra: Partial<ResultMeta> = {}): ResultMeta => ({
   ref: { tabId: "t", runId: 1, index },
   db: { connectionId: "c", database: "shop" },
+  databaseKind: "Postgres",
   columns: [],
   rowCount,
   rowsSeen: rowCount,
@@ -13,7 +14,9 @@ const meta = (index: number, rowCount: number, extra: Partial<ResultMeta> = {}):
   elapsedMs: 38,
   ...extra,
 });
-const stmt = (index: number, status: StatementRun["status"]): StatementRun => ({ index, range: { from: 0, to: 1 }, status });
+const stmt = (index: number, status: StatementRun["status"], outputs: RunOutput[] = []): StatementRun => ({ index, range: { from: 0, to: 1 }, status, outputs });
+const rows = (index: number, result: ResultMeta) => stmt(index, { kind: "Finished" }, [{ kind: "Rows", result, state: "Complete" }]);
+const command = (index: number, tag: string, elapsedMs: number) => stmt(index, { kind: "Finished" }, [{ kind: "Command", tag, elapsedMs, affectedRows: null }]);
 const finished = (statements: StatementRun[], outcome: "Ok" | "Failed" | "Cancelled" = "Ok"): RunState => ({
   kind: "Finished",
   runId: 1,
@@ -23,29 +26,29 @@ const finished = (statements: StatementRun[], outcome: "Ok" | "Failed" | "Cancel
 });
 
 function consoleWith(mode: "AutoCommit" | "Manual", txn: ConsoleState["txn"]): ConsoleState {
-  return { tabId: "t", rev: 1, config: { connectionId: "c", database: "shop", schema: null, mode }, session: { kind: "None" }, txn, run: { kind: "Idle" } };
+  return { tabId: "t", rev: 1, config: { connectionId: "c", database: "shop", schema: null, mode }, session: { kind: "None" }, txnDepth: null, work: null, txn, run: { kind: "Idle" } };
 }
 
 describe("hasUncommittedWork", () => {
-  it("is true only for a manual console holding a transaction", () => {
+  it("is true whenever a console holds a transaction", () => {
     expect(hasUncommittedWork(consoleWith("Manual", "Active"))).toBe(true);
     expect(hasUncommittedWork(consoleWith("Manual", "Aborted"))).toBe(true);
     expect(hasUncommittedWork(consoleWith("Manual", "Idle"))).toBe(false);
-    expect(hasUncommittedWork(consoleWith("AutoCommit", "Active"))).toBe(false);
+    expect(hasUncommittedWork(consoleWith("AutoCommit", "Active"))).toBe(true);
     expect(hasUncommittedWork(undefined)).toBe(false);
   });
 });
 
 describe("runSummary", () => {
   it("reads like the mockup for a finished row result", () => {
-    expect(runSummary(finished([stmt(0, { kind: "Rows", result: meta(0, 6), done: true })]), undefined, 0)).toEqual({
+    expect(runSummary(finished([rows(0, meta(0, 6))]), undefined, 0)).toEqual({
       tone: "ok",
       text: "6 rows · 38 ms",
     });
   });
 
   it("names a truncated result's limit and the rows the server sent", () => {
-    const run = finished([stmt(0, { kind: "Rows", result: meta(0, 200_000, { rowsSeen: 300_000, truncated: "RowLimit" }), done: true })]);
+    const run = finished([rows(0, meta(0, 200_000, { rowsSeen: 300_000, truncated: "RowLimit" }))]);
     expect(runSummary(run, undefined, 0)?.text).toBe("200,000 of 300,000 rows (row limit) · 38 ms");
   });
 
@@ -55,7 +58,7 @@ describe("runSummary", () => {
   });
 
   it("falls back to the last command tag when no statement returned rows", () => {
-    const run = finished([stmt(0, { kind: "Command", tag: "UPDATE 3", elapsedMs: 4 })]);
+    const run = finished([command(0, "UPDATE 3", 4)]);
     expect(runSummary(run, undefined, 0)?.text).toBe("UPDATE 3 · 4 ms");
   });
 
@@ -67,9 +70,9 @@ describe("runSummary", () => {
 
 describe("shownResult", () => {
   const run = finished([
-    stmt(0, { kind: "Rows", result: meta(0, 1), done: true }),
-    stmt(1, { kind: "Command", tag: "UPDATE 1", elapsedMs: 1 }),
-    stmt(2, { kind: "Rows", result: meta(2, 9), done: true }),
+    rows(0, meta(0, 1)),
+    command(1, "UPDATE 1", 1),
+    rows(2, meta(2, 9)),
   ]);
 
   it("defaults to the last row result and honours a pick that still exists", () => {
@@ -87,7 +90,7 @@ const notice = (runId: number, message: string, severity = "NOTICE"): OutputEntr
 });
 const failure: QueryError = { severity: "ERROR", sqlstate: "40001", message: "could not serialize", detail: null, hint: null, context: null, position: null };
 const finishedRun = (runId: number, statements: StatementRun[] = []): RunState => ({ kind: "Finished", runId, elapsedMs: 5, statements, outcome: "Ok" });
-const rowsAt = (index: number) => stmt(index, { kind: "Rows", result: meta(index, 1), done: true });
+const rowsAt = (index: number) => rows(index, meta(index, 1));
 
 describe("resultView", () => {
   const withRows = finishedRun(7, [rowsAt(0), rowsAt(1)]);
@@ -115,11 +118,11 @@ describe("resultView", () => {
   });
 
   it("shows the log instead of the tail when the tab has entries", () => {
-    expect(resultView(finishedRun(7, [stmt(0, { kind: "Command", tag: "DO", elapsedMs: 1 })]), undefined, true)).toEqual({ kind: "output" });
+    expect(resultView(finishedRun(7, [command(0, "DO", 1)]), undefined, true)).toEqual({ kind: "output" });
   });
 
   it("falls back to the tail when the log is empty", () => {
-    expect(resultView(finishedRun(7, [stmt(0, { kind: "Command", tag: "DO", elapsedMs: 1 })]), undefined, false)).toEqual({ kind: "tail" });
+    expect(resultView(finishedRun(7, [command(0, "DO", 1)]), undefined, false)).toEqual({ kind: "tail" });
     expect(resultView(finishedRun(7), { kind: "output", runId: 7, result: undefined }, false)).toEqual({ kind: "tail" });
     expect(resultView({ kind: "Idle" }, undefined, false)).toEqual({ kind: "tail" });
   });
@@ -145,7 +148,7 @@ describe("outputTone", () => {
 
 describe("workspace snapshot", () => {
   const configs: Record<string, ConnectionConfig> = {
-    c: { id: "c", name: "dev", host: "localhost", port: 5433, database: "shop", user: "l1data", sslMode: "Prefer", caCertPath: null, hasPassword: true, color: null },
+    c: { databaseKind: "Postgres", id: "c", name: "dev", host: "localhost", port: 5433, database: "shop", user: "l1data", sslMode: "Prefer", caCertPath: null, hasPassword: true, color: null },
   };
   const tabs: Tab[] = [
     { id: "a", title: "Untitled-2.sql", console: { db: { connectionId: "c", database: "reporting" }, mode: "Manual" }, table: null },
@@ -232,4 +235,16 @@ describe("workspace snapshot", () => {
     expect(nextUntitled(tabs)).toBe("Untitled-3.sql");
     expect(nextUntitled([])).toBe("Untitled-1.sql");
   });
+});
+
+it("keeps every result ordinal from one failed batch, including empty and partial row sets", () => {
+  const run = finished([stmt(0, { kind: "Failed", error: failure }, [
+    { kind: "Rows", result: meta(0, 0, { databaseKind: "SqlServer" }), state: "Complete" },
+    { kind: "Command", tag: "UPDATE", affectedRows: null, elapsedMs: 1 },
+    { kind: "Rows", result: meta(1, 2, { databaseKind: "SqlServer" }), state: "Failed" },
+  ])], "Failed");
+  expect(rowResults(run).map((r) => [r.index, r.meta.rowCount, r.done])).toEqual([[0, 0, true], [1, 2, true]]);
+  expect(shownResult(run, 0)?.meta.rowCount).toBe(0);
+  expect(resultView(run, 1, true)).toMatchObject({ kind: "rows", result: { index: 1 } });
+  expect(runSummary(run, 1, 0)).toEqual({ tone: "error", text: failure.message });
 });

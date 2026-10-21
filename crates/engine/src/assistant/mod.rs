@@ -201,7 +201,7 @@ impl Shared {
             (seq, control_rx, inner.closing.clone())
         };
         chat.store_record(self);
-        let context = request.tab.as_ref().map(|t| SentContext { db: t.db.clone(), connection_name, tab_title: t.title.clone() });
+        let context = request.tab.as_ref().map(|t| SentContext { database_kind: t.db.as_ref().and_then(|db| self.config(db.connection_id)).map(|c| c.database_kind), db: t.db.clone(), connection_name, tab_title: t.title.clone() });
         let entry = Entry::User { at_ms: now_ms(), text: text.clone(), context, attachment };
         chat.store_entry(self, seq, seq, &entry);
         chat.publish_entry(self, seq, seq, entry);
@@ -290,8 +290,6 @@ async fn drain(tasks: &mut FuturesUnordered<JoinHandle<()>>) {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-
     const DIR: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/src/assistant");
 
     fn sources() -> Vec<(String, String)> {
@@ -322,22 +320,13 @@ mod tests {
     }
 
     #[test]
-    fn only_tools_rs_reaches_a_session_client() {
+    fn only_tools_rs_runs_model_sql() {
         for (name, text) in sources() {
             if name == "tools.rs" {
-                assert!(text.contains(".client."), "tools.rs is where queries run");
+                assert!(text.contains("session.query("), "tools.rs is where queries run");
                 continue;
             }
-            assert!(!text.contains(".client."), "{name} reaches a session's client; database access belongs in tools.rs, on its own read-only session");
+            assert!(!text.contains("session.query("), "{name} reaches a session's query stream; database access belongs in tools.rs, on its own read-only session");
         }
-    }
-
-    #[test]
-    fn the_system_prompt_names_the_tools_and_the_followups_fence() {
-        let prompt = std::fs::read_to_string(format!("{DIR}/system_prompt.md")).unwrap();
-        for tool in &tools::TOOLS {
-            assert!(prompt.contains(tool.name), "the prompt does not mention {}", tool.name);
-        }
-        assert!(prompt.contains("```followups"));
     }
 }

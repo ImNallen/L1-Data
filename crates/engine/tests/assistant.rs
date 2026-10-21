@@ -1184,3 +1184,24 @@ mod pg {
         assert!(matches!(user, Entry::User { context: Some(SentContext { connection_name: Some(name), tab_title, .. }), .. } if name == "dev" && tab_title == "orders.sql"), "{user:?}");
     }
 }
+
+#[tokio::test]
+async fn sql_server_model_queries_are_refused_without_an_approval_even_without_a_catalog() {
+    for permission in [Permission::AskFirst, Permission::Auto] {
+        let mut h = Harness::open().await;
+        h.use_fake_with("query", "--fake-sql 'SELECT TOP (1) [id] FROM [dbo].[orders]'");
+        let config = h.engine.save_connection(engine::draft_from_url("mssql://sa@127.0.0.1:1/shop?sslmode=require", "offline SQL Server").unwrap()).await.unwrap();
+        let chat = h.chat(permission);
+        let tab = TabContext { tab_id: TabId(uuid::Uuid::new_v4()), title: "orders.sql".into(), db: Some(DatabaseRef { connection_id: config.id, database: "shop".into() }), text: "DECLARE @x int=1; SELECT @x".into(), target: RunTarget::All, attach: None };
+        h.engine.assistant_send(chat, SendRequest { text: "Count orders".into(), tab: Some(tab) }).await.unwrap();
+        assert_eq!(h.wait_end(chat).await.0, TurnOutcome::Completed);
+        let entries = h.entries(chat).await;
+        assert!(entries.iter().any(|e| matches!(e, Entry::User { context: Some(SentContext { database_kind: Some(DatabaseKind::SqlServer), .. }), .. })));
+        assert!(entries.iter().any(|e| matches!(e, Entry::Tool { tool: ToolUse::RunQuery { .. }, status: ToolStatus::Failed { message }, .. } if message.contains("SQL Server model queries are disabled"))), "{entries:?}");
+        assert!(!h.stdin_lines().iter().any(|l| l.contains("\"behavior\":\"allow\"")));
+        assert!(h.stdin_lines().iter().any(|l| l.contains("SQL Server / T-SQL")));
+        let protocol = h.stdin_lines().join("\n");
+        assert!(protocol.contains("Microsoft SQL Server") && protocol.contains("TOP or OFFSET/FETCH"), "{protocol}");
+        assert!(!protocol.contains("Prefer aggregates and LIMIT"));
+    }
+}

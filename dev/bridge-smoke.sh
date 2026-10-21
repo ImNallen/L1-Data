@@ -42,6 +42,7 @@ json.dump({
     "draft": {
         "id": None,
         "name": "smoke",
+        "databaseKind": "Postgres",
         "host": u.hostname,
         "port": u.port or 5432,
         "database": database,
@@ -113,7 +114,18 @@ PY
   fi
   sleep 1
 done
-invoke result_page "{\"resultRef\":{\"tabId\":\"$TAB\",\"runId\":$RUN_ID,\"index\":1},\"start\":0,\"len\":10}" | ok
+RESULT_REF=$(python3 - "$SSE_LOG" "$TAB" "$RUN_ID" <<'PY'
+import json, sys
+frames = [json.loads(l[5:]) for l in open(sys.argv[1]) if l.startswith("data:")]
+finished = [f for f in frames if f.get("kind") == "ConsoleChanged" and f.get("tabId") == sys.argv[2]
+            and f.get("run", {}).get("kind") == "Finished" and f["run"]["runId"] == int(sys.argv[3])]
+assert finished, "no finished run"
+rows = [o["result"] for s in finished[-1]["run"]["statements"] for o in s["outputs"] if o["kind"] == "Rows"]
+assert len(rows) == 1, rows
+print(json.dumps(rows[0]["ref"]))
+PY
+)
+invoke result_page "{\"resultRef\":$RESULT_REF,\"start\":0,\"len\":10}" | ok
 kill $SSE_PID; wait $SSE_PID 2>/dev/null || true
 
 python3 - "$SSE_LOG" "$TAB" "$RUN_ID" "$QUERY" "$DB" <<'EOF'
@@ -124,8 +136,9 @@ print("SSE kinds:", kinds)
 finished = [f for f in frames if f["kind"] == "ConsoleChanged" and f["tabId"] == sys.argv[2]
             and f["run"]["kind"] == "Finished" and f["run"]["runId"] == int(sys.argv[3])]
 assert finished, "no Finished ConsoleChanged on SSE"
-st = finished[-1]["run"]["statements"][1]["status"]
-assert st["kind"] == "Rows" and st["result"]["rowCount"] == 6, st
+statement = finished[-1]["run"]["statements"][1]
+st = next(o for o in statement["outputs"] if o["kind"] == "Rows")
+assert statement["status"]["kind"] == "Finished" and st["state"] == "Complete" and st["result"]["rowCount"] == 6, statement
 print("SSE ConsoleChanged Finished: rows=%d outcome=%s" % (st["result"]["rowCount"], finished[-1]["run"]["outcome"]))
 def line(b):
     fields = {"Statement": ("statement", "text"), "Notice": ("severity", "message"), "Command": ("statement", "tag"), "Rows": ("statement", "rows")}

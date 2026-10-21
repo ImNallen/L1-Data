@@ -1,17 +1,15 @@
-use std::pin::pin;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use futures_util::StreamExt;
 use serde_json::{Value, json};
-use tokio_postgres::SimpleQueryMessage;
 
 use super::reply;
-use crate::connection::{ConnectParams, connect_error_text, error_text};
-use crate::model::{ApprovalReason, Catalog, ConnStatus, DatabaseRef, KeyKind, Permission, RelKind, Relation, SchemaInfo, ToolResult, ToolStatus, ToolUse};
+use crate::connection::{ConnectParams, connect_error_text};
+use crate::model::{ApprovalReason, Catalog, ConnStatus, DatabaseKind, DatabaseRef, KeyKind, Permission, RelKind, Relation, SchemaInfo, ToolResult, ToolStatus, ToolUse};
 use crate::provider::{ModelResult, ToolSpec};
-use crate::session::{CancelHandle, Session};
-use crate::{Shared, detail, sql};
+use crate::session::{CancelHandle, Session, QueryEvent};
+use crate::{Shared, sql};
 
 pub(crate) static TOOLS: [ToolSpec; 3] = [
     ToolSpec {
@@ -76,7 +74,12 @@ pub(crate) enum Ask {
     User(ApprovalReason),
 }
 
-pub(crate) fn policy(call: &ParsedCall, permission: Permission) -> Ask {
+pub(crate) const MSSQL_REFUSAL: &str = "SQL Server model queries are disabled because server-enforced read-only transactions are unavailable. Use the schema tools and suggest T-SQL for the user to run.";
+
+pub(crate) fn policy(call: &ParsedCall, permission: Permission, database_kind: Option<DatabaseKind>) -> Ask {
+    if matches!(call,ParsedCall::RunQuery { .. }) && database_kind == Some(DatabaseKind::SqlServer) {
+        return Ask::Refuse(MSSQL_REFUSAL.into());
+    }
     match call {
         ParsedCall::DescribeTables { .. } | ParsedCall::SearchCatalog { .. } => Ask::Allow,
         ParsedCall::Invalid { message, .. } => Ask::Refuse(message.clone()),
@@ -91,12 +94,12 @@ pub(crate) fn policy(call: &ParsedCall, permission: Permission) -> Ask {
     }
 }
 
-pub(crate) fn describe(name: &str, input: &Value, catalog: Option<&Catalog>) -> ToolUse {
+pub(crate) fn describe(name: &str, input: &Value, catalog: Option<&Catalog>, kind: DatabaseKind) -> ToolUse {
     match parse_call(name, input) {
         ParsedCall::DescribeTables { tables } => ToolUse::DescribeTables { tables },
         ParsedCall::SearchCatalog { query } => ToolUse::SearchCatalog { query },
         ParsedCall::RunQuery { sql, purpose } => {
-            let relations = reply::uses(&sql, catalog);
+            let relations = reply::uses(&sql, catalog, kind);
             ToolUse::RunQuery { sql, purpose, relations }
         }
         ParsedCall::Invalid { name, .. } => ToolUse::Other { name },
@@ -129,6 +132,7 @@ pub(crate) async fn execute(shared: &Arc<Shared>, db: Option<&DatabaseRef>, call
             Err(message) => Executed::failed(message),
         },
         ParsedCall::RunQuery { sql, .. } => {
+            if instance.config.database_kind != DatabaseKind::Postgres { return Executed::failed(MSSQL_REFUSAL); }
             let params = match shared.params(&instance.config, &db.database) {
                 Ok(params) => params,
                 Err(e) => return Executed::failed(connect_error_text(&e)),
@@ -203,7 +207,7 @@ async fn describe_tables(shared: &Arc<Shared>, db: &DatabaseRef, tables: &[Strin
             missing.push(name.clone());
             continue;
         };
-        let detail = detail::load(&session.client, db.clone(), relation.oid, catalog.version).await.map_err(|e| error_text(&e))?;
+        let detail = session.detail(db.clone(), relation.oid, catalog.version).await.map_err(|e| e.message)?;
         let qualified = format!("{schema}.{}", relation.name);
         let rows = relation.row_estimate.map(|n| format!(", ~{n} rows")).unwrap_or_default();
         text.push_str(&format!("{qualified} ({}{rows})\n", kind_word(relation.kind)));
@@ -285,24 +289,23 @@ pub(crate) struct RowsOut {
 /// output. Dropping the session discards the transaction and ends a result the engine stopped
 /// reading; a cancel request goes out when the future is dropped before the query finished.
 pub(crate) async fn run_query(shared: &Shared, params: &ConnectParams, sql: &str, statement_timeout: Duration) -> Result<RowsOut, String> {
-    let session = Session::open_assistant(params, &shared.timezone).await.map_err(|e| connect_error_text(&e))?;
+    let mut session = Session::open_assistant(params, &shared.timezone).await.map_err(|e| connect_error_text(&e))?;
     let mut guard = CancelOnDrop { shared, handle: Some(session.cancel_handle()) };
     session
-        .client
-        .batch_execute(&format!("BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY; SET LOCAL statement_timeout = {}; SET LOCAL lock_timeout = {LOCK_TIMEOUT_MS}", statement_timeout.as_millis()))
+        .batch(&format!("BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY; SET LOCAL statement_timeout = {}; SET LOCAL lock_timeout = {LOCK_TIMEOUT_MS}", statement_timeout.as_millis()))
         .await
         .map_err(|e| query_error_text(&e))?;
-    let prepared = session.client.prepare(sql).await.map_err(|e| query_error_text(&e))?;
-    let columns: Vec<String> = prepared.columns().iter().map(|c| c.name().to_owned()).collect();
-    drop(prepared);
+    let mut columns = Vec::new();
     let started = Instant::now();
-    let mut stream = pin!(session.client.simple_query_raw(sql).await.map_err(|e| query_error_text(&e))?);
+    let mut stream = session.query(sql);
     let mut rows: Vec<Vec<Option<String>>> = Vec::new();
     let mut bytes = 0;
     let mut more = false;
     while let Some(message) = stream.next().await {
-        let SimpleQueryMessage::Row(row) = message.map_err(|e| query_error_text(&e))? else { continue };
-        let cells: Vec<Option<String>> = (0..row.len()).map(|i| row.get(i).map(|c| super::context::cut(c, TOOL_CELL_CHARS))).collect();
+        let event = message.map_err(|e| query_error_text(&e))?;
+        if let QueryEvent::Columns(cols) = event { columns = cols.into_iter().map(|c| c.name).collect(); continue; }
+        let QueryEvent::Row(row) = event else { continue };
+        let cells: Vec<Option<String>> = row.iter().map(|c| c.as_ref().map(|c| super::context::cut(c, TOOL_CELL_CHARS))).collect();
         let size = row_bytes(&cells);
         if rows.len() == TOOL_ROWS || (!rows.is_empty() && bytes + size > TOOL_BYTES) {
             more = true;
@@ -331,18 +334,11 @@ impl Drop for CancelOnDrop<'_> {
     }
 }
 
-fn query_error_text(e: &tokio_postgres::Error) -> String {
-    let Some(db) = e.as_db_error() else { return error_text(e) };
-    let mut text = db.message().to_owned();
-    if let Some(detail) = db.detail() {
-        text.push_str(&format!("\nDETAIL: {detail}"));
-    }
-    if let Some(hint) = db.hint() {
-        text.push_str(&format!("\nHINT: {hint}"));
-    }
-    if let Some(tokio_postgres::error::ErrorPosition::Original(n)) = db.position() {
-        text.push_str(&format!("\nat character {n}"));
-    }
+fn query_error_text(e: &crate::model::QueryError) -> String {
+    let mut text = e.message.clone();
+    if let Some(detail) = &e.detail { text.push_str(&format!("\nDETAIL: {detail}")); }
+    if let Some(hint) = &e.hint { text.push_str(&format!("\nHINT: {hint}")); }
+    if let Some(position) = e.position { text.push_str(&format!("\nat character {}", position.0 + 1)); }
     text
 }
 
@@ -392,6 +388,38 @@ fn cut_bytes(text: &str, max: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    fn policy(call: &ParsedCall, permission: Permission) -> Ask { super::policy(call,permission,Some(DatabaseKind::Postgres)) }
+    #[test]
+    fn sql_server_queries_are_refused_before_approval_in_every_permission_mode() {
+        let call = parse_call("run_query", &json!({"sql":"SELECT 1"}));
+        for permission in [Permission::Auto,Permission::AskFirst] {
+            assert_eq!(super::policy(&call,permission,Some(DatabaseKind::SqlServer)),Ask::Refuse(MSSQL_REFUSAL.into()));
+        }
+        assert_eq!(super::policy(&parse_call("search_catalog",&json!({"query":"orders"})),Permission::Auto,Some(DatabaseKind::SqlServer)),Ask::Allow);
+    }
+
+    #[cfg(feature = "mssql-tests")]
+    #[tokio::test]
+    async fn sql_server_execution_boundary_refuses_queries_but_schema_tools_work() {
+        let dir = tempfile::tempdir().unwrap();
+        let engine = crate::Engine::open(crate::EngineConfig { data_dir: dir.path().into(), keys: Arc::new(crate::MemoryKeyStore::default()), agent_path: crate::AgentPath::Fixed("".into()) }).await.unwrap();
+        let mut draft = crate::draft_from_url("mssql://sa@localhost:1434/shop?sslmode=require", "tools test").unwrap();
+        draft.host = std::env::var("L1_DATA_TEST_MSSQL_HOST").unwrap_or(draft.host);
+        draft.port = std::env::var("L1_DATA_TEST_MSSQL_PORT").ok().and_then(|p| p.parse().ok()).unwrap_or(draft.port);
+        draft.password = crate::model::PasswordInput::Set(std::env::var("L1_DATA_TEST_MSSQL_PASSWORD").unwrap_or_else(|_| "L1Data_dev_Str0ng".into()));
+        let config = engine.save_connection(draft).await.unwrap();
+        engine.connect(config.id).await.unwrap();
+        let db = DatabaseRef { connection_id: config.id, database: "shop".into() };
+        let refused = execute(&engine.shared, Some(&db), parse_call("run_query", &json!({"sql":"SELECT 1"}))).await;
+        assert_eq!(refused.for_model.text, MSSQL_REFUSAL);
+        assert!(refused.for_model.is_error);
+        for (name, input) in [("search_catalog",json!({"query":"orders"})),("describe_tables",json!({"tables":["dbo.orders"]}))] {
+            let result = execute(&engine.shared, Some(&db), parse_call(name, &input)).await;
+            assert!(!result.for_model.is_error, "{}", result.for_model.text);
+            assert!(matches!(result.status, ToolStatus::Done { .. }));
+            assert!(result.for_model.text.contains("orders"));
+        }
+    }
 
     #[test]
     fn calls_parse_once_and_bad_input_is_named() {
@@ -422,9 +450,9 @@ mod tests {
 
     #[test]
     fn describe_builds_the_card_with_uses() {
-        let tool = describe("run_query", &json!({ "sql": "select * from orders o join customers c on c.id = o.customer_id", "purpose": "join" }), None);
+        let tool = describe("run_query", &json!({ "sql": "select * from orders o join customers c on c.id = o.customer_id", "purpose": "join" }), None, DatabaseKind::Postgres);
         assert_eq!(tool, ToolUse::RunQuery { sql: "select * from orders o join customers c on c.id = o.customer_id".into(), purpose: "join".into(), relations: vec!["orders".into(), "customers".into()] });
-        assert_eq!(describe("Bash", &json!({}), None), ToolUse::Other { name: "Bash".into() });
+        assert_eq!(describe("Bash", &json!({}), None, DatabaseKind::Postgres), ToolUse::Other { name: "Bash".into() });
     }
 
     #[test]
@@ -546,13 +574,22 @@ mod pg_tests {
         assert!(bytes_of(&heavy) <= TOOL_BYTES && heavy.more, "{} bytes", bytes_of(&heavy));
     }
 
+    async fn test_rows(session: &mut Session, sql: &str) -> Vec<Vec<String>> {
+        let mut stream = session.query(sql);
+        let mut rows = Vec::new();
+        while let Some(event) = stream.next().await {
+            if let QueryEvent::Row(row) = event.unwrap() { rows.push(row.into_iter().map(Option::unwrap).collect()); }
+        }
+        rows
+    }
+
     #[tokio::test]
     async fn every_vetted_name_is_a_pg_catalog_function_with_no_volatile_overload_and_the_sizes_are_volatile() {
         let (engine, _dir) = engine().await;
-        let session = Session::open_assistant(&params(), &engine.shared.timezone).await.unwrap();
+        let mut session = Session::open_assistant(&params(), &engine.shared.timezone).await.unwrap();
         let names: Vec<&str> = sql::VETTED.iter().chain(sql::VETTED_SIZES).copied().collect();
-        let rows = session.client.query("select proname, bool_and(provolatile <> 'v') from pg_proc where pronamespace = 'pg_catalog'::regnamespace and proname = any($1) group by proname", &[&names]).await.unwrap();
-        let found: std::collections::BTreeMap<String, bool> = rows.iter().map(|r| (r.get(0), r.get(1))).collect();
+        let rows = test_rows(&mut session, "select proname, bool_and(provolatile <> 'v') from pg_proc where pronamespace = 'pg_catalog'::regnamespace group by proname").await;
+        let found: std::collections::BTreeMap<String, bool> = rows.iter().map(|r| (r[0].clone(), r[1] == "t")).collect();
         let missing: Vec<&str> = names.iter().copied().filter(|n| !found.contains_key(*n)).collect();
         assert_eq!(missing, Vec::<&str>::new(), "not in pg_catalog");
         let volatile: Vec<&str> = sql::VETTED.iter().copied().filter(|n| !found[*n]).collect();
@@ -564,10 +601,10 @@ mod pg_tests {
     #[tokio::test]
     async fn every_vetted_operator_is_a_pg_catalog_operator_with_no_volatile_implementation() {
         let (engine, _dir) = engine().await;
-        let session = Session::open_assistant(&params(), &engine.shared.timezone).await.unwrap();
+        let mut session = Session::open_assistant(&params(), &engine.shared.timezone).await.unwrap();
         let symbols: Vec<&str> = sql::VETTED_OPERATORS.to_vec();
-        let rows = session.client.query("select o.oprname, bool_and(p.provolatile <> 'v') from pg_operator o join pg_proc p on p.oid = o.oprcode where o.oprnamespace = 'pg_catalog'::regnamespace and o.oprname = any($1) group by o.oprname", &[&symbols]).await.unwrap();
-        let found: std::collections::BTreeMap<String, bool> = rows.iter().map(|r| (r.get(0), r.get(1))).collect();
+        let rows = test_rows(&mut session, "select o.oprname, bool_and(p.provolatile <> 'v') from pg_operator o join pg_proc p on p.oid = o.oprcode where o.oprnamespace = 'pg_catalog'::regnamespace group by o.oprname").await;
+        let found: std::collections::BTreeMap<String, bool> = rows.iter().map(|r| (r[0].clone(), r[1] == "t")).collect();
         let missing: Vec<&str> = symbols.iter().copied().filter(|s| !found.contains_key(*s)).collect();
         assert_eq!(missing, Vec::<&str>::new(), "not in pg_catalog");
         let volatile: Vec<&str> = symbols.iter().copied().filter(|s| !found[*s]).collect();
@@ -577,9 +614,9 @@ mod pg_tests {
     #[tokio::test]
     async fn the_keyword_lists_match_the_server() {
         let (engine, _dir) = engine().await;
-        let session = Session::open_assistant(&params(), &engine.shared.timezone).await.unwrap();
-        let rows = session.client.query("select word, catcode::text from pg_get_keywords() order by word", &[]).await.unwrap();
-        let of = |codes: &[&str]| rows.iter().filter(|r| codes.contains(&r.get::<_, String>(1).as_str())).map(|r| r.get::<_, String>(0)).collect::<Vec<_>>();
+        let mut session = Session::open_assistant(&params(), &engine.shared.timezone).await.unwrap();
+        let rows = test_rows(&mut session, "select word, catcode::text from pg_get_keywords() order by word").await;
+        let of = |codes: &[&str]| rows.iter().filter(|r| codes.contains(&r[1].as_str())).map(|r| r[0].clone()).collect::<Vec<_>>();
         assert_eq!(of(&["R", "C"]), sql::NEVER_A_FUNCTION, "rerun dev/pg-keywords.sh");
         assert_eq!(of(&["T", "U"]), sql::OTHER_KEYWORDS, "rerun dev/pg-keywords.sh");
         assert_eq!(of(&["R"]), sql::RESERVED, "rerun dev/pg-keywords.sh");

@@ -4,7 +4,7 @@ use super::context::cut;
 use crate::model::{Catalog, Entry, ReplyBlock, ToolResult, ToolStatus, ToolUse, TurnOutcome};
 use crate::sql;
 
-const SQL_INFOS: [&str; 3] = ["sql", "postgresql", "pgsql"];
+const SQL_INFOS: [&str; 6] = ["sql", "postgresql", "pgsql", "tsql", "mssql", "sqlserver"];
 const FOLLOWUPS_INFO: &str = "followups";
 pub(crate) const MAX_FOLLOWUPS: usize = 3;
 pub(crate) const MAX_FOLLOWUP_CHARS: usize = 80;
@@ -88,8 +88,8 @@ fn fence_close(line: &str, ticks: usize) -> bool {
     line.len() - rest.len() <= 3 && !body.is_empty() && body.chars().all(|c| c == '`') && body.len() >= ticks
 }
 
-pub(crate) fn uses(sql: &str, catalog: Option<&Catalog>) -> Vec<String> {
-    let names = sql::relation_names(sql);
+pub(crate) fn uses(sql: &str, catalog: Option<&Catalog>, kind: crate::model::DatabaseKind) -> Vec<String> {
+    let names = match kind { crate::model::DatabaseKind::Postgres=>sql::relation_names(sql),crate::model::DatabaseKind::SqlServer=>sql::tsql::relation_names(sql) };
     let Some(catalog) = catalog else {
         return names.into_iter().map(|n| display(n.schema.as_deref(), &n.name, None)).collect();
     };
@@ -208,6 +208,7 @@ fn status_line(status: &ToolStatus) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    fn uses(sql: &str, catalog: Option<&Catalog>) -> Vec<String> { super::uses(sql,catalog,crate::model::DatabaseKind::Postgres) }
     use crate::model::{ColumnInfo, ConnectionId, DatabaseRef, RelKind, Relation, SchemaInfo, ToolCallId, TypeCategory};
 
     const REPLY: &str = "This compares paid revenue:\n\n```sql\nSELECT c.region\nFROM orders o\n```\n\n`FILTER` keeps both periods in one scan.\n\n```python\nprint(1)\n```\n\n```followups\nShow growth as a percentage\nOnly EU regions\n```\n";
@@ -267,9 +268,9 @@ mod tests {
     }
 
     fn catalog() -> Catalog {
-        let relation = |name: &str| Relation { oid: 1, name: name.into(), kind: RelKind::Table, row_estimate: Some(3), columns: vec![ColumnInfo { attnum: 1, name: "id".into(), type_display: "bigint".into(), category: TypeCategory::Integer, not_null: true, pk: true, fk: false }] };
+        let relation = |name: &str| Relation { qualified_name: String::new(), oid: 1, name: name.into(), kind: RelKind::Table, row_estimate: Some(3), columns: vec![ColumnInfo { writable: true, attnum: 1, name: "id".into(), type_display: "bigint".into(), category: TypeCategory::Integer, not_null: true, pk: true, fk: false }] };
         let schema = |name: &str, system: bool, relations: Vec<Relation>| SchemaInfo { name: name.into(), system, table_count: relations.len() as u32, relations, functions: Vec::new() };
-        Catalog {
+        Catalog { database_kind: crate::model::DatabaseKind::Postgres,
             db: DatabaseRef { connection_id: ConnectionId(uuid::Uuid::nil()), database: "shop".into() },
             version: 1,
             default_schema: Some("public".into()),

@@ -2,11 +2,19 @@ import type { ConnectionState, ConsoleState, OutputEntry, ResultMeta, RunState, 
 import { formatElapsed, groupDigits, pluralRows } from "../features/results/format";
 
 export function hasUncommittedWork(console: ConsoleState | undefined): boolean {
-  return console !== undefined && console.config.mode === "Manual" && console.txn !== "Idle";
+  return console !== undefined && console.txn !== "Idle";
 }
 
 export function isRunning(console: ConsoleState | undefined): boolean {
   return console?.run.kind === "Running";
+}
+
+export function isBusy(console: ConsoleState | undefined): boolean {
+  return console?.work != null || isRunning(console);
+}
+
+export function canCancel(console: ConsoleState | undefined): boolean {
+  return console?.work === "Count" || isRunning(console);
 }
 
 export type Tone = "live" | "pending" | "off" | "error";
@@ -39,7 +47,9 @@ export function runStatements(run: RunState): StatementRun[] {
 export function rowResults(run: RunState): RowResult[] {
   const out: RowResult[] = [];
   for (const s of runStatements(run)) {
-    if (s.status.kind === "Rows") out.push({ index: s.index, meta: s.status.result, done: s.status.done });
+    for (const output of s.outputs) {
+      if (output.kind === "Rows") out.push({ index: output.result.ref.index, meta: output.result, done: output.state !== "Streaming" });
+    }
   }
   return out;
 }
@@ -94,8 +104,8 @@ export function runSummary(run: RunState, picked: ResultPick | undefined, nowMs:
       if (run.outcome === "Cancelled") return { tone: "muted", text: `Cancelled · ${formatElapsed(run.elapsedMs)}` };
       const shown = shownResult(run, picked);
       if (shown) return { tone: "ok", text: `${rowsText(shown.meta)} · ${formatElapsed(shown.meta.elapsedMs)}` };
-      const last = run.statements.at(-1);
-      if (last?.status.kind === "Command") return { tone: "ok", text: `${last.status.tag} · ${formatElapsed(last.status.elapsedMs)}` };
+      const last = run.statements.flatMap((s) => s.outputs).at(-1);
+      if (last?.kind === "Command") return { tone: "ok", text: `${last.tag} · ${formatElapsed(last.elapsedMs)}` };
       return { tone: "ok", text: formatElapsed(run.elapsedMs) };
     }
     default: {

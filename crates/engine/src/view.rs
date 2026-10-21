@@ -7,7 +7,7 @@ use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
 
-use crate::connection::PgDatabase;
+use crate::connection::DatabaseInfo;
 use crate::model::{Catalog, DbAccess, Preset, ViewEdit};
 
 /// Persisted per connection in `connection_views`. Never crosses IPC: the UI sees the resolved
@@ -96,7 +96,7 @@ impl<'de> Deserialize<'de> for DatabaseView {
 /// served catalog of every slot that has one.
 pub struct Known<'a> {
     pub home: &'a str,
-    pub databases: &'a [PgDatabase],
+    pub databases: &'a [DatabaseInfo],
     pub catalogs: &'a HashMap<String, Arc<Catalog>>,
 }
 
@@ -188,15 +188,18 @@ pub fn resolve_schemas(view: &DatabaseView, catalog: &Catalog) -> Vec<String> {
 
 /// Postgres reserves the `pg_` prefix for its own schemas. `catalog.rs` applies the same rule in
 /// SQL; this copy lets `system_schemas_to_load` change only when a system schema's visibility does.
-pub fn is_system_schema(name: &str) -> bool {
-    name == "information_schema" || name.starts_with("pg_")
+pub fn is_system_schema(name: &str, kind: crate::model::DatabaseKind) -> bool {
+    match kind {
+        crate::model::DatabaseKind::Postgres => name == "information_schema" || name.starts_with("pg_"),
+        crate::model::DatabaseKind::SqlServer => matches!(name,"sys"|"INFORMATION_SCHEMA"|"db_owner"|"db_accessadmin"|"db_securityadmin"|"db_ddladmin"|"db_backupoperator"|"db_datareader"|"db_datawriter"|"db_denydatareader"|"db_denydatawriter"),
+    }
 }
 
 /// The system schemas whose relations the catalog must load: the ones in `Only`, while
 /// `show_system_schemas` is on. Functions never load for them.
-pub fn system_schemas_to_load(view: &DatabaseView) -> Vec<String> {
+pub fn system_schemas_to_load(view: &DatabaseView, kind: crate::model::DatabaseKind) -> Vec<String> {
     match &view.schemas {
-        Selection::Only { names } if view.show_system_schemas => names.iter().filter(|n| is_system_schema(n)).cloned().collect(),
+        Selection::Only { names } if view.show_system_schemas => names.iter().filter(|n| is_system_schema(n,kind)).cloned().collect(),
         _ => Vec::new(),
     }
 }
@@ -214,12 +217,12 @@ mod tests {
     use super::*;
     use crate::model::{ConnectionId, DatabaseRef, SchemaInfo};
 
-    fn db(name: &str, system: bool, access: DbAccess) -> PgDatabase {
-        PgDatabase { name: name.into(), system, access }
+    fn db(name: &str, system: bool, access: DbAccess) -> DatabaseInfo {
+        DatabaseInfo { name: name.into(), system, access }
     }
 
     fn catalog(database: &str, default: Option<&str>, schemas: &[(&str, bool)]) -> Arc<Catalog> {
-        Arc::new(Catalog {
+        Arc::new(Catalog { database_kind: crate::model::DatabaseKind::Postgres,
             db: DatabaseRef { connection_id: ConnectionId(uuid::Uuid::nil()), database: database.into() },
             version: 1,
             default_schema: default.map(str::to_owned),
@@ -231,7 +234,7 @@ mod tests {
     }
 
     struct Server {
-        databases: Vec<PgDatabase>,
+        databases: Vec<DatabaseInfo>,
         catalogs: HashMap<String, Arc<Catalog>>,
     }
 
@@ -370,11 +373,11 @@ mod tests {
         let known = server.known();
         let checked = ConnectionView::initial().apply(&ViewEdit::Schema { database: "shop".into(), name: "pg_catalog".into(), shown: true }, &known);
         assert_eq!(shown_schemas(&checked, &server, "shop"), ["lab", "public"]);
-        assert_eq!(system_schemas_to_load(&checked.database("shop", "shop")), Vec::<String>::new());
+        assert_eq!(system_schemas_to_load(&checked.database("shop", "shop"),crate::model::DatabaseKind::Postgres), Vec::<String>::new());
 
         let on = checked.apply(&ViewEdit::ShowSystemSchemas { database: "shop".into(), show: true }, &known);
         assert_eq!(shown_schemas(&on, &server, "shop"), ["lab", "pg_catalog", "public"]);
-        assert_eq!(system_schemas_to_load(&on.database("shop", "shop")), ["pg_catalog"]);
+        assert_eq!(system_schemas_to_load(&on.database("shop", "shop"),crate::model::DatabaseKind::Postgres), ["pg_catalog"]);
 
         let off = on.apply(&ViewEdit::ShowSystemSchemas { database: "shop".into(), show: false }, &known);
         assert_eq!(shown_schemas(&off, &server, "shop"), ["lab", "public"]);

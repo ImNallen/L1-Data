@@ -49,3 +49,13 @@ describe("useCatalog.prune", () => {
     expect(useCatalog.getState().views).toBe(unchanged);
   });
 });
+
+it("uses the engine's qualified completion text verbatim for bracketed names", () => {
+  const catalog = shopCatalog("ms", 1);
+  const relation = catalog.schemas[1]!.relations[0]!;
+  relation.name = "line items";
+  relation.qualifiedName = "[Sales].[line items]";
+  catalog.databaseKind = "SqlServer";
+  const completion = buildCatalogView(catalog).qualifiedTables.find((c) => c.label === "public.line items");
+  expect(completion?.apply).toBe("[Sales].[line items]");
+});

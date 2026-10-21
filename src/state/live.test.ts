@@ -12,6 +12,7 @@ function consoleAt(rev: number, txn: ConsoleState["txn"] = "Idle"): ConsoleState
     config: { connectionId: CONN, database: "shop", schema: "public", mode: "Manual" },
     session: { kind: "None" },
     txn,
+    txnDepth: null, work: null,
     run: { kind: "Idle" },
   };
 }
@@ -61,7 +62,7 @@ describe("live.apply", () => {
       kind: "ConnectionChanged",
       id: CONN,
       rev: 9,
-      status: { kind: "Connected", server: { version: "16.4", versionNum: 160004, encoding: "UTF8" }, instance: { home: "shop", showSystemDatabases: false, databases: [] } },
+      status: { kind: "Connected", server: { version: "16.4", versionNum: 160004, encoding: "UTF8" }, instance: { configuredDatabase: "shop", home: "shop", showSystemDatabases: false, databases: [] } },
     });
     const boot: BootSnapshot = {
       connections: [],
@@ -163,6 +164,7 @@ describe("live.apply", () => {
           kind: "Connected",
           server,
           instance: {
+            configuredDatabase: "shop",
             home: "shop",
             showSystemDatabases: false,
             databases: [
@@ -175,7 +177,7 @@ describe("live.apply", () => {
           },
         },
       },
-      other: { id: "other", rev: 1, status: { kind: "Connected", server, instance: { home: "x", showSystemDatabases: false, databases: [db("x", { kind: "Ready", version: 2 })] } } },
+      other: { id: "other", rev: 1, status: { kind: "Connected", server, instance: { configuredDatabase: "x", home: "x", showSystemDatabases: false, databases: [db("x", { kind: "Ready", version: 2 })] } } },
       down: { id: "down", rev: 9, status: { kind: "Lost", reason: "gone" } },
     };
     expect([...wantedCatalogs(connections).entries()]).toEqual([
@@ -196,7 +198,7 @@ describe("live.apply", () => {
   });
 
   it("prepends appended history entries", () => {
-    const base = { atMs: 0, connectionId: CONN, connectionName: "p", database: "shop", sql: "select 1", elapsedMs: 1, outcome: { kind: "Cancelled" as const } };
+    const base = { databaseKind: "Postgres" as const, atMs: 0, connectionId: CONN, connectionName: "p", database: "shop", sql: "select 1", elapsedMs: 1, outcome: { kind: "Cancelled" as const } };
     let s = applyEvent(emptyLive, { kind: "HistoryAppended", id: 1, ...base });
     s = applyEvent(s, { kind: "HistoryAppended", id: 2, ...base });
     expect(s.historyTail.map((h) => h.id)).toEqual([2, 1]);

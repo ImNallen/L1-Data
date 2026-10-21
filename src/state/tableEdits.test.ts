@@ -1,7 +1,7 @@
 import { expect, it } from "vitest";
 import { addRow, markDeleted, NO_EDITS, pendingCount, removeNewRows, resetNewCell, rowKey, setCell, setNewCell, toChanges, toggleDeletes, useTableEdits, type RowId } from "./tableEdits";
 
-const row = (...values: (string | null)[]): RowId => ({ key: rowKey(values), values });
+const row = (value: string | null): RowId => [{ column: "id", value }];
 
 it("turns pending edits into engine changes keyed by primary key", () => {
   let e = addRow(NO_EDITS, 7);
@@ -10,7 +10,7 @@ it("turns pending edits into engine changes keyed by primary key", () => {
   e = setCell(e, row("2"), "name", "b2", "b");
   e = toggleDeletes(e, [row("1")]);
 
-  const { changes, rowOf } = toChanges(e, "public", "customers", ["id"]);
+  const { changes, rowOf } = toChanges(e, "public", "customers");
   expect(changes).toEqual({
     schema: "public",
     table: "customers",
@@ -20,8 +20,8 @@ it("turns pending edits into engine changes keyed by primary key", () => {
   });
   expect(pendingCount(e)).toBe(3);
   expect(rowOf({ kind: "Insert", index: 0 })).toEqual({ insert: 7 });
-  expect(rowOf({ kind: "Update", index: 0 })).toEqual({ key: rowKey(["2"]) });
-  expect(rowOf({ kind: "Delete", index: 0 })).toEqual({ key: rowKey(["1"]) });
+  expect(rowOf({ kind: "Update", index: 0 })).toEqual({ key: rowKey(row("2")) });
+  expect(rowOf({ kind: "Delete", index: 0 })).toEqual({ key: rowKey(row("1")) });
 });
 
 it("drops an update set back to the stored value, and a new cell set back to its default", () => {
@@ -31,13 +31,13 @@ it("drops an update set back to the stored value, and a new cell set back to its
 
   e = setNewCell(addRow(NO_EDITS, 1), 1, "name", "x");
   e = resetNewCell(e, 1, "name");
-  expect(toChanges(e, "s", "t", ["id"]).changes.inserts).toEqual([[]]);
+  expect(toChanges(e, "s", "t").changes.inserts).toEqual([[]]);
 });
 
 it("deletes win over updates to the same row, and toggling twice restores it", () => {
   let e = setCell(NO_EDITS, row("2"), "name", "b2", "b");
   e = toggleDeletes(e, [row("2")]);
-  expect(toChanges(e, "s", "t", ["id"]).changes.updates).toEqual([]);
+  expect(toChanges(e, "s", "t").changes.updates).toEqual([]);
   expect(pendingCount(e)).toBe(1);
 
   e = toggleDeletes(e, [row("2")]);
@@ -47,13 +47,14 @@ it("deletes win over updates to the same row, and toggling twice restores it", (
 
 it("marks a mixed selection deleted before it unmarks anything", () => {
   const e = toggleDeletes(toggleDeletes(NO_EDITS, [row("1")]), [row("1"), row("2")]);
-  expect(Object.keys(e.deletes).sort()).toEqual([rowKey(["1"]), rowKey(["2"])]);
+  expect(Object.keys(e.deletes).sort()).toEqual([rowKey(row("1")), rowKey(row("2"))]);
 });
 
 it("keys composite primary keys in column order and removes new rows by id", () => {
-  const e = toggleDeletes(removeNewRows(addRow(addRow(NO_EDITS, 1), 2), [1]), [row("7", "A-1")]);
+  const key = [{ column: "order_id", value: "7" }, { column: "sku", value: "A-1" }];
+  const e = toggleDeletes(removeNewRows(addRow(addRow(NO_EDITS, 1), 2), [1]), [key]);
   expect(e.inserts.map((r) => r.id)).toEqual([2]);
-  expect(toChanges(e, "s", "t", ["order_id", "sku"]).changes.deletes).toEqual([
+  expect(toChanges(e, "s", "t").changes.deletes).toEqual([
     [
       { column: "order_id", value: "7" },
       { column: "sku", value: "A-1" },
@@ -78,8 +79,8 @@ it("holds a tab's edits still while its submit is in flight", () => {
 
 it("marks or unmarks rows for deletion the same way however often it runs", () => {
   const twice = markDeleted(markDeleted(NO_EDITS, [row("1"), row("2")], true), [row("1"), row("2")], true);
-  expect(Object.keys(twice.deletes).sort()).toEqual([rowKey(["1"]), rowKey(["2"])]);
-  expect(markDeleted(twice, [row("1")], false).deletes).toEqual({ [rowKey(["2"])]: ["2"] });
+  expect(Object.keys(twice.deletes).sort()).toEqual([rowKey(row("1")), rowKey(row("2"))]);
+  expect(markDeleted(twice, [row("1")], false).deletes).toEqual({ [rowKey(row("2"))]: row("2") });
 });
 
 it("tells the caller when an edit was refused during a submit", () => {
@@ -88,4 +89,37 @@ it("tells the caller when an edit was refused during a submit", () => {
   expect(store.edit("u", (e) => markDeleted(e, [row("1")], true))).toBe(false);
   store.endSubmit("u");
   expect(store.edit("u", (e) => markDeleted(e, [row("1")], true))).toBe(true);
+});
+
+it("keeps equal key values under different primary-key names separate", () => {
+  const alternate = [{ column: "alternate", value: "1" }];
+  const updated = setCell(NO_EDITS, row("1"), "note", "edited", "original");
+  const edits = markDeleted(updated, [alternate], true);
+  expect(pendingCount(edits)).toBe(2);
+  expect(toChanges(edits, "public", "t").changes).toEqual({
+    schema: "public", table: "t", inserts: [],
+    updates: [{ key: row("1"), set: [{ column: "note", value: "edited" }] }],
+    deletes: [alternate],
+  });
+});
+
+it.each(["update", "delete"])("captures an immutable named original key for a staged %s", (change) => {
+  const cell = { column: "id", value: "1" };
+  const selected = [cell];
+  const edits = change === "update" ? setCell(NO_EDITS, selected, "note", "edited", "original") : markDeleted(NO_EDITS, [selected], true);
+  cell.column = "alternate";
+  cell.value = "2";
+  const submitted = toChanges(edits, "public", "t").changes;
+  const keys = change === "update" ? submitted.updates.map((u) => u.key) : submitted.deletes;
+  expect(keys).toEqual([row("1")]);
+  keys[0]![0]!.column = "mutated request";
+  expect(toChanges(edits, "public", "t").changes).toMatchObject(change === "update" ? { updates: [{ key: row("1") }] } : { deletes: [row("1")] });
+});
+
+it("keeps the stored identity when the user edits a primary-key value", () => {
+  const renamed = setCell(NO_EDITS, row("1"), "id", "2", "1");
+  const edits = setCell(renamed, row("1"), "note", "edited", "original");
+  expect(toChanges(edits, "public", "t").changes.updates).toEqual([{
+    key: row("1"), set: [{ column: "id", value: "2" }, { column: "note", value: "edited" }],
+  }]);
 });

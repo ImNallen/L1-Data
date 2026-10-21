@@ -1,11 +1,11 @@
 import { create } from "zustand";
-import type { DocRange, RunTarget, TabId } from "../../ipc/bindings";
+import type { DocRange, ExecutionUnitKind, RunTarget, TabId } from "../../ipc/bindings";
 import { focusEditor, previewRanges } from "./editorStates";
 
 export type Choice = { kind: "statement"; index: number } | { kind: "all" };
 /** The cursor line's top and bottom, and the editor's right edge, in viewport pixels. */
 export type Anchor = { right: number; top: number; bottom: number };
-export type OpenChooser = { kind: "open"; tabId: TabId; text: string; statements: DocRange[]; active: Choice; anchor: Anchor };
+export type OpenChooser = { kind: "open"; tabId: TabId; text: string; statements: DocRange[]; unitKind?: ExecutionUnitKind; active: Choice; anchor: Anchor };
 export type Chooser = { kind: "closed" } | OpenChooser;
 
 export const useChooser = create<{ chooser: Chooser }>(() => ({ chooser: { kind: "closed" } }));

@@ -1,7 +1,6 @@
-use tokio_postgres::types::{Kind, Type};
-
+use crate::model::{DatabaseKind, ExecutionUnitKind, TableOrderEdit, TableOrderView, TableSortKey, TableScript, Relation};
 use crate::model::{
-    CellWrite, ColumnFilter, DocOffset, DocRange, FilterOp, FormatEdit, FormatError, PgTypeRef, RunTarget, ScriptOutline, TableQuery, TypeCategory,
+    CellWrite, ColumnFilter, DocOffset, DocRange, FilterOp, FormatEdit, FormatError, RunTarget, ScriptOutline, TableQuery,
 };
 use crate::sql::{self, ByteTarget, DmlVerb, StmtKind, StmtSpan};
 
@@ -57,11 +56,17 @@ impl<'a> OffsetMap<'a> {
 }
 
 /// `at_cursor` comes from `sql::pick`, so it names the statement a `Cursor` run would execute.
-pub fn script_outline(text: &str, cursor: DocOffset) -> ScriptOutline {
+pub fn script_outline(text: &str, cursor: DocOffset, database_kind: DatabaseKind) -> ScriptOutline {
+    if database_kind == DatabaseKind::SqlServer {
+        let map = OffsetMap::new(text);
+        let spans = sql::tsql::split_batches(text).unwrap_or_default();
+        let picked = sql::tsql::pick(text, ByteTarget::Cursor(map.from_utf16(cursor))).unwrap_or_default();
+        return ScriptOutline { unit_kind: ExecutionUnitKind::Batch, statements: spans.iter().map(|s| map.range(s)).collect(), at_cursor: picked.first().and_then(|p| spans.iter().position(|s| s == p)).and_then(|i| u16::try_from(i).ok()) };
+    }
     let map = OffsetMap::new(text);
     let spans = sql::split_statements(text);
     let picked = sql::pick(&spans, text, ByteTarget::Cursor(map.from_utf16(cursor)));
-    ScriptOutline {
+    ScriptOutline { unit_kind: crate::model::ExecutionUnitKind::Statement,
         statements: spans.iter().map(|s| map.range(s)).collect(),
         at_cursor: picked.first().and_then(|p| spans.iter().position(|s| s == p)).and_then(|i| u16::try_from(i).ok()),
     }
@@ -70,7 +75,14 @@ pub fn script_outline(text: &str, cursor: DocOffset) -> ScriptOutline {
 /// A cursor formats the statement a `Cursor` run would execute, a selection every statement it
 /// touches, and `All` the document. Each statement is formatted on its own; the text between them,
 /// `;` included, is kept.
-pub fn format_edit(text: &str, target: RunTarget) -> Result<FormatEdit, FormatError> {
+pub fn format_edit(text: &str, target: RunTarget, database_kind: DatabaseKind) -> Result<FormatEdit, FormatError> {
+    if database_kind == DatabaseKind::SqlServer {
+        let map = OffsetMap::new(text);
+        let spans = sql::tsql::pick(text, map.target(target)).map_err(|_| FormatError::Unsupported)?;
+        let (Some(first), Some(last)) = (spans.first(), spans.last()) else { return Err(FormatError::NothingToFormat); };
+        let insert = sql::tsql::format(&text[first.start..last.end]).map_err(|_| FormatError::Unsupported)?;
+        return Ok(FormatEdit { from: map.to_utf16(first.start), to: map.to_utf16(last.end), insert });
+    }
     let map = OffsetMap::new(text);
     let spans = sql::split_statements(text);
     let picked = match map.target(target) {
@@ -88,74 +100,6 @@ pub fn format_edit(text: &str, target: RunTarget) -> Result<FormatEdit, FormatEr
         at = span.end;
     }
     Ok(FormatEdit { from: map.to_utf16(first.start), to: map.to_utf16(last.end), insert })
-}
-
-pub fn type_ref(t: &Type) -> PgTypeRef {
-    PgTypeRef {
-        oid: t.oid(),
-        display: type_display(t),
-        category: type_category(t),
-    }
-}
-
-fn type_display(t: &Type) -> String {
-    match t.kind() {
-        Kind::Array(elem) => format!("{}[]", type_display(elem)),
-        _ if t.schema() == "pg_catalog" => builtin_name(t.name()).to_owned(),
-        _ if t.schema() == "public" => t.name().to_owned(),
-        _ => format!("{}.{}", t.schema(), t.name()),
-    }
-}
-
-fn builtin_name(internal: &str) -> &str {
-    match internal {
-        "int8" => "bigint",
-        "int4" => "integer",
-        "int2" => "smallint",
-        "float4" => "real",
-        "float8" => "double precision",
-        "bool" => "boolean",
-        "bpchar" => "char",
-        other => other,
-    }
-}
-
-/// The category of a type the catalog names by OID, with `typtype` and `typcategory` from `pg_type`.
-/// The catalog resolves a domain to its base type first. User types carry no element or member
-/// types here because the category never needs them.
-pub fn catalog_category(oid: u32, typtype: i8, typcategory: i8) -> TypeCategory {
-    let kind = match (typtype as u8, typcategory as u8) {
-        (b'e', _) => Kind::Enum(Vec::new()),
-        (b'c', _) => Kind::Composite(Vec::new()),
-        (b'r', _) => Kind::Range(Type::UNKNOWN),
-        (b'm', _) => Kind::Multirange(Type::UNKNOWN),
-        (_, b'A') => Kind::Array(Type::UNKNOWN),
-        _ => return Type::from_oid(oid).map_or(TypeCategory::Other, |t| type_category(&t)),
-    };
-    type_category(&Type::new(String::new(), oid, kind, String::new()))
-}
-
-fn type_category(t: &Type) -> TypeCategory {
-    match t.kind() {
-        Kind::Array(_) => TypeCategory::Array,
-        Kind::Enum(_) => TypeCategory::Enum,
-        Kind::Composite(_) => TypeCategory::Composite,
-        Kind::Range(_) | Kind::Multirange(_) => TypeCategory::Range,
-        Kind::Domain(inner) => type_category(inner),
-        Kind::Simple | Kind::Pseudo => match *t {
-            Type::INT2 | Type::INT4 | Type::INT8 | Type::OID => TypeCategory::Integer,
-            Type::FLOAT4 | Type::FLOAT8 | Type::NUMERIC | Type::MONEY => TypeCategory::Numeric,
-            Type::TEXT | Type::VARCHAR | Type::BPCHAR | Type::NAME | Type::CHAR | Type::XML => TypeCategory::Text,
-            Type::BOOL => TypeCategory::Bool,
-            Type::DATE | Type::TIME | Type::TIMETZ | Type::TIMESTAMP | Type::TIMESTAMPTZ | Type::INTERVAL => TypeCategory::Temporal,
-            Type::JSON | Type::JSONB => TypeCategory::Json,
-            Type::BYTEA => TypeCategory::Binary,
-            Type::UUID => TypeCategory::Uuid,
-            Type::INET | Type::CIDR | Type::MACADDR | Type::MACADDR8 => TypeCategory::Network,
-            _ => TypeCategory::Other,
-        },
-        _ => TypeCategory::Other,
-    }
 }
 
 /// tokio-postgres exposes only the row count of a command completion, so the tag is rebuilt
@@ -278,9 +222,28 @@ pub fn delete_sql(schema: &str, table: &str, key: &[CellWrite]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    fn script_outline(text: &str, cursor: DocOffset) -> ScriptOutline { super::script_outline(text, cursor, DatabaseKind::Postgres) }
 
     fn r(from: u32, to: u32) -> DocRange {
         DocRange { from: DocOffset(from), to: DocOffset(to) }
+    }
+
+    #[test]
+    fn postgres_table_templates_keep_saved_browse_tabs_recognizable() {
+        for (schema, table, expected) in [
+            ("public", "orders", "SELECT * FROM public.orders"),
+            ("_sales", "order$items", "SELECT * FROM _sales.order$items"),
+            ("Sales", "line items", "SELECT * FROM \"Sales\".\"line items\""),
+            ("public", "select", "SELECT * FROM public.\"select\""),
+            ("current_schema", "a\"b", "SELECT * FROM \"current_schema\".\"a\"\"b\""),
+        ] {
+            let script = table_script(DatabaseKind::Postgres, schema, table);
+            assert_eq!(script.text, expected);
+            assert_eq!(script.accepted_texts, [expected.to_owned(), format!("{expected};")]);
+        }
+        let script = table_script(DatabaseKind::SqlServer, "dbo", "orders");
+        assert_eq!(script.text, "SELECT * FROM [dbo].[orders]");
+        assert_eq!(script.accepted_texts, ["SELECT * FROM [dbo].[orders]"]);
     }
 
     #[test]
@@ -288,26 +251,26 @@ mod tests {
         let text = "select 1 as one;\nselect * from public.orders limit 3;\nselect 'third' as three;";
         assert_eq!(
             script_outline(text, DocOffset(30)),
-            ScriptOutline { statements: vec![r(0, 15), r(17, 52), r(54, 77)], at_cursor: Some(1) }
+            ScriptOutline { unit_kind: crate::model::ExecutionUnitKind::Statement, statements: vec![r(0, 15), r(17, 52), r(54, 77)], at_cursor: Some(1) }
         );
     }
 
     #[test]
     fn script_outline_at_trailing_whitespace_picks_the_previous_statement() {
         let text = "select 1;   \n\nselect 2";
-        assert_eq!(script_outline(text, DocOffset(11)), ScriptOutline { statements: vec![r(0, 8), r(14, 22)], at_cursor: Some(0) });
+        assert_eq!(script_outline(text, DocOffset(11)), ScriptOutline { unit_kind: crate::model::ExecutionUnitKind::Statement, statements: vec![r(0, 8), r(14, 22)], at_cursor: Some(0) });
     }
 
     #[test]
     fn script_outline_splits_the_users_doc_at_its_blank_line() {
         let text = "SELECT * FROM public.addresses\nWHERE id > 5\nAND id < 10\nORDER BY id DESC\n\nselect * from public.categories";
-        assert_eq!(script_outline(text, DocOffset(80)), ScriptOutline { statements: vec![r(0, 72), r(74, 105)], at_cursor: Some(1) });
+        assert_eq!(script_outline(text, DocOffset(80)), ScriptOutline { unit_kind: crate::model::ExecutionUnitKind::Statement, statements: vec![r(0, 72), r(74, 105)], at_cursor: Some(1) });
         assert_eq!(script_outline(text, DocOffset(35)).at_cursor, Some(0));
     }
 
     #[test]
     fn script_outline_of_a_doc_without_statements_is_empty() {
-        let none = ScriptOutline { statements: vec![], at_cursor: None };
+        let none = ScriptOutline { unit_kind: crate::model::ExecutionUnitKind::Statement, statements: vec![], at_cursor: None };
         assert_eq!(script_outline("", DocOffset(0)), none);
         assert_eq!(script_outline("  -- nothing\n/* here */\n", DocOffset(5)), none);
     }
@@ -315,7 +278,7 @@ mod tests {
     #[test]
     fn script_outline_ranges_and_cursor_are_utf16() {
         let text = "-- 😀é\nselect 1;\nselect 2;";
-        assert_eq!(script_outline(text, DocOffset(18)), ScriptOutline { statements: vec![r(0, 15), r(17, 25)], at_cursor: Some(1) });
+        assert_eq!(script_outline(text, DocOffset(18)), ScriptOutline { unit_kind: crate::model::ExecutionUnitKind::Statement, statements: vec![r(0, 15), r(17, 25)], at_cursor: Some(1) });
     }
 
     #[test]
@@ -343,54 +306,6 @@ mod tests {
         assert_eq!(map.pg_position(&spans[0], 1), DocOffset(0));
         assert_eq!(map.pg_position(&spans[0], 0), DocOffset(0));
         assert_eq!(map.pg_position(&spans[0], 500), map.to_utf16(spans[0].end));
-    }
-
-    #[test]
-    fn builtin_and_array_names() {
-        let r = type_ref(&Type::INT8);
-        assert_eq!((r.oid, r.display.as_str(), r.category), (20, "bigint", TypeCategory::Integer));
-        assert_eq!(type_ref(&Type::INT4_ARRAY).display, "integer[]");
-        assert_eq!(type_ref(&Type::INT4_ARRAY).category, TypeCategory::Array);
-        assert_eq!(type_ref(&Type::TIMESTAMPTZ).display, "timestamptz");
-        assert_eq!(type_ref(&Type::TIMESTAMPTZ).category, TypeCategory::Temporal);
-        assert_eq!(type_ref(&Type::TEXT).category, TypeCategory::Text);
-        assert_eq!(type_ref(&Type::BPCHAR).display, "char");
-        assert_eq!(type_ref(&Type::NUMERIC).category, TypeCategory::Numeric);
-        assert_eq!(type_ref(&Type::OID).category, TypeCategory::Integer);
-        assert_eq!(type_ref(&Type::FLOAT8).category, TypeCategory::Numeric);
-        assert_eq!(type_ref(&Type::JSONB).category, TypeCategory::Json);
-        assert_eq!(type_ref(&Type::BYTEA).category, TypeCategory::Binary);
-        assert_eq!(type_ref(&Type::UUID).category, TypeCategory::Uuid);
-        assert_eq!(type_ref(&Type::INET).category, TypeCategory::Network);
-        assert_eq!(type_ref(&Type::INT4_RANGE).category, TypeCategory::Range);
-        assert_eq!(type_ref(&Type::POINT).category, TypeCategory::Other);
-        assert_eq!(type_ref(&Type::BOOL).display, "boolean");
-    }
-
-    #[test]
-    fn catalog_types_share_the_result_categories() {
-        let (base, enumerated, composite, range, array) = (b'b' as i8, b'e' as i8, b'c' as i8, b'r' as i8, b'A' as i8);
-        assert_eq!(catalog_category(20, base, b'N' as i8), TypeCategory::Integer);
-        assert_eq!(catalog_category(1700, base, b'N' as i8), TypeCategory::Numeric);
-        assert_eq!(catalog_category(25, base, b'S' as i8), TypeCategory::Text);
-        assert_eq!(catalog_category(70000, enumerated, b'E' as i8), TypeCategory::Enum);
-        assert_eq!(catalog_category(70001, composite, b'C' as i8), TypeCategory::Composite);
-        assert_eq!(catalog_category(70002, range, b'R' as i8), TypeCategory::Range);
-        assert_eq!(catalog_category(70003, base, array), TypeCategory::Array);
-        assert_eq!(catalog_category(70004, base, b'U' as i8), TypeCategory::Other);
-    }
-
-    #[test]
-    fn user_types_show_schema_outside_public() {
-        let public_enum = Type::new("mood".into(), 70000, Kind::Enum(vec![]), "public".into());
-        assert_eq!(type_ref(&public_enum).display, "mood");
-        assert_eq!(type_ref(&public_enum).category, TypeCategory::Enum);
-        let lab_enum = Type::new("mood".into(), 70001, Kind::Enum(vec![]), "lab".into());
-        assert_eq!(type_ref(&lab_enum).display, "lab.mood");
-        let arr = Type::new("_mood".into(), 70002, Kind::Array(lab_enum), "lab".into());
-        assert_eq!(type_ref(&arr).display, "lab.mood[]");
-        let domain = Type::new("posint".into(), 70003, Kind::Domain(Type::INT4), "public".into());
-        assert_eq!(type_ref(&domain).category, TypeCategory::Integer);
     }
 
     #[test]
@@ -483,5 +398,93 @@ mod tests {
             r#"UPDATE "public"."line items" SET "qty" = '3', "note" = NULL WHERE "order_id" = '7' AND "sku" = 'A-1'"#
         );
         assert_eq!(delete_sql("public", "customers", &[cell("id", Some("42"))]), r#"DELETE FROM "public"."customers" WHERE "id" = '42'"#);
+    }
+}
+
+pub fn pick(text: &str, target: ByteTarget, kind: DatabaseKind) -> Result<Vec<StmtSpan>, String> {
+    match kind { DatabaseKind::Postgres => Ok(sql::pick(&sql::split_statements(text), text, target)), DatabaseKind::SqlServer => sql::tsql::pick(text, target) }
+}
+pub fn classify(text: &str, kind: DatabaseKind) -> StmtKind { match kind { DatabaseKind::Postgres => sql::classify(text), DatabaseKind::SqlServer => sql::tsql::classify(text) } }
+
+pub fn table_script(kind: DatabaseKind, schema: &str, table: &str) -> TableScript {
+    fn postgres_ident(name: &str) -> String {
+        let mut chars = name.chars();
+        let simple = chars.next().is_some_and(|c| c.is_ascii_lowercase() || c == '_')
+            && chars.all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_' || c == '$');
+        if simple && !sql::RESERVED.contains(&name) && !sql::TYPE_OR_FUNCTION_NAME.contains(&name) {
+            name.to_owned()
+        } else {
+            quote_ident(name)
+        }
+    }
+    let quote = match kind { DatabaseKind::Postgres => postgres_ident, DatabaseKind::SqlServer => sql::tsql::quote_ident };
+    let text = format!("SELECT * FROM {}.{}", quote(schema), quote(table));
+    let mut accepted_texts = vec![text.clone()];
+    if kind == DatabaseKind::Postgres { accepted_texts.push(format!("{text};")); }
+    TableScript { text, accepted_texts }
+}
+
+pub fn table_order(kind: DatabaseKind, relation: Option<&Relation>, order_by: &str, edit: TableOrderEdit) -> Result<TableOrderView, String> {
+    let parsed = match kind { DatabaseKind::Postgres => sql::order::parse(order_by), DatabaseKind::SqlServer => sql::tsql::parse_order_by(order_by) };
+    if kind == DatabaseKind::SqlServer {
+        let known = |name: &str| relation.is_some_and(|r| r.columns.iter().any(|c| c.name == name));
+        let resolved = parsed.as_ref().is_some_and(|keys| keys.iter().all(|(name, _)| known(name))) && relation.is_some();
+        match &edit {
+            TableOrderEdit::Inspect if !resolved => return Ok(TableOrderView { sql: order_by.to_owned(), keys: None }),
+            TableOrderEdit::Cycle { column, additive } => {
+                if relation.is_none() {
+                    return Err("Table columns are unavailable. Connect and refresh the table catalog before sorting.".into());
+                }
+                if !known(column) {
+                    return Err(format!("Column {column:?} is not in this table's catalog. Refresh the catalog before sorting."));
+                }
+                if *additive && !resolved {
+                    return Err("To add a header sort, ORDER BY must use exact table column names. Edit ORDER BY, or click without Shift to replace a simple column order.".into());
+                }
+            }
+            TableOrderEdit::Inspect => {}
+        }
+    }
+    let Some(mut keys) = parsed else { return Ok(TableOrderView { sql: order_by.to_owned(), keys: None }); };
+    if let TableOrderEdit::Cycle { column, additive } = edit {
+        let previous = keys.iter().find(|(name,_)| *name == column).map(|(_,desc)| *desc);
+        if !additive { keys.retain(|(name,_)| *name == column); }
+        match previous {
+            None => keys.push((column,false)),
+            Some(false) => { if let Some((_,desc)) = keys.iter_mut().find(|(name,_)| *name == column) { *desc = true; } },
+            Some(true) => keys.retain(|(name,_)| *name != column),
+        }
+    } else { return Ok(TableOrderView { sql: order_by.to_owned(), keys: Some(keys.into_iter().map(|(column,desc)| TableSortKey { column,desc }).collect()) }); }
+    let sql = match kind {
+        DatabaseKind::Postgres => keys.iter().map(|(column,desc)| format!("{}{}",quote_ident(column),if *desc { " DESC" } else { "" })).collect::<Vec<_>>().join(", "),
+        DatabaseKind::SqlServer => sql::tsql::format_order_by(&keys),
+    };
+    Ok(TableOrderView { sql, keys: Some(keys.into_iter().map(|(column,desc)| TableSortKey { column,desc }).collect()) })
+}
+
+pub fn table_browse(kind: DatabaseKind, schema: &str, table: &str, relation: Option<&Relation>, query: &TableQuery, limit: u32, offset: u64) -> Result<String, String> {
+    let pk = relation.map(Relation::pk_columns).unwrap_or_default();
+    match kind {
+        DatabaseKind::Postgres => {
+            let text = browse_sql(schema,table,&pk,query,limit,offset);
+            if sql::split_statements(&text).len()!=1 { return Err("The filter must be a single expression.".into()); }
+            Ok(text)
+        }
+        DatabaseKind::SqlServer => {
+            sql::tsql::validate_expression(&query.r#where,false)?;
+            sql::tsql::validate_expression(&query.order_by,true)?;
+            let projection = relation.map(|r| r.columns.iter().map(|c| {
+                let col = sql::tsql::quote_ident(&c.name);
+                if matches!(c.type_display.as_str(),"money"|"smallmoney") { format!("CAST({col} AS decimal(19,4)) AS {col}") } else { col }
+            }).collect::<Vec<_>>().join(", ")).filter(|p| !p.is_empty()).unwrap_or_else(|| "*".into());
+            sql::tsql::browse_sql(schema,table,&projection,relation.map(|r| r.columns.as_slice()).unwrap_or_default(),&pk,query,limit,offset)
+        }
+    }
+}
+
+pub fn table_count(kind: DatabaseKind, schema: &str, table: &str, relation: Option<&Relation>, query: &TableQuery) -> Result<String,String> {
+    match kind {
+        DatabaseKind::Postgres => { let text = count_sql(schema,table,query); if sql::split_statements(&text).len()!=1 { Err("The filter must be a single expression.".into()) } else { Ok(text) } },
+        DatabaseKind::SqlServer => { sql::tsql::validate_expression(&query.r#where,false)?; sql::tsql::count_sql(schema,table,relation.map(|r| r.columns.as_slice()).unwrap_or_default(),query) },
     }
 }

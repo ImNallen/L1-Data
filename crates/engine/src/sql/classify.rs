@@ -31,6 +31,7 @@ pub enum Invalidates {
     Catalog,
     /// The instance's `pg_database` list.
     DatabaseList,
+    Both,
 }
 
 impl StmtKind {

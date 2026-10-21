@@ -1,34 +1,55 @@
 import { undo } from "@codemirror/commands";
 import { mockIPC } from "@tauri-apps/api/mocks";
-import { afterEach, expect, it, vi } from "vitest";
-import type { ConsoleState, Settings } from "../../ipc/bindings";
+import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
+import type { ApplyError, ConsoleState, DatabaseKind, Settings, TableQuery, TableScript, TabSnapshot } from "../../ipc/bindings";
+import { connectionConfig } from "../../testing/connections";
+import { shopCatalog } from "../../testing/shopCatalog";
+import { buildCatalogView, useCatalog } from "../../state/catalog";
+import { dbKey } from "../../state/dbKey";
 import { useLive } from "../../state/live";
-import { useTableEdits } from "../../state/tableEdits";
-import { useWorkspace } from "../../state/workspace";
+import { markDeleted, pendingCount, setCell, useTableEdits } from "../../state/tableEdits";
+import { useWorkspace, workspaceSnapshot } from "../../state/workspace";
+import { gridEditing } from "../results/ResultGrid";
 import { dropEditor, editorStateOf, insertAtCursor, moveCursor, seedEditor, textOf } from "./editorStates";
-import { browseQuery, formatActive, loadTableOnce, openTableTab, saveSettings, setTabMode, setTabTarget } from "./runActions";
+import { browseTemplate, formatActive, lastTablePage, loadTableOnce, openTableTab, saveSettings, setTabMode, setTabTarget, runOrChoose, openSqlTab, isBrowsing, submitEdits, cancelActive, installRunBehavior, setTablePage, updateTableQuery } from "./runActions";
 
 afterEach(() => {
   vi.unstubAllGlobals();
   for (const id of useWorkspace.getState().order) dropEditor(id);
   useWorkspace.setState(useWorkspace.getInitialState(), true);
   useLive.setState(useLive.getInitialState(), true);
+  useCatalog.setState(useCatalog.getInitialState(), true);
   useTableEdits.setState(useTableEdits.getInitialState(), true);
 });
 
 const orders = { db: { connectionId: "c1", database: "shop" }, schema: "public", relation: "orders" };
+const ordersScript = {
+  text: "SELECT * FROM public.orders",
+  acceptedTexts: ["SELECT * FROM public.orders", "SELECT * FROM public.orders;"],
+} satisfies TableScript;
 
-it("quotes only the identifiers that need it in a table's browse query", () => {
-  expect(browseQuery("public", "customers")).toBe("SELECT * FROM public.customers");
-  expect(browseQuery("public", "order")).toBe('SELECT * FROM public."order"');
-  expect(browseQuery("Sales", "line items")).toBe('SELECT * FROM "Sales"."line items"');
-  expect(browseQuery("public", 'say "hi"')).toBe('SELECT * FROM public."say ""hi"""');
+beforeEach(() => {
+  vi.stubGlobal("window", { crypto });
+  mockIPC((cmd) => cmd === "table_script" ? ordersScript : null);
 });
 
-it("opens the results when a table opens, new or already in a tab", () => {
+it("uses the engine's canonical template for bracketed table names", async () => {
+  const calls: unknown[] = [];
+  mockIPC((cmd, args) => {
+    if (cmd === "table_script") { calls.push(args); return { text: "SELECT * FROM [Sales].[line items]", acceptedTexts: ["SELECT * FROM [Sales].[line items]"] } satisfies TableScript; }
+  });
+  const db = { connectionId: "mssql", database: "shop" };
+  await openTableTab({ db, schema: "Sales", relation: "line items" });
+  const tab = useWorkspace.getState().tabs[useWorkspace.getState().active!];
+  expect(calls).toEqual([{ db, schema: "Sales", table: "line items" }]);
+  expect(tab && textOf(tab.id)).toBe("SELECT * FROM [Sales].[line items]");
+  expect(tab && isBrowsing(tab)).toBe(true);
+});
+
+it("opens the results when a table opens, new or already in a tab", async () => {
   const ref = { db: { connectionId: "c1", database: "shop" }, schema: "public", relation: "orders" };
   useWorkspace.setState({ layout: { ...useWorkspace.getState().layout, results: false } });
-  openTableTab(ref);
+  await openTableTab(ref);
   const tab = useWorkspace.getState().tabs[useWorkspace.getState().active!];
   expect([tab, useWorkspace.getState().layout.results]).toEqual([
     {
@@ -41,7 +62,7 @@ it("opens the results when a table opens, new or already in a tab", () => {
   ]);
 
   useWorkspace.setState({ layout: { ...useWorkspace.getState().layout, results: false } });
-  openTableTab(ref);
+  await openTableTab(ref);
   expect(Object.keys(useWorkspace.getState().tabs)).toHaveLength(1);
   expect(useWorkspace.getState().layout.results).toBe(true);
 });
@@ -76,8 +97,8 @@ it("writes settings one at a time, so the write that lands last carries every ch
   expect({ overlapped, persisted }).toMatchObject({ overlapped: false, persisted: { maxRows: 5, colorScheme: "Dark" } });
 });
 
-function openWithConsole(mode: "AutoCommit" | "Manual" = "AutoCommit") {
-  openTableTab(orders);
+async function openWithConsole(mode: "AutoCommit" | "Manual" = "AutoCommit") {
+  await openTableTab(orders);
   const id = useWorkspace.getState().active!;
   const console: ConsoleState = {
     tabId: id,
@@ -85,20 +106,94 @@ function openWithConsole(mode: "AutoCommit" | "Manual" = "AutoCommit") {
     config: { connectionId: "c1", database: "shop", schema: null, mode },
     session: { kind: "None" },
     txn: "Idle",
+    txnDepth: null, work: null,
     run: { kind: "Idle" },
   };
   useLive.setState({ consoles: { [id]: console } });
   return id;
 }
 
+it("Last counts on its own tab and loads the exact last table page", async () => {
+  const id = await openWithConsole();
+  const requests: { cmd: string; args: unknown }[] = [];
+  let finish: (count: number) => void = () => { throw new Error("count was not requested"); };
+  mockIPC((cmd, args) => {
+    requests.push({ cmd, args });
+    if (cmd === "exact_row_count") return new Promise<number>((resolve) => { finish = resolve; });
+    if (cmd === "console_run") return { runId: 7, statements: [] };
+    return null;
+  });
+  const pending = lastTablePage(id);
+  expect(requests).toEqual([{ cmd: "exact_row_count", args: { tabId: id, db: orders.db, schema: "public", table: "orders", query: { orderBy: "", filters: [], where: "" } } }]);
+  expect(useWorkspace.getState().tabs[id]?.table?.page).toBe(0);
+  finish(1251);
+  await pending;
+  expect(requests[1]).toEqual({ cmd: "console_run", args: { tabId: id, request: { kind: "tablePage", schema: "public", table: "orders", page: 2, query: { orderBy: "", filters: [], where: "" } } } });
+  expect(useWorkspace.getState().tabs[id]?.table).toMatchObject({ page: 2, exactRowCount: 1251 });
+});
+
+it.each(["target", "query", "page", "table", "text", "close", "page size"])("Last discards a deferred count after its %s changes", async (change) => {
+  const id = await openWithConsole();
+  const requests: string[] = [];
+  let finish: (count: number) => void = () => { throw new Error("count was not requested"); };
+  mockIPC((cmd) => {
+    requests.push(cmd);
+    if (cmd === "exact_row_count") return new Promise<number>((resolve) => { finish = resolve; });
+    return null;
+  });
+  const pending = lastTablePage(id);
+  const state = useWorkspace.getState();
+  if (change === "target") state.patchConsole(id, { db: { connectionId: "other", database: "reporting" } });
+  if (change === "query") state.setTableQuery(id, { orderBy: "id DESC", filters: [], where: "id > 10" });
+  if (change === "page") state.setTablePage(id, 3);
+  if (change === "table") {
+    const tab = state.tabs[id]!;
+    useWorkspace.setState({ tabs: { ...state.tabs, [id]: { ...tab, table: { ...tab.table!, table: "customers" } } } });
+  }
+  if (change === "text") insertAtCursor(id, "SELECT 42; ");
+  if (change === "close") { state.closeTab(id); dropEditor(id); }
+  if (change === "page size") state.setSettings({ ...state.settings, tablePageSize: 100 });
+  const current = useWorkspace.getState().tabs[id];
+  const text = change === "close" ? undefined : textOf(id);
+  const consoles = useLive.getState().consoles;
+  finish(1251);
+  await pending;
+  expect(requests).toEqual(["exact_row_count"]);
+  expect(useWorkspace.getState().tabs[id]).toBe(current);
+  expect(useLive.getState().consoles).toBe(consoles);
+  if (text !== undefined) expect(textOf(id)).toBe(text);
+});
+
+it("Last drops its counted page if the query changes during console setup", async () => {
+  const id = await openWithConsole();
+  useLive.setState({ consoles: {} });
+  const requests: string[] = [];
+  let configure: () => void = () => { throw new Error("console setup was not requested"); };
+  mockIPC((cmd) => {
+    requests.push(cmd);
+    if (cmd === "exact_row_count") return 1251;
+    if (cmd === "console_configure") return new Promise<null>((resolve) => { configure = () => resolve(null); });
+    return null;
+  });
+  const pending = lastTablePage(id);
+  await vi.waitFor(() => expect(requests).toContain("console_configure"));
+  useWorkspace.getState().setTableQuery(id, { orderBy: "", filters: [], where: "id = 1" });
+  configure();
+  await pending;
+  expect(requests).toEqual(["exact_row_count", "console_configure"]);
+  expect(useWorkspace.getState().tabs[id]?.table).toMatchObject({ page: 0, exactRowCount: undefined, query: { where: "id = 1" } });
+});
+
 it("switches a table tab to manual transactions through console_configure", async () => {
   vi.stubGlobal("window", { crypto });
   const calls: { cmd: string; args: unknown }[] = [];
   mockIPC((cmd, args) => {
+    if (cmd === "table_script") return ordersScript;
     calls.push({ cmd, args });
     return null;
   });
-  const id = openWithConsole();
+  const id = await openWithConsole();
+  calls.length = 0;
   await setTabMode(id, "Manual");
   expect(calls).toEqual([
     { cmd: "console_configure", args: { tabId: id, config: { connectionId: "c1", database: "shop", schema: null, mode: "Manual" } } },
@@ -106,14 +201,39 @@ it("switches a table tab to manual transactions through console_configure", asyn
   expect(useWorkspace.getState().tabs[id]?.console.mode).toBe("Manual");
 });
 
+it("refuses SQL Server Manual mode before an unopened tab can change commit semantics", async () => {
+  useWorkspace.setState({ configs: { ms: { ...connectionConfig("ms", "SQL Server"), databaseKind: "SqlServer" } } });
+  const id = openSqlTab({ db: { connectionId: "ms", database: "shop" } });
+  const calls: string[] = [];
+  mockIPC((cmd) => { calls.push(cmd); return null; });
+  await setTabMode(id, "Manual");
+  expect(calls).toEqual([]);
+  expect(useWorkspace.getState().tabs[id]?.console.mode).toBe("AutoCommit");
+  expect(useWorkspace.getState().toast?.text).toContain("SQL Server Manual mode is unavailable");
+});
+
+it("keeps a Manual tab on its old target when SQL Server requires an explicit mode choice", async () => {
+  const id = await openWithConsole();
+  useWorkspace.getState().patchConsole(id, { mode: "Manual" });
+  useWorkspace.setState({ configs: { ms: { ...connectionConfig("ms", "SQL Server"), databaseKind: "SqlServer" } } });
+  const calls: string[] = [];
+  mockIPC((cmd) => { calls.push(cmd); return null; });
+  await setTabTarget(id, { connectionId: "ms", database: "shop" });
+  expect(calls).toEqual([]);
+  expect(useWorkspace.getState().tabs[id]?.console).toEqual({ db: orders.db, mode: "Manual" });
+  expect(useWorkspace.getState().toast?.text).toContain("Choose Auto-commit");
+});
+
 it("keeps a tab on its database while it has staged edits", async () => {
   vi.stubGlobal("window", { crypto });
   const calls: string[] = [];
   mockIPC((cmd) => {
+    if (cmd === "table_script") return ordersScript;
     calls.push(cmd);
     return null;
   });
-  const id = openWithConsole();
+  const id = await openWithConsole();
+  calls.length = 0;
   useTableEdits.getState().addRow(id);
   await setTabTarget(id, { connectionId: "c1", database: "reporting" });
   expect([calls, useWorkspace.getState().tabs[id]?.console.db, useWorkspace.getState().toast?.text]).toEqual([
@@ -125,6 +245,58 @@ it("keeps a tab on its database while it has staged edits", async () => {
   useTableEdits.getState().clear(id);
   await setTabTarget(id, { connectionId: "c1", database: "reporting" });
   expect([calls, useWorkspace.getState().tabs[id]?.console.db]).toEqual([["console_configure"], { connectionId: "c1", database: "reporting" }]);
+});
+
+it.each(["update", "delete"])("submits the original named %s key after PostgreSQL catalog replacement and keeps refused edits", async (change) => {
+  const id = await openWithConsole();
+  const catalog = shopCatalog("c1", 1);
+  const relation = catalog.schemas[1]!.relations.find((r) => r.name === "orders")!;
+  relation.columns[1]!.name = "alternate";
+  const meta = {
+    databaseKind: catalog.databaseKind,
+    db: catalog.db,
+    columns: relation.columns.map((column) => ({ name: column.name, type: { display: column.typeDisplay, category: column.category }, source: { tableOid: relation.oid, attnum: column.attnum } })),
+  };
+  const original = buildCatalogView(catalog);
+  useCatalog.setState({ views: { [dbKey(catalog.db)]: original } });
+  const editing = gridEditing(original, "public", "orders", meta);
+  expect(editing?.pkColumns).toEqual(["id"]);
+  const originalRow = ["1", "2", "selected", "0", "2026-10-21"];
+  const selected = editing!.pkColumns.map((column) => ({ column, value: originalRow[meta.columns.findIndex((c) => c.name === column)] ?? null }));
+  useTableEdits.getState().edit(id, (edits) => change === "update" ? setCell(edits, selected, "status", "edited", "selected") : markDeleted(edits, [selected], true));
+  const staged = useTableEdits.getState().byTab[id];
+
+  const refreshed = buildCatalogView({
+    ...catalog,
+    version: 2,
+    schemas: catalog.schemas.map((schema) => ({ ...schema, relations: schema.relations.map((rel) => rel === relation ? { ...rel, columns: rel.columns.map((c) => ({ ...c, pk: c.name === "alternate" })) } : rel) })),
+  });
+  useCatalog.setState({ views: { [dbKey(catalog.db)]: refreshed } });
+  expect(gridEditing(refreshed, "public", "orders", meta)?.pkColumns).toEqual(["alternate"]);
+  const submitted: unknown[] = [];
+  mockIPC((cmd, args) => {
+    submitted.push({ cmd, args });
+    if (cmd === "table_apply") return Promise.reject({ kind: "NoPrimaryKey" } satisfies ApplyError);
+    return null;
+  });
+
+  await submitEdits(id);
+
+  expect(submitted).toEqual([{
+    cmd: "table_apply",
+    args: {
+      tabId: id,
+      changes: {
+        schema: "public", table: "orders", inserts: [],
+        updates: change === "update" ? [{ key: [{ column: "id", value: "1" }], set: [{ column: "status", value: "edited" }] }] : [],
+        deletes: change === "delete" ? [[{ column: "id", value: "1" }]] : [],
+      },
+    },
+  }]);
+  expect(useTableEdits.getState().byTab[id]).toEqual(staged);
+  expect(pendingCount(useTableEdits.getState().byTab[id]!)).toBe(1);
+  expect(useTableEdits.getState().submitting[id]).toBeUndefined();
+  expect(useWorkspace.getState().toast?.text).toContain("primary key");
 });
 
 function openScript(text: string, edit: () => unknown) {
@@ -148,7 +320,7 @@ it("formats as its own undo step, apart from the typing before it, and leaves th
   await formatActive();
   let state = editorStateOf("script");
   expect([sent, state.doc.toString(), state.selection.main.head]).toEqual([
-    [{ text: typed, target: { kind: "cursor", offset: 27 } }],
+    [{ text: typed, databaseKind: "Postgres", target: { kind: "cursor", offset: 27 } }],
     "select 1;\nSELECT a,\n  b\nFROM t",
     30,
   ]);
@@ -180,18 +352,340 @@ it("loads a table tab's page on first show, and never runs edited text unasked",
   vi.stubGlobal("window", { crypto });
   const runs: unknown[] = [];
   mockIPC((cmd, args) => {
+    if (cmd === "table_script") return ordersScript;
     if (cmd === "console_run") runs.push((args as { request: unknown }).request);
     if (cmd === "console_run") return { runId: 1, statements: [] };
     return null;
   });
-  const table = { schema: "public", table: "orders", page: 2, query: { orderBy: "", filters: [], where: "" } };
-  for (const [id, text] of [["browsing", "SELECT * FROM public.orders;"], ["edited", "delete from orders"]] as const) {
+  const query = { orderBy: "total DESC", filters: [{ column: "status", op: "Eq", value: "paid" }], where: "total > 10" } satisfies TableQuery;
+  const table = { schema: "public", table: "orders", page: 2, query };
+  for (const [id, text] of [["browsing", "SELECT * FROM public.orders"], ["edited", "SELECT * FROM public.orders WHERE status = 'pending'"]] as const) {
     seedEditor(id, text);
     useWorkspace.getState().addTab({ id, title: "orders", console: { db: { connectionId: "c1", database: "shop" }, mode: "AutoCommit" }, table });
   }
-  loadTableOnce("edited");
-  loadTableOnce("browsing");
+  await loadTableOnce("edited");
+  await loadTableOnce("browsing");
   await vi.waitFor(() => expect(runs).toHaveLength(1));
   await new Promise((r) => setTimeout(r, 0));
-  expect(runs).toEqual([{ kind: "tablePage", schema: "public", table: "orders", page: 2, query: { orderBy: "", filters: [], where: "" } }]);
+  expect(runs).toEqual([{ kind: "tablePage", schema: "public", table: "orders", page: 2, query }]);
+});
+
+it.each([
+  "SELECT * FROM public.orders",
+  "SELECT * FROM public.orders;",
+  "\n SELECT * FROM public.orders\n ",
+  "\t SELECT * FROM public.orders;\n",
+])("restores a saved browse document %j with its page, filters and order", async (text) => {
+  const runs: unknown[] = [];
+  mockIPC((cmd, args) => {
+    if (cmd === "table_script") return ordersScript;
+    if (cmd === "console_run") {
+      runs.push(args);
+      return { runId: 1, statements: [] };
+    }
+    return null;
+  });
+  const id = crypto.randomUUID();
+  const query = { orderBy: "total DESC", filters: [{ column: "status", op: "Eq", value: "paid" }], where: "total > 10" } satisfies TableQuery;
+  const saved: TabSnapshot = {
+    id, title: "orders", text,
+    console: { connectionId: "c1", database: "shop", schema: null, mode: "AutoCommit" },
+    table: { schema: "public", table: "orders", page: 2, query },
+  };
+  const ws = useWorkspace.getState();
+  seedEditor(id, text);
+  ws.restore({ tabs: [saved], active: id, layout: ws.layout }, [connectionConfig("c1", "PostgreSQL")], ws.settings);
+  await loadTableOnce(id);
+  await vi.waitFor(() => expect(runs).toHaveLength(1));
+  expect(runs).toEqual([{ tabId: id, request: { kind: "tablePage", schema: "public", table: "orders", page: 2, query } }]);
+  const tab = useWorkspace.getState().tabs[id];
+  expect(tab && isBrowsing(tab)).toBe(true);
+  expect(workspaceSnapshot(useWorkspace.getState(), textOf).tabs).toEqual([saved]);
+});
+
+it.each([
+  "SELECT * FROM public.orders WHERE status = 'pending'",
+  "SELECT * FROM public.orders;;",
+  "SELECT * FROM public.orders; -- changed",
+])("keeps a changed saved document %j out of table browsing", async (text) => {
+  const runs: unknown[] = [];
+  mockIPC((cmd, args) => {
+    if (cmd === "table_script") return ordersScript;
+    if (cmd === "console_run") runs.push(args);
+    return null;
+  });
+  const id = crypto.randomUUID();
+  seedEditor(id, text);
+  useWorkspace.getState().addTab({ id, title: "orders", console: { db: orders.db, mode: "AutoCommit" }, table: { schema: "public", table: "orders", page: 2, query: { orderBy: "id DESC", filters: [], where: "" } } });
+  await loadTableOnce(id);
+  const tab = useWorkspace.getState().tabs[id];
+  expect(tab && isBrowsing(tab)).toBe(false);
+  expect(runs).toEqual([]);
+  expect(textOf(id)).toBe(text);
+});
+
+it("compares engine-supplied strings without interpreting their punctuation", async () => {
+  const db = { connectionId: crypto.randomUUID(), database: "shop" };
+  mockIPC((cmd) => cmd === "table_script" ? { text: "engine template", acceptedTexts: ["engine template", "another engine form"] } satisfies TableScript : null);
+  const id = crypto.randomUUID();
+  seedEditor(id, "\n another engine form\t");
+  useWorkspace.getState().addTab({ id, title: "orders", console: { db, mode: "AutoCommit" }, table: { schema: "public", table: "orders", page: 0, query: { orderBy: "", filters: [], where: "" } } });
+  await browseTemplate(db, "public", "orders");
+  const tab = useWorkspace.getState().tabs[id];
+  expect(tab && isBrowsing(tab)).toBe(true);
+  seedEditor(id, "engine template;");
+  expect(tab && isBrowsing(tab)).toBe(false);
+});
+
+it("drops a table script reply after its dialect changes and loads the current dialect", async () => {
+  const connectionId = crypto.randomUUID();
+  const config = connectionConfig(connectionId, "dev");
+  useWorkspace.getState().upsertConfig(config);
+  const db = { connectionId, database: "shop" };
+  let finish: (script: TableScript) => void = () => { throw new Error("table script was not requested"); };
+  mockIPC((cmd) => cmd === "table_script" ? new Promise<TableScript>((resolve) => { finish = resolve; }) : null);
+  const pending = browseTemplate(db, "public", "orders");
+  useWorkspace.getState().upsertConfig({ ...config, databaseKind: "SqlServer" });
+  finish(ordersScript);
+  expect(await pending).toBeNull();
+  mockIPC((cmd) => cmd === "table_script" ? { text: "SELECT * FROM [public].[orders]", acceptedTexts: ["SELECT * FROM [public].[orders]"] } satisfies TableScript : null);
+  await openTableTab({ db, schema: "public", relation: "orders" });
+  const tab = useWorkspace.getState().tabs[useWorkspace.getState().active!];
+  expect(tab && textOf(tab.id)).toBe("SELECT * FROM [public].[orders]");
+  expect(tab && isBrowsing(tab)).toBe(true);
+});
+
+it("drops a cached page load after its dialect changes while awaiting the template", async () => {
+  const connectionId = crypto.randomUUID();
+  const config = connectionConfig(connectionId, "dev");
+  useWorkspace.getState().upsertConfig(config);
+  const db = { connectionId, database: "shop" };
+  await openTableTab({ db, schema: "public", relation: "orders" });
+  const id = useWorkspace.getState().active!;
+  const calls: string[] = [];
+  mockIPC((cmd) => { calls.push(cmd); return null; });
+  const pending = loadTableOnce(id);
+  useWorkspace.getState().upsertConfig({ ...config, databaseKind: "SqlServer" });
+  await pending;
+  expect(calls).toEqual([]);
+});
+
+it("never runs edited browse text as a script after awaiting console setup", async () => {
+  await openTableTab(orders);
+  const id = useWorkspace.getState().active!;
+  const calls: string[] = [];
+  mockIPC((cmd) => {
+    calls.push(cmd);
+    if (cmd === "console_configure") insertAtCursor(id, "SELECT 42;\n");
+    if (cmd === "console_run") return { runId: 1, statements: [] };
+    return null;
+  });
+  await loadTableOnce(id);
+  await vi.waitFor(() => expect(calls).toContain("console_configure"));
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  expect(calls).toEqual(["console_configure"]);
+  expect(textOf(id)).toBe("SELECT 42;\nSELECT * FROM public.orders");
+});
+
+it("drops formatting when the connection changes while the document stays the same", async () => {
+  openScript("select 1", () => {
+    useWorkspace.getState().patchConsole("script", { db: { connectionId: "sqlserver", database: "master" } });
+    return { from: 0, to: 8, insert: "SELECT 1" };
+  });
+  await formatActive();
+  expect(textOf("script")).toBe("select 1");
+});
+
+it("passes SQL Server kind to text services before a catalog loads and reports unsupported formatting", async () => {
+  useWorkspace.setState({ configs: { ms: { ...connectionConfig("ms", "SQL Server"), databaseKind: "SqlServer" } } });
+  const sent = openScript("declare @x int = 1", () => Promise.reject({ kind: "Unsupported" }));
+  useWorkspace.getState().patchConsole("script", { db: { connectionId: "ms", database: "master" } });
+  await formatActive();
+  expect(sent).toEqual([{ text: "declare @x int = 1", target: { kind: "cursor", offset: 0 }, databaseKind: "SqlServer" }]);
+  expect(useWorkspace.getState().toast?.text).toBe("Formatting is not supported for this SQL construct.");
+});
+
+it("does not run an outline response after switching the target with unchanged text", async () => {
+  useWorkspace.setState({ configs: { ms: { ...connectionConfig("ms", "SQL Server"), databaseKind: "SqlServer" } } });
+  const requests: unknown[] = [];
+  const runs: unknown[] = [];
+  const id = openSqlTab({ db: { connectionId: "ms", database: "master" }, text: "select 1" });
+  mockIPC((cmd, args) => {
+    if (cmd === "script_outline") {
+      requests.push(args);
+      useWorkspace.getState().patchConsole(id, { db: { connectionId: "ms", database: "other" } });
+      return { statements: [{ from: 0, to: 8 }], atCursor: 0, unitKind: "Batch" };
+    }
+    if (cmd === "console_run") runs.push(args);
+    return null;
+  });
+  await runOrChoose();
+  expect(requests).toEqual([{ text: "select 1", cursor: 0, databaseKind: "SqlServer" }]);
+  expect(runs).toEqual([]);
+});
+
+it.each(["database", "mode"])("drops a pending run when its %s changes during console setup", async (change) => {
+  const calls: string[] = [];
+  let finish: () => void = () => { throw new Error("console setup was not requested"); };
+  const id = openSqlTab({ db: { connectionId: "c1", database: "shop" }, text: "SELECT 1" });
+  mockIPC((cmd) => {
+    calls.push(cmd);
+    if (cmd === "console_configure") return new Promise<null>((resolve) => { finish = () => resolve(null); });
+    if (cmd === "script_outline") return { statements: [{ from: 0, to: 8 }], atCursor: 0, unitKind: "Statement" };
+    return null;
+  });
+  const pending = runOrChoose();
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  if (change === "database") await setTabTarget(id, { connectionId: "ms", database: "master" });
+  else await setTabMode(id, "Manual");
+  finish();
+  await pending;
+  expect(calls).toEqual(["console_configure"]);
+});
+
+describe("pages during an exact count", () => {
+  beforeAll(() => installRunBehavior());
+
+  function publish(id: string, patch: Partial<ConsoleState>) {
+    const state = useLive.getState().consoles[id]!;
+    useLive.getState().apply({ kind: "ConsoleChanged", ...state, ...patch, rev: state.rev + 1 });
+  }
+
+  async function pendingCount(databaseKind: DatabaseKind = "SqlServer") {
+    useWorkspace.getState().upsertConfig({ ...connectionConfig("c1", "dev"), databaseKind });
+    const id = await openWithConsole();
+    publish(id, { session: { kind: "Open", backendPid: 1 }, run: { kind: "Finished", runId: 7, elapsedMs: 1, outcome: "Ok", statements: [] } });
+    let finish: (count: number) => void = () => { throw new Error("count was not requested"); };
+    const requests: { cmd: string; args: unknown }[] = [];
+    mockIPC((cmd, args) => {
+      requests.push({ cmd, args });
+      if (cmd === "exact_row_count") return new Promise<number>((resolve) => { finish = resolve; });
+      if (cmd === "console_run") return { runId: 8, statements: [] };
+      return null;
+    });
+    const pending = lastTablePage(id);
+    return { id, pending, requests, finish };
+  }
+
+  it.each([false, true])("keeps only the latest page intent before the saved page changes, Busy published=%s", async (published) => {
+    const { id, pending, requests, finish } = await pendingCount();
+    if (published) publish(id, { work: "Count" });
+    setTablePage(id, 1);
+    setTablePage(id, 3);
+    await Promise.resolve();
+    expect(requests.map((r) => r.cmd)).toEqual(["exact_row_count"]);
+    expect(useWorkspace.getState().tabs[id]?.table?.page).toBe(0);
+    if (published) publish(id, { work: null });
+    expect(requests.map((r) => r.cmd)).toEqual(["exact_row_count"]);
+    finish(1251);
+    await pending;
+    await vi.waitFor(() => expect(requests.filter((r) => r.cmd === "console_run")).toHaveLength(1));
+    expect(requests.at(-1)?.args).toMatchObject({ request: { kind: "tablePage", page: 3 } });
+    await vi.waitFor(() => expect(useWorkspace.getState().tabs[id]?.table?.page).toBe(3));
+    expect(useWorkspace.getState().tabs[id]?.table?.exactRowCount).toBeUndefined();
+  });
+
+  it("lets PostgreSQL load a newer page while its metadata count is pending", async () => {
+    const { id, pending, requests, finish } = await pendingCount("Postgres");
+    setTablePage(id, 1);
+    await vi.waitFor(() => expect(useWorkspace.getState().tabs[id]?.table?.page).toBe(1));
+    finish(1251);
+    await pending;
+    expect(requests.map((r) => r.cmd)).toEqual(["exact_row_count", "console_run"]);
+    expect(requests[1]?.args).toMatchObject({ request: { kind: "tablePage", page: 1 } });
+    expect(useWorkspace.getState().tabs[id]?.table?.page).toBe(1);
+  });
+
+  it("waits for the ownership snapshot when the count reply arrives first", async () => {
+    const { id, pending, requests, finish } = await pendingCount();
+    publish(id, { work: "Count" });
+    finish(1251);
+    await pending;
+    expect(requests.map((r) => r.cmd)).toEqual(["exact_row_count"]);
+    publish(id, { work: null });
+    await vi.waitFor(() => expect(useWorkspace.getState().tabs[id]?.table?.page).toBe(2));
+    expect(requests.at(-1)?.args).toMatchObject({ request: { kind: "tablePage", page: 2 } });
+  });
+
+  it("lets Escape discard a counted page queued before the clearing snapshot", async () => {
+    const { id, pending, requests, finish } = await pendingCount();
+    publish(id, { work: "Count" });
+    finish(1251);
+    await pending;
+    expect(cancelActive()).toBe(true);
+    publish(id, { work: null, session: { kind: "Lost", reason: "cancelled", transaction: "Unknown" } });
+    publish(id, { work: null, session: { kind: "Open", backendPid: 2 } });
+    await Promise.resolve();
+    expect(requests.map((r) => r.cmd)).toEqual(["exact_row_count", "console_cancel"]);
+    expect(useWorkspace.getState().tabs[id]?.table?.page).toBe(0);
+  });
+
+  it("queues a changed filter and drops the older Last result", async () => {
+    const { id, pending, requests, finish } = await pendingCount();
+    publish(id, { work: "Count" });
+    updateTableQuery(id, (query) => ({ ...query, where: "id > 9" }));
+    finish(1251);
+    await pending;
+    expect(requests.map((r) => r.cmd)).toEqual(["exact_row_count"]);
+    publish(id, { work: null });
+    await vi.waitFor(() => expect(requests).toHaveLength(2));
+    expect(requests[1]?.args).toMatchObject({ request: { kind: "tablePage", page: 0, query: { where: "id > 9" } } });
+  });
+
+  it.each(["cancel", "close", "disconnect"])("does not run a queued page or repeat a count after %s", async (action) => {
+    const { id, pending, requests, finish } = await pendingCount();
+    publish(id, { work: "Count" });
+    setTablePage(id, 1);
+    if (action === "cancel") {
+      expect(cancelActive()).toBe(true);
+      expect(requests.map((r) => r.cmd)).toEqual(["exact_row_count", "console_cancel"]);
+      publish(id, { work: null, session: { kind: "Lost", reason: "cancelled", transaction: "Unknown" } });
+    } else if (action === "close") {
+      useWorkspace.getState().closeTab(id);
+      publish(id, { work: null, session: { kind: "None" } });
+    } else {
+      publish(id, { work: null, session: { kind: "None" } });
+    }
+    finish(1251);
+    await pending;
+    publish(id, { work: null, session: { kind: "Open", backendPid: 2 } });
+    await Promise.resolve();
+    expect(requests.filter((r) => r.cmd === "console_run")).toEqual([]);
+    expect(requests.filter((r) => r.cmd === "exact_row_count")).toHaveLength(1);
+  });
+
+  it("keeps ordinary run page queuing and cancellation", async () => {
+    const id = await openWithConsole();
+    const requests: { cmd: string; args: unknown }[] = [];
+    mockIPC((cmd, args) => {
+      requests.push({ cmd, args });
+      if (cmd === "console_run") return { runId: 8, statements: [] };
+      return null;
+    });
+    publish(id, { work: "Run", session: { kind: "Open", backendPid: 1 }, run: { kind: "Running", runId: 7, startedAtMs: 1, statements: [] } });
+    setTablePage(id, 1);
+    setTablePage(id, 2);
+    expect(requests).toEqual([]);
+    publish(id, { work: null, run: { kind: "Finished", runId: 7, elapsedMs: 1, outcome: "Ok", statements: [] } });
+    await vi.waitFor(() => expect(useWorkspace.getState().tabs[id]?.table?.page).toBe(2));
+    expect(requests).toHaveLength(1);
+    expect(requests[0]?.args).toMatchObject({ request: { kind: "tablePage", page: 2 } });
+    publish(id, { work: "Run", run: { kind: "Running", runId: 8, startedAtMs: 1, statements: [] } });
+    setTablePage(id, 3);
+    expect(cancelActive()).toBe(true);
+    publish(id, { work: null, run: { kind: "Finished", runId: 8, elapsedMs: 1, outcome: "Cancelled", statements: [] } });
+    await Promise.resolve();
+    expect(requests.map((r) => r.cmd)).toEqual(["console_run", "console_cancel"]);
+  });
+
+  it("does not allow Escape to cancel transaction, edit or probe work", async () => {
+    const id = await openWithConsole();
+    const requests: string[] = [];
+    mockIPC((cmd) => { requests.push(cmd); });
+    for (const work of ["Transaction", "Edit", "Probe"] as const) {
+      publish(id, { work });
+      expect(cancelActive()).toBe(false);
+    }
+    expect(requests).toEqual([]);
+  });
 });
