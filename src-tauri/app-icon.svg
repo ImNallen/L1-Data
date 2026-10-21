@@ -1,5 +1,1 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" width="1024" height="1024">
-  <rect x="100" y="100" width="824" height="824" rx="185" fill="#0a0a0a"/>
-  <rect x="101" y="101" width="822" height="822" rx="184" fill="none" stroke="#fff" stroke-opacity="0.1" stroke-width="2"/>
-  <path fill="#fff" transform="translate(341.837 292) scale(0.2244898)" d="M0 324L444 8V1592H796L484 1960H0ZM776 408L1516 0V1960H1044V612L776 768Z"/>
-</svg>
+<svg xmlns="http://www.w3.org/2000/svg" width="512" height="512" viewBox="0 0 512 512" role="img"><title>L1Data</title><defs><linearGradient id="l1data" x1="0" y1="0" x2="1" y2="1"><stop stop-color="#00DFB0"/><stop offset=".52" stop-color="#00C5D7"/><stop offset="1" stop-color="#0095F5"/></linearGradient><clipPath id="l1data-clip"><rect width="512" height="512" rx="104"/></clipPath></defs><g clip-path="url(#l1data-clip)"><rect width="512" height="512" fill="url(#l1data)"/><path d="M0 440C78 268 267 166 448 0H512V512H0Z" fill="#0095F5" opacity=".22"/></g><g transform="translate(112 130) scale(.9)" fill="#FFFFFF"><path d="M32 0H70Q92 0 92 22V162Q92 191 119 195L191 201Q202 202 202 214V267Q202 280 189 280H35Q0 280 0 245V34Q0 0 32 0Z"/><path d="M159 53L237 6Q247 0 259 0H296Q320 0 320 24V256Q320 280 296 280H246Q224 280 224 258V99Q224 93 218 97L166 127Q150 136 150 118V70Q150 59 159 53Z"/></g></svg>
