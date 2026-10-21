@@ -556,6 +556,14 @@ pub struct TableSortKey { pub column: String, pub desc: bool }
 #[serde(rename_all = "camelCase")]
 pub struct TableOrderView { pub sql: String, pub keys: Option<Vec<TableSortKey>> }
 
+#[derive(Debug, Clone, Serialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct TableScript {
+    pub text: String,
+    /// Browse documents after trimming outer whitespace. Includes the canonical text.
+    pub accepted_texts: Vec<String>,
+}
+
 #[derive(Debug, Clone, Deserialize, Type)]
 #[serde(tag = "kind", rename_all = "camelCase", rename_all_fields = "camelCase")]
 pub enum RunRequest {

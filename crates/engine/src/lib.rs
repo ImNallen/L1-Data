@@ -748,7 +748,7 @@ impl Engine {
         text::format_edit(text, target, database_kind)
     }
 
-    pub fn table_script(&self, db: DatabaseRef, schema: &str, table: &str) -> Result<String,String> {
+    pub fn table_script(&self, db: DatabaseRef, schema: &str, table: &str) -> Result<TableScript,String> {
         let kind = self.shared.config(db.connection_id).ok_or("Unknown connection")?.database_kind;
         Ok(text::table_script(kind,schema,table))
     }

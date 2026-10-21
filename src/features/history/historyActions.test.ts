@@ -32,7 +32,7 @@ it("opens the exact saved SQL and database in a new tab without changing the ori
 it("inserts at the cursor of the active tab's editor, a table tab's too, and needs an open tab", async () => {
   expect(insertHistoryQuery("select 42")).toBe(false);
   vi.stubGlobal("window", { crypto });
-  mockIPC((cmd) => cmd === "table_script" ? "SELECT * FROM public.orders" : null);
+  mockIPC((cmd) => cmd === "table_script" ? { text: "SELECT * FROM public.orders", acceptedTexts: ["SELECT * FROM public.orders", "SELECT * FROM public.orders;"] } : null);
   await openTableTab({ db: { connectionId: "c1", database: "shop" }, schema: "public", relation: "orders" });
   const tableId = useWorkspace.getState().active!;
   expect(insertHistoryQuery("select 42;\n")).toBe(true);

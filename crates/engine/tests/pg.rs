@@ -1019,6 +1019,64 @@ async fn sql_comments_in_where_and_order_by_keep_the_page_limit() {
 }
 
 #[tokio::test]
+async fn table_page_preserves_nested_domain_native_metadata_and_primary_key() {
+    let mut h = Harness::start().await;
+    h.engine.connect(h.conn).await.unwrap();
+    let tab = h.sql_tab(TxnMode::AutoCommit).await;
+    let oracle = h.oracle().await;
+    let schema = unique("nested_domains");
+    oracle
+        .batch_execute(&format!(
+            "CREATE SCHEMA {schema};
+             CREATE DOMAIN {schema}.first_level AS int;
+             CREATE DOMAIN {schema}.second_level AS {schema}.first_level;
+             CREATE TABLE {schema}.items (id int PRIMARY KEY, value {schema}.second_level);
+             INSERT INTO {schema}.items VALUES (1, 42)"
+        ))
+        .await
+        .unwrap();
+    let check_schema = schema.clone();
+    let engine = h.engine.clone();
+    let checked = tokio::spawn(async move {
+        let schema = check_schema;
+        h.engine.refresh_catalog(h.db()).await.unwrap();
+        let catalog = h.engine.catalog(h.db()).await.unwrap();
+        let relation = catalog.relation(&schema, "items").unwrap();
+        let direct = h.run_ok(tab, &format!("SELECT * FROM {schema}.items")).await;
+        let native = Harness::result(&direct, 0);
+        assert_eq!(native.columns[1].r#type.category, TypeCategory::Integer);
+
+        let accepted = h.engine.console_run(tab, RunRequest::TablePage {
+            schema: schema.clone(), table: "items".into(), page: 0, query: TableQuery::default(),
+        }).await.unwrap();
+        let state = h.wait_finished(tab, accepted.run_id).await;
+        assert!(matches!(state.run, RunState::Finished { outcome: RunOutcome::Ok, .. }), "{:?}", state.run);
+        let meta = Harness::result(&state, 0);
+        assert_eq!(serde_json::to_value(&meta.columns).unwrap(), serde_json::to_value(&native.columns).unwrap());
+        let rows = h.page(&meta, 0, 1);
+        assert_eq!(rows, vec![vec![Some("1".into()), Some("42".into())]]);
+        let key = meta.columns.iter().zip(&rows[0]).filter_map(|(column, value)| {
+            let source = column.source?;
+            (source.table_oid == relation.oid && relation.columns.iter().any(|known| known.attnum == source.attnum && known.pk))
+                .then(|| cell(&column.name, value.as_deref()))
+        }).collect::<Vec<_>>();
+        assert_eq!(key.len(), 1, "native provenance identifies the complete primary key");
+        assert_eq!(key[0].column, "id");
+        let changes = TableChanges {
+            schema: schema.clone(), table: "items".into(), inserts: vec![], deletes: vec![],
+            updates: vec![RowUpdate { key, set: vec![cell("value", Some("43"))] }],
+        };
+        assert!(h.engine.table_apply(tab, changes).await.unwrap().committed);
+        assert_eq!(h.scalar(tab, &format!("SELECT value FROM {schema}.items WHERE id = 1")).await, "43");
+    }).await;
+    oracle.batch_execute(&format!("DROP SCHEMA {schema} CASCADE")).await.unwrap();
+    let remaining: i64 = oracle.query_one("SELECT count(*) FROM pg_namespace WHERE nspname = $1", &[&schema]).await.unwrap().get(0);
+    assert_eq!(remaining, 0);
+    engine.shutdown().await;
+    checked.unwrap();
+}
+
+#[tokio::test]
 async fn table_page_on_second_database_uses_its_pk() {
     let mut h = Harness::start().await;
     let tab = h.sql_tab_on(TxnMode::AutoCommit, "reporting").await;

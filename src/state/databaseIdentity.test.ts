@@ -104,7 +104,7 @@ it("keeps restored table browsing active when the target gains its canonical spe
   const calls: { cmd: string; args: unknown }[] = [];
   mockIPC((cmd, args) => {
     calls.push({ cmd, args });
-    if (cmd === "table_script") return "SELECT * FROM [dbo].[orders]";
+    if (cmd === "table_script") return { text: "SELECT * FROM [dbo].[orders]", acceptedTexts: ["SELECT * FROM [dbo].[orders]"] };
     if (cmd === "console_run") return { runId: 1, statements: [] };
     return null;
   });

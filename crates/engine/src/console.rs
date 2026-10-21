@@ -394,7 +394,7 @@ async fn run_outputs(console: &Console, shared: &Shared, session: &mut Session, 
             Ok(QueryEvent::Prepared) => {}
             Ok(QueryEvent::Columns(mut columns)) => {
                 if let Some((set, out)) = active.take() { finish_rows(console, shared, index, &set, &mut outputs[out], started, &mut rows); }
-                if let Some(table) = &plan.table {
+                if let Some(table) = &plan.table && plan.connection.database_kind == DatabaseKind::SqlServer {
                     if columns.len() != table.columns.len() || columns.iter().zip(&table.columns).any(|(actual, known)| actual.name != known.name || actual.r#type.category != known.category) {
                         failure = Some(crate::session::error("Table shape changed. Refresh the catalog before browsing again."));
                         break;

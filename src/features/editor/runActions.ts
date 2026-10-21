@@ -10,6 +10,7 @@ import {
   type Settings,
   type TabId,
   type TableQuery,
+  type TableScript,
   type TxnMode,
 } from "../../ipc/bindings";
 import { applyErrorText, configureErrorText, disconnectErrorText, runErrorText, txnErrorText } from "../../ipc/errors";
@@ -66,24 +67,25 @@ async function ensureConsole(tab: Tab): Promise<boolean> {
 
 const sent = new Map<TabId, { runId: number; text: string }>();
 
-const tableScripts = new Map<string, string>();
-const tableScriptKey = (db: DatabaseRef, schema: string, table: string) => JSON.stringify([db.connectionId, schema, table]);
+const tableScripts = new Map<string, TableScript>();
+const tableScriptKey = (db: DatabaseRef, schema: string, table: string) => JSON.stringify([db.connectionId, databaseKindFor(db, ws().configs), schema, table]);
 
 export async function browseTemplate(db: DatabaseRef, schema: string, table: string): Promise<string | null> {
   const key = tableScriptKey(db, schema, table);
   const cached = tableScripts.get(key);
-  if (cached !== undefined) return cached;
+  if (cached !== undefined) return cached.text;
   const res = await commands.tableScript(db, schema, table);
+  if (key !== tableScriptKey(db, schema, table)) return null;
   if (res.status === "error") {
     notify(res.error);
     return null;
   }
   tableScripts.set(key, res.data);
-  return res.data;
+  return res.data.text;
 }
 
 export function isBrowsing(tab: Tab): tab is TableTab {
-  return isTableTab(tab) && textOf(tab.id) === tableScripts.get(tableScriptKey(tab.console.db, tab.table.schema, tab.table.table));
+  return isTableTab(tab) && tableScripts.get(tableScriptKey(tab.console.db, tab.table.schema, tab.table.table))?.acceptedTexts.includes(textOf(tab.id).trim()) === true;
 }
 
 function textTarget(tab: Tab): { db: DatabaseRef | null; databaseKind: DatabaseKind } {
@@ -136,7 +138,7 @@ async function runTab(tabId: TabId, target?: PageTarget, script?: RunTarget): Pr
     if (target) queuedPages.set(tabId, target);
     return;
   }
-  if (!(await ensureConsole(tab))) return;
+  if (!(await ensureConsole(tab)) || (target && !isBrowsing(tab))) return;
 
   let request: RunRequest;
   let text = "";
@@ -293,9 +295,10 @@ const loadedTables = new Set<TabId>();
 export async function loadTableOnce(tabId: TabId): Promise<void> {
   const tab = ws().tabs[tabId];
   if (loadedTables.has(tabId) || !isTableTab(tab)) return;
+  const key = tableScriptKey(tab.console.db, tab.table.schema, tab.table.table);
   const template = await browseTemplate(tab.console.db, tab.table.schema, tab.table.table);
   const current = ws().tabs[tabId];
-  if (template === null || loadedTables.has(tabId) || !isTableTab(current) || !sameDb(current.console.db, tab.console.db) || current.table !== tab.table) return;
+  if (template === null || loadedTables.has(tabId) || !isTableTab(current) || !sameDb(current.console.db, tab.console.db) || key !== tableScriptKey(current.console.db, current.table.schema, current.table.table) || current.table !== tab.table) return;
   loadedTables.add(tabId);
   if (useLive.getState().consoles[tabId]?.run.kind !== "Finished") void runTab(tabId, { page: tab.table.page });
 }

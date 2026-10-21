@@ -21,7 +21,7 @@ export const commands = {
 	consoleConfigure: (tabId: TabId, config: ConsoleConfig) => typedError<ConsoleState, ConfigureError>(__TAURI_INVOKE("console_configure", { tabId, config })),
 	scriptOutline: (text: string, cursor: DocOffset, databaseKind: DatabaseKind) => __TAURI_INVOKE<ScriptOutline>("script_outline", { text, cursor, databaseKind }),
 	editorFormat: (text: string, target: RunTarget, databaseKind: DatabaseKind) => typedError<FormatEdit, FormatError>(__TAURI_INVOKE("editor_format", { text, target, databaseKind })),
-	tableScript: (db: DatabaseRef, schema: string, table: string) => typedError<string, string>(__TAURI_INVOKE("table_script", { db, schema, table })),
+	tableScript: (db: DatabaseRef, schema: string, table: string) => typedError<TableScript, string>(__TAURI_INVOKE("table_script", { db, schema, table })),
 	tableOrder: (db: DatabaseRef, schema: string, table: string, orderBy: string, edit: TableOrderEdit) => typedError<TableOrderView, string>(__TAURI_INVOKE("table_order", { db, schema, table, orderBy, edit })),
 	consoleRun: (tabId: TabId, request: RunRequest) => typedError<RunAccepted, RunError>(__TAURI_INVOKE("console_run", { tabId, request })),
 	consoleCancel: (tabId: TabId) => __TAURI_INVOKE<void>("console_cancel", { tabId }),
@@ -1032,6 +1032,12 @@ export type TableQuery = {
 	filters: ColumnFilter[],
 	/**  A boolean SQL expression ANDed with `filters`; empty means none. */
 	where: string,
+};
+
+export type TableScript = {
+	text: string,
+	/**  Browse documents after trimming outer whitespace. Includes the canonical text. */
+	acceptedTexts: string[],
 };
 
 /**  The table a tab opened from the sidebar browses, in the tab's console database. */

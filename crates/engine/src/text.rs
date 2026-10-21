@@ -1,4 +1,4 @@
-use crate::model::{DatabaseKind, ExecutionUnitKind, TableOrderEdit, TableOrderView, TableSortKey, Relation};
+use crate::model::{DatabaseKind, ExecutionUnitKind, TableOrderEdit, TableOrderView, TableSortKey, TableScript, Relation};
 use crate::model::{
     CellWrite, ColumnFilter, DocOffset, DocRange, FilterOp, FormatEdit, FormatError, RunTarget, ScriptOutline, TableQuery,
 };
@@ -237,9 +237,13 @@ mod tests {
             ("public", "select", "SELECT * FROM public.\"select\""),
             ("current_schema", "a\"b", "SELECT * FROM \"current_schema\".\"a\"\"b\""),
         ] {
-            assert_eq!(table_script(DatabaseKind::Postgres, schema, table), expected);
+            let script = table_script(DatabaseKind::Postgres, schema, table);
+            assert_eq!(script.text, expected);
+            assert_eq!(script.accepted_texts, [expected.to_owned(), format!("{expected};")]);
         }
-        assert_eq!(table_script(DatabaseKind::SqlServer, "dbo", "orders"), "SELECT * FROM [dbo].[orders]");
+        let script = table_script(DatabaseKind::SqlServer, "dbo", "orders");
+        assert_eq!(script.text, "SELECT * FROM [dbo].[orders]");
+        assert_eq!(script.accepted_texts, ["SELECT * FROM [dbo].[orders]"]);
     }
 
     #[test]
@@ -402,7 +406,7 @@ pub fn pick(text: &str, target: ByteTarget, kind: DatabaseKind) -> Result<Vec<St
 }
 pub fn classify(text: &str, kind: DatabaseKind) -> StmtKind { match kind { DatabaseKind::Postgres => sql::classify(text), DatabaseKind::SqlServer => sql::tsql::classify(text) } }
 
-pub fn table_script(kind: DatabaseKind, schema: &str, table: &str) -> String {
+pub fn table_script(kind: DatabaseKind, schema: &str, table: &str) -> TableScript {
     fn postgres_ident(name: &str) -> String {
         let mut chars = name.chars();
         let simple = chars.next().is_some_and(|c| c.is_ascii_lowercase() || c == '_')
@@ -414,7 +418,10 @@ pub fn table_script(kind: DatabaseKind, schema: &str, table: &str) -> String {
         }
     }
     let quote = match kind { DatabaseKind::Postgres => postgres_ident, DatabaseKind::SqlServer => sql::tsql::quote_ident };
-    format!("SELECT * FROM {}.{}", quote(schema), quote(table))
+    let text = format!("SELECT * FROM {}.{}", quote(schema), quote(table));
+    let mut accepted_texts = vec![text.clone()];
+    if kind == DatabaseKind::Postgres { accepted_texts.push(format!("{text};")); }
+    TableScript { text, accepted_texts }
 }
 
 pub fn table_order(kind: DatabaseKind, relation: Option<&Relation>, order_by: &str, edit: TableOrderEdit) -> Result<TableOrderView, String> {

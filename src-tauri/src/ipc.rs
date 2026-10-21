@@ -254,7 +254,7 @@ pub async fn usage_limits(app: AppHandle) -> LimitsReport {
 
 #[tauri::command]
 #[specta::specta]
-pub fn table_script(engine: State<'_, Arc<Engine>>, db: DatabaseRef, schema: String, table: String) -> Result<String, String> {
+pub fn table_script(engine: State<'_, Arc<Engine>>, db: DatabaseRef, schema: String, table: String) -> Result<TableScript, String> {
     engine.table_script(db, &schema, &table)
 }
 
