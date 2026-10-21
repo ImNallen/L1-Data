@@ -352,14 +352,21 @@ fn ddl_at(tokens: &[Token<'_>], at: usize) -> Option<StmtKind> {
     Some(StmtKind::Ddl(object.filter(|t| t.kind == Kind::Word).map_or(verb.clone(), |t| format!("{verb} {}", t.text.to_ascii_uppercase()))))
 }
 
+fn batch_schema_change(tokens: &[Token<'_>]) -> Option<StmtKind> {
+    let mut changes = (0..tokens.len()).filter_map(|i| ddl_at(tokens, i));
+    let first = changes.next()?;
+    if matches!(&first, StmtKind::Ddl(tag) if tag.ends_with(" DATABASE")) {
+        return Some(first);
+    }
+    Some(changes.find(|kind| matches!(kind, StmtKind::Ddl(tag) if tag.ends_with(" DATABASE"))).unwrap_or(first))
+}
+
 pub(crate) fn classify(text: &str) -> StmtKind {
     let Ok(tokens) = significant(text) else {
         return StmtKind::Other("BATCH".into());
     };
-    // A batch may change schema after its first statement. Refresh conservatively.
-    let ddl: Vec<_> = (0..tokens.len()).filter_map(|i| ddl_at(&tokens, i)).collect();
-    if let Some(kind) = ddl.iter().find(|k| matches!(k, StmtKind::Ddl(tag) if tag.ends_with(" DATABASE"))).or(ddl.first()) {
-        return kind.clone();
+    if let Some(kind) = batch_schema_change(&tokens) {
+        return kind;
     }
     let first = tokens.iter().position(Token::code).unwrap_or(tokens.len());
     if let Some(kind) = transaction_at(&tokens, first) {
