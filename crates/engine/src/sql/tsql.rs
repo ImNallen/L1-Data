@@ -1,5 +1,5 @@
 use super::mssql_value::{Input, input_sql};
-use super::{ByteTarget, DmlVerb, StmtKind, StmtSpan, relations::NameRef};
+use super::{ByteTarget, DmlVerb, Invalidates, StmtKind, StmtSpan, relations::NameRef};
 use crate::model::{ColumnFilter, ColumnInfo, FilterOp, TableQuery, TypeCategory};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -356,6 +356,27 @@ fn batch_schema_change(tokens: &[Token<'_>]) -> Option<StmtKind> {
         return Some(first);
     }
     Some(changes.find(|kind| matches!(kind, StmtKind::Ddl(tag) if tag.ends_with(" DATABASE"))).unwrap_or(first))
+}
+
+pub(crate) fn invalidates(text: &str) -> Invalidates {
+    let Ok(tokens) = significant(text) else {
+        return Invalidates::Nothing;
+    };
+    let mut catalog = false;
+    let mut databases = false;
+    for kind in (0..tokens.len()).filter_map(|i| ddl_at(&tokens, i)) {
+        match kind.invalidates() {
+            Invalidates::Catalog => catalog = true,
+            Invalidates::DatabaseList => databases = true,
+            _ => {}
+        }
+    }
+    match (catalog, databases) {
+        (false, false) => Invalidates::Nothing,
+        (true, false) => Invalidates::Catalog,
+        (false, true) => Invalidates::DatabaseList,
+        (true, true) => Invalidates::Both,
+    }
 }
 
 pub(crate) fn classify(text: &str) -> StmtKind {
@@ -977,31 +998,6 @@ fn from_sql(schema: &str, table: &str, columns: &[ColumnInfo], query: &TableQuer
     Ok(sql)
 }
 
-fn ordered_columns(text: &str) -> Vec<String> {
-    let Ok(tokens) = lex(text) else {
-        return Vec::new();
-    };
-    let mut columns = Vec::new();
-    let mut depth = 0usize;
-    let mut start = 0;
-    for i in 0..=tokens.len() {
-        if i == tokens.len() || tokens[i].text == "," && depth == 0 {
-            if let Some((names, after)) = name_path(&tokens[start..i], 0) {
-                let part = &tokens[start..i];
-                if after == part.len() || after + 1 == part.len() && (word_at(part, after, "ASC") || word_at(part, after, "DESC")) {
-                    columns.push(names.last().unwrap().clone());
-                }
-            }
-            start = i + 1;
-        } else if tokens[i].text == "(" {
-            depth += 1;
-        } else if tokens[i].text == ")" {
-            depth = depth.saturating_sub(1);
-        }
-    }
-    columns
-}
-
 pub(crate) fn browse_sql(
     schema: &str,
     table: &str,
@@ -1014,15 +1010,13 @@ pub(crate) fn browse_sql(
 ) -> Result<String, String> {
     let mut sql = format!("SELECT {projection} {}", from_sql(schema, table, columns, query)?);
     let mut order = Vec::new();
-    let mut ordered = ordered_columns(&query.order_by);
-    if !query.order_by.trim().is_empty() {
+    let user_order = !query.order_by.trim().is_empty();
+    if user_order {
         order.push(format!("{}\n", query.order_by.trim()));
     }
     for column in pk {
-        if !ordered.contains(column) {
-            order.push(quote_ident(column));
-            ordered.push(column.clone());
-        }
+        let column = quote_ident(column);
+        order.push(if user_order { format!("(SELECT {column})") } else { column });
     }
     if order.is_empty() {
         order.push("(SELECT NULL)".into());
@@ -1221,12 +1215,27 @@ mod tests {
         assert_eq!(classify("DECLARE @x int = 1; SELECT @x"), StmtKind::Query);
         assert_eq!(classify("WITH c AS (SELECT 1 AS id) UPDATE t SET id = 1"), StmtKind::Dml(DmlVerb::Update));
         assert_eq!(classify("SELECT 1; CREATE OR ALTER PROCEDURE p AS SELECT 2"), StmtKind::Ddl("CREATE PROCEDURE".into()));
-        assert_eq!(classify("SELECT 1; ALTER TABLE t ADD x int").invalidates(), Invalidates::Catalog);
-        assert_eq!(classify("CREATE TABLE t (id int); DROP DATABASE d").invalidates(), Invalidates::DatabaseList);
+        assert_eq!(invalidates("SELECT 1; ALTER TABLE t ADD x int"), Invalidates::Catalog);
+        assert_eq!(invalidates("CREATE TABLE t (id int); DROP DATABASE d"), Invalidates::Both);
         assert!(is_write("SELECT 1; INSERT INTO t VALUES (1)"));
         assert!(is_write("SELECT id INTO #copy FROM t"));
         assert!(is_write("EXEC p"));
         assert!(!is_write("SELECT [UPDATE], N'DROP TABLE t', @INSERT /* DELETE */"));
+    }
+
+    #[test]
+    fn refresh_obligations_accumulate_independently_of_batch_classification() {
+        for (text, expected) in [
+            ("SELECT 1", Invalidates::Nothing),
+            ("CREATE TABLE t (id int)", Invalidates::Catalog),
+            ("DROP DATABASE IF EXISTS d", Invalidates::DatabaseList),
+            ("ALTER DATABASE d SET READ_WRITE; ALTER TABLE t ADD n int", Invalidates::Both),
+            ("CREATE PROCEDURE p AS BEGIN DROP DATABASE IF EXISTS d; END", Invalidates::Both),
+            ("CREATE OR ALTER PROCEDURE p AS BEGIN DROP DATABASE IF EXISTS d; END", Invalidates::Both),
+            ("SELECT N'CREATE TABLE t'; /* ALTER DATABASE d */ SELECT [DROP], @CREATE", Invalidates::Nothing),
+        ] {
+            assert_eq!(invalidates(text), expected, "{text}");
+        }
     }
 
     #[test]
@@ -1392,10 +1401,11 @@ mod tests {
         let query = TableQuery { order_by: "[Id] DESC, LOWER([Name])".into(), ..Default::default() };
         assert_eq!(
             browse_sql("s", "t", "*", &[], &["Id".into(), "Tenant".into()], &query, 10, 0).unwrap(),
-            "SELECT * FROM [s].[t] ORDER BY [Id] DESC, LOWER([Name])\n, [Tenant] OFFSET 0 ROWS FETCH NEXT 10 ROWS ONLY"
+            "SELECT * FROM [s].[t] ORDER BY [Id] DESC, LOWER([Name])\n, (SELECT [Id]), (SELECT [Tenant]) OFFSET 0 ROWS FETCH NEXT 10 ROWS ONLY"
         );
         let query = TableQuery { order_by: "[t].[Id] DESC".into(), ..Default::default() };
-        assert!(!browse_sql("s", "t", "*", &[], &["Id".into()], &query, 10, 0).unwrap().contains(", [Id]"));
+        assert!(browse_sql("s", "t", "*", &[], &["Id".into()], &query, 10, 0).unwrap().contains(", (SELECT [Id])"));
+        assert!(validate_expression("(SELECT [Id])", true).is_err());
     }
 
     #[test]

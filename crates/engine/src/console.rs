@@ -49,6 +49,10 @@ impl Owed {
             Invalidates::Nothing => {}
             Invalidates::Catalog => self.catalog = true,
             Invalidates::DatabaseList => self.databases = true,
+            Invalidates::Both => {
+                self.catalog = true;
+                self.databases = true;
+            }
         }
     }
 
@@ -322,7 +326,11 @@ pub async fn run_task(console: Arc<Console>, shared: Arc<Shared>, mut session: S
             Err(_) if cancelled => (StmtStatus::Cancelled, HistoryOutcome::Cancelled),
             Err(error) => (StmtStatus::Failed { error: error.clone() }, HistoryOutcome::Error { message: error.message.clone() }),
         };
-        let invalidates = if result.is_ok() || plan.connection.database_kind == DatabaseKind::SqlServer { stmt.kind.invalidates() } else { Invalidates::Nothing };
+        let invalidates = match plan.connection.database_kind {
+            DatabaseKind::SqlServer => crate::sql::tsql::invalidates(sql),
+            DatabaseKind::Postgres if result.is_ok() => stmt.kind.invalidates(),
+            DatabaseKind::Postgres => Invalidates::Nothing,
+        };
         let due = console.edit(&shared, run_id, |inner| {
             inner.txn = txn;
             inner.txn_depth = session.txn_depth();
