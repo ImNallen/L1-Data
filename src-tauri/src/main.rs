@@ -222,22 +222,34 @@ async fn self_check_steps(engine: &Arc<Engine>, url: &str) -> Result<serde_json:
         .result_page(ResultRef { tab_id: tab, run_id: accepted.run_id, index: 0 }, 0, 1)
         .map_err(fail("result_page"))?;
     let catalog = engine.catalog(DatabaseRef { connection_id: config.id, database: config.database.clone() }).await.map_err(fail("catalog_get"))?;
+    let text_engine = engine.clone();
+    let text_db = catalog.db.clone();
+    let text_schema = catalog.default_schema.clone().unwrap_or_default();
+    let database_kind = config.database_kind;
+    let text_services = std::thread::spawn(move || {
+        let outline = text_engine.script_outline("SELECT 1", DocOffset(0), database_kind);
+        let formatted = text_engine.editor_format("SELECT 1", RunTarget::All, database_kind).map_err(fail("editor_format"))?;
+        let browse = text_engine.table_script(text_db.clone(), &text_schema, "orders").map_err(fail("table_script"))?;
+        let order = text_engine.table_order(text_db, "", TableOrderEdit::Cycle { column: "id".into(), additive: false }).map_err(fail("table_order"))?;
+        Ok::<_, (&'static str, serde_json::Value)>(serde_json::json!({ "outline": outline, "formatted": formatted, "browse": browse, "order": order }))
+    }).join().map_err(|_| ("text_services", serde_json::json!("panicked off the runtime")))??;
     engine
         .edit_view(config.id, ViewEdit::Database { name: "reporting".into(), shown: true })
         .await
         .map_err(fail("connection_edit_view"))?;
     let reporting = engine.catalog(DatabaseRef { connection_id: config.id, database: "reporting".into() }).await.map_err(fail("catalog_get reporting"))?;
     // Called from a plain thread, as the sync command is on the main thread of the desktop app.
+    let probe_database = match config.database_kind { DatabaseKind::Postgres => "postgres", DatabaseKind::SqlServer => "master" };
     let prober = engine.clone();
     let id = config.id;
-    std::thread::spawn(move || prober.probe_databases(id, vec!["postgres".into()]))
+    std::thread::spawn(move || prober.probe_databases(id, vec![probe_database.into()]))
         .join()
         .map_err(|_| ("connection_probe_databases", serde_json::json!("panicked off the runtime")))?;
     let probed = tokio::time::timeout(std::time::Duration::from_secs(10), async {
         loop {
             let live = engine.boot().live.into_iter().find(|c| c.id == config.id);
             if let Some(ConnectionState { status: ConnStatus::Connected { instance, .. }, .. }) = live
-                && let Some(db) = instance.databases.iter().find(|d| d.name == "postgres")
+                && let Some(db) = instance.databases.iter().find(|d| d.name == probe_database)
                 && let SchemaCount::Known { count } = db.schema_count
             {
                 return count;
@@ -262,7 +274,8 @@ async fn self_check_steps(engine: &Arc<Engine>, url: &str) -> Result<serde_json:
         "select1": { "rows": page.rows, "elapsedMs": finished.1 },
         "catalog": report(&catalog),
         "shownCatalog": report(&reporting),
-        "probedSchemas": { "postgres": probed },
+        "probedSchemas": { (probe_database): probed },
+        "textServices": text_services,
     }))
 }
 

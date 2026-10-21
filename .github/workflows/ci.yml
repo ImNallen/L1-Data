@@ -84,7 +84,7 @@ jobs:
         run: cargo test --workspace
 
   database:
-    name: pg-tests and bridge-smoke
+    name: database integrations and bridge smokes
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     services:
@@ -102,6 +102,19 @@ jobs:
           --health-timeout 5s
           --health-retries 12
           --shm-size=1g
+      sqlserver:
+        image: mcr.microsoft.com/mssql/server:2022-latest
+        env:
+          ACCEPT_EULA: "Y"
+          MSSQL_PID: Developer
+          MSSQL_SA_PASSWORD: L1Data_dev_Str0ng
+        ports:
+          - 1434:1433
+        options: >-
+          --health-cmd "/opt/mssql-tools18/bin/sqlcmd -S localhost -U sa -P L1Data_dev_Str0ng -C -b -Q 'SELECT 1'"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 24
     steps:
       - uses: actions/checkout@v4
 
@@ -130,11 +143,22 @@ jobs:
       - name: Apply dev/seed.sql
         run: psql "$L1_DATA_TEST_PG" -v ON_ERROR_STOP=1 -f dev/seed.sql
 
-      - name: cargo build -p dev-bridge
-        run: cargo build -p dev-bridge
+      - name: Apply dev/mssql-seed.sql
+        env:
+          MSSQL_CONTAINER: ${{ job.services.sqlserver.id }}
+        run: docker exec -i "$MSSQL_CONTAINER" /opt/mssql-tools18/bin/sqlcmd -S localhost -U sa -P L1Data_dev_Str0ng -C -b < dev/mssql-seed.sql
+
+      - name: cargo build -p dev-bridge -p engine
+        run: cargo build -p dev-bridge -p engine
 
       - name: dev/bridge-smoke.sh
         run: dev/bridge-smoke.sh
 
       - name: cargo test -p engine --features pg-tests
         run: cargo test -p engine --features pg-tests
+
+      - name: cargo test -p engine --features mssql-tests
+        run: cargo test -p engine --features mssql-tests
+
+      - name: Mixed database bridge smoke
+        run: python3 dev/mssql-smoke.py
