@@ -1,6 +1,6 @@
 import { IconCheck, IconCopy, IconPlayerPlayFilled } from "@tabler/icons-react";
 import { useEffect, useState } from "react";
-import type { DatabaseRef } from "../../ipc/bindings";
+import type { DatabaseKind, DatabaseRef } from "../../ipc/bindings";
 import { useWorkspace } from "../../state/workspace";
 import { Button, IconButton } from "../../ui/primitives";
 import { insertSql, openInNewTab, replaceTabSql, runInNewTab } from "./assistantActions";
@@ -8,7 +8,7 @@ import { SqlHighlight } from "./SqlHighlight";
 
 const ACTION = "h-7 px-2.5 text-ui-12.5";
 
-export function SqlCard({ sql, relations, vetted, complete, db }: { sql: string; relations: string[]; vetted: boolean; complete: boolean; db: DatabaseRef | null }) {
+export function SqlCard({ sql, relations, vetted, complete, db, databaseKind = "Postgres" }: { sql: string; relations: string[]; vetted: boolean; complete: boolean; db: DatabaseRef | null; databaseKind?: DatabaseKind }) {
   const [copied, setCopied] = useState(false);
   useEffect(() => {
     if (!copied) return;
@@ -37,7 +37,7 @@ export function SqlCard({ sql, relations, vetted, complete, db }: { sql: string;
           {copied ? <IconCheck size={13} /> : <IconCopy size={13} />}
         </IconButton>
       </div>
-      <SqlHighlight sql={sql} className="px-3 py-2.5" />
+      <SqlHighlight sql={sql} databaseKind={databaseKind} className="px-3 py-2.5" />
       <div className="flex flex-wrap items-center gap-1 border-t border-border px-2 py-1.5">
         {complete && !vetted ? (
           <Button data-testid="sql-open-new-tab" title="L1 Data cannot verify this as read-only, so it opens without running" className={ACTION} disabled={!complete} onClick={() => openInNewTab(sql, db)}>

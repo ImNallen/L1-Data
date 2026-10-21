@@ -49,7 +49,7 @@ const FIRST_TURN = [
     kind: "User",
     atMs: 1,
     text: "Which regions grew the most compared with the 90 days before?",
-    context: { db: DB, connectionName: "prod-postgres", tabTitle: "orders_by_region.sql" },
+    context: { databaseKind: "Postgres", db: DB, connectionName: "prod-postgres", tabTitle: "orders_by_region.sql" },
     attachment: { tabTitle: "orders_by_region.sql", columns: ["region"], rows: [["EU-West"]], totalRows: 6 },
   }),
   snap(1, 0, {
@@ -172,4 +172,15 @@ it("dots the history button while any chat waits for approval", () => {
     ["Chat history, a chat is waiting for approval", true],
     ["Chat history", false],
   ]);
+});
+
+
+it("highlights SQL cards from saved SQL Server context after its connection is deleted", () => {
+  const entries = [
+    snap(0, 0, { kind: "User", atMs: 1, text: "Show top rows", context: { db: DB, databaseKind: "SqlServer", connectionName: "removed", tabTitle: "old" }, attachment: null }),
+    snap(1, 0, { kind: "Text", done: true, blocks: [{ kind: "Sql", sql: "SELECT TOP 1 [odd name] FROM [dbo].[line items]", relations: [], vetted: false, complete: true }] }),
+  ];
+  const html = render({ kind: "Idle" }, entries);
+  expect(html).toContain('class="text-keyword">TOP</span>');
+  expect(html).toContain('data-testid="sql-open-new-tab"');
 });

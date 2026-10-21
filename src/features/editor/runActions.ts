@@ -4,6 +4,7 @@ import {
   commands,
   type ConsoleConfig,
   type DatabaseRef,
+  type DatabaseKind,
   type RunRequest,
   type RunTarget,
   type Settings,
@@ -13,7 +14,8 @@ import {
 } from "../../ipc/bindings";
 import { applyErrorText, configureErrorText, disconnectErrorText, runErrorText, txnErrorText } from "../../ipc/errors";
 import { findRelation, useCatalog, viewFor } from "../../state/catalog";
-import { homeDb, sameDb } from "../../state/dbKey";
+import { databaseKindFor } from "../../state/databaseKind";
+import { dbKey, homeDb, sameDb } from "../../state/dbKey";
 import { useLive } from "../../state/live";
 import { dropRowCaches } from "../../state/rowCache";
 import { isRunning } from "../../state/status";
@@ -32,8 +34,7 @@ import {
   showRunTarget,
   textOf,
 } from "./editorStates";
-import { openChooser } from "./chooserState";
-import { sqlIdent } from "./sqlIdent";
+import { closeChooser, openChooser } from "./chooserState";
 
 const ws = () => useWorkspace.getState();
 const notify = (text: string) => ws().notify(text);
@@ -64,12 +65,34 @@ async function ensureConsole(tab: Tab): Promise<boolean> {
 
 const sent = new Map<TabId, { runId: number; text: string }>();
 
-export function browseQuery(schema: string, table: string): string {
-  return `SELECT * FROM ${sqlIdent(schema)}.${sqlIdent(table)}`;
+const tableScripts = new Map<string, string>();
+const tableScriptKey = (db: DatabaseRef, schema: string, table: string) => JSON.stringify([dbKey(db), schema, table]);
+
+export async function browseTemplate(db: DatabaseRef, schema: string, table: string): Promise<string | null> {
+  const key = tableScriptKey(db, schema, table);
+  const cached = tableScripts.get(key);
+  if (cached !== undefined) return cached;
+  const res = await commands.tableScript(db, schema, table);
+  if (res.status === "error") {
+    notify(res.error);
+    return null;
+  }
+  tableScripts.set(key, res.data);
+  return res.data;
 }
 
 export function isBrowsing(tab: Tab): tab is TableTab {
-  return isTableTab(tab) && textOf(tab.id).trim().replace(/;$/, "") === browseQuery(tab.table.schema, tab.table.table);
+  return isTableTab(tab) && textOf(tab.id) === tableScripts.get(tableScriptKey(tab.console.db, tab.table.schema, tab.table.table));
+}
+
+function textTarget(tab: Tab): { db: DatabaseRef | null; databaseKind: DatabaseKind } {
+  const db = tabTarget(tab);
+  return { db, databaseKind: databaseKindFor(db, ws().configs) };
+}
+
+function sameTextTarget(id: TabId, target: ReturnType<typeof textTarget>): boolean {
+  const tab = ws().tabs[id];
+  return tab !== undefined && sameDb(tabTarget(tab), target.db) && textTarget(tab).databaseKind === target.databaseKind;
 }
 
 function selectionTarget(state: EditorState): RunTarget {
@@ -83,9 +106,12 @@ export async function formatActive(): Promise<void> {
   const tab = id ? ws().tabs[id] : undefined;
   if (!id || !tab || isBrowsing(tab)) return;
   const state = editorStateOf(id);
-  const res = await commands.editorFormat(state.doc.toString(), selectionTarget(state));
+  const target = textTarget(tab);
+  const res = await commands.editorFormat(state.doc.toString(), selectionTarget(state), target.databaseKind);
+  if (ws().active !== id || !sameTextTarget(id, target)) return;
   if (res.status === "error") {
     if (res.error.kind === "Unsafe") notify("Couldn't format this statement safely.");
+    if (res.error.kind === "Unsupported") notify("Formatting is not supported for this SQL construct.");
     return;
   }
   const { from, to, insert } = res.data;
@@ -156,20 +182,22 @@ export async function runOrChoose(ask = false): Promise<void> {
   if (isBrowsing(tab) || !sel.empty) return runActive();
   if (isRunning(useLive.getState().consoles[id]) || !(await ensureConsole(tab))) return;
   const text = state.doc.toString();
-  const outline = await commands.scriptOutline(text, sel.head);
+  const target = textTarget(tab);
+  const outline = await commands.scriptOutline(text, sel.head, target.databaseKind);
   const now = editorStateOf(id);
-  if (ws().active !== id || now.doc !== state.doc || !now.selection.main.empty || now.selection.main.head !== sel.head) return;
+  if (ws().active !== id || !sameTextTarget(id, target) || now.doc !== state.doc || !now.selection.main.empty || now.selection.main.head !== sel.head) return;
   const { statements, atCursor } = outline;
   if (statements.length === 0 || (atCursor !== null && (!ask || statements.length < 2))) return runTab(id, undefined, { kind: "cursor", offset: sel.head });
   const anchor = cursorAnchor();
   if (!anchor) return;
   const above = statements.findLastIndex((r) => r.to <= sel.head);
-  openChooser({ tabId: id, text, statements, active: { kind: "statement", index: atCursor ?? Math.max(above, 0) }, anchor });
+  openChooser({ tabId: id, text, statements, unitKind: outline.unitKind, active: { kind: "statement", index: atCursor ?? Math.max(above, 0) }, anchor });
 }
 
 export function cancelActive(): boolean {
   const id = ws().active;
   if (!id || !isRunning(useLive.getState().consoles[id])) return false;
+  if (databaseKindFor(tabTarget(ws().tabs[id]), ws().configs) === "SqlServer") notify("Cancelling SQL Server resets this session and rolls back its open transaction.");
   void commands.consoleCancel(id);
   return true;
 }
@@ -231,18 +259,23 @@ function showResults() {
   if (!ws().layout.results) ws().setLayout({ results: true });
 }
 
-export function openTableTab(ref: RelationRef): void {
-  const existing = Object.values(ws().tabs).find(
+export async function openTableTab(ref: RelationRef): Promise<void> {
+  const findOpen = () => Object.values(ws().tabs).find(
     (t) => isTableTab(t) && sameDb(t.console.db, ref.db) && t.table.schema === ref.schema && t.table.table === ref.relation,
   );
+  const existing = findOpen();
   ws().select(ref);
   showResults();
   if (existing) {
     ws().setActive(existing.id);
     return;
   }
+  const template = await browseTemplate(ref.db, ref.schema, ref.relation);
+  if (template === null) return;
+  const opened = findOpen();
+  if (opened) return ws().setActive(opened.id);
   const id = crypto.randomUUID();
-  seedEditor(id, browseQuery(ref.schema, ref.relation));
+  seedEditor(id, template);
   ws().addTab({
     id,
     title: ref.relation,
@@ -254,9 +287,12 @@ export function openTableTab(ref: RelationRef): void {
 const loadedTables = new Set<TabId>();
 
 // Loads only as a page, so a restored tab whose saved text is no longer the browse query never runs that text unasked.
-export function loadTableOnce(tabId: TabId): void {
+export async function loadTableOnce(tabId: TabId): Promise<void> {
   const tab = ws().tabs[tabId];
   if (loadedTables.has(tabId) || !isTableTab(tab)) return;
+  const template = await browseTemplate(tab.console.db, tab.table.schema, tab.table.table);
+  const current = ws().tabs[tabId];
+  if (template === null || loadedTables.has(tabId) || !isTableTab(current) || !sameDb(current.console.db, tab.console.db) || current.table !== tab.table) return;
   loadedTables.add(tabId);
   if (useLive.getState().consoles[tabId]?.run.kind !== "Finished") void runTab(tabId, { page: tab.table.page });
 }
@@ -430,10 +466,11 @@ async function markOnce(): Promise<void> {
   const state = editorStateOf(id);
   const sel = state.selection.main;
   if (isBrowsing(tab) || !sel.empty) return showRunTarget(id, null);
-  const outline = await commands.scriptOutline(state.doc.toString(), sel.head);
+  const target = textTarget(tab);
+  const outline = await commands.scriptOutline(state.doc.toString(), sel.head, target.databaseKind);
   const now = editorStateOf(id);
   // A stale reply is dropped: the change that made it stale already scheduled a newer pass.
-  if (ws().active !== id || now.doc !== state.doc || !now.selection.main.empty || now.selection.main.head !== sel.head) return;
+  if (ws().active !== id || !sameTextTarget(id, target) || now.doc !== state.doc || !now.selection.main.empty || now.selection.main.head !== sel.head) return;
   showRunTarget(id, outline.atCursor === null ? null : (outline.statements[outline.atCursor] ?? null));
 }
 
@@ -449,7 +486,13 @@ export function installRunBehavior(): void {
   useLive.subscribe(showRunErrors);
   useLive.subscribe(runQueuedPages);
   useWorkspace.subscribe((s, prev) => {
-    if (s.active !== prev.active) refreshRunMark();
+    const tab = s.active ? s.tabs[s.active] : undefined;
+    const before = prev.active ? prev.tabs[prev.active] : undefined;
+    if (s.active !== prev.active || !sameDb(tabTarget(tab), tabTarget(before)) || databaseKindFor(tabTarget(tab), s.configs) !== databaseKindFor(tabTarget(before), prev.configs)) {
+      closeChooser();
+      if (s.active) showRunTarget(s.active, null);
+      refreshRunMark();
+    }
   });
   installEditorBehavior([
     Prec.highest(

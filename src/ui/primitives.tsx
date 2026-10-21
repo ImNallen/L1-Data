@@ -3,6 +3,8 @@ import * as Dialog from "@radix-ui/react-dialog";
 import * as Menu from "@radix-ui/react-dropdown-menu";
 import { IconCheck, IconChevronRight, IconX } from "@tabler/icons-react";
 import { useLayoutEffect, useRef, type ButtonHTMLAttributes, type ComponentProps, type ReactElement, type ReactNode, type RefObject } from "react";
+import type { DatabaseKind } from "../ipc/bindings";
+import { DATABASE_LABEL } from "../state/databaseKind";
 import type { TextRange } from "./textMatch";
 
 export function cx(...parts: (string | false | null | undefined)[]): string {
@@ -12,10 +14,10 @@ export function cx(...parts: (string | false | null | undefined)[]): string {
 export const MENU_PANEL = "motion-pop z-50 min-w-[180px] rounded-lg border border-control bg-raised p-1 shadow-[var(--shadow-popover)]";
 export const MENU_ITEM = "flex h-7 cursor-default items-center gap-2 rounded-md px-2 text-ui-13 outline-none data-[highlighted]:bg-selected";
 
-export function PgBadge() {
+export function DatabaseBadge({ databaseKind }: { databaseKind: DatabaseKind }) {
   return (
-    <span className="inline-grid h-4 min-w-[18px] place-items-center rounded-[4px] bg-badge-bg px-[3px] font-mono text-ui-8.5 font-bold leading-none tracking-tight text-badge">
-      PG
+    <span title={DATABASE_LABEL[databaseKind]} aria-label={DATABASE_LABEL[databaseKind]} className="inline-grid h-4 min-w-[18px] place-items-center rounded-[4px] bg-badge-bg px-[3px] font-mono text-ui-8.5 font-bold leading-none tracking-tight text-badge">
+      {databaseKind === "Postgres" ? "PG" : "MS"}
     </span>
   );
 }

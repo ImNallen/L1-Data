@@ -1,22 +1,10 @@
-import { expect, it } from "vitest";
-import { filterForValue, formatOrderBy, nextSort, parseOrderBy } from "./tableQuery";
+import { mockIPC } from "@tauri-apps/api/mocks";
+import { afterEach, expect, it, vi } from "vitest";
+import { useWorkspace, type TableTab } from "../../state/workspace";
+import { cycleTableOrder, filterForValue } from "./tableQuery";
 
-const asc = (column: string) => ({ column, desc: false });
-const desc = (column: string) => ({ column, desc: true });
-
-it("cycles a plain-clicked column ascending, descending, off, replacing other keys", () => {
-  expect(nextSort([], "a", false)).toEqual([asc("a")]);
-  expect(nextSort([asc("a")], "a", false)).toEqual([desc("a")]);
-  expect(nextSort([desc("a")], "a", false)).toEqual([]);
-  expect(nextSort([asc("a"), desc("b")], "b", false)).toEqual([]);
-  expect(nextSort([asc("a")], "b", false)).toEqual([asc("b")]);
-});
-
-it("cycles a shift-clicked column in place and keeps the other keys", () => {
-  expect(nextSort([asc("a")], "b", true)).toEqual([asc("a"), asc("b")]);
-  expect(nextSort([asc("a"), asc("b")], "a", true)).toEqual([desc("a"), asc("b")]);
-  expect(nextSort([desc("a"), asc("b")], "a", true)).toEqual([asc("b")]);
-});
+const tab: TableTab = { id: "table", title: "odd table", console: { db: { connectionId: "ms", database: "shop" }, mode: "AutoCommit" }, table: { schema: "dbo", table: "odd table", page: 0, query: { orderBy: "[odd name]", where: "", filters: [] } } };
+afterEach(() => { useWorkspace.setState(useWorkspace.getInitialState(), true); vi.unstubAllGlobals(); });
 
 it("filters by a cell's value, using IS NULL for nulls", () => {
   expect(filterForValue("region", "EU-West", false)).toEqual({ column: "region", op: "Eq", value: "EU-West" });
@@ -25,16 +13,49 @@ it("filters by a cell's value, using IS NULL for nulls", () => {
   expect(filterForValue("region", null, true)).toEqual({ column: "region", op: "NotNull", value: "" });
 });
 
-it("writes header sorts as ORDER BY text and reads them back", () => {
-  const keys = [desc("created_at"), asc("Region"), asc("order")];
-  expect(formatOrderBy(keys)).toBe('created_at DESC, "Region", "order"');
-  expect(parseOrderBy(formatOrderBy(keys))).toEqual(keys);
-  expect(parseOrderBy("")).toEqual([]);
-  expect(parseOrderBy('Name asc, "a,b" desc')).toEqual([asc("name"), desc("a,b")]);
+it("cycles header ordering through the engine and stores its SQL unchanged", async () => {
+  vi.stubGlobal("window", { crypto });
+  useWorkspace.getState().addTab(tab);
+  const requests: unknown[] = [];
+  mockIPC((cmd, args) => {
+    if (cmd === "table_order") { requests.push(args); return { sql: "[odd name] DESC", keys: [{ column: "odd name", desc: true }] }; }
+    return null;
+  });
+  await cycleTableOrder(tab, "odd name", true);
+  expect(requests).toEqual([{ db: tab.console.db, orderBy: "[odd name]", edit: { kind: "Cycle", column: "odd name", additive: true } }]);
+  expect(useWorkspace.getState().tabs.table?.table?.query.orderBy).toBe("[odd name] DESC");
 });
 
-it("leaves ORDER BY expressions it can't read as columns alone", () => {
-  expect(parseOrderBy("lower(name) DESC")).toBeNull();
-  expect(parseOrderBy("name NULLS LAST")).toBeNull();
-  expect(parseOrderBy("name,")).toBeNull();
+it("drops a sort reply after the user changes an advanced order expression", async () => {
+  vi.stubGlobal("window", { crypto });
+  useWorkspace.getState().addTab(tab);
+  mockIPC((cmd) => {
+    if (cmd === "table_order") {
+      useWorkspace.getState().setTableQuery(tab.id, { ...tab.table.query, orderBy: "lower([odd name])" });
+      return { sql: "[odd name] DESC", keys: [{ column: "odd name", desc: true }] };
+    }
+    return null;
+  });
+  await cycleTableOrder(tab, "odd name", false);
+  expect(useWorkspace.getState().tabs.table?.table?.query.orderBy).toBe("lower([odd name])");
+});
+
+
+it("keeps rapid additive sorts in order using the previous engine reply", async () => {
+  vi.stubGlobal("window", { crypto });
+  useWorkspace.getState().addTab(tab);
+  const orders: unknown[] = [];
+  mockIPC((cmd, args) => {
+    if (cmd === "table_order") {
+      orders.push(args);
+      return { sql: orders.length === 1 ? "[odd name] DESC" : "[odd name] DESC, [other]", keys: null };
+    }
+    return null;
+  });
+  await Promise.all([cycleTableOrder(tab, "odd name", false), cycleTableOrder(tab, "other", true)]);
+  expect(orders).toEqual([
+    { db: tab.console.db, orderBy: "[odd name]", edit: { kind: "Cycle", column: "odd name", additive: false } },
+    { db: tab.console.db, orderBy: "[odd name] DESC", edit: { kind: "Cycle", column: "other", additive: true } },
+  ]);
+  expect(useWorkspace.getState().tabs.table?.table?.query.orderBy).toBe("[odd name] DESC, [other]");
 });

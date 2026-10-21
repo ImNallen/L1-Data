@@ -8,7 +8,7 @@ import {
   type CompletionSource,
 } from "@codemirror/autocomplete";
 import { defaultKeymap, history, historyKeymap, indentWithTab, isolateHistory } from "@codemirror/commands";
-import { PostgreSQL, sql } from "@codemirror/lang-sql";
+import { sql } from "@codemirror/lang-sql";
 import { bracketMatching, indentOnInput } from "@codemirror/language";
 import { setDiagnostics, type Diagnostic } from "@codemirror/lint";
 import { highlightSelectionMatches, searchKeymap } from "@codemirror/search";
@@ -25,8 +25,9 @@ import {
   type DecorationSet,
   type LayerMarker,
 } from "@codemirror/view";
-import type { DocRange, FormatEdit, TabId } from "../../ipc/bindings";
+import type { DatabaseKind, DocRange, FormatEdit, TabId } from "../../ipc/bindings";
 import type { CatalogView } from "../../state/catalog";
+import { SQL_DIALECT } from "./sqlDialect";
 import { editorHighlighting, editorTheme, functionCallStyle, LINE_PADDING_LEFT } from "./theme";
 
 const states = new Map<TabId, EditorState>();
@@ -170,10 +171,11 @@ function qualifiedTables(tables: readonly Completion[]): CompletionSource {
   });
 }
 
-function sqlLanguage(catalog: CatalogView | undefined): Extension {
+function sqlLanguage(catalog: CatalogView | undefined, databaseKind: DatabaseKind): Extension {
+  const dialect = SQL_DIALECT[databaseKind];
   return [
-    sql({ dialect: PostgreSQL, schema: catalog?.completion, defaultSchema: catalog?.catalog.defaultSchema ?? undefined, upperCaseKeywords: true }),
-    PostgreSQL.language.data.of({ autocomplete: qualifiedTables(catalog?.qualifiedTables ?? []) }),
+    sql({ dialect, schema: catalog?.completion, defaultSchema: catalog?.catalog.defaultSchema ?? undefined, upperCaseKeywords: true }),
+    dialect.language.data.of({ autocomplete: qualifiedTables(catalog?.qualifiedTables ?? []) }),
   ];
 }
 
@@ -197,7 +199,7 @@ function createState(text: string): EditorState {
       autocompletion({ icons: false }),
       highlightSelectionMatches(),
       keymap.of([...closeBracketsKeymap, ...defaultKeymap, ...searchKeymap, ...historyKeymap, ...completionKeymap, indentWithTab]),
-      sqlConfig.of(sqlLanguage(undefined)),
+      sqlConfig.of(sqlLanguage(undefined, "Postgres")),
       flashField,
       previewField,
       runTargetField,
@@ -277,8 +279,8 @@ export function focusEditor(): void {
   view?.focus();
 }
 
-export function configureSql(id: TabId, catalog: CatalogView | undefined): void {
-  updateEditor(id, () => ({ effects: sqlConfig.reconfigure(sqlLanguage(catalog)) }));
+export function configureSql(id: TabId, catalog: CatalogView | undefined, databaseKind: DatabaseKind = catalog?.catalog.databaseKind ?? "Postgres"): void {
+  updateEditor(id, () => ({ effects: sqlConfig.reconfigure(sqlLanguage(catalog, databaseKind)) }));
 }
 
 export function flashRanges(id: TabId, ranges: DocRange[]): void {

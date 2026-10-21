@@ -12,6 +12,7 @@ function consoleAt(rev: number, txn: ConsoleState["txn"] = "Idle"): ConsoleState
     config: { connectionId: CONN, database: "shop", schema: "public", mode: "Manual" },
     session: { kind: "None" },
     txn,
+    txnDepth: null,
     run: { kind: "Idle" },
   };
 }
@@ -196,7 +197,7 @@ describe("live.apply", () => {
   });
 
   it("prepends appended history entries", () => {
-    const base = { atMs: 0, connectionId: CONN, connectionName: "p", database: "shop", sql: "select 1", elapsedMs: 1, outcome: { kind: "Cancelled" as const } };
+    const base = { databaseKind: "Postgres" as const, atMs: 0, connectionId: CONN, connectionName: "p", database: "shop", sql: "select 1", elapsedMs: 1, outcome: { kind: "Cancelled" as const } };
     let s = applyEvent(emptyLive, { kind: "HistoryAppended", id: 1, ...base });
     s = applyEvent(s, { kind: "HistoryAppended", id: 2, ...base });
     expect(s.historyTail.map((h) => h.id)).toEqual([2, 1]);

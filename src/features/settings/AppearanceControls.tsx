@@ -4,7 +4,7 @@ import type { Density, FontSetting } from "../../ipc/bindings";
 import { gridRowHeight } from "../../shell/appearance";
 import { DEFAULT_SETTINGS, useWorkspace } from "../../state/workspace";
 import { canvasFontProbe, FONT_SIZES, fontChoices, fontStack, type FontKind } from "../../themes/fonts";
-import { cx, IconButton, PgBadge } from "../../ui/primitives";
+import { cx, IconButton, DatabaseBadge } from "../../ui/primitives";
 import { saveSettings } from "../editor/runActions";
 import { chooseDensity, chooseFont, previewPanelMotion, savePanelMotion } from "./appearanceActions";
 import { Row } from "./SettingLayout";
@@ -80,7 +80,7 @@ function InterfaceSample({ font }: { font: FontSetting }) {
       className="mt-3 rounded-lg border border-control bg-bg px-3 py-2.5 leading-relaxed text-muted"
       style={{ fontFamily: fontStack("interface", font.family), fontSize: font.size }}
     >
-      Open <span className="inline-flex items-center gap-1 rounded-md bg-pill px-1.5 align-middle text-fg"><PgBadge /> shop</span> and browse{" "}
+      Open <span className="inline-flex items-center gap-1 rounded-md bg-pill px-1.5 align-middle text-fg"><DatabaseBadge databaseKind="Postgres" /> shop</span> and browse{" "}
       <span className="rounded-md bg-pill px-1.5 text-fg">public.orders</span>, then sort by total and filter to the paid ones.
     </p>
   );

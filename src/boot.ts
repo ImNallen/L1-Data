@@ -3,11 +3,11 @@ import { commands, type AppEvent } from "./ipc/bindings";
 import { useCatalog } from "./state/catalog";
 import { useLive, wantedCatalogs, type LiveData } from "./state/live";
 import { useRelationDetail } from "./state/relationDetail";
-import { useWorkspace, workspaceSnapshot } from "./state/workspace";
+import { tabFromSnapshot, tabTarget, useWorkspace, workspaceSnapshot } from "./state/workspace";
 import { startAppearance } from "./shell/appearance";
 import { startTheme } from "./shell/theme";
 import { seedEditor, textOf } from "./features/editor/editorStates";
-import { browseQuery, installRunBehavior, onEditorDocChanged, openSqlTab } from "./features/editor/runActions";
+import { browseTemplate, installRunBehavior, onEditorDocChanged, openSqlTab } from "./features/editor/runActions";
 import { startAssistantSync } from "./features/assistant/assistantActions";
 
 const SAVE_DEBOUNCE_MS = 500;
@@ -46,7 +46,13 @@ export async function boot(): Promise<void> {
   await listen<AppEvent>("app-event", (e) => useLive.getState().apply(e.payload));
   const snapshot = await commands.appBoot();
   useLive.getState().hydrate(snapshot);
-  for (const tab of snapshot.workspace.tabs) seedEditor(tab.id, tab.text ?? (tab.table ? browseQuery(tab.table.schema, tab.table.table) : ""));
+  const configs = Object.fromEntries(snapshot.connections.map((config) => [config.id, config]));
+  for (const saved of snapshot.workspace.tabs) {
+    const tab = tabFromSnapshot(saved, configs);
+    const db = tabTarget(tab);
+    const template = tab?.table && db ? await browseTemplate(db, tab.table.schema, tab.table.table) : null;
+    seedEditor(saved.id, saved.text ?? template ?? "");
+  }
   useWorkspace.getState().restore(snapshot.workspace, snapshot.connections, snapshot.settings);
   startTheme();
   startAppearance();

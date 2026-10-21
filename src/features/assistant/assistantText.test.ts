@@ -96,9 +96,9 @@ it("chips a sent message with its connection, database, tab, and attached rows, 
   const db = { connectionId: "c1", database: "shop" };
   const rows = { tabTitle: "orders_by_region.sql", columns: ["region"], rows: [["EU-West"]], totalRows: 6 };
   expect([
-    contextChip(user({ db, connectionName: "prod-postgres", tabTitle: "orders_by_region.sql" }, rows)),
-    contextChip(user({ db, connectionName: null, tabTitle: "Untitled-1.sql" })),
-    contextChip(user({ db: null, connectionName: null, tabTitle: "" })),
+    contextChip(user({ databaseKind: "Postgres", db, connectionName: "prod-postgres", tabTitle: "orders_by_region.sql" }, rows)),
+    contextChip(user({ databaseKind: "Postgres", db, connectionName: null, tabTitle: "Untitled-1.sql" })),
+    contextChip(user({ databaseKind: null, db: null, connectionName: null, tabTitle: "" })),
     contextChip(user(null)),
   ]).toEqual(["prod-postgres / shop · orders_by_region.sql · 6 rows attached", "shop · Untitled-1.sql", null, null]);
 });

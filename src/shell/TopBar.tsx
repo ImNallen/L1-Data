@@ -23,6 +23,8 @@ export function TopBar({ hosted }: { hosted: HostedWindow | null }) {
   const config = connectionId ? configs[connectionId] : undefined;
   const running = isRunning(liveConsole);
   const txn = liveConsole?.txn;
+  const txnDepth = liveConsole?.txnDepth;
+  const sqlServer = config?.databaseKind === "SqlServer";
   const txnLost = liveConsole?.session.kind === "Lost" && liveConsole.session.txnLost;
 
   return (
@@ -75,8 +77,8 @@ export function TopBar({ hosted }: { hosted: HostedWindow | null }) {
             className="inline-flex h-7 items-center gap-1 rounded-md pr-1.5 pl-2 text-ui-12.5 text-muted outline-none hover:bg-hover hover:text-fg data-[state=open]:bg-hover data-[state=open]:text-fg"
           >
             {MODE_LABEL[tab.console.mode]}
-            {tab.console.mode === "Manual" && txn && txn !== "Idle" && (
-              <span className={txn === "Aborted" ? "text-danger" : "text-fg"}> · {txn === "Aborted" ? "aborted" : "in transaction"}</span>
+            {txn && txn !== "Idle" && (
+              <span className={txn === "Aborted" ? "text-danger" : "text-fg"}> · {txn === "Aborted" ? "aborted" : "in transaction"}{txnDepth !== null && txnDepth !== undefined && txnDepth > 1 ? ` (${txnDepth})` : ""}</span>
             )}
             {txnLost && <span className="text-danger"> · rolled back</span>}
             <IconChevronDown size={13} />
@@ -93,7 +95,7 @@ export function TopBar({ hosted }: { hosted: HostedWindow | null }) {
 
       {tab && hasUncommittedWork(liveConsole) && (
         <>
-          <Button data-testid="commit-btn" disabled={running} onClick={() => void endTransaction(tab.id, "commit")}>
+          <Button data-testid="commit-btn" title={sqlServer ? "Commit all transaction nesting levels" : undefined} disabled={running} onClick={() => void endTransaction(tab.id, "commit")}>
             Commit
           </Button>
           <Button data-testid="rollback-btn" disabled={running} onClick={() => void endTransaction(tab.id, "rollback")}>
@@ -111,7 +113,7 @@ export function TopBar({ hosted }: { hosted: HostedWindow | null }) {
 
       {tab &&
         (running ? (
-          <Button data-testid="cancel-btn" className="w-[104px] justify-center bg-hover" onClick={() => cancelActive()}>
+          <Button data-testid="cancel-btn" title={sqlServer ? "Cancel resets the SQL Server session and rolls back its open transaction" : undefined} className="w-[104px] justify-center bg-hover" onClick={() => cancelActive()}>
             <IconPlayerStopFilled size={10} className="text-muted" />
             Cancel
             <Kbd className="bg-control text-muted">Esc</Kbd>

@@ -11,6 +11,7 @@ const config: ConnectionConfig = {
   user: "u",
   sslMode: "Prefer",
   caCertPath: null,
+  databaseKind: "Postgres",
   hasPassword: false,
   color: null,
 };
@@ -42,6 +43,7 @@ const prod = instance([
 const schema = (name: string, tableCount: number, system = false): SchemaInfo => ({ name, system, tableCount, relations: [], functions: [] });
 
 const shopCatalog: Catalog = {
+  databaseKind: "Postgres",
   db: { connectionId: "c1", database: "shop" },
   version: 3,
   defaultSchema: "public",

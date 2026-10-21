@@ -1,7 +1,6 @@
 import type { Completion } from "@codemirror/autocomplete";
 import type { SQLNamespace } from "@codemirror/lang-sql";
 import { create } from "zustand";
-import { sqlIdent } from "../features/editor/sqlIdent";
 import { shortType } from "../features/results/format";
 import { commands, type Catalog, type ColumnSource, type DatabaseRef, type RelKind, type Relation } from "../ipc/bindings";
 import { dbKey, type DbKey } from "./dbKey";
@@ -33,7 +32,7 @@ export function buildCatalogView(catalog: Catalog): CatalogView {
       };
       qualifiedTables.push({
         label: `${schema.name}.${rel.name}`,
-        apply: `${sqlIdent(schema.name)}.${sqlIdent(rel.name)}`,
+        apply: rel.qualifiedName,
         type: view ? "type" : "class",
         detail: view ? "view" : "table",
       });

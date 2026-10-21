@@ -109,7 +109,7 @@ function ChooserPanel({ chooser }: { chooser: OpenChooser }) {
     <div
       ref={ref}
       role="listbox"
-      aria-label="Statement to run"
+      aria-label={chooser.unitKind === "Batch" ? "Batch to run" : "Statement to run"}
       tabIndex={-1}
       data-state="open"
       data-testid="statement-chooser"
@@ -136,7 +136,7 @@ function ChooserPanel({ chooser }: { chooser: OpenChooser }) {
             "statement-choice-all",
             <>
               <span className="w-4 shrink-0" />
-              {`All ${statements.length} statements`}
+              {`All ${statements.length} ${chooser.unitKind === "Batch" ? "batches" : "statements"}`}
             </>,
           )}
         </>

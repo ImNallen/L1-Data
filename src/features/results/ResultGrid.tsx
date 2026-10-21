@@ -23,8 +23,8 @@ import { useEffect, useImperativeHandle, useLayoutEffect, useMemo, useRef, useSt
 import type { ColumnMeta, Density, FontSetting, ResultMeta, TypeCategory } from "../../ipc/bindings";
 import { DENSITY_FACTOR, gridRowHeight } from "../../shell/appearance";
 import { rowCacheFor, type RowCache } from "../../state/rowCache";
-import { isPrimaryKey, useCatalog, viewFor, type CatalogView } from "../../state/catalog";
-import type { DbKey } from "../../state/dbKey";
+import { findRelation, isPrimaryKey, useCatalog, viewFor, type CatalogView } from "../../state/catalog";
+import { sameDb, type DbKey } from "../../state/dbKey";
 import { NO_EDITS, markDeleted, removeNewRows, resetNewCell, rowKey, setCell, setNewCell, useTableEdits, type CellValue, type RowId, type TableEdits } from "../../state/tableEdits";
 import { useWorkspace } from "../../state/workspace";
 import { fontStack } from "../../themes/fonts";
@@ -54,8 +54,17 @@ const SORT_BADGE_W = 20;
 const FILTER_BUTTON_W = 20;
 const QUERY_CONTROLS = SORT_BADGE_W + FILTER_BUTTON_W + 2 * HEADER_GAP;
 
-export type GridEditing = { pkColumns: string[] };
+export type GridEditing = { pkColumns: string[]; writableColumns: ReadonlySet<string> };
 export type GridActions = { addRow(): void; deleteSelectedRows(): void };
+
+export function gridEditing(view: CatalogView | undefined, schema: string, table: string, meta: Pick<ResultMeta, "db" | "columns">): GridEditing | null {
+  const relation = findRelation(view, schema, table);
+  if (!relation || relation.kind !== "Table" || !sameDb(view?.catalog.db, meta.db)) return null;
+  const pkColumns = relation.columns.filter((c) => c.pk).map((c) => c.name);
+  if (!pkColumns.length || !pkColumns.every((name) => meta.columns.some((c) => c.name === name))) return null;
+  if (!meta.columns.every((c) => c.source?.tableOid === relation.oid && relation.columns.some((column) => column.attnum === c.source?.attnum && column.name === c.name))) return null;
+  return { pkColumns, writableColumns: new Set(relation.columns.filter((c) => c.writable).map((c) => c.name)) };
+}
 
 const DEFAULT = Symbol("default");
 
@@ -360,9 +369,10 @@ export function ResultGrid({
   const [editingCell, setEditingCell] = useState<(Cell & { draft: string; initial: string; stored: CellValue }) | null>(null);
   const opening = useRef(0);
   const refused = () => useWorkspace.getState().notify("A submit is running. Try again when it finishes.");
+  const canWrite = (col: number) => editable && editing?.writableColumns.has(columns[col]?.name ?? "") === true;
   const startEdit = (row: number, col: number, typed?: string) => {
     const id = rowIdOf(row);
-    if (!editable || useTableEdits.getState().submitting[tabId] || (!newRowAt(row) && (!id || id.key in edits.deletes))) return;
+    if (!canWrite(col) || useTableEdits.getState().submitting[tabId] || (!newRowAt(row) && (!id || id.key in edits.deletes))) return;
     const name = columns[col]!.name;
     const pending = newRowAt(row) || (id && name in (edits.updates[id.key]?.values ?? {}));
     const open = (initial: string, stored: CellValue) =>
@@ -382,6 +392,7 @@ export function ResultGrid({
     });
   };
   const writeCell = (row: number, col: number, value: CellValue | typeof DEFAULT, stored = cache.get(row)?.[col] ?? null) => {
+    if (!canWrite(col)) return;
     const name = columns[col]!.name;
     const added = newRowAt(row);
     if (added) {
@@ -423,13 +434,13 @@ export function ResultGrid({
   useEffect(() => {
     if (edits.inserts.length > insertsSeen.current) {
       const row = rowCount + edits.inserts.length - 1;
-      const col = Math.max(0, columns.findIndex((_, i) => !pkIdx.includes(i)));
+      const col = Math.max(0, columns.findIndex((c) => editing?.writableColumns.has(c.name)));
       rows.scrollToIndex(row);
       setSelection({ anchor: { row, col }, focus: { row, col } });
       scroller.current?.focus();
     }
     insertsSeen.current = edits.inserts.length;
-  }, [edits.inserts.length, rowCount, columns, pkIdx, rows]);
+  }, [edits.inserts.length, rowCount, columns, editing, rows]);
   useImperativeHandle(actionsRef, () => ({ addRow: () => void useTableEdits.getState().addRow(tabId), deleteSelectedRows: () => void deleteSelectedRows() }));
 
 
@@ -509,7 +520,7 @@ export function ResultGrid({
               <div
                 key={vc.key}
                 data-testid={`grid-header-${vc.index}`}
-                title={query ? `${c.name} ${c.type.display}\nClick to sort, Shift-click to add to the sort` : `${c.name} ${c.type.display}`}
+                title={`${c.name} ${c.type.display}${editing && !editing.writableColumns.has(c.name) ? "\nRead-only column" : ""}${query ? "\nClick to sort, Shift-click to add to the sort" : ""}`}
                 onClick={query ? (e) => query.onSort(c.name, e.shiftKey) : undefined}
                 className={cx(
                   "group/header absolute top-0 flex h-full items-center gap-1.5 border-r border-grid px-2",
@@ -618,7 +629,7 @@ export function ResultGrid({
                       if (dragging.current === "cells") setSelection((sel) => (sel ? { ...sel, focus: { row: vr.index, col: vc.index } } : sel));
                       if (dragging.current === "rows") setSelection((sel) => (sel ? selectRows(sel.anchor.row, vr.index, columns.length) : sel));
                     }}
-                    onDoubleClick={() => (editable ? startEdit(vr.index, vc.index) : void openCell(vr.index, vc.index))}
+                    onDoubleClick={() => (canWrite(vc.index) ? startEdit(vr.index, vc.index) : void openCell(vr.index, vc.index))}
                     onContextMenu={() => {
                       const cell = { row: vr.index, col: vc.index };
                       setMenuCell(cell);
@@ -710,7 +721,7 @@ export function ResultGrid({
             {editable && (
               <>
                 <div className="my-1 h-px bg-control" />
-                {!menuRowDeleted && (
+                {!menuRowDeleted && canWrite(menuCell.col) && (
                   <>
                     <ContextMenuItem testId="grid-menu-edit" onSelect={() => startEdit(menuCell.row, menuCell.col)}>
                       Edit cell

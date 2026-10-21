@@ -65,6 +65,6 @@ export function triggerText(t: TriggerInfo): RowText {
   const traits = [TIMING[t.timing], !t.perRow && "statement", !t.enabled && "disabled"].filter(Boolean);
   return {
     trailing: traits.join(" · "),
-    second: `${t.events.map((e) => e.toUpperCase()).join(", ")} · ${t.function}()`,
+    second: `${t.events.map((e) => e.toUpperCase()).join(", ")} · ${t.implementation.kind === "Function" ? `${t.implementation.name}()` : t.implementation.definition ?? "SQL module definition unavailable"}`,
   };
 }

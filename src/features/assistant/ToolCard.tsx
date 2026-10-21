@@ -1,6 +1,6 @@
 import { IconChevronRight, IconCircleOff, IconDatabaseSearch, IconPlayerPlay, IconTable, IconTool } from "@tabler/icons-react";
 import { memo, useState, type ReactNode } from "react";
-import type { ApprovalId, ApprovalReason, ChatId, DatabaseRef, Decision, ToolResult, ToolStatus, ToolUse } from "../../ipc/bindings";
+import type { ApprovalId, ApprovalReason, ChatId, DatabaseKind, DatabaseRef, Decision, ToolResult, ToolStatus, ToolUse } from "../../ipc/bindings";
 import { toolLine } from "../../state/transcript";
 import { Button, cx, Spinner } from "../../ui/primitives";
 import { answerApproval, openInNewTab } from "./assistantActions";
@@ -55,7 +55,7 @@ function RowsPreview({ rows, sql, db }: { rows: RowsResult; sql: string | null; 
   );
 }
 
-function ApprovalCard({ chatId, testId, tool, approval, reason }: { chatId: ChatId; testId: string; tool: ToolUse; approval: ApprovalId; reason: ApprovalReason }) {
+function ApprovalCard({ chatId, testId, tool, approval, reason, databaseKind }: { chatId: ChatId; testId: string; tool: ToolUse; approval: ApprovalId; reason: ApprovalReason; databaseKind: DatabaseKind }) {
   const [answered, setAnswered] = useState(false);
   const answer = (decision: Decision) => {
     setAnswered(true);
@@ -67,7 +67,7 @@ function ApprovalCard({ chatId, testId, tool, approval, reason }: { chatId: Chat
       {tool.kind === "RunQuery" && (
         <>
           {tool.purpose && <p className="text-ui-12.5 text-muted">{tool.purpose}</p>}
-          <SqlHighlight sql={tool.sql} className="rounded-md border border-border bg-bg px-2.5 py-2" />
+          <SqlHighlight sql={tool.sql} databaseKind={databaseKind} className="rounded-md border border-border bg-bg px-2.5 py-2" />
           {tool.relations.length > 0 && <p className="text-ui-12 text-dim">Uses {tool.relations.join(", ")}</p>}
         </>
       )}
@@ -91,10 +91,10 @@ function StatusIcon({ tool, status }: { tool: ToolUse; status: ToolStatus }): Re
   return <Icon size={13} />;
 }
 
-export const ToolCard = memo(function ToolCard({ chatId, seq, tool, status, db }: { chatId: ChatId; seq: number; tool: ToolUse; status: ToolStatus; db: DatabaseRef | null }) {
+export const ToolCard = memo(function ToolCard({ chatId, seq, tool, status, db, databaseKind }: { chatId: ChatId; seq: number; tool: ToolUse; status: ToolStatus; db: DatabaseRef | null; databaseKind: DatabaseKind }) {
   const [open, setOpen] = useState(false);
   const testId = `chat-tool-${seq}`;
-  if (status.kind === "AwaitingApproval") return <ApprovalCard chatId={chatId} testId={testId} tool={tool} approval={status.approval} reason={status.reason} />;
+  if (status.kind === "AwaitingApproval") return <ApprovalCard chatId={chatId} testId={testId} tool={tool} approval={status.approval} reason={status.reason} databaseKind={databaseKind} />;
   const rows = status.kind === "Done" && status.result.kind === "Rows" ? status.result : null;
   const line = toolLine(tool, status);
   return (

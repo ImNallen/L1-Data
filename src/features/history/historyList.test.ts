@@ -3,6 +3,7 @@ import type { HistoryBrowsePage, HistoryGroupSummary } from "../../ipc/bindings"
 import { appendOlder, appendRuns, firstPageQuery, historyKey, keepSelection, olderPageQuery, type HistoryDetail, type HistoryList } from "./historyList";
 
 const group = (id: number): HistoryGroupSummary => ({
+  databaseKind: "Postgres",
   id, latestId: id + 10, latestAtMs: 123, connectionId: "c1", database: "shop", title: "Query", excerpt: "select 1",
   runCount: 2, failedCount: 0, isWrite: false,
   representative: { id: id + 10, atMs: 123, connectionName: "dev", elapsedMs: 20, outcome: { kind: "Rows", rows: 1 } },
@@ -31,7 +32,7 @@ it("preserves exact-group selection on refresh and otherwise selects the first m
 });
 
 it("ignores run pages fetched before another group, page, or revision replaced the preview", () => {
-  const original: HistoryDetail = { id: 5, sql: "select 1", runs: [group(5).representative], hasMore: true, maxElapsedMs: 100, revision: 2 };
+  const original: HistoryDetail = { databaseKind: "Postgres", id: 5, sql: "select 1", runs: [group(5).representative], hasMore: true, maxElapsedMs: 100, revision: 2 };
   const next = { ...original, runs: [group(1).representative], hasMore: false };
   expect(appendRuns(original, original, next).runs.map((r) => r.id)).toEqual([15, 11]);
   expect(appendRuns({ ...original, id: 8 }, original, next).id).toBe(8);

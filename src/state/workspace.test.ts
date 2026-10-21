@@ -11,6 +11,7 @@ const config = (id: string): ConnectionConfig => ({
   user: "l1data",
   sslMode: "Prefer",
   caCertPath: null,
+  databaseKind: "Postgres",
   hasPassword: true,
   color: null,
 });

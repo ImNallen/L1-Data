@@ -1,13 +1,14 @@
-import { PostgreSQL } from "@codemirror/lang-sql";
 import { highlightTree } from "@lezer/highlight";
 import { useMemo } from "react";
+import type { DatabaseKind } from "../../ipc/bindings";
 import { cx } from "../../ui/primitives";
+import { SQL_DIALECT } from "../editor/sqlDialect";
 import { isKeywordCall, staticSqlHighlighter } from "../editor/theme";
 
 type Span = { text: string; className: string };
 
-export function sqlSpans(sql: string): Span[] {
-  const tree = PostgreSQL.language.parser.parse(sql);
+export function sqlSpans(sql: string, databaseKind: DatabaseKind = "Postgres"): Span[] {
+  const tree = SQL_DIALECT[databaseKind].language.parser.parse(sql);
   const calls = new Set<number>();
   tree.iterate({
     enter(node) {
@@ -25,8 +26,8 @@ export function sqlSpans(sql: string): Span[] {
   return spans;
 }
 
-export function SqlHighlight({ sql, className }: { sql: string; className?: string }) {
-  const spans = useMemo(() => sqlSpans(sql), [sql]);
+export function SqlHighlight({ sql, databaseKind, className }: { sql: string; databaseKind: DatabaseKind; className?: string }) {
+  const spans = useMemo(() => sqlSpans(sql, databaseKind), [sql, databaseKind]);
   return (
     <pre className={cx("selectable font-mono text-code-sm leading-[1.6] break-words whitespace-pre-wrap text-(color:--code)", className)}>
       {spans.map((s, i) => (s.className ? <span key={i} className={s.className}>{s.text}</span> : s.text))}

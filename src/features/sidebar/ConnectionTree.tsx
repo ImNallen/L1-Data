@@ -50,7 +50,7 @@ import {
   ContextSubmenu,
   cx,
   Highlight,
-  PgBadge,
+  DatabaseBadge,
   Spinner,
   StatusDot,
 } from "../../ui/primitives";
@@ -720,7 +720,7 @@ function ConnectionNode({ config, expanded, revealed }: { config: ConnectionConf
         onClick={onClick}
         icon={
           <span className={cx(tone === "off" && "opacity-50 grayscale")}>
-            <PgBadge />
+            <DatabaseBadge databaseKind={config.databaseKind} />
           </span>
         }
         label={
@@ -835,7 +835,7 @@ function FilteredTree({ filter, query }: { filter: TreeFilter; query: string }) 
   if (filter.connections.length === 0) return <TreeNote>No matches for “{query}”.</TreeNote>;
   return filter.connections.map(({ config, databases }) => (
     <ConnectionGroup key={config.id} name={config.name} color={config.color}>
-      <FoldRow path={config.name} depth={0} icon={<PgBadge />} label={<span className="font-medium">{config.name}</span>} expanded={expanded} />
+      <FoldRow path={config.name} depth={0} icon={<DatabaseBadge databaseKind={config.databaseKind} />} label={<span className="font-medium">{config.name}</span>} expanded={expanded} />
       {expanded.has(config.name) &&
         databases.map(({ db, schemas }) => {
           const path = `${config.name}/${db.database}`;

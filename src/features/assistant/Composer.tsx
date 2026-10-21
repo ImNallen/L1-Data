@@ -3,7 +3,8 @@ import { IconAlertTriangle, IconArrowUp, IconBrain, IconChevronDown, IconLock, I
 import { useLayoutEffect, useRef, useState, type ReactNode } from "react";
 import { commands, type ChatOptions, type ChatState, type ModelOption, type Permission } from "../../ipc/bindings";
 import { useLive } from "../../state/live";
-import { useWorkspace } from "../../state/workspace";
+import { databaseKindFor } from "../../state/databaseKind";
+import { tabTarget, useWorkspace } from "../../state/workspace";
 import { cx, IconButton, MenuContent, MenuItem, MenuLabel } from "../../ui/primitives";
 import { pluralRows } from "../results/format";
 import { configureChat, effortFor, gridResult, sendMessage, stopTurn } from "./assistantActions";
@@ -124,6 +125,7 @@ export function Composer({ chat }: { chat: ChatState | undefined }) {
 
   const active = useWorkspace((s) => s.active);
   const tabTitle = useWorkspace((s) => (s.active ? s.tabs[s.active]?.title : undefined));
+  const sqlServer = useWorkspace((s) => databaseKindFor(tabTarget(s.active ? s.tabs[s.active] : undefined), s.configs) === "SqlServer");
   const picked = useWorkspace((s) => (s.active ? s.activeResult[s.active] : undefined));
   const run = useLive((s) => (active ? s.consoles[active]?.run : undefined));
   const hasOutput = useLive((s) => (active ? (s.output[active]?.length ?? 0) : 0) > 0);
@@ -159,6 +161,7 @@ export function Composer({ chat }: { chat: ChatState | undefined }) {
   return (
     <div className="shrink-0 px-3 pb-3">
       {banner && <Banner banner={banner} />}
+      {sqlServer && <p data-testid="assistant-sqlserver-limit" className="mb-2 text-ui-12 leading-relaxed text-dim">The assistant can inspect SQL Server schema and suggest SQL. Its run_query tool is unavailable for SQL Server. Open suggested SQL in a tab to run it.</p>}
       <div className="rounded-xl border border-control bg-raised focus-within:border-accent-border">
         {attaching && (
           <div className="flex px-3 pt-2.5">

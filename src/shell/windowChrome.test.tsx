@@ -313,6 +313,7 @@ function withTableTab(mode: TxnMode = "AutoCommit", color: string | null = null)
     user: "l1data",
     sslMode: "Prefer",
     caCertPath: null,
+  databaseKind: "Postgres",
     hasPassword: true,
     color,
   };

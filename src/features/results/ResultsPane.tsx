@@ -30,6 +30,7 @@ import {
   type Summary,
 } from "../../state/status";
 import { useCatalog, viewFor } from "../../state/catalog";
+import { databaseKindFor } from "../../state/databaseKind";
 import { NO_EDITS, pendingCount, useTableEdits } from "../../state/tableEdits";
 import { isFiltered, isTableTab, useWorkspace, type TableTab } from "../../state/workspace";
 import { cx, IconButton, MenuContent, MenuItem, Spinner } from "../../ui/primitives";
@@ -42,14 +43,13 @@ import {
   saveSettings,
   setTablePage,
   submitEdits,
-  tablePrimaryKey,
   updateTableQuery,
 } from "../editor/runActions";
 import { FilterBar } from "./FilterBar";
 import { groupDigits, pageStatus, pluralRows } from "./format";
 import { ErrorBlock, OutputPanel } from "./OutputPanel";
-import { ResultGrid, type GridActions, type GridEditing, type GridQuery } from "./ResultGrid";
-import { filterForValue, formatOrderBy, nextSort, parseOrderBy, useFilterDrafts } from "./tableQuery";
+import { gridEditing, ResultGrid, type GridActions, type GridEditing, type GridQuery } from "./ResultGrid";
+import { cycleTableOrder, filterForValue, useFilterDrafts, useTableOrder } from "./tableQuery";
 
 const NO_OUTPUT: readonly OutputEntry[] = [];
 
@@ -225,7 +225,7 @@ function RunTail({ run }: { run: RunState }) {
   const error = failedError(run);
   if (error) return <ErrorBlock error={error} />;
   if (run.outcome === "Cancelled") return "Cancelled.";
-  const commands = runStatements(run).flatMap((s) => (s.status.kind === "Command" ? [s.status.tag] : []));
+  const commands = runStatements(run).flatMap((s) => s.outputs.flatMap((o) => o.kind === "Command" ? [o.tag] : []));
   if (commands.length) return commands.join(", ");
   return rowResults(run).length ? null : "The statement returned no rows.";
 }
@@ -281,6 +281,7 @@ function ResultBody({
 export function ResultsPane({ tabId }: { tabId: TabId | null }) {
   const tab = useWorkspace((s) => (tabId ? s.tabs[tabId] : undefined));
   const picked = useWorkspace((s) => (tabId ? s.activeResult[tabId] : undefined));
+  const databaseKind = useWorkspace((s) => databaseKindFor(tab?.console.db ?? null, s.configs));
   const setActiveResult = useWorkspace((s) => s.setActiveResult);
   const run = useLive((s) => (tabId ? s.consoles[tabId]?.run : undefined)) ?? { kind: "Idle" as const };
   const now = useNow(run.kind === "Running", 100);
@@ -298,11 +299,11 @@ export function ResultsPane({ tabId }: { tabId: TabId | null }) {
   const browsingTable = browsing && isTableTab(tab) ? tab : null;
   const pager = browsingTable && view.kind === "rows" ? browsingTable : null;
   const addDraft = useFilterDrafts((s) => s.add);
+  const sort = useTableOrder(browsingTable);
   const gridQuery: GridQuery | null = browsingTable && {
-    sort: parseOrderBy(browsingTable.table.query.orderBy) ?? [],
+    sort,
     filtered: new Set(browsingTable.table.query.filters.map((f) => f.column)),
-    onSort: (column, additive) =>
-      updateTableQuery(browsingTable.id, (q) => ({ ...q, orderBy: formatOrderBy(nextSort(parseOrderBy(q.orderBy) ?? [], column, additive)) })),
+    onSort: (column, additive) => void cycleTableOrder(browsingTable, column, additive),
     onFilterColumn: (column) => addDraft(browsingTable.id, column),
     onFilterValue: (column, value, negate) =>
       updateTableQuery(browsingTable.id, (q) => ({ ...q, filters: [...q.filters, filterForValue(column, value, negate)] })),
@@ -311,10 +312,10 @@ export function ResultsPane({ tabId }: { tabId: TabId | null }) {
     if (tabId && isTable) loadTableOnce(tabId);
   }, [tabId, isTable]);
   const catalogView = useCatalog((s) => viewFor(s.views, browsingTable?.console.db));
-  const editing = useMemo<GridEditing | null>(() => {
-    const pkColumns = browsingTable && catalogView ? tablePrimaryKey(browsingTable) : [];
-    return pkColumns.length ? { pkColumns } : null;
-  }, [browsingTable?.console.db, browsingTable?.table.schema, browsingTable?.table.table, catalogView]);
+  const editing = useMemo(
+    () => browsingTable && shown ? gridEditing(catalogView, browsingTable.table.schema, browsingTable.table.table, shown.meta) : null,
+    [browsingTable?.console.db, browsingTable?.table.schema, browsingTable?.table.table, catalogView, shown?.meta],
+  );
   const actions = useRef<GridActions | null>(null);
 
   return (
@@ -328,7 +329,7 @@ export function ResultsPane({ tabId }: { tabId: TabId | null }) {
                 key={r.index}
                 type="button"
                 data-testid={`result-pick-${r.index}`}
-                title={`Statement ${r.index + 1} · ${pluralRows(r.meta.rowCount)}`}
+                title={`Result ${i + 1} · ${pluralRows(r.meta.rowCount)}`}
                 onClick={() => tabId && setActiveResult(tabId, r.index)}
                 className={cx(
                   "h-5 min-w-6 rounded px-1.5 font-mono text-ui-11.5",
@@ -400,6 +401,7 @@ export function ResultsPane({ tabId }: { tabId: TabId | null }) {
         </div>
       </div>
 
+      {(databaseKind === "SqlServer" || shown?.meta.databaseKind === "SqlServer") && <p data-testid="sqlserver-output-limit" className="border-b border-grid px-3 py-1 text-ui-11.5 text-dim">SQL Server PRINT and informational messages are unavailable. Affected row counts may be unknown.</p>}
       {browsingTable && <FilterBar tab={browsingTable} />}
 
       <div className="relative flex min-h-0 flex-1 flex-col">

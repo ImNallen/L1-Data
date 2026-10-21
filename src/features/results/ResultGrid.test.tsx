@@ -4,10 +4,10 @@ import type { ColumnMeta, TypeCategory } from "../../ipc/bindings";
 import { buildCatalogView } from "../../state/catalog";
 import { dbKey } from "../../state/dbKey";
 import { shopCatalog } from "../../testing/shopCatalog";
-import { HeaderIcon, nextFocus, primaryKeyColumns, selectRows } from "./ResultGrid";
+import { gridEditing, HeaderIcon, nextFocus, primaryKeyColumns, selectRows } from "./ResultGrid";
 
 const iconOf = (category: TypeCategory, primaryKey = false) => {
-  const html = renderToStaticMarkup(<HeaderIcon column={{ name: "c", type: { oid: 0, display: "t", category }, source: null }} primaryKey={primaryKey} />);
+  const html = renderToStaticMarkup(<HeaderIcon column={{ name: "c", type: { display: "t", category }, source: null }} primaryKey={primaryKey} />);
   return html.match(/tabler-icon-([a-z-]+)/)?.[1];
 };
 
@@ -40,6 +40,7 @@ it("looks primary keys up in the catalog of the database the rows came from", ()
   const orders = shop.catalog.schemas[1]!.relations.find((r) => r.name === "orders")!;
   // In `reporting`, the OID `orders` has in `shop` belongs to a table whose key is its second column.
   const reporting = buildCatalogView({
+    databaseKind: "Postgres",
     db: { connectionId: "conn", database: "reporting" },
     version: 2,
     defaultSchema: "public",
@@ -63,7 +64,7 @@ it("looks primary keys up in the catalog of the database the rows came from", ()
     ],
   });
   const views = { [dbKey(shop.catalog.db)]: shop, [dbKey(reporting.catalog.db)]: reporting };
-  const column = (name: string, attnum: number): ColumnMeta => ({ name, type: { oid: 20, display: "bigint", category: "Numeric" }, source: { tableOid: orders.oid, attnum } });
+  const column = (name: string, attnum: number): ColumnMeta => ({ name, type: { display: "bigint", category: "Numeric" }, source: { tableOid: orders.oid, attnum } });
   const columns = [column("a", orders.columns[0]!.attnum), column("b", orders.columns[1]!.attnum)];
   expect(primaryKeyColumns(views, { db: { connectionId: "conn", database: "shop" }, columns })).toEqual([true, false]);
   expect(primaryKeyColumns(views, { db: { connectionId: "conn", database: "reporting" }, columns })).toEqual([false, true]);
@@ -96,4 +97,22 @@ it("jumps to the edges with Home, End, and the modifier", () => {
 it("selects whole rows from the first to the last column, focused on the first", () => {
   expect(selectRows(4, 4, 6)).toEqual({ anchor: { row: 4, col: 5 }, focus: { row: 4, col: 0 } });
   expect(selectRows(2, 7, 6)).toEqual({ anchor: { row: 2, col: 5 }, focus: { row: 7, col: 0 } });
+});
+
+it("keeps generated columns read-only and requires database-scoped edit provenance", () => {
+  const catalog = shopCatalog("ms", 1);
+  catalog.databaseKind = "SqlServer";
+  const relation = catalog.schemas[1]!.relations.find((r) => r.name === "orders")!;
+  relation.columns[0]!.writable = false;
+  const meta = {
+    db: catalog.db,
+    columns: relation.columns.map((column) => ({ name: column.name, type: { display: column.typeDisplay, category: column.category }, source: { tableOid: relation.oid, attnum: column.attnum } })),
+  };
+  const view = buildCatalogView(catalog);
+  const editing = gridEditing(view, "public", "orders", meta);
+  expect(editing?.pkColumns).toEqual(["id"]);
+  expect(editing?.writableColumns.has("id")).toBe(false);
+  expect(editing?.writableColumns.has("status")).toBe(true);
+  expect(gridEditing(view, "public", "orders", { ...meta, db: { ...meta.db, database: "reporting" } })).toBeNull();
+  expect(gridEditing(view, "public", "orders", { ...meta, columns: meta.columns.map((c) => ({ ...c, source: null })) })).toBeNull();
 });
