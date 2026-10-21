@@ -1,7 +1,7 @@
 import { undo } from "@codemirror/commands";
 import { mockIPC } from "@tauri-apps/api/mocks";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
-import type { ConsoleState, Settings } from "../../ipc/bindings";
+import type { ConsoleState, Settings, TableQuery } from "../../ipc/bindings";
 import { connectionConfig } from "../../testing/connections";
 import { useLive } from "../../state/live";
 import { useTableEdits } from "../../state/tableEdits";
@@ -202,8 +202,9 @@ it("loads a table tab's page on first show, and never runs edited text unasked",
     if (cmd === "console_run") return { runId: 1, statements: [] };
     return null;
   });
-  const table = { schema: "public", table: "orders", page: 2, query: { orderBy: "", filters: [], where: "" } };
-  for (const [id, text] of [["browsing", "SELECT * FROM public.orders"], ["edited", "delete from orders"]] as const) {
+  const query = { orderBy: "total DESC", filters: [{ column: "status", op: "Eq", value: "paid" }], where: "total > 10" } satisfies TableQuery;
+  const table = { schema: "public", table: "orders", page: 2, query };
+  for (const [id, text] of [["browsing", "SELECT * FROM public.orders"], ["edited", "SELECT * FROM public.orders WHERE status = 'pending'"]] as const) {
     seedEditor(id, text);
     useWorkspace.getState().addTab({ id, title: "orders", console: { db: { connectionId: "c1", database: "shop" }, mode: "AutoCommit" }, table });
   }
@@ -211,7 +212,7 @@ it("loads a table tab's page on first show, and never runs edited text unasked",
   await loadTableOnce("browsing");
   await vi.waitFor(() => expect(runs).toHaveLength(1));
   await new Promise((r) => setTimeout(r, 0));
-  expect(runs).toEqual([{ kind: "tablePage", schema: "public", table: "orders", page: 2, query: { orderBy: "", filters: [], where: "" } }]);
+  expect(runs).toEqual([{ kind: "tablePage", schema: "public", table: "orders", page: 2, query }]);
 });
 
 it("drops formatting when the connection changes while the document stays the same", async () => {

@@ -229,6 +229,20 @@ mod tests {
     }
 
     #[test]
+    fn postgres_table_templates_keep_saved_browse_tabs_recognizable() {
+        for (schema, table, expected) in [
+            ("public", "orders", "SELECT * FROM public.orders"),
+            ("_sales", "order$items", "SELECT * FROM _sales.order$items"),
+            ("Sales", "line items", "SELECT * FROM \"Sales\".\"line items\""),
+            ("public", "select", "SELECT * FROM public.\"select\""),
+            ("current_schema", "a\"b", "SELECT * FROM \"current_schema\".\"a\"\"b\""),
+        ] {
+            assert_eq!(table_script(DatabaseKind::Postgres, schema, table), expected);
+        }
+        assert_eq!(table_script(DatabaseKind::SqlServer, "dbo", "orders"), "SELECT * FROM [dbo].[orders]");
+    }
+
+    #[test]
     fn script_outline_lists_every_statement_and_preselects_the_one_under_the_cursor() {
         let text = "select 1 as one;\nselect * from public.orders limit 3;\nselect 'third' as three;";
         assert_eq!(
@@ -389,7 +403,17 @@ pub fn pick(text: &str, target: ByteTarget, kind: DatabaseKind) -> Result<Vec<St
 pub fn classify(text: &str, kind: DatabaseKind) -> StmtKind { match kind { DatabaseKind::Postgres => sql::classify(text), DatabaseKind::SqlServer => sql::tsql::classify(text) } }
 
 pub fn table_script(kind: DatabaseKind, schema: &str, table: &str) -> String {
-    let quote = match kind { DatabaseKind::Postgres => quote_ident, DatabaseKind::SqlServer => sql::tsql::quote_ident };
+    fn postgres_ident(name: &str) -> String {
+        let mut chars = name.chars();
+        let simple = chars.next().is_some_and(|c| c.is_ascii_lowercase() || c == '_')
+            && chars.all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_' || c == '$');
+        if simple && !sql::RESERVED.contains(&name) && !sql::TYPE_OR_FUNCTION_NAME.contains(&name) {
+            name.to_owned()
+        } else {
+            quote_ident(name)
+        }
+    }
+    let quote = match kind { DatabaseKind::Postgres => postgres_ident, DatabaseKind::SqlServer => sql::tsql::quote_ident };
     format!("SELECT * FROM {}.{}", quote(schema), quote(table))
 }
 
