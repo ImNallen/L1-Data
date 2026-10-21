@@ -451,14 +451,14 @@ pub fn table_browse(kind: DatabaseKind, schema: &str, table: &str, relation: Opt
                 let col = sql::tsql::quote_ident(&c.name);
                 if matches!(c.type_display.as_str(),"money"|"smallmoney") { format!("CAST({col} AS decimal(19,4)) AS {col}") } else { col }
             }).collect::<Vec<_>>().join(", ")).filter(|p| !p.is_empty()).unwrap_or_else(|| "*".into());
-            Ok(sql::tsql::browse_sql(schema,table,&projection,&pk,query,limit,offset))
+            sql::tsql::browse_sql(schema,table,&projection,relation.map(|r| r.columns.as_slice()).unwrap_or_default(),&pk,query,limit,offset)
         }
     }
 }
 
-pub fn table_count(kind: DatabaseKind, schema: &str, table: &str, query: &TableQuery) -> Result<String,String> {
+pub fn table_count(kind: DatabaseKind, schema: &str, table: &str, relation: Option<&Relation>, query: &TableQuery) -> Result<String,String> {
     match kind {
         DatabaseKind::Postgres => { let text = count_sql(schema,table,query); if sql::split_statements(&text).len()!=1 { Err("The filter must be a single expression.".into()) } else { Ok(text) } },
-        DatabaseKind::SqlServer => { sql::tsql::validate_expression(&query.r#where,false)?; Ok(sql::tsql::count_sql(schema,table,query)) },
+        DatabaseKind::SqlServer => { sql::tsql::validate_expression(&query.r#where,false)?; sql::tsql::count_sql(schema,table,relation.map(|r| r.columns.as_slice()).unwrap_or_default(),query) },
     }
 }

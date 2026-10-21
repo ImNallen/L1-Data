@@ -1,5 +1,6 @@
+use super::mssql_value::{Input, input_sql};
 use super::{ByteTarget, DmlVerb, StmtKind, StmtSpan, relations::NameRef};
-use crate::model::{ColumnFilter, FilterOp, TableQuery};
+use crate::model::{ColumnFilter, ColumnInfo, FilterOp, TableQuery, TypeCategory};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Kind {
@@ -939,16 +940,19 @@ fn like_pattern(value: &str, prefix_only: bool) -> String {
     quote_literal(&pattern)
 }
 
-fn filter_sql(filter: &ColumnFilter) -> String {
+fn filter_sql(filter: &ColumnFilter, columns: &[ColumnInfo]) -> Result<String, String> {
+    let info = columns.iter().find(|c| c.name == filter.column).ok_or_else(|| format!("Unknown filter column {}", filter.column))?;
     let column = quote_ident(&filter.column);
+    let comparable = if info.type_display == "image" { format!("CONVERT(varbinary(max), {column})") } else { column.clone() };
     let op = match filter.op {
-        FilterOp::IsNull => return format!("{column} IS NULL"),
-        FilterOp::NotNull => return format!("{column} IS NOT NULL"),
+        FilterOp::IsNull => return Ok(format!("{column} IS NULL")),
+        FilterOp::NotNull => return Ok(format!("{column} IS NOT NULL")),
         FilterOp::Contains | FilterOp::StartsWith => {
-            return format!(
-                "CONVERT(nvarchar(max), {column}) LIKE {} ESCAPE N'~'",
+            let display = if info.category == TypeCategory::Binary { format!("CONVERT(varchar(max), {comparable}, 1)") } else { format!("CONVERT(nvarchar(max), {column})") };
+            return Ok(format!(
+                "{display} LIKE {} ESCAPE N'~'",
                 like_pattern(&filter.value, filter.op == FilterOp::StartsWith)
-            );
+            ));
         }
         FilterOp::Eq => "=",
         FilterOp::Ne => "<>",
@@ -957,20 +961,20 @@ fn filter_sql(filter: &ColumnFilter) -> String {
         FilterOp::Gt => ">",
         FilterOp::Ge => ">=",
     };
-    format!("{column} {op} {}", quote_literal(&filter.value))
+    Ok(format!("{comparable} {op} {}", input_sql(info, Input::Literal(&filter.value))?))
 }
 
-fn from_sql(schema: &str, table: &str, query: &TableQuery) -> String {
+fn from_sql(schema: &str, table: &str, columns: &[ColumnInfo], query: &TableQuery) -> Result<String, String> {
     let mut sql = format!("FROM {}.{}", quote_ident(schema), quote_ident(table));
     let mut filters = Vec::new();
     if !query.r#where.trim().is_empty() {
         filters.push(format!("({}\n)", query.r#where.trim()));
     }
-    filters.extend(query.filters.iter().map(filter_sql));
+    filters.extend(query.filters.iter().map(|filter| filter_sql(filter, columns)).collect::<Result<Vec<_>, _>>()?);
     if !filters.is_empty() {
         sql.push_str(&format!(" WHERE {}", filters.join(" AND ")));
     }
-    sql
+    Ok(sql)
 }
 
 fn ordered_columns(text: &str) -> Vec<String> {
@@ -1002,12 +1006,13 @@ pub(crate) fn browse_sql(
     schema: &str,
     table: &str,
     projection: &str,
+    columns: &[ColumnInfo],
     pk: &[String],
     query: &TableQuery,
     limit: u32,
     offset: u64,
-) -> String {
-    let mut sql = format!("SELECT {projection} {}", from_sql(schema, table, query));
+) -> Result<String, String> {
+    let mut sql = format!("SELECT {projection} {}", from_sql(schema, table, columns, query)?);
     let mut order = Vec::new();
     let mut ordered = ordered_columns(&query.order_by);
     if !query.order_by.trim().is_empty() {
@@ -1023,11 +1028,11 @@ pub(crate) fn browse_sql(
         order.push("(SELECT NULL)".into());
     }
     sql.push_str(&format!(" ORDER BY {} OFFSET {offset} ROWS FETCH NEXT {limit} ROWS ONLY", order.join(", ")));
-    sql
+    Ok(sql)
 }
 
-pub(crate) fn count_sql(schema: &str, table: &str, query: &TableQuery) -> String {
-    format!("SELECT COUNT_BIG(*) {}", from_sql(schema, table, query))
+pub(crate) fn count_sql(schema: &str, table: &str, columns: &[ColumnInfo], query: &TableQuery) -> Result<String, String> {
+    Ok(format!("SELECT COUNT_BIG(*) {}", from_sql(schema, table, columns, query)?))
 }
 
 #[cfg(test)]
@@ -1377,24 +1382,28 @@ mod tests {
     fn browse_paginates_with_pk_tiebreakers_and_preserves_trusted_projection() {
         let query = TableQuery::default();
         assert_eq!(
-            browse_sql("s]", "旅", "*", &["Id".into(), "Tenant".into()], &query, 50, 200),
+            browse_sql("s]", "旅", "*", &[], &["Id".into(), "Tenant".into()], &query, 50, 200).unwrap(),
             "SELECT * FROM [s]]].[旅] ORDER BY [Id], [Tenant] OFFSET 200 ROWS FETCH NEXT 50 ROWS ONLY"
         );
         assert_eq!(
-            browse_sql("s", "t", "CONVERT(decimal(19,4), [money]) AS [money]", &[], &query, 1, u64::MAX),
+            browse_sql("s", "t", "CONVERT(decimal(19,4), [money]) AS [money]", &[], &[], &query, 1, u64::MAX).unwrap(),
             "SELECT CONVERT(decimal(19,4), [money]) AS [money] FROM [s].[t] ORDER BY (SELECT NULL) OFFSET 18446744073709551615 ROWS FETCH NEXT 1 ROWS ONLY"
         );
         let query = TableQuery { order_by: "[Id] DESC, LOWER([Name])".into(), ..Default::default() };
         assert_eq!(
-            browse_sql("s", "t", "*", &["Id".into(), "Tenant".into()], &query, 10, 0),
+            browse_sql("s", "t", "*", &[], &["Id".into(), "Tenant".into()], &query, 10, 0).unwrap(),
             "SELECT * FROM [s].[t] ORDER BY [Id] DESC, LOWER([Name])\n, [Tenant] OFFSET 0 ROWS FETCH NEXT 10 ROWS ONLY"
         );
         let query = TableQuery { order_by: "[t].[Id] DESC".into(), ..Default::default() };
-        assert!(!browse_sql("s", "t", "*", &["Id".into()], &query, 10, 0).contains(", [Id]"));
+        assert!(!browse_sql("s", "t", "*", &[], &["Id".into()], &query, 10, 0).unwrap().contains(", [Id]"));
     }
 
     #[test]
     fn count_big_and_column_filters_escape_every_like_metacharacter() {
+        let columns = ["na]me", "prefix", "空", "x"].map(|name| ColumnInfo {
+            name: name.into(), type_display: "nvarchar(max)".into(), category: TypeCategory::Text,
+            attnum: 1, writable: true, not_null: false, pk: false, fk: false,
+        });
         let query = TableQuery {
             r#where: "[active] = 1 OR [旅] = N'人'".into(),
             filters: vec![
@@ -1405,7 +1414,7 @@ mod tests {
             order_by: "ignored".into(),
         };
         assert_eq!(
-            count_sql("Sales", "Orders", &query),
+            count_sql("Sales", "Orders", &columns, &query).unwrap(),
             "SELECT COUNT_BIG(*) FROM [Sales].[Orders] WHERE ([active] = 1 OR [旅] = N'人'\n) AND CONVERT(nvarchar(max), [na]]me]) LIKE N'%~~~%~_~[x]''旅%' ESCAPE N'~' AND CONVERT(nvarchar(max), [prefix]) LIKE N'a~_b%' ESCAPE N'~' AND [空] IS NULL"
         );
         for (op, expected) in [
@@ -1417,11 +1426,11 @@ mod tests {
             (FilterOp::Ge, ">="),
         ] {
             assert_eq!(
-                filter_sql(&ColumnFilter { column: "x".into(), op, value: "O'Brien".into() }),
+                filter_sql(&ColumnFilter { column: "x".into(), op, value: "O'Brien".into() }, &columns).unwrap(),
                 format!("[x] {expected} N'O''Brien'")
             );
         }
-        assert_eq!(count_sql("s", "t", &TableQuery::default()), "SELECT COUNT_BIG(*) FROM [s].[t]");
+        assert_eq!(count_sql("s", "t", &[], &TableQuery::default()).unwrap(), "SELECT COUNT_BIG(*) FROM [s].[t]");
     }
 
     #[test]

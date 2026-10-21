@@ -910,7 +910,16 @@ impl Engine {
     /// `count(*)` with the query's filters, on the database's metadata session.
     pub async fn exact_row_count(&self, db: DatabaseRef, schema: String, table: String, query: TableQuery) -> Result<u64, CountError> {
         let (instance, slot) = self.shared.slot(&db).map_err(|_| CountError::NotConnected)?;
-        let sql = text::table_count(instance.config.database_kind, &schema, &table, &query).map_err(|message| CountError::Failed { message })?;
+        let catalog = if instance.config.database_kind == DatabaseKind::SqlServer && !query.filters.is_empty() {
+            Some(self.shared.catalog(&db).await.map_err(|error| match error {
+                CatalogError::Failed { message } => CountError::Failed { message },
+                _ => CountError::Failed { message: "Cannot load column types for table filters.".into() },
+            })?)
+        } else {
+            None
+        };
+        let relation = catalog.as_ref().and_then(|catalog| catalog.relation(&schema, &table));
+        let sql = text::table_count(instance.config.database_kind, &schema, &table, relation, &query).map_err(|message| CountError::Failed { message })?;
         let mut meta = slot.meta.lock().await;
         let session = self.shared.session_in(&instance, &slot, &mut meta).await.map_err(|e| CountError::Failed { message: connection::connect_error_text(&e) })?;
         session.count(&sql).await.map_err(|e| CountError::Failed { message: e.message })

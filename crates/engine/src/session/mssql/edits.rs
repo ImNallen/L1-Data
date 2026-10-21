@@ -1,43 +1,14 @@
 use super::{MsSession, number};
 use crate::model::*;
 use crate::session::{Edit, QueryEvent, error};
+use crate::sql::mssql_value::{Input, input_sql};
 use crate::sql::tsql::quote_ident;
 use futures_util::StreamExt;
 
 fn parameter(cell: &CellWrite, relation: &Relation, parameters: &mut Vec<Option<String>>) -> Result<String, QueryError> {
     let column = relation.columns.iter().find(|c| c.name == cell.column).ok_or_else(|| error(format!("Unknown column {}", cell.column)))?;
-    let native = column.type_display.as_str();
-    let base = native.split('(').next().unwrap_or(native);
     parameters.push(cell.value.clone());
-    let parameter = format!("@P{}", parameters.len());
-    if matches!(base, "char" | "varchar" | "nchar" | "nvarchar" | "text" | "ntext") {
-        if matches!(base, "nchar" | "nvarchar") {
-            let bound = native.strip_suffix(')').and_then(|s| s.split_once('(')).and_then(|(_, n)| n.parse::<usize>().ok());
-            if cell.value.as_ref().is_some_and(|v| bound.is_some_and(|n| v.encode_utf16().count() > n)) {
-                return Err(error(format!("Text value exceeds the capacity of {} ({native})", column.name)));
-            }
-        }
-        return Ok(parameter);
-    }
-    if matches!(base, "binary" | "varbinary" | "image") {
-        if let Some(value) = &cell.value {
-            let hex = value.strip_prefix("0x").ok_or_else(|| error("Binary values must use 0x-prefixed hexadecimal text"))?;
-            if hex.len() % 2 != 0 || !hex.bytes().all(|b| b.is_ascii_hexdigit()) {
-                return Err(error("Binary values must contain complete hexadecimal bytes"));
-            }
-            let bound = native.strip_suffix(')').and_then(|s| s.split_once('(')).and_then(|(_, n)| n.parse::<usize>().ok());
-            if bound.is_some_and(|n| hex.len() / 2 > n) {
-                return Err(error(format!("Binary value exceeds the capacity of {} ({native})", column.name)));
-            }
-        }
-        return Ok(format!("CONVERT(varbinary(max), {parameter}, 1)"));
-    }
-    let ty = match base {
-        "tinyint" | "smallint" | "int" | "bigint" | "decimal" | "numeric" | "money" | "smallmoney" | "float" | "real" | "bit" | "date" | "time" | "datetime" | "smalldatetime"
-        | "datetime2" | "datetimeoffset" | "uniqueidentifier" | "xml" => native,
-        _ => return Err(error(format!("Staged writes for SQL Server type {native} are unsupported"))),
-    };
-    Ok(format!("CONVERT({ty}, {parameter})"))
+    input_sql(column, Input::Parameter { index: parameters.len(), value: cell.value.as_deref() }).map_err(error)
 }
 
 fn key(key: &[CellWrite], relation: &Relation, parameters: &mut Vec<Option<String>>) -> Result<String, QueryError> {
