@@ -13,7 +13,6 @@ import {
   IconMinus,
   IconPlus,
   IconTerminal2,
-  IconUpload,
 } from "@tabler/icons-react";
 import { useEffect, useMemo, useRef, useSyncExternalStore, type RefObject } from "react";
 import { commands, type OutputEntry, type QueryError, type ResultMeta, type RunState, type TabId } from "../../ipc/bindings";
@@ -53,13 +52,6 @@ import { gridEditing, ResultGrid, type GridActions, type GridEditing, type GridQ
 import { cycleTableOrder, filterForValue, useFilterDrafts, useTableOrder } from "./tableQuery";
 
 const NO_OUTPUT: readonly OutputEntry[] = [];
-
-const EXPORT_FORMATS = [
-  { label: "CSV", ready: true },
-  { label: "JSON", ready: false },
-  { label: "Markdown", ready: false },
-  { label: "XML", ready: false },
-];
 
 const PAGE_SIZES = [10, 100, 250, 500, 1000];
 const PAGER_INSET = 52;
@@ -352,24 +344,6 @@ export function ResultsPane({ tabId }: { tabId: TabId | null }) {
         {tab && <CursorPosition />}
 
         <div className="flex items-center gap-0.5">
-          <Menu.Root modal={false}>
-            <Menu.Trigger
-              data-testid="export-format"
-              aria-label="Export format"
-              className="inline-flex h-7 items-center gap-1 rounded-md pr-1.5 pl-2 text-ui-12.5 text-muted outline-none hover:bg-hover hover:text-fg data-[state=open]:bg-hover data-[state=open]:text-fg"
-            >
-              CSV
-              <IconChevronDown size={13} />
-            </Menu.Trigger>
-            <MenuContent align="end">
-              {EXPORT_FORMATS.map((f) => (
-                <MenuItem key={f.label} testId={`export-format-${f.label}`} checked={f.ready} disabled={!f.ready}>
-                  {f.label}
-                  {!f.ready && <span className="ml-auto pl-4 text-ui-11.5 text-dim">Soon</span>}
-                </MenuItem>
-              ))}
-            </MenuContent>
-          </Menu.Root>
           <IconButton
             data-testid="export-btn"
             aria-label="Export CSV"
@@ -378,14 +352,6 @@ export function ResultsPane({ tabId }: { tabId: TabId | null }) {
             onClick={() => shown && void exportCsv(shown.meta)}
           >
             <IconDownload size={16} />
-          </IconButton>
-          <IconButton
-            data-testid="import-btn"
-            aria-label="Import"
-            title="Import"
-            onClick={() => useWorkspace.getState().notify("Import is coming soon.")}
-          >
-            <IconUpload size={16} />
           </IconButton>
           <IconButton
             data-testid="output-toggle"
