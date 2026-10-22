@@ -843,7 +843,7 @@ export type ResultRef = {
 	index: number,
 };
 
-export type RightPanel = "Assistant" | "Schema" | "History";
+export type RightPanel = "Assistant";
 
 export type RowPage = {
 	start: number,

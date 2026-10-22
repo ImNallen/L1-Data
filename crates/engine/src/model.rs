@@ -1078,16 +1078,23 @@ impl Default for Layout {
     }
 }
 
-// Hand-written so workspaces saved before the panel widths or the assistant chat existed still load.
+// Hand-written so workspaces saved before the panel widths or the assistant chat existed still load,
+// and a saved Schema or History panel, which older builds offered, opens the assistant.
 // `#[serde(default)]` would do it too, but specta would then mark every Layout field optional in the TS bindings.
 impl<'de> Deserialize<'de> for Layout {
     fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        #[derive(Deserialize)]
+        enum SavedPanel {
+            Assistant,
+            Schema,
+            History,
+        }
         #[derive(Deserialize)]
         #[serde(rename_all = "camelCase")]
         struct Saved {
             sidebar: bool,
             results: bool,
-            right_panel: Option<RightPanel>,
+            right_panel: Option<SavedPanel>,
             results_height: u16,
             sidebar_width: Option<u16>,
             right_panel_width: Option<u16>,
@@ -1098,7 +1105,7 @@ impl<'de> Deserialize<'de> for Layout {
         Ok(Self {
             sidebar: s.sidebar,
             results: s.results,
-            right_panel: s.right_panel,
+            right_panel: s.right_panel.map(|_| RightPanel::Assistant),
             results_height: s.results_height,
             sidebar_width: s.sidebar_width.unwrap_or(default.sidebar_width),
             right_panel_width: s.right_panel_width.unwrap_or(default.right_panel_width),
@@ -1110,8 +1117,6 @@ impl<'de> Deserialize<'de> for Layout {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Type)]
 pub enum RightPanel {
     Assistant,
-    Schema,
-    History,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, Type)]
@@ -2153,7 +2158,9 @@ mod tests {
         .unwrap();
         assert!(!layout.sidebar);
         assert!(!layout.results);
-        assert_eq!(layout.right_panel, Some(RightPanel::History));
+        assert_eq!(layout.right_panel, Some(RightPanel::Assistant), "a removed panel opens the assistant");
+        let schema: Layout = serde_json::from_value(json!({ "sidebar": true, "results": true, "rightPanel": "Schema", "resultsHeight": 280 })).unwrap();
+        assert_eq!(schema.right_panel, Some(RightPanel::Assistant));
         assert_eq!(layout.results_height, 280);
         assert_eq!(layout.sidebar_width, 256);
         assert_eq!(layout.right_panel_width, 341);

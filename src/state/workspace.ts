@@ -183,7 +183,7 @@ export const useWorkspace = create<WorkspaceData & WorkspaceActions>()((set) => 
       tabs: Object.fromEntries(tabs.map((t) => [t.id, t])),
       order,
       active: w.active && order.includes(w.active) ? w.active : (order[0] ?? null),
-      layout: { ...w.layout, rightPanel: w.layout.rightPanel && "Assistant" },
+      layout: w.layout,
       configs,
       settings,
     });
