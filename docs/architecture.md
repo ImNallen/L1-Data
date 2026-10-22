@@ -378,7 +378,7 @@ pub struct Layout {
 }
 // Layout has a hand-written Deserialize: workspaces saved before the widths or `assistant_chat` existed load with the defaults.
 #[derive(Clone, Serialize, Deserialize, Type)] pub enum RightPanel { Assistant }
-// Only Assistant is drawn. `restore` in state/workspace.ts maps any saved panel to Assistant.
+// Layout's deserializer reads a saved Schema or History panel, from older builds, as Assistant.
 
 #[derive(Clone, Serialize, Type)]
 pub struct Settings {
@@ -1065,7 +1065,7 @@ Tracing a run from the button to the grid takes four files: `runActions.ts` → 
    - numeric grouping on text (`-1234567.890` → `-1,234,567.890`), page labels, elapsed time, TSV
    - catalog → `SQLNamespace`, substring matching, the tree filter, and the settings filter
    - `RowCache` page math
-   - status derivations, workspace snapshot round trips (a table tab's text and mode, old table tabs, dropped schemas), restore mapping any saved right panel to Assistant
+   - status derivations, workspace snapshot round trips (a table tab's text and mode, old table tabs, dropped schemas)
    - staged edits → `TableChanges`, and edits held still while a submit is in flight
    - header sort cycling and the `ORDER BY` text round trip
    - browse-query quoting and serialized settings writes in `runActions`
