@@ -1,17 +1,14 @@
-import * as Menu from "@radix-ui/react-dropdown-menu";
 import { IconArrowBackUp, IconInfoCircle, IconMinus, IconPlus, IconRefresh } from "@tabler/icons-react";
 import { useState, type ReactNode } from "react";
 import { commands, type ProviderConfig, type ProviderInfo, type ProviderKind, type ProviderState } from "../../ipc/bindings";
 import { useLive } from "../../state/live";
 import { useWorkspace } from "../../state/workspace";
-import { cx, IconButton, inputClass, MenuContent, MenuItem, MenuLabel, Switch } from "../../ui/primitives";
+import { cx, IconButton, inputClass, Switch } from "../../ui/primitives";
 import { useNow } from "../../ui/useNow";
 import { checkedAgo, outcomeVersion, providerStatus, type StatusTone } from "../assistant/assistantText";
 import { PROVIDER_ICONS } from "../assistant/providerIcons";
 import { saveSettings } from "../editor/runActions";
 import { Row, SettingLabel } from "./SettingLayout";
-
-const UPCOMING = ["Codex"];
 
 const TONE_CLASS = { ok: "text-dim", warn: "text-amber", error: "text-danger", muted: "text-dim" } satisfies Record<StatusTone, string>;
 
@@ -26,22 +23,6 @@ function defaultsOf(config: ProviderConfig, info: ProviderInfo): ProviderConfig 
 
 function sameConfig(a: ProviderConfig, b: ProviderConfig): boolean {
   return a.displayName === b.displayName && a.binaryPath === b.binaryPath && a.configDir === b.configDir && a.launchArgs === b.launchArgs;
-}
-
-function AddProviderMenu({ present }: { present: readonly ProviderKind[] }) {
-  const kinds = new Set<string>(present);
-  const upcoming = UPCOMING.filter((name) => !kinds.has(name));
-  return (
-    <MenuContent>
-      {upcoming.length === 0 && <MenuLabel>Every provider is added.</MenuLabel>}
-      {upcoming.map((name) => (
-        <MenuItem key={name} testId={`add-provider-${name}`} disabled>
-          {name}
-          <span className="ml-auto pl-4 text-ui-11.5 text-dim">Soon</span>
-        </MenuItem>
-      ))}
-    </MenuContent>
-  );
 }
 
 function TextField({
@@ -223,21 +204,12 @@ export function ProviderListSetting() {
   const selected = configs.find((c) => c.provider === picked) ?? configs[0];
   const known = Object.values(states).filter((p) => p !== undefined);
   const checking = known.some((p) => p.checking);
-  const present = configs.map((c) => c.provider);
   return (
     <section data-setting="providerList" aria-label="Providers">
       <div className="mb-2 flex items-center gap-1 px-1">
         <h2 className="text-ui-13 font-medium text-fg">
           <SettingLabel id="providerList" />
         </h2>
-        <Menu.Root modal={false}>
-          <Menu.Trigger asChild>
-            <IconButton aria-label="Add provider" className="size-6">
-              <IconPlus size={14} />
-            </IconButton>
-          </Menu.Trigger>
-          <AddProviderMenu present={present} />
-        </Menu.Root>
         <div className="flex-1" />
         <button
           type="button"
@@ -255,16 +227,6 @@ export function ProviderListSetting() {
           {configs.map((c) => (
             <ProviderRow key={c.provider} config={c} state={states[c.provider]} selected={c === selected} onSelect={() => setPicked(c.provider)} />
           ))}
-          <Menu.Root modal={false}>
-            <Menu.Trigger
-              data-testid="add-provider"
-              className="flex items-center gap-2.5 px-3 py-2.5 text-left text-ui-13 text-muted outline-none hover:bg-hover hover:text-fg data-[state=open]:bg-hover"
-            >
-              <IconPlus size={14} className="mx-px" />
-              Add provider
-            </Menu.Trigger>
-            <AddProviderMenu present={present} />
-          </Menu.Root>
         </div>
         {selected && <ProviderDetail key={selected.provider} config={selected} state={states[selected.provider]} />}
       </div>
