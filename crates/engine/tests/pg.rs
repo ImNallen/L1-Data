@@ -1806,3 +1806,64 @@ async fn a_running_query_is_in_the_impact_and_a_has_writes_probe_is_not() {
     h.engine.console_cancel(busy).await;
     h.wait_finished(busy, accepted.run_id).await;
 }
+
+/// Forwards to the test server until `freeze`, then holds every byte, as a stalled network does.
+async fn freezable_relay(upstream: (String, u16)) -> (u16, Arc<std::sync::atomic::AtomicBool>) {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    async fn pump(mut from: tokio::net::tcp::OwnedReadHalf, mut to: tokio::net::tcp::OwnedWriteHalf, frozen: Arc<AtomicBool>) {
+        let mut buf = vec![0u8; 16 * 1024];
+        while let Ok(n @ 1..) = from.read(&mut buf).await {
+            while frozen.load(Ordering::Relaxed) {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+            if to.write_all(&buf[..n]).await.is_err() {
+                return;
+            }
+        }
+    }
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let frozen = Arc::new(AtomicBool::new(false));
+    let relay_frozen = frozen.clone();
+    tokio::spawn(async move {
+        while let Ok((client, _)) = listener.accept().await {
+            let server = tokio::net::TcpStream::connect((upstream.0.as_str(), upstream.1)).await.unwrap();
+            let ((client_read, client_write), (server_read, server_write)) = (client.into_split(), server.into_split());
+            tokio::spawn(pump(client_read, server_write, relay_frozen.clone()));
+            tokio::spawn(pump(server_read, client_write, relay_frozen.clone()));
+        }
+    });
+    (port, frozen)
+}
+
+#[tokio::test]
+async fn a_stalled_session_does_not_hang_the_restart_or_disconnect_check() {
+    let real = draft_from_url(&url(), "dev").unwrap();
+    let (port, frozen) = freezable_relay((real.host.clone(), real.port)).await;
+    let draft = ConnectionDraft { host: "127.0.0.1".into(), port, ..real };
+    let transport = Arc::new(ScriptedTransport::named("available").unwrap());
+    let mut h = Harness::start_updating(tempfile::tempdir().unwrap(), draft, transport).await;
+    h.engine.update_check();
+    next_update(&mut h, |s| matches!(s, UpdateStatus::Available { .. })).await;
+    h.engine.update_download("0.2.0".into()).unwrap();
+    next_update(&mut h, |s| matches!(s, UpdateStatus::Downloaded { .. })).await;
+    let (a, b) = (h.sql_tab(TxnMode::Manual).await, h.sql_tab(TxnMode::Manual).await);
+    h.run_ok(a, "select 1").await;
+    h.run_ok(b, "select 1").await;
+    let mut both = vec![OpenTxn { tab_id: a, has_writes: true }, OpenTxn { tab_id: b, has_writes: true }];
+    both.sort_by_key(|t| t.tab_id.0);
+    frozen.store(true, std::sync::atomic::Ordering::Relaxed);
+
+    let started = Instant::now();
+    let impact = tokio::time::timeout(Duration::from_secs(10), confirm(&h, None)).await.expect("the restart check waited on a stalled session");
+    assert!(started.elapsed() < Duration::from_secs(5), "restart check took {:?}", started.elapsed());
+    assert_eq!(impact.transactions, both, "an unanswered probe counts as writes");
+
+    let started = Instant::now();
+    let err = tokio::time::timeout(Duration::from_secs(10), h.engine.disconnect(h.conn, false)).await.expect("disconnect waited on a stalled session").unwrap_err();
+    assert!(started.elapsed() < Duration::from_secs(5), "disconnect check took {:?}", started.elapsed());
+    let DisconnectError::OpenTransactions { mut tabs } = err else { panic!("{err:?}") };
+    tabs.sort_by_key(|t| t.tab_id.0);
+    assert_eq!(tabs, both);
+}
