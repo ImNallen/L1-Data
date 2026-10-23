@@ -1,6 +1,7 @@
 import { commands, type ChatId, type RestartImpact, type TabId, type UpdateError, type UpdateTrack } from "../../ipc/bindings";
 import { updateErrorText } from "../../ipc/errors";
 import { useLive } from "../../state/live";
+import { pendingCount, useTableEdits } from "../../state/tableEdits";
 import { useWorkspace } from "../../state/workspace";
 import { flushWorkspaceSave } from "../editor/persistence";
 import { restartBody, restartTitle, type UpdateAction } from "./updateText";
@@ -35,18 +36,30 @@ async function downloadUpdate(version: string): Promise<void> {
 const tabTitle = (id: TabId) => ws().tabs[id]?.title ?? "a closed tab";
 const chatTitle = (id: ChatId) => useLive.getState().chats[id]?.title || "an untitled chat";
 
-export async function installUpdate(version: string, accepted: RestartImpact | null): Promise<void> {
-  if (accepted) await flushWorkspaceSave();
-  const res = await commands.updateInstall(version, accepted);
+function tabsWithUnsubmittedEdits(): TabId[] {
+  const { byTab } = useTableEdits.getState();
+  return ws().order.filter((id) => {
+    const edits = byTab[id];
+    return edits !== undefined && pendingCount(edits) > 0;
+  });
+}
+
+type Accepted = { impact: RestartImpact; unsubmitted: TabId[] };
+
+export async function installUpdate(version: string, accepted: Accepted | null): Promise<void> {
+  const covered = accepted !== null && tabsWithUnsubmittedEdits().every((id) => accepted.unsubmitted.includes(id));
+  if (covered) await flushWorkspaceSave();
+  const res = await commands.updateInstall(version, covered ? accepted.impact : null);
   if (res.status === "error") return notifyUnlessStale(res.error);
   if (res.data.kind === "Restarting") return;
   const { impact } = res.data;
+  const unsubmitted = tabsWithUnsubmittedEdits();
   ws().open({
     kind: "confirm",
     title: restartTitle(version, useLive.getState().updates),
-    body: restartBody(impact, tabTitle, chatTitle),
+    body: restartBody(impact, unsubmitted, tabTitle, chatTitle),
     confirmLabel: "Restart and install",
-    onConfirm: () => void installUpdate(version, impact),
+    onConfirm: () => void installUpdate(version, { impact, unsubmitted }),
   });
 }
 

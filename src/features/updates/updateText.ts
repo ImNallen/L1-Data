@@ -161,12 +161,13 @@ function quoted(titles: readonly string[]): string {
   return listOf(titles.map((t) => `“${t}”`));
 }
 
-export function restartBody(impact: RestartImpact, tabTitle: (id: TabId) => string, chatTitle: (id: ChatId) => string): string {
+export function restartBody(impact: RestartImpact, unsubmitted: readonly TabId[], tabTitle: (id: TabId) => string, chatTitle: (id: ChatId) => string): string {
   const changed = impact.transactions.filter((t) => t.hasWrites).map((t) => tabTitle(t.tabId));
   const open = impact.transactions.filter((t) => !t.hasWrites).map((t) => tabTitle(t.tabId));
   const ends = [
     impact.running.length > 0 && `cancels the ${impact.running.length === 1 ? "query" : "queries"} running in ${quoted(impact.running.map(tabTitle))}`,
     changed.length > 0 && `rolls back the uncommitted changes in ${quoted(changed)}`,
+    unsubmitted.length > 0 && `discards the changes in ${quoted(unsubmitted.map(tabTitle))} that haven't been submitted`,
     open.length > 0 && `ends the open ${open.length === 1 ? "transaction" : "transactions"} in ${quoted(open)}`,
     impact.chats.length > 0 && `stops the assistant in ${quoted(impact.chats.map(chatTitle))}`,
   ].filter((clause) => clause !== false);

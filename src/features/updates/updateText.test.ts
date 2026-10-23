@@ -78,7 +78,8 @@ describe("Settings > About", () => {
 
 describe("the restart dialog", () => {
   const titles: Record<string, string> = { [TAB_A]: "orders.sql", [TAB_B]: "fix-prices.sql", [CHAT]: "Top customers" };
-  const body = (impact: Partial<RestartImpact>) => restartBody({ running: [], transactions: [], chats: [], ...impact }, (id) => titles[id] ?? id, (id) => titles[id] ?? id);
+  const body = (impact: Partial<RestartImpact>, staged: string[] = []) =>
+    restartBody({ running: [], transactions: [], chats: [], ...impact }, staged, (id) => titles[id] ?? id, (id) => titles[id] ?? id);
 
   it("says only that the app reopens when nothing would be interrupted", () => {
     expect(body({})).toBe("L1 Data will close and reopen.");
@@ -90,6 +91,10 @@ describe("the restart dialog", () => {
     );
     expect(body({ running: [TAB_A, TAB_B] })).toBe("Restarting cancels the queries running in “orders.sql” and “fix-prices.sql”. L1 Data will close and reopen.");
     expect(body({ transactions: [{ tabId: TAB_A, hasWrites: false }] })).toBe("Restarting ends the open transaction in “orders.sql”. L1 Data will close and reopen.");
+    expect(body({}, [TAB_A])).toBe("Restarting discards the changes in “orders.sql” that haven't been submitted. L1 Data will close and reopen.");
+    expect(body({ running: [TAB_A] }, [TAB_A, TAB_B])).toBe(
+      "Restarting cancels the query running in “orders.sql” and discards the changes in “orders.sql” and “fix-prices.sql” that haven't been submitted. L1 Data will close and reopen.",
+    );
   });
 
   it("calls an older build one in the title", () => {

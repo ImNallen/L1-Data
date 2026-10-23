@@ -2,6 +2,7 @@ import { mockIPC } from "@tauri-apps/api/mocks";
 import { afterEach, expect, it, vi } from "vitest";
 import type { InstallReply, RestartImpact, UpdateState, UpdateStatus } from "../../ipc/bindings";
 import { useLive } from "../../state/live";
+import { useTableEdits } from "../../state/tableEdits";
 import { useWorkspace } from "../../state/workspace";
 import { dropEditor } from "../editor/editorStates";
 import { openSqlTab } from "../editor/runActions";
@@ -11,6 +12,7 @@ afterEach(() => {
   for (const id of useWorkspace.getState().order) dropEditor(id);
   useWorkspace.setState(useWorkspace.getInitialState(), true);
   useLive.setState(useLive.getInitialState(), true);
+  useTableEdits.setState(useTableEdits.getInitialState(), true);
   vi.unstubAllGlobals();
 });
 
@@ -59,6 +61,36 @@ it("asks before the restart, sends back what it showed, and asks again when more
     { cmd: "workspace_save" },
     { cmd: "update_install", accepted: changed },
   ]);
+  expect(ws().overlay.kind).toBe("none");
+});
+
+it("names the tabs with unsubmitted table edits, and asks again when another tab stages one", async () => {
+  vi.stubGlobal("window", { crypto });
+  const orders = openSqlTab({ title: "public.orders" });
+  const customers = openSqlTab({ title: "public.customers" });
+  useTableEdits.getState().addRow(orders);
+  const none: RestartImpact = { running: [], transactions: [], chats: [] };
+  const replies: InstallReply[] = [{ kind: "Confirm", impact: none }, { kind: "Confirm", impact: none }, { kind: "Restarting" }];
+  const accepted: (RestartImpact | null)[] = [];
+  mockIPC((cmd, args) => {
+    if (cmd !== "update_install") return null;
+    accepted.push((args as { accepted: RestartImpact | null }).accepted);
+    return replies.shift();
+  });
+
+  runUpdateAction({ kind: "install", version: "0.2.0" });
+  await vi.waitFor(() => confirmShown());
+  expect(confirmShown().body).toBe("Restarting discards the changes in “public.orders” that haven't been submitted. L1 Data will close and reopen.");
+
+  useTableEdits.getState().addRow(customers);
+  confirm();
+  await vi.waitFor(() => expect(accepted).toHaveLength(2));
+  await vi.waitFor(() => confirmShown());
+  expect(confirmShown().body).toBe("Restarting discards the changes in “public.orders” and “public.customers” that haven't been submitted. L1 Data will close and reopen.");
+
+  confirm();
+  await vi.waitFor(() => expect(accepted).toHaveLength(3));
+  expect(accepted).toEqual([null, null, none]);
   expect(ws().overlay.kind).toBe("none");
 });
 
