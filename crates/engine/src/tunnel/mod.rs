@@ -1,4 +1,6 @@
 mod auth;
+#[cfg(all(test, feature = "ssh-tests"))]
+mod docker_tests;
 mod known_hosts;
 #[cfg(test)]
 mod tests;

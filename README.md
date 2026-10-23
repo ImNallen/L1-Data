@@ -113,6 +113,7 @@ For SQL Server development, run `pnpm db:mssql:up`. It starts SQL Server 2022 De
 cargo test --workspace   # engine units, bindings drift test, bridge coverage test
 cargo test -p engine --features pg-tests   # engine against PostgreSQL
 cargo test -p engine --features mssql-tests   # engine against SQL Server; needs pnpm db:mssql:up
+cargo test -p engine --features ssh-tests   # engine through an SSH bastion; needs pnpm db:up and pnpm db:ssh:up
 python3 dev/mssql-tls-smoke.py   # public Engine VerifyFull CA/name checks against a disposable SQL Server
 pnpm typecheck
 pnpm test                # vitest
@@ -127,6 +128,8 @@ pnpm screenshot          # macOS: rewrites docs/images/l1-data.png from the runn
 ```
 
 The SQL Server TLS smoke needs Docker, OpenSSL, Rust, and the cached `mcr.microsoft.com/mssql/server:2022-latest` image. It builds the engine and a temporary public-API probe, starts its own container on a free loopback port, and uses generated fixture credentials and certificates. It checks trusted `localhost`, hostname rejection on `127.0.0.1`, unrelated-CA rejection, and **Require** controls. Each probe child gets isolated `SSL_CERT_FILE` and `SSL_CERT_DIR` settings. The script removes its container and temporary files on success or failure. It does not use the seeded databases or bridge.
+
+`pnpm db:ssh:up` starts an OpenSSH bastion on `localhost:2222` that forwards only to `postgres:5432`, and to `mssql:1433` when `pnpm db:mssql:up` is up too. The `ssh-tests` SQL Server case runs only then. The bastion's host key and the client keys under `dev/sshd` are test-only fixtures.
 
 A debug binary rewrites `src/ipc/bindings.ts` each time it starts, so `pnpm tauri dev` and `pnpm self-check` keep it current too.
 
