@@ -1,0 +1,380 @@
+name: Release
+
+on:
+  schedule:
+    - cron: "17 * * * *"
+  workflow_dispatch:
+    inputs:
+      channel:
+        description: Release track
+        type: choice
+        options: [nightly, stable]
+        default: nightly
+      version:
+        description: Stable version, such as 0.2.0. Defaults to the version of the latest nightly.
+        type: string
+        required: false
+  push:
+    tags:
+      - "v*.*.*"
+      - "!v*-nightly.*"
+  pull_request:
+    paths:
+      - .github/workflows/release.yml
+      - .github/workflows/ci.yml
+      - scripts/**
+
+concurrency:
+  group: ${{ github.event_name == 'pull_request' && format('release-dry-run-{0}', github.ref) || 'release' }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+  queue: ${{ github.event_name == 'pull_request' && 'single' || 'max' }}
+
+permissions:
+  contents: read
+
+env:
+  NODE_VERSION: "26"
+  PNPM_VERSION: "11"
+  RUST_TOOLCHAIN: "1.93"
+  UPDATER_PUBKEY: dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDJDOTNEOTk0ODdCNUE2NEEKUldSS3ByV0hsTm1UTEszQnJpU3lvR3kyL3lqcW1OWmh1MmgvTFlzeXhuQmNUOVpNRFA5TGpueisK
+
+jobs:
+  plan:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    outputs:
+      action: ${{ steps.plan.outputs.action }}
+      channel: ${{ steps.plan.outputs.channel }}
+      version: ${{ steps.plan.outputs.version }}
+      tag: ${{ steps.plan.outputs.tag }}
+      sha: ${{ steps.plan.outputs.sha }}
+      previous_tag: ${{ steps.plan.outputs.previous_tag }}
+      ci: ${{ steps.plan.outputs.ci }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+
+      - id: plan
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+          INPUT_CHANNEL: ${{ inputs.channel }}
+          INPUT_VERSION: ${{ inputs.version }}
+        run: node scripts/release-plan.mjs
+
+      - name: Require the Apple signing secrets
+        if: steps.plan.outputs.action == 'publish'
+        env:
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          missing=()
+          for name in APPLE_CERTIFICATE APPLE_CERTIFICATE_PASSWORD APPLE_ID APPLE_PASSWORD APPLE_TEAM_ID; do
+            [[ -n "${!name}" ]] || missing+=("$name")
+          done
+          if (( ${#missing[@]} )); then
+            echo "::error::A release signs and notarizes the macOS build. Set these secrets first (docs/releasing.md): ${missing[*]}"
+            exit 1
+          fi
+
+  ci:
+    needs: plan
+    if: needs.plan.outputs.ci == 'true'
+    uses: ./.github/workflows/ci.yml
+    permissions:
+      contents: read
+
+  build:
+    needs: [plan, ci]
+    if: ${{ !cancelled() && needs.plan.result == 'success' && needs.plan.outputs.action != 'skip' && (needs.ci.result == 'success' || needs.ci.result == 'skipped') }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-latest
+            args: --target universal-apple-darwin --bundles app,dmg
+            rust-targets: aarch64-apple-darwin,x86_64-apple-darwin
+          - os: ubuntu-24.04
+            args: --bundles appimage,deb
+          - os: windows-latest
+            args: --bundles nsis
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 90
+    defaults:
+      run:
+        shell: bash
+    env:
+      ACTION: ${{ needs.plan.outputs.action }}
+      VERSION: ${{ needs.plan.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.plan.outputs.sha }}
+
+      - name: Check out the release scripts from the workflow commit
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          path: .release-tools
+          sparse-checkout: scripts
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: ${{ env.PNPM_VERSION }}
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: pnpm
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+          targets: ${{ matrix.rust-targets }}
+
+      - name: Install Tauri Linux packages
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+            build-essential \
+            curl \
+            wget \
+            file \
+            libxdo-dev \
+            libssl-dev \
+            libayatana-appindicator3-dev \
+            librsvg2-dev \
+            libwebkit2gtk-4.1-dev \
+            patchelf \
+            pkg-config \
+            xdg-utils
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          prefix-key: release
+
+      - run: pnpm install --frozen-lockfile
+
+      - name: Stamp the version
+        run: |
+          jq -n --arg version "$VERSION" --arg pubkey "$UPDATER_PUBKEY" \
+            '{version: $version, bundle: {createUpdaterArtifacts: true}, plugins: {updater: {pubkey: $pubkey}}}' > release.conf.json
+
+      - name: Choose macOS signing
+        id: signing
+        if: runner.os == 'macOS'
+        env:
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          names=(APPLE_CERTIFICATE APPLE_CERTIFICATE_PASSWORD APPLE_ID APPLE_PASSWORD APPLE_TEAM_ID)
+          missing=()
+          for name in "${names[@]}"; do
+            [[ -n "${!name}" ]] || missing+=("$name")
+          done
+          if (( ${#missing[@]} == 0 )); then
+            # Tauri signs and notarizes when these are set at all, even empty, so they reach the build only when complete.
+            for name in "${names[@]}"; do
+              printf '%s<<APPLE_SECRET_EOF\n%s\nAPPLE_SECRET_EOF\n' "$name" "${!name}" >> "$GITHUB_ENV"
+            done
+            echo "signed=true" >> "$GITHUB_OUTPUT"
+            echo "macOS is signed with Developer ID and notarized." >> "$GITHUB_STEP_SUMMARY"
+          elif [[ "$ACTION" == dry-run ]]; then
+            echo "signed=false" >> "$GITHUB_OUTPUT"
+            echo "macOS is **unsigned** in this dry run. Missing secrets: ${missing[*]}." >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "::error::Missing Apple secrets: ${missing[*]}"
+            exit 1
+          fi
+
+      - uses: tauri-apps/tauri-action@1deb371b0cd8bd54025b384f1cd735e725c4060f # v1.0.0
+        id: tauri
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+          APPIMAGE_EXTRACT_AND_RUN: ${{ runner.os == 'Linux' && '1' || '' }}
+        with:
+          tauriScript: pnpm tauri
+          args: ${{ matrix.args }} --config release.conf.json
+
+      - name: Notarize and staple the DMG
+        if: steps.signing.outputs.signed == 'true'
+        env:
+          ARTIFACT_PATHS: ${{ steps.tauri.outputs.artifactPaths }}
+        run: |
+          set -euo pipefail
+          app=$(jq -er '.[] | select(endswith(".app"))' <<< "$ARTIFACT_PATHS")
+          dmg=$(jq -er '.[] | select(endswith(".dmg"))' <<< "$ARTIFACT_PATHS")
+          codesign --verify --deep --strict --verbose=2 "$app"
+          xcrun stapler validate "$app"
+          xcrun notarytool submit "$dmg" --apple-id "$APPLE_ID" --password "$APPLE_PASSWORD" --team-id "$APPLE_TEAM_ID" --wait
+          xcrun stapler staple "$dmg"
+          spctl --assess --type open --context context:primary-signature --verbose=2 "$dmg"
+
+      - name: Stage the bundles
+        env:
+          ARTIFACT_PATHS: ${{ steps.tauri.outputs.artifactPaths }}
+        run: |
+          node .release-tools/scripts/updater-manifest.mjs stage "$RUNNER_OS" "$VERSION" staged
+          {
+            echo "### $RUNNER_OS bundles"
+            echo '```'
+            ls -l staged
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: bundles-${{ runner.os }}
+          path: staged/
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 14
+
+  dry-run:
+    needs: [plan, build]
+    if: ${{ !cancelled() && needs.plan.outputs.action == 'dry-run' && needs.build.result == 'success' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          sparse-checkout: scripts
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: bundles-*
+          merge-multiple: true
+          path: assets
+
+      - name: Build latest.json without publishing
+        env:
+          TAG: ${{ needs.plan.outputs.tag }}
+          VERSION: ${{ needs.plan.outputs.version }}
+        run: |
+          node scripts/updater-manifest.mjs manifest assets "$TAG" "$VERSION" --dry-run latest.json
+          {
+            echo "### Dry run of $TAG"
+            echo "Nothing was published. This is the latest.json the release would serve."
+            echo '```'
+            for sig in assets/*.sig; do
+              echo "$(basename "$sig"): $(base64 -d < "$sig" | grep '^trusted comment:')"
+            done
+            echo '```'
+            echo '```json'
+            cat latest.json
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: latest-json
+          path: latest.json
+
+  publish:
+    needs: [plan, build]
+    if: ${{ !cancelled() && needs.plan.outputs.action == 'publish' && needs.build.result == 'success' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+      CHANNEL: ${{ needs.plan.outputs.channel }}
+      VERSION: ${{ needs.plan.outputs.version }}
+      TAG: ${{ needs.plan.outputs.tag }}
+      SHA: ${{ needs.plan.outputs.sha }}
+      PREVIOUS_TAG: ${{ needs.plan.outputs.previous_tag }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          sparse-checkout: scripts
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: bundles-*
+          merge-multiple: true
+          path: assets
+
+      - name: Create or resume the release
+        id: release
+        run: |
+          set -euo pipefail
+          if release=$(gh release view "$TAG" --json isDraft,targetCommitish 2>/dev/null); then
+            jq -e --arg sha "$SHA" '.targetCommitish == $sha' <<< "$release" > /dev/null || {
+              echo "::error::Release $TAG already exists for another commit."
+              exit 1
+            }
+            jq -r '"state=" + (if .isDraft then "draft" else "published" end)' <<< "$release" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          notes=(-f "tag_name=$TAG" -f "target_commitish=$SHA")
+          if [[ -n "$PREVIOUS_TAG" ]]; then notes+=(-f "previous_tag_name=$PREVIOUS_TAG"); fi
+          gh api "repos/$GH_REPO/releases/generate-notes" "${notes[@]}" --jq .body > notes.md
+          flags=(--draft --target "$SHA" --title "L1 Data $TAG" --notes-file notes.md)
+          if [[ "$CHANNEL" == nightly ]]; then flags+=(--prerelease); fi
+          gh release create "$TAG" "${flags[@]}"
+          echo "state=draft" >> "$GITHUB_OUTPUT"
+
+      - name: Upload the bundles and latest.json
+        if: steps.release.outputs.state == 'draft'
+        run: |
+          set -euo pipefail
+          gh release upload "$TAG" assets/* --clobber
+          gh release view "$TAG" --json body,assets > release.json
+          node scripts/updater-manifest.mjs manifest assets "$TAG" "$VERSION" release.json latest.json
+          gh release upload "$TAG" latest.json --clobber
+          gh release download "$TAG" --pattern latest.json --dir uploaded --clobber
+          cmp latest.json uploaded/latest.json
+
+      - name: Publish the release
+        if: steps.release.outputs.state == 'draft'
+        run: |
+          set -euo pipefail
+          if [[ "$CHANNEL" == stable ]]; then latest=--latest; else latest=--latest=false; fi
+          gh release edit "$TAG" --draft=false "$latest"
+          gh release view "$TAG" --json isDraft,isPrerelease |
+            jq -e --arg channel "$CHANNEL" '.isDraft == false and .isPrerelease == ($channel == "nightly")' > /dev/null
+
+      - name: Point the feeds at this release
+        run: |
+          set -euo pipefail
+          gh release download "$TAG" --pattern latest.json --dir feed --clobber
+          jq -e --arg version "$VERSION" '.version == $version' feed/latest.json > /dev/null
+          if ! gh release view nightly > /dev/null 2>&1; then
+            gh release create nightly --prerelease --latest=false --target "$SHA" --title "Nightly update feed" \
+              --notes "The Nightly track's updater feed. Every Stable and Nightly release replaces latest.json here. Download L1 Data from the versioned releases."
+          fi
+          gh release upload nightly feed/latest.json --clobber
+          feeds=("https://github.com/$GH_REPO/releases/download/nightly/latest.json")
+          if [[ "$CHANNEL" == stable ]]; then feeds+=("https://github.com/$GH_REPO/releases/latest/download/latest.json"); fi
+          for feed in "${feeds[@]}"; do
+            for attempt in 1 2 3 4 5 6; do
+              served=$(curl -fsSL "$feed" | jq -r .version) && [[ "$served" == "$VERSION" ]] && break
+              [[ $attempt == 6 ]] && { echo "::error::$feed serves ${served:-nothing}, not $VERSION."; exit 1; }
+              sleep 10
+            done
+            echo "$feed serves $VERSION." >> "$GITHUB_STEP_SUMMARY"
+          done
+          echo "Release: https://github.com/$GH_REPO/releases/tag/$TAG" >> "$GITHUB_STEP_SUMMARY"

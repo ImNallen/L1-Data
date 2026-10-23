@@ -11,7 +11,7 @@
     "tauri": "tauri",
     "bridge": "concurrently -k -n bridge,vite -c cyan,magenta \"cargo run -q -p dev-bridge\" \"vite\"",
     "build": "vite build",
-    "test": "vitest run",
+    "test": "vitest run && node --test 'scripts/*.test.mjs'",
     "typecheck": "tsc --noEmit",
     "screenshot": "cargo build -q -p dev-bridge -p l1-data -p engine && dev/screenshot.sh",
     "bindings": "UPDATE_BINDINGS=1 cargo test -q -p l1-data export_bindings_up_to_date",
