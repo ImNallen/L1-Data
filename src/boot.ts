@@ -7,8 +7,8 @@ import { tabFromSnapshot, tabTarget, useWorkspace } from "./state/workspace";
 import { startAppearance } from "./shell/appearance";
 import { startTheme } from "./shell/theme";
 import { seedEditor } from "./features/editor/editorStates";
-import { reconcileFiles } from "./features/editor/fileActions";
-import { startPersistence } from "./features/editor/persistence";
+import { reconcileFiles, savesInFlight } from "./features/editor/fileActions";
+import { installCloseFlush, startPersistence } from "./features/editor/persistence";
 import { browseTemplate, installRunBehavior, openSqlTab } from "./features/editor/runActions";
 import { startAssistantSync } from "./features/assistant/assistantActions";
 import { startUpdateSync } from "./features/updates/updateActions";
@@ -52,6 +52,7 @@ export async function boot(): Promise<void> {
   startAppearance();
   if (snapshot.workspace.tabs.length === 0) openSqlTab();
   startPersistence();
+  installCloseFlush(savesInFlight);
   void reconcileFiles();
   startCatalogSync();
   startAssistantSync();
