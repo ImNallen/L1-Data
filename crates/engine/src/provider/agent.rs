@@ -450,7 +450,7 @@ mod tests {
     #[tokio::test]
     async fn close_ends_a_child_that_ignores_eof_even_with_no_group_to_kill() {
         let dir = tempfile::tempdir().unwrap();
-        let engine = Engine::open(EngineConfig { data_dir: dir.path().to_owned(), keys: Arc::new(MemoryKeyStore::default()), agent_path: AgentPath::Fixed("".into()), user_known_hosts: None }).await.unwrap();
+        let engine = Engine::open(EngineConfig { data_dir: dir.path().to_owned(), keys: Arc::new(MemoryKeyStore::default()), agent_path: AgentPath::Fixed("".into()), user_known_hosts: None, updates: Arc::new(crate::ScriptedTransport::named("off").unwrap()) }).await.unwrap();
         let spec = LaunchSpec { program: "sh".into(), args: vec!["-c".into(), "echo ready; exec sleep 60".into()], env_set: Vec::new(), env_remove: Vec::new(), cwd: std::env::temp_dir() };
         let (agent, _) = Agent::start(&engine.shared, spec, Box::new(LineCodec)).await.unwrap();
         let pid = agent.pipes.pgid;
@@ -464,7 +464,7 @@ mod tests {
     #[tokio::test]
     async fn a_write_to_a_child_that_already_died_reports_its_stderr() {
         let dir = tempfile::tempdir().unwrap();
-        let engine = Engine::open(EngineConfig { data_dir: dir.path().to_owned(), keys: Arc::new(MemoryKeyStore::default()), agent_path: AgentPath::Fixed("".into()), user_known_hosts: None }).await.unwrap();
+        let engine = Engine::open(EngineConfig { data_dir: dir.path().to_owned(), keys: Arc::new(MemoryKeyStore::default()), agent_path: AgentPath::Fixed("".into()), user_known_hosts: None, updates: Arc::new(crate::ScriptedTransport::named("off").unwrap()) }).await.unwrap();
         let spec = LaunchSpec { program: "sh".into(), args: vec!["-c".into(), "echo 'No conversation found' >&2; exit 1".into()], env_set: Vec::new(), env_remove: Vec::new(), cwd: std::env::temp_dir() };
         let mut pipes = Pipes::spawn(&engine.shared, &spec).unwrap();
         std::thread::sleep(Duration::from_millis(300));
@@ -476,7 +476,7 @@ mod tests {
     #[tokio::test]
     async fn a_cancelled_next_or_flush_loses_no_line_no_eof_and_no_write() {
         let dir = tempfile::tempdir().unwrap();
-        let engine = Engine::open(EngineConfig { data_dir: dir.path().to_owned(), keys: Arc::new(MemoryKeyStore::default()), agent_path: AgentPath::Fixed("".into()), user_known_hosts: None }).await.unwrap();
+        let engine = Engine::open(EngineConfig { data_dir: dir.path().to_owned(), keys: Arc::new(MemoryKeyStore::default()), agent_path: AgentPath::Fixed("".into()), user_known_hosts: None, updates: Arc::new(crate::ScriptedTransport::named("off").unwrap()) }).await.unwrap();
         let script = "echo ready; echo one; sleep 0.2; echo two; sleep 0.5; cat";
         let spec = LaunchSpec { program: "sh".into(), args: vec!["-c".into(), script.into()], env_set: Vec::new(), env_remove: Vec::new(), cwd: std::env::temp_dir() };
         let (mut agent, _) = Agent::start(&engine.shared, spec, Box::new(LineCodec)).await.unwrap();

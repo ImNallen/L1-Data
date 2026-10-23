@@ -26,6 +26,7 @@ impl Harness {
             keys: Arc::new(MemoryKeyStore::default()),
             agent_path: AgentPath::Fixed("".into()),
             user_known_hosts: None,
+            updates: Arc::new(engine::ScriptedTransport::named("off").unwrap()),
         }).await.unwrap();
         let draft = match kind {
             DatabaseKind::Postgres => draft_from_url(

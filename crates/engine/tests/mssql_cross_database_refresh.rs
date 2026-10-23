@@ -34,6 +34,7 @@ impl Harness {
             keys: Arc::new(MemoryKeyStore::default()),
             agent_path: AgentPath::Fixed("".into()),
             user_known_hosts: None,
+            updates: Arc::new(engine::ScriptedTransport::named("off").unwrap()),
         }).await.unwrap();
         let mut connections = Vec::new();
         for name in ["Cross-database refresh", "Independent catalog identity"] {

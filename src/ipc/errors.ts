@@ -12,6 +12,8 @@ import type {
   SendError,
   SshError,
   TxnError,
+  UpdateError,
+  UpdateFailure,
 } from "./bindings";
 
 export function connectErrorText(e: ConnectError): string {
@@ -241,6 +243,38 @@ export function approveErrorText(e: ApproveError): string {
       return "This query was already answered, stopped, or expired.";
     default: {
       const unreachable: never = e.kind;
+      return unreachable;
+    }
+  }
+}
+
+export function updateErrorText(e: UpdateError): string | null {
+  switch (e.kind) {
+    case "Stale":
+      return null;
+    case "Busy":
+      return "Wait for the update to finish downloading or installing before you switch tracks.";
+    default: {
+      const unreachable: never = e;
+      return unreachable;
+    }
+  }
+}
+
+export function updateFailureText(f: UpdateFailure): string {
+  switch (f.kind) {
+    case "Offline":
+      return "Couldn't reach GitHub for updates.";
+    case "BadSignature":
+      return "The update's signature didn't match, so it was discarded.";
+    case "ReadOnlyLocation":
+      return "L1 Data can't replace itself where it runs. On macOS, move it to Applications.";
+    case "PermissionDenied":
+      return "L1 Data couldn't replace itself. Check that you can change the folder it runs from.";
+    case "Other":
+      return `The update failed: ${f.message}`;
+    default: {
+      const unreachable: never = f;
       return unreachable;
     }
   }

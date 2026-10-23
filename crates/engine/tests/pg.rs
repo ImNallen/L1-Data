@@ -4,7 +4,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use engine::model::*;
-use engine::{AgentPath, Engine, EngineConfig, MemoryKeyStore, draft_from_url};
+use engine::{AgentPath, Engine, EngineConfig, MemoryKeyStore, ScriptedTransport, UpdateTransport, draft_from_url};
 use futures_util::TryStreamExt;
 use tokio::sync::broadcast;
 use tokio_postgres::NoTls;
@@ -56,7 +56,11 @@ impl Harness {
     }
 
     async fn start_with(dir: tempfile::TempDir, draft: ConnectionDraft) -> Self {
-        let engine = Engine::open(EngineConfig { data_dir: dir.path().to_owned(), keys: Arc::new(MemoryKeyStore::default()), agent_path: AgentPath::Fixed("".into()), user_known_hosts: None })
+        Self::start_updating(dir, draft, Arc::new(ScriptedTransport::named("off").unwrap())).await
+    }
+
+    async fn start_updating(dir: tempfile::TempDir, draft: ConnectionDraft, updates: Arc<dyn UpdateTransport>) -> Self {
+        let engine = Engine::open(EngineConfig { data_dir: dir.path().to_owned(), keys: Arc::new(MemoryKeyStore::default()), agent_path: AgentPath::Fixed("".into()), user_known_hosts: None, updates })
             .await
             .unwrap();
         let events = engine.subscribe();
@@ -1731,4 +1735,74 @@ async fn formatting_keeps_the_value_of_a_backslash_literal_with_standard_strings
         };
         assert_eq!(text_rows(&oracle, &formatted).await, text_rows(&oracle, &sql).await, "{sql:?} formatted as {formatted:?}");
     }
+}
+
+async fn next_update(h: &mut Harness, done: impl Fn(&UpdateStatus) -> bool) {
+    loop {
+        if let AppEvent::UpdateChanged(state) = h.next_event().await
+            && done(&state.status)
+        {
+            return;
+        }
+    }
+}
+
+async fn downloaded_update() -> (Harness, Arc<ScriptedTransport>) {
+    let transport = Arc::new(ScriptedTransport::named("available").unwrap());
+    let mut h = Harness::start_updating(tempfile::tempdir().unwrap(), draft_from_url(&url(), "dev").unwrap(), transport.clone()).await;
+    h.engine.update_check();
+    next_update(&mut h, |s| matches!(s, UpdateStatus::Available { .. })).await;
+    h.engine.update_download("0.2.0".into()).unwrap();
+    next_update(&mut h, |s| matches!(s, UpdateStatus::Downloaded { .. })).await;
+    (h, transport)
+}
+
+async fn confirm(h: &Harness, accepted: Option<RestartImpact>) -> RestartImpact {
+    match h.engine.update_install("0.2.0".into(), accepted).await {
+        Ok(InstallReply::Confirm { impact }) => impact,
+        other => panic!("expected a confirm, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn an_install_asks_again_when_a_transaction_opens_or_gains_writes() {
+    let (mut h, transport) = downloaded_update().await;
+    let (a, b) = (h.sql_tab(TxnMode::Manual).await, h.sql_tab(TxnMode::Manual).await);
+    h.run_ok(a, "select 1").await;
+    let shown = confirm(&h, None).await;
+    assert_eq!(shown, RestartImpact { running: vec![], transactions: vec![OpenTxn { tab_id: a, has_writes: false }], chats: vec![] });
+
+    h.run_ok(b, "create temp table restart_b (id int)").await;
+    let shown = confirm(&h, Some(shown)).await;
+    let mut both = vec![OpenTxn { tab_id: a, has_writes: false }, OpenTxn { tab_id: b, has_writes: true }];
+    both.sort_by_key(|t| t.tab_id.0);
+    assert_eq!(shown.transactions, both, "a transaction opened since the confirm");
+
+    h.run_ok(a, "create temp table restart_a (id int)").await;
+    let shown = confirm(&h, Some(shown)).await;
+    assert!(shown.transactions.iter().all(|t| t.has_writes), "a transaction gained writes since the confirm: {shown:?}");
+
+    assert!(matches!(h.engine.update_install("0.2.0".into(), Some(shown)).await, Ok(InstallReply::Restarting)));
+    let started = Instant::now();
+    while !transport.relaunched() {
+        assert!(started.elapsed() < Duration::from_secs(10), "no relaunch");
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+}
+
+#[tokio::test]
+async fn a_running_query_is_in_the_impact_and_a_has_writes_probe_is_not() {
+    let (mut h, _transport) = downloaded_update().await;
+    let busy = h.sql_tab(TxnMode::AutoCommit).await;
+    let idle = h.sql_tab(TxnMode::Manual).await;
+    h.run_ok(idle, "select 1").await;
+    let accepted = h.start_run(busy, "select pg_sleep(30)").await;
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    let (first, second) = tokio::join!(confirm(&h, None), confirm(&h, None));
+    for impact in [&first, &second] {
+        assert_eq!(impact.running, vec![busy], "{impact:?}");
+        assert_eq!(impact.transactions.iter().map(|t| t.tab_id).collect::<Vec<_>>(), vec![idle], "{impact:?}");
+    }
+    h.engine.console_cancel(busy).await;
+    h.wait_finished(busy, accepted.run_id).await;
 }

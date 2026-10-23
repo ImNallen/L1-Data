@@ -29,13 +29,14 @@ function DensityControl({ value }: { value: Density }) {
   );
 }
 
-function Select({ testId, label, value, options, onChange, className }: {
+export function Select({ testId, label, value, options, onChange, className, disabled }: {
   testId: string;
   label: string;
   value: string;
   options: readonly { value: string; label: string }[];
   onChange: (value: string) => void;
   className?: string;
+  disabled?: boolean;
 }) {
   return (
     <div className={cx("relative", className)}>
@@ -43,8 +44,9 @@ function Select({ testId, label, value, options, onChange, className }: {
         data-testid={testId}
         aria-label={label}
         value={value}
+        disabled={disabled}
         onChange={(e) => onChange(e.target.value)}
-        className="h-8 w-full cursor-pointer appearance-none rounded-lg border border-control bg-bg pr-7 pl-2.5 text-ui-13 text-fg outline-none hover:bg-hover focus-visible:border-accent-border"
+        className="h-8 w-full cursor-pointer appearance-none rounded-lg border border-control bg-bg pr-7 pl-2.5 text-ui-13 text-fg outline-none hover:bg-hover focus-visible:border-accent-border disabled:cursor-default disabled:opacity-40 disabled:hover:bg-bg"
       >
         {options.map((o) => (
           <option key={o.value} value={o.value}>

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import type { AppEvent, BootSnapshot, ChatState, ChatStatus, ConnectionState, ConsoleState, DatabaseState, EntrySnapshot, OutputEntry, ProviderState } from "../ipc/bindings";
+import type { AppEvent, BootSnapshot, ChatState, ChatStatus, ConnectionState, ConsoleState, DatabaseState, EntrySnapshot, OutputEntry, ProviderState, UpdateState, UpdateStatus } from "../ipc/bindings";
 import { applyEvent, emptyLive, hydrateChatLive, hydrateLive, OUTPUT_LIMIT, seedTranscriptLive, wantedCatalogs, type LiveData } from "./live";
 
 const CONN = "c0000000-0000-4000-8000-000000000001";
@@ -38,6 +38,10 @@ function providerAt(rev: number, checking: boolean): ProviderState {
 
 const applyAll = (s: LiveData, events: AppEvent[]) => events.reduce(applyEvent, s);
 
+function updateAt(rev: number, status: UpdateStatus): UpdateState {
+  return { rev, track: "Stable", currentVersion: "0.1.0", status, checkedAtMs: null };
+}
+
 describe("live.apply", () => {
   it("keeps the higher rev regardless of arrival order", () => {
     const inOrder = [consoleAt(1), consoleAt(2, "Active")].reduce((s, c) => applyEvent(s, consoleChanged(c)), emptyLive);
@@ -72,14 +76,20 @@ describe("live.apply", () => {
       settings: { maxRows: 1, maxResultBytes: 1, tablePageSize: 1, stopOnError: true, colorScheme: "System", lightTheme: "l1-light", darkTheme: "l1-dark", customThemes: [], interfaceFont: { family: "Inter", size: 13 }, codeFont: { family: "JetBrains Mono", size: 13 }, density: "Standard", panelMotionMs: 150, tintConnections: false, providers: [], providerHealthCheckSecs: 300 },
       providers: [],
       chats: [],
+      updates: updateAt(0, { kind: "Idle" }),
     };
     const s = hydrateLive(early, boot);
     expect(s.connections[CONN]?.status.kind).toBe("Connected");
     expect(s.consoles[TAB]?.rev).toBe(1);
+    expect(s.updates).toEqual(updateAt(0, { kind: "Idle" }));
   });
 
-  it("hydrate takes providers and chats from boot, and keeps a newer chat that raced it", () => {
-    const early = applyEvent(emptyLive, { kind: "ChatChanged", ...chatAt(5, RUNNING) });
+  it("hydrate takes providers, chats, and updates from boot, and keeps newer ones that raced it", () => {
+    const checking = updateAt(4, { kind: "Checking" });
+    const early = applyAll(emptyLive, [
+      { kind: "ChatChanged", ...chatAt(5, RUNNING) },
+      { kind: "UpdateChanged", ...checking },
+    ]);
     const boot = hydrateLive(early, {
       connections: [],
       live: [],
@@ -88,9 +98,11 @@ describe("live.apply", () => {
       settings: { maxRows: 1, maxResultBytes: 1, tablePageSize: 1, stopOnError: true, colorScheme: "System", lightTheme: "l1-light", darkTheme: "l1-dark", customThemes: [], interfaceFont: { family: "Inter", size: 13 }, codeFont: { family: "JetBrains Mono", size: 13 }, density: "Standard", panelMotionMs: 150, tintConnections: false, providers: [], providerHealthCheckSecs: 300 },
       providers: [providerAt(1, true)],
       chats: [chatAt(0), chatAt(0, { kind: "Idle" }, OTHER_CHAT)],
+      updates: updateAt(0, { kind: "Idle" }),
     });
     expect(boot.providers).toEqual({ Claude: providerAt(1, true) });
     expect(boot.chats).toEqual({ [CHAT]: chatAt(5, RUNNING), [OTHER_CHAT]: chatAt(0, { kind: "Idle" }, OTHER_CHAT) });
+    expect(boot.updates).toEqual(checking);
   });
 
   it("keeps the higher provider snapshot and strips the event tag", () => {
@@ -99,6 +111,15 @@ describe("live.apply", () => {
       { kind: "ProviderChanged", ...providerAt(1, true) },
     ]);
     expect(s.providers).toEqual({ Claude: providerAt(2, false) });
+  });
+
+  it("keeps the update snapshot with the higher rev", () => {
+    const found = updateAt(3, { kind: "Available", version: "0.2.0", downgrade: false });
+    const s = applyAll(emptyLive, [
+      { kind: "UpdateChanged", ...found },
+      { kind: "UpdateChanged", ...updateAt(2, { kind: "Checking" }) },
+    ]);
+    expect(s.updates).toEqual(found);
   });
 
   it("keeps the higher chat snapshot regardless of arrival order", () => {

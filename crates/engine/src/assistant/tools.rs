@@ -402,7 +402,7 @@ mod tests {
     #[tokio::test]
     async fn sql_server_execution_boundary_refuses_queries_but_schema_tools_work() {
         let dir = tempfile::tempdir().unwrap();
-        let engine = crate::Engine::open(crate::EngineConfig { data_dir: dir.path().into(), keys: Arc::new(crate::MemoryKeyStore::default()), agent_path: crate::AgentPath::Fixed("".into()), user_known_hosts: None }).await.unwrap();
+        let engine = crate::Engine::open(crate::EngineConfig { data_dir: dir.path().into(), keys: Arc::new(crate::MemoryKeyStore::default()), agent_path: crate::AgentPath::Fixed("".into()), user_known_hosts: None, updates: Arc::new(crate::ScriptedTransport::named("off").unwrap()) }).await.unwrap();
         let mut draft = crate::draft_from_url("mssql://sa@localhost:1434/shop?sslmode=require", "tools test").unwrap();
         draft.host = std::env::var("L1_DATA_TEST_MSSQL_HOST").unwrap_or(draft.host);
         draft.port = std::env::var("L1_DATA_TEST_MSSQL_PORT").ok().and_then(|p| p.parse().ok()).unwrap_or(draft.port);
@@ -478,7 +478,7 @@ mod pg_tests {
 
     async fn engine() -> (Arc<Engine>, tempfile::TempDir) {
         let dir = tempfile::tempdir().unwrap();
-        let engine = Engine::open(EngineConfig { data_dir: dir.path().to_owned(), keys: Arc::new(MemoryKeyStore::default()), agent_path: AgentPath::Fixed("".into()), user_known_hosts: None }).await.unwrap();
+        let engine = Engine::open(EngineConfig { data_dir: dir.path().to_owned(), keys: Arc::new(MemoryKeyStore::default()), agent_path: AgentPath::Fixed("".into()), user_known_hosts: None, updates: Arc::new(crate::ScriptedTransport::named("off").unwrap()) }).await.unwrap();
         (engine, dir)
     }
 

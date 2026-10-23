@@ -141,6 +141,10 @@ routes! { e;
     assistant_delete(chat_id: ChatId) => { e.assistant_delete(chat_id).await; ok(()) };
     provider_refresh() => { e.provider_refresh(); ok(()) };
     usage_limits() => ok(e.usage_limits().await);
+    update_check() => { e.update_check(); ok(()) };
+    update_download(version: String) => e.update_download(version);
+    update_install(version: String, accepted: Option<RestartImpact>) => e.update_install(version, accepted).await;
+    update_set_track(track: UpdateTrack) => e.update_set_track(track);
 }
 
 #[cfg(test)]
@@ -190,6 +194,7 @@ mod tests {
             keys: Arc::new(MemoryKeyStore::default()),
             agent_path: AgentPath::Fixed("".into()),
             user_known_hosts: None,
+            updates: Arc::new(engine::ScriptedTransport::named("off").unwrap()),
         })
         .await
         .unwrap();

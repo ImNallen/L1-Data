@@ -86,7 +86,7 @@ async fn haiku_answers_resumes_and_waits_for_an_approval() {
     let dir = tempfile::Builder::new().prefix("l1-smoke-").tempdir().unwrap();
     let marker = dir.path().file_name().unwrap().to_string_lossy().into_owned();
     let _transcripts = TranscriptDirs(marker);
-    let engine = Engine::open(EngineConfig { data_dir: dir.path().join("data"), keys: Arc::new(MemoryKeyStore::default()), agent_path: AgentPath::LoginShell, user_known_hosts: None }).await.unwrap();
+    let engine = Engine::open(EngineConfig { data_dir: dir.path().join("data"), keys: Arc::new(MemoryKeyStore::default()), agent_path: AgentPath::LoginShell, user_known_hosts: None, updates: Arc::new(engine::ScriptedTransport::named("off").unwrap()) }).await.unwrap();
     let mut smoke = Smoke { events: engine.subscribe(), engine };
 
     let started = Instant::now();

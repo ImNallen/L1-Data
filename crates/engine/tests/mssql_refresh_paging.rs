@@ -18,7 +18,7 @@ impl Harness {
     async fn open(database: &str) -> Self {
         let dir = tempfile::tempdir().unwrap();
         let engine =
-            Engine::open(EngineConfig { data_dir: dir.path().into(), keys: Arc::new(MemoryKeyStore::default()), agent_path: AgentPath::Fixed("".into()), user_known_hosts: None })
+            Engine::open(EngineConfig { data_dir: dir.path().into(), keys: Arc::new(MemoryKeyStore::default()), agent_path: AgentPath::Fixed("".into()), user_known_hosts: None, updates: Arc::new(engine::ScriptedTransport::named("off").unwrap()) })
                 .await
                 .unwrap();
         let events = engine.subscribe();

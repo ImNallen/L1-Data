@@ -140,6 +140,12 @@ async fn manual_tab_isolated_until_commit_and_abort_rolls_back() {
    - **Approvals live in an engine ledger, checked at the ask and again at execution.** Each turn keeps one ledger keyed by the provider's tool-call id. The CLI's `can_use_tool` request consults it first, and that is where the user's wait for **Run** happens. The card, the ledger, and the allow reply's `updatedInput` all hold that request's input, which can differ from the earlier `tool_use` block's. The MCP `tools/call` consults it again, and a call runs only on a recorded `Run` whose input equals the approved input. A CLI that skips the ask, or calls with other arguments, still cannot run a query nobody approved, and a refused call hears why. After Stop, both consults deny at once. Catalog tools never ask. A `run_query` statement that is not a read is refused without asking. `sql::vet` decides what may run unattended and fails closed: a read is `Clear` only when it has no `U&` escape and no `SELECT … INTO`, every function it calls, bare or `pg_catalog.`-qualified, is on the vetted allowlist of built-ins, and so is every operator it uses, bare or as `OPERATOR(pg_catalog.op)`, since an operator is a function. **Ask first** asks for every query, **Auto** asks for anything not `Clear`, and both name what `vet` found through `ApprovalReason::Unvetted`. Views, functions, and casts to or from types defined in the database are not inspected, so the user's role is the last limit. A permission change applies from the next tool call.
    - **The model's queries run on their own READ ONLY sessions.** `assistant::tools::run_query` opens a fresh session for each call, with `default_transaction_read_only = on`. It runs `BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY` with a 30 s `statement_timeout` and a 5 s `lock_timeout`, and `prepare` refuses a second statement. It reads text rows through the simple protocol, keeps at most 50 rows and 8 KB of cells with each cell cut at 200 chars, stops before a row that would cross either cap, cuts the cells of a first row that would cross the bytes alone to an equal share of them, and drops the session without a commit. It never borrows a tab's session or a metadata session, so a tab's open transaction, `SET`s, and temp tables stay out of reach, and a session-level `set_config` or advisory lock dies with the call. `describe_tables` runs no model text. It reads keys and indexes with the engine's own OID-scoped detail queries on the database's metadata session, as the tree does.
    - **Claude's protocol stays behind a sans-IO codec in `provider/`.** `provider/claude.rs` turns stream-json lines into provider-neutral `AgentEvent`s and builds the lines to write back, with no pipes, tasks, or clock. `provider/agent.rs` drives the process. `assistant/` sees only the `Provider` and `Codec` traits, so a second provider is a new `ProviderKind` and a new file in `provider/`. One structure test fails if a file under `assistant/` names a provider or its wire format. Another fails if any file there except `tools.rs` calls a session's client.
+11. **The engine runs the updater, and the shell only moves bytes.** `crates/engine/src/update/` owns the update state machine, the check schedule, the offer policy, the saved track, and the restart impact. `update/machine.rs` is pure. It holds one `Phase` enum and derives the wire `UpdateState` from it with a rising `rev`, so a change cannot forget to publish. The shell implements `UpdateTransport` in `src-tauri/src/updater.rs`, the only file that names `tauri_plugin_updater`. It reports whatever a feed offers, downloads and verifies, installs, and relaunches through `request_restart`, so `RunEvent::Exit` runs `Engine::shutdown` as a quit does. Three trait objects make the order a type fact. `fetch` returns a `Release`, only a `Release` downloads into a `Verified`, and only a `Verified` installs, and each step consumes its input. The transport's version comparator accepts every version, which turns off the plugin's only guard against a feed that pairs a new version number with an old, validly signed build. `tauri.conf.json` therefore sets `requireSignedVersion`, so the version the engine judges is the version the signature binds. The webview gets no updater permission and no updater JS package. Structure tests in `src-tauri` check all three.
+   - **The track is saved in kv `updates`, not in `Settings`.** The webview writes `Settings` whole, so a stale copy of the track there would switch the track back on the next unrelated settings change. Only `update_set_track` writes it, which also lets a switch answer `Busy` during a download or an install. When kv `updates` is missing, a build that can update saves the track its version implies, Nightly for a version with `-nightly.`, so a nightly install that the Nightly feed later moves onto a stable release stays on Nightly. A build that cannot update saves nothing, because a debug build shares the installed app's data directory. A saved track this build cannot read, such as one a newer build wrote, is logged and left as saved.
+   - **The downgrade rule is derived on every check.** Only a nightly build on the Stable track takes an older version, so switching to Stable installs the latest stable. Every other pair of build and track takes only a strictly newer version by semver precedence, which orders `0.1.1-nightly.20261023.5` below `0.1.1-nightly.20261024.6` below `0.1.1`. Nothing is remembered, so a check that failed or was ignored after the switch, or a restart in between, cannot leave the user on the old track.
+   - **Consent is checked again where the install runs.** `update_install(version, accepted)` first answers `Confirm` with a `RestartImpact`: the tabs with work in flight other than the engine's own `has_writes` probe, the open transactions probed as `disconnect` probes them, and the chats with a running turn. When the confirm comes back, the engine computes the impact again and installs only if the acceptance still covers it. Otherwise it answers `Confirm` with the longer list. This is the approval ledger's rule applied to a restart. Staged table edits live only in the webview, so `updateActions.ts` adds the tabs that hold them to the dialog. On confirm it reads them again, and if a tab gained edits it sends no acceptance, so the engine answers `Confirm` and the dialog reopens. After the install is accepted, the installer can wait on a macOS admin prompt. While the status is `Installing`, `InstallingOverlay` covers the window, holds focus, and swallows every keydown in a window capture listener, so no edit, query, or transaction starts that the relaunch would end unasked. The engine has already stopped the assistant's turns, and all other new work starts in the UI, so the engine has no gate of its own. The overlay leaves when the status does, so a `Failed` install hands the window back. The install stops the assistant's turns first, because Windows exits inside the plugin's `install` without running the shell's exit handler.
+   - **Every step names the version the user saw.** `update_download` and `update_install` take the version. A repeat of a step already under way returns Ok and does nothing, and a step the update has moved past returns `Stale`, so a click that lands after a background change never acts on a state the user did not see. A check is bounded at 30 s and a download at 300 s. A track switch during a check is allowed, and the check's ticket drops its late result. Nothing downloads without a click, and a held release is never replaced by a background check.
+   - **Debug builds report `UpdatesOff::DevBuild` and never check.** The dev-bridge and the tests pass a `ScriptedTransport`, which serves scripted feeds, so they run the real machine and policy rather than canned states.
 
 ### Rust types (crates/engine/src/model.rs, the IPC contract)
 
@@ -395,6 +401,7 @@ pub struct BootSnapshot {
     pub connections: Vec<ConnectionConfig>, pub live: Vec<ConnectionState>,
     pub consoles: Vec<ConsoleState>, pub workspace: Workspace, pub settings: Settings,
     pub providers: Vec<ProviderState>, pub chats: Vec<ChatState>,   // chats: stored, newest first, at most 200
+    pub updates: UpdateState,
 }
 
 // ---- the one event (emitted as "app-event") -------------------------------------
@@ -408,6 +415,7 @@ pub enum AppEvent {
     ProviderChanged(ProviderState),
     ChatChanged(ChatState),
     ChatEntryChanged(EntrySnapshot),                    // coalesced to <= 20/s per chat while a text block streams
+    UpdateChanged(UpdateState),
 }
 ```
 
@@ -507,6 +515,37 @@ pub struct SendRequest { pub text: String, pub tab: Option<TabContext> }
 pub struct TabContext { pub tab_id: TabId, pub title: String, pub db: Option<DatabaseRef>, pub text: String, pub target: RunTarget, pub attach: Option<ResultRef> }
 ```
 
+#### Update types
+
+The sidebar's update button and **Settings** > **About** follow `AppEvent::UpdateChanged`, a whole `UpdateState` with a rising `rev`, as the other panels do.
+
+```rust
+pub enum UpdateTrack { Stable, Nightly }               // saved in kv `updates`, never in Settings
+pub struct UpdateState {                               // no `kind` field: AppEvent is tagged on kind
+    pub rev: u64, pub track: UpdateTrack,
+    pub current_version: String,                       // the version the shell reports
+    pub status: UpdateStatus,
+    pub checked_at_ms: Option<i64>,                    // a failed check leaves it as it was
+}
+#[serde(tag = "kind")]
+pub enum UpdateStatus {
+    Disabled { reason: UpdatesOff }, Idle, Checking, UpToDate,
+    Available { version: String, downgrade: bool },
+    Downloading { version: String, downgrade: bool, percent: Option<u8> },
+    Downloaded { version: String, downgrade: bool },   // verified; the engine holds the bytes
+    Installing { version: String },
+    Failed { failure: UpdateFailure },
+}
+pub enum UpdatesOff { DevBuild, NotAppImage, UnsupportedTarget, UnknownVersion }
+#[serde(tag = "kind")]
+pub enum UpdateFailure { Offline, BadSignature, ReadOnlyLocation, PermissionDenied, Other { message: String } }   // worded in src/ipc/errors.ts
+pub struct RestartImpact { pub running: Vec<TabId>, pub transactions: Vec<OpenTxn>, pub chats: Vec<ChatId> }   // also the acceptance the frontend sends back
+#[serde(tag = "kind")]
+pub enum InstallReply { Confirm { impact: RestartImpact }, Restarting }
+#[serde(tag = "kind")]
+pub enum UpdateError { Stale, Busy }
+```
+
 ### IPC command list (src-tauri/src/ipc.rs)
 
 Each command is one line delegating to `Engine`. tauri-specta uses `ErrorHandlingMode::Result`, so TypeScript sees `{status:"ok",data} | {status:"error",error}`.
@@ -554,6 +593,10 @@ Each command is one line delegating to `Engine`. tauri-specta uses `ErrorHandlin
 | `assistant_delete` | `chatId` | `()` | Takes `AppHandle`, like `console_cancel`. Marks the chat deleted under its lock, so the turn task stores and publishes nothing more, stops a running turn and waits up to 5 s, aborts it past that, deletes the rows, and emits one `ChatStatus::Deleted` tombstone with a fresh rev, also for a stored chat not loaded this session. Leaves the CLI's transcript file alone. |
 | `provider_refresh` | – | `()` | Sync, fire and forget. A full probe of every enabled provider. |
 | `usage_limits` | – | `LimitsReport` | Takes `AppHandle`, like `console_cancel`. Asks the Claude and Codex CLIs at once, each bounded at 8 s, and returns when both answer. Never fails: each source's failure is its own `LimitsOutcome`. Reads Claude even while its provider is switched off. |
+| `update_check` | – | `()` | Sync, fire and forget. Starts a check unless one runs, a release is held, or one downloads or installs. |
+| `update_download` | `version` | `Result<(), UpdateError>` | Sync. Starts the download of the offered `version`. Ok and nothing more when that version already downloads, is downloaded, or installs. `Stale` otherwise. |
+| `update_install` | `version, accepted: Option<RestartImpact>` | `Result<InstallReply, UpdateError>` | Takes `AppHandle`, like `console_cancel`. Answers `Confirm { impact }` until `accepted` covers what a restart would end now. Then it stops the assistant's turns, installs on a blocking thread, asks the shell to relaunch, and answers `Restarting`. `Stale` unless `version` is downloaded or installing. |
+| `update_set_track` | `track: UpdateTrack` | `Result<(), UpdateError>` | Sync. Saves the track and checks it at once. The same track again does nothing. `Busy` while a download or an install runs. |
 
 ```rust
 #[derive(Deserialize, Type)]
@@ -632,9 +675,11 @@ Writing uses one command, `table_apply(tab, TableChanges)`. It borrows the tab's
 pub struct Engine { shared: Arc<Shared> }
 pub(crate) struct Shared { /* data_dir, vault, store, settings, connections, consoles, events, next_run, timezone */ }
 
-pub struct EngineConfig { pub data_dir: PathBuf, pub keys: Arc<dyn KeyStore>, pub agent_path: AgentPath, pub user_known_hosts: Option<PathBuf> }
+pub struct EngineConfig { pub data_dir: PathBuf, pub keys: Arc<dyn KeyStore>, pub agent_path: AgentPath, pub user_known_hosts: Option<PathBuf>, pub updates: Arc<dyn UpdateTransport> }
 // AgentPath::LoginShell (the app and the dev-bridge) or AgentPath::Fixed(path) (tests pass an empty one,
 // so no installed agent CLI ever runs under `cargo test`)
+// updates: the app passes src-tauri's TauriTransport; the dev-bridge passes ScriptedTransport::named($L1_DATA_UPDATE_SCENARIO),
+// and unrelated tests pass the `off` scenario
 
 impl Engine {
     pub async fn open(cfg: EngineConfig) -> Result<Arc<Self>, StoreError>;   // opens SQLite, runs migrations
@@ -680,11 +725,15 @@ impl Engine {
     pub async fn assistant_delete(&self, chat: ChatId);
     pub fn provider_refresh(&self);
     pub async fn usage_limits(&self) -> LimitsReport;
+    pub fn update_check(&self);
+    pub fn update_download(&self, version: String) -> Result<(), UpdateError>;
+    pub async fn update_install(&self, version: String, accepted: Option<RestartImpact>) -> Result<InstallReply, UpdateError>;
+    pub fn update_set_track(&self, track: UpdateTrack) -> Result<(), UpdateError>;
     pub async fn shutdown(&self);                                            // quit: stops every turn, then kills any agent process still alive, within engine::SHUTDOWN_BOUND (4 s); the shell's timeout is that plus a margin
 }
 ```
 
-The block above is an excerpt. `Engine` has 44 public methods, and 38 of them match the 38 registered commands one to one. `open`, `data_dir`, `runtime`, `subscribe`, `settings`, and `shutdown` serve the shell, the dev-bridge, and tests. Behind it the engine hides:
+The block above is an excerpt. `Engine` has 53 public methods, and 47 of them match the 47 registered commands one to one. `open`, `data_dir`, `runtime`, `subscribe`, `settings`, and `shutdown` serve the shell, the dev-bridge, and tests. Behind it the engine hides:
 
 - TLS mode mapping and keychain reads
 - Session lifecycle, lazy reconnects, and `search_path` / `TimeZone` setup
@@ -700,6 +749,7 @@ The block above is an excerpt. `Engine` has 44 public methods, and 38 of them ma
 - Table-browse, count, and edit SQL with its own quoting
 - Staged edits applied under one transaction or savepoint
 - Agent CLI processes, their protocol, the approval ledger, and the assistant's read-only query sessions
+- The update schedule, the offer policy, the saved track, and what a restart would end
 
 The frontend sequences two calls for one operation in two places only. `runTab` configures a tab's console before its first run, and the pager's Last button counts rows with `exact_row_count` before it loads the page.
 
@@ -854,6 +904,7 @@ type LiveData = {
   providers: Partial<Record<ProviderKind, ProviderState>>;
   chats: Record<ChatId, ChatState>;
   transcripts: Record<ChatId, Record<number, EntrySnapshot>>;   // by seq, only for chats the panel opened; other chats' entry events are dropped
+  updates: UpdateState | null;                                 // null only before the boot snapshot
 };
 // wantedCatalogs(connections): every Ready catalog of every Connected instance, keyed by DbKey (connection id + NUL + database).
 // boot.ts prunes useCatalog to that set and calls ensure for each entry.
@@ -943,12 +994,12 @@ Everything lives under `app_data_dir()` (override with `L1_DATA_DATA_DIR` in deb
 
 - `connections(id TEXT PK, json TEXT)`. Configs only.
 - `history(id INTEGER PK, at_ms, connection_id, connection_name, database, sql, elapsed_ms, outcome_json, is_write)`, indexed on `(connection_id, id)`. Legacy `history_list` search is `LIKE`. Grouped browsing uses literal substring search across SQL, recorded connection name, database, and error message. Pruned to the newest 10,000 entries on insert. Migration 4 adds and backfills `is_write` in the same transaction as its version bump.
-- `kv(key TEXT PK, json TEXT)`. Holds `workspace` and `settings`.
+- `kv(key TEXT PK, json TEXT)`. Holds `workspace`, `settings`, and `updates`. `updates` holds only the update track. The update state stays in memory.
 - `secrets(connection_id TEXT PK, nonce BLOB, ciphertext BLOB)`. One sealed password per connection. Migration 2 adds it.
 - `ssh_secrets(connection_id TEXT PK, nonce BLOB, ciphertext BLOB)`. One sealed SSH password or key passphrase per connection. Migration 7 adds it. Deleting a connection deletes both rows.
 - `chats(id TEXT PK, updated_ms, json)`, indexed on `updated_ms`, and `chat_entries(chat_id, seq, turn, json)` with the key `(chat_id, seq)`. Migration 5 adds both. Deleting a chat deletes its entries. A chat's `json` is a `ChatRecord`, which holds the title, the options, the entry count, and the provider session the next turn resumes, with the config directory the CLI made it under. Each entry's `json` is one `Entry`. A chat row that fails to parse is logged and left out of the list, and an entry row that fails to parse loads as `Entry::Unreadable`.
 
-Provider configs and the health check interval are part of `settings` in `kv`. Probe results stay in memory, so a launch never shows a stale sign-in.
+Provider configs and the health check interval are part of `settings` in `kv`. Probe results stay in memory, so a launch never shows a stale sign-in. An update can install an older build, so a `settings` row that this build cannot parse loads as the defaults and stays as saved until the user changes a setting, rather than stopping `Engine::open`.
 
 The OS credential store holds one item, a random 32-byte master key, with service `dev.l1data.app` and user `master-key`. macOS therefore asks for keychain access once, not once per connection. Each password is sealed with XChaCha20-Poly1305 under that key, with a random nonce and the connection id as associated data, and the result is stored in the `secrets` table. An SSH secret is sealed the same way with `{id}/ssh` as associated data and stored in `ssh_secrets`, so a blob moved between the tables does not open. All passwords do not go into one keychain item because Windows Credential Manager caps an item at 2560 bytes. The first saved password creates the key. Reading a password never creates one. If the key is missing or a password fails to open (wiped keychain, copied data dir, memory store restart), the connection behaves as if it had no password, and the user enters it again at the `MissingPassword` prompt. `trait KeyStore { load, save }` has two implementations: `KeyringKeyStore` and `MemoryKeyStore`. The second exists for tests and e2e, selected by `L1_DATA_SECRET_STORE=memory` in debug builds only. SQLite access is a `std::sync::Mutex<rusqlite::Connection>`. Writes are single-row and sub-millisecond, so they run inline.
 
@@ -982,6 +1033,9 @@ crates/engine/
   src/assistant/tools.rs      # the three tools, the approval policy, run_query; the only file here that calls a session's client
   src/assistant/{context,reply}.rs   # pure: the per-turn context block, reply parsing, recover, recap
   src/assistant/system_prompt.md
+  src/update/mod.rs           # self-update: the UpdateTransport seam, the saved track, the async steps, the schedule, the restart impact
+  src/update/machine.rs       # pure: the Phase machine, the offer policy, consent, the schedule's due rule
+  src/update/scripted.rs      # ScriptedTransport: the named scenarios the dev-bridge and the tests use
   src/bin/fake_claude.rs      # fake-claude: a stand-in CLI with named scenarios, not shipped
   tests/pg.rs                 # pg-tests feature: Harness + every scenario
   tests/assistant.rs          # Engine with fake-claude; its pg module runs under pg-tests
@@ -990,6 +1044,7 @@ crates/engine/
 src-tauri/
   src/main.rs                 # builder, specta export, event forwarder task, plugins, macOS menu, self-check
   src/ipc.rs                  # #[tauri::command] one-liners
+  src/updater.rs              # TauriTransport over tauri-plugin-updater; the only file that names the plugin
   build.rs  tauri.conf.json  capabilities/default.json
   app-icon.svg  icons/        # icons/ is generated from app-icon.svg by dev/icons.sh
 src/                          # frontend
@@ -1001,11 +1056,12 @@ src/                          # frontend
   shell/{theme,hostedWindow,commands}.ts
   ui/primitives.tsx           # shared buttons, menus, dialogs, context menus
   ui/textMatch.ts             # substring matching and highlight ranges for the search boxes
-  features/settings/{sections,SettingsScreen,SettingsSidebarBody,SettingLayout,AppearanceSection,QueriesSection,ProvidersSection}.tsx  features/settings/settingsIndex.ts
+  features/settings/{sections,SettingsScreen,SettingsSidebarBody,SettingLayout,AppearanceSection,QueriesSection,ProvidersSection,AboutSection}.tsx  features/settings/settingsIndex.ts
   features/assistant/{AssistantPanel,Transcript,ReplyText,SqlCard,SqlHighlight,ToolCard,Composer,ChatHistory,providerIcons}.tsx  features/assistant/{assistantActions,assistantText}.ts
   features/sidebar/{Sidebar,SidebarSearch,ConnectionTree}.tsx  features/sidebar/{treeFilter,detailText}.ts
   features/connections/{ConnectionDialog,connectionColors}.tsx  features/connections/connectionActions.ts
-  features/editor/{SqlEditor.tsx,editorStates.ts,runActions.ts,sqlIdent.ts,theme.ts}
+  features/editor/{SqlEditor.tsx,editorStates.ts,runActions.ts,persistence.ts,sqlIdent.ts,theme.ts}
+  features/updates/{UpdateButton.tsx,updateActions.ts,updateText.ts}   # the sidebar update button, the install confirm loop, every update string
   features/results/{ResultsPane,ResultGrid,FilterBar}.tsx  features/results/{format,tableQuery}.ts
   features/history/{HistoryPalette.tsx,historyList.ts}
   testing/shopCatalog.ts      # catalog fixture for vitest
@@ -1038,6 +1094,8 @@ Tracing a run from the button to the grid takes four files: `runActions.ts` → 
    - store: migrations run once, history paging and pruning
    - model: wire casing, `RunRequest` tags, the nested `ConnectError` tag, settings and layouts saved by older versions still load
    - `Engine` without a DB: boot on an empty dir, passwordless saves never touch the keychain, persistence across `open`, draft validation
+   - updates: the machine's phase tables, the offer policy for each pair of build and track, the schedule's due rule, consent, and the scripted scenarios. Through `Engine` with `ScriptedTransport` on a paused clock: the first check at 15 s, a nightly build switched to Stable offered the older stable and back, the install and relaunch, the implied track saved at first launch and kept by a later stable build, a track saved by a newer build left alone, a failed install, a bad signature, `Busy` during a download, and each sync update command called from a thread with no runtime
+   - `src-tauri`: plugin errors sort into `UpdateFailure`, only `updater.rs` names the plugin, `requireSignedVersion` is on, and the webview cannot reach the updater
    - assistant units: the Claude codec against the lines in `tests/fixtures/claude/`, argv, child env, launch-argument parsing, reply parsing into Markdown and SQL blocks, the context block's budgets, the tool policy, `relation_names` and `vet` with the cases the review raised, `recover`, chats and entries in the store, and the two structure tests
    - `Engine` with `fake-claude` (`tests/assistant.rs`), picked through `binaryPath` and `launchArgs = --fake-scenario <name>` as a user would: the probe, a streamed reply with suggestions, `Busy`, Ask first and Deny, a `tools/call` whose arguments differ from the approved input, a `tools/call` with other arguments while its ask is unanswered, an ask whose input differs from its `tool_use` block, Auto, Stop denying a pending approval and a later ask and call, Stop and shutdown killing a process that ignores interrupt and EOF, a follow-up accepted at the End and started only after the last process exited, delete and shutdown waiting for that exit, a crash's stderr tail, the recap after a session lost at start or at the first result or after a changed config directory, a resume that fails for another reason, a restart whose process never starts, a sign-in failure at start, a missing assistant directory, the default options rule, a resumed session and a changed model in argv, recovery after a mid-turn crash, shutdown, delete during a turn and of an unloaded chat, and two opens with one rev
 2. **Engine against real Postgres** (`pnpm db:up && cargo test -p engine --features pg-tests`). `Harness` uses `MemoryKeyStore`, a temp data dir, and `L1_DATA_TEST_PG` (default `postgres://l1data:l1data@localhost:5433/shop`). Scenarios:
@@ -1058,6 +1116,7 @@ Tracing a run from the button to the grid takes four files: `runActions.ts` → 
    - DDL refreshes the catalog and the connection snapshot carries the new version; a DDL burst behind a busy metadata session causes exactly two loads
    - a table page on a second database (`reporting`) orders by that database's primary key; catalog versions keep rising across a reconnect; history records the console's database; a database no tab or tree row uses gets `NotShown`
    - `exact_row_count` is exact, reports `NotConnected` before connect, and fails on a missing table
+   - an update install asks again when a transaction opens or gains writes after the confirm, and a running query is in the restart impact while the impact's own `has_writes` probe is not
    - a forced disconnect during a manual run leaves the tab idle, and a run orphaned by disconnect never writes into the next run
    - the console's schema sets `search_path`, `COPY ... FROM STDIN` and `TO STDOUT` are rejected as `Unsupported`, and the session survives
    - bad credentials fail with `Auth`, and `test_connection` works
@@ -1087,6 +1146,7 @@ Tracing a run from the button to the grid takes four files: `runActions.ts` → 
    - **Settings** > **Providers** with the real `claude` reads `v2.1.301 · Signed in · Claude Max`, a bad binary path reads Not found, and Reset restores it
    - the mockup question streams a reply. In Ask first, `run_query` waits for Run, the SQL card reads "Uses orders, customers", and Run in new tab, Insert at cursor, Replace tab with ⌘Z, a suggestion chip, and Stop each work. Auto runs a query without asking, and a `DELETE` is refused and comes back as an Open in new tab card
    - after a bridge restart, the chat reopens from history and a resumed turn answers from memory
+   - with `L1_DATA_UPDATE_SCENARIO` (AGENTS.md lists the scenarios): `available` checks, downloads with a progress ring, and confirms a restart that names a running query and an open transaction, then shows Restarting; `nightly-build` switched to Stable in **Settings** > **About** offers 0.1.0 as an older build; `offline` and `install-fails` show their failure text; `off` shows no button
    - with no signed-in CLI, `fake-claude` stands in. Build it with `cargo build -p engine --bin fake-claude`, then set **Binary path** to `target/debug/fake-claude` and **Launch arguments** to `--fake-scenario <name>`; the comment at the top of `crates/engine/src/bin/fake_claude.rs` lists every scenario, and `card`, `query`, `slow`, `wedged`, `crash`, and `resume-lost` are the ones to start with
 6. **Real shell.** `pnpm self-check` launches the debug binary with `L1_DATA_SELF_CHECK=1`: it boots `Engine` inside Tauri, connects to the dev DB, runs `SELECT 1` and loads the catalog, prints JSON, and exits 0. `pnpm screenshot` covers WKWebView rendering on macOS. It starts a throwaway Postgres, seeds a workspace and an assistant chat that `fake-claude` answers through the dev-bridge, launches the debug app on that data dir, and captures its window with `screencapture` into `docs/images/l1-data.png`. Driving the real webview with `@wdio/tauri-service` (embedded provider, verified to support macOS) is not built.
 7. **Real CLI.** `cargo test -p engine --features claude-smoke --test claude_smoke -- --nocapture` needs a signed-in `claude` and `pnpm db:up`. It spends three Haiku turns at low effort. It checks what `fake-claude` cannot: the CLI accepts the argv and the child env, a resumed session remembers the earlier turn, and a `can_use_tool` ask approved after 75 s still runs its query.
