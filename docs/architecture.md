@@ -882,7 +882,7 @@ Session-loss rules:
 - **Lost with a transaction open.** The slot records `TransactionLoss::RolledBack` for a PostgreSQL transaction and the UI shows "Transaction rolled back: connection lost". SQL Server retirement records `TransactionLoss::Unknown`: the UI says "session reset", preserves the fact that earlier commits remain committed, and warns that the last transaction outcome may be unknown. Idle PostgreSQL loss records `None`. The next run starts a fresh session and clears the notice.
 - **Metadata session death.** The home database's session marks `ConnectionState` `Lost` and closes the instance, which drops every slot and its session. Another database's session marks only that database's `CatalogStatus` `Failed`, keeping the last catalog's version; the next load on it reopens the session. Consoles are independent. A disconnect closes the instance the same way, and a slot's watch task holds the instance weakly so it cannot keep a session alive past that.
 
-`disconnect(force=false)` checks every console of that connection that is `Active` or `Aborted`. To compute `has_writes` it runs `SELECT pg_current_xact_id_if_assigned() IS NOT NULL` (PG13+, else `true`) on the idle session.
+`disconnect(force=false)` checks every console of that connection that is `Active` or `Aborted`. To compute `has_writes` it runs `SELECT pg_current_xact_id_if_assigned() IS NOT NULL` (PG13+, else `true`) on the idle session. The probes for all consoles run together, each for at most 3 s, and a probe with no answer counts as `has_writes`, so a stalled network cannot hang a disconnect, a tab close, or a restart confirm. The session goes back to the tab unchanged, because a slow answer is not a lost transaction.
 
 ### Frontend (React 19, TypeScript, Vite)
 
@@ -1117,6 +1117,7 @@ Tracing a run from the button to the grid takes four files: `runActions.ts` → 
    - a table page on a second database (`reporting`) orders by that database's primary key; catalog versions keep rising across a reconnect; history records the console's database; a database no tab or tree row uses gets `NotShown`
    - `exact_row_count` is exact, reports `NotConnected` before connect, and fails on a missing table
    - an update install asks again when a transaction opens or gains writes after the confirm, and a running query is in the restart impact while the impact's own `has_writes` probe is not
+   - a session behind a frozen relay holds neither the restart confirm nor a disconnect past the probe deadline, and its unanswered probe counts as writes
    - a forced disconnect during a manual run leaves the tab idle, and a run orphaned by disconnect never writes into the next run
    - the console's schema sets `search_path`, `COPY ... FROM STDIN` and `TO STDOUT` are rejected as `Unsupported`, and the session survives
    - bad credentials fail with `Auth`, and `test_connection` works
