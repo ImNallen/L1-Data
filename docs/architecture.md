@@ -518,6 +518,7 @@ Each command is one line delegating to `Engine`. tauri-specta uses `ErrorHandlin
 | `connection_delete` | `ConnectionId` | `Result<(), DisconnectError>` | Disconnects (refuses on open txns), deletes the config row and sealed password together. Never touches the keychain. |
 | `connection_test` | `ConnectionDraft` | `Result<ServerInfo, ConnectError>` | `PasswordInput::Keep` opens the sealed password, if one is stored. |
 | `connection_parse_url` | `url: String` | `Result<ConnectionDraft, String>` | Pure parse of a `postgres://` URL or a `key=value` string into a draft with an empty name. A password in the URL comes back as `PasswordInput::Set`, otherwise `Clear`. The connection dialog's URL field calls it on each edit. Sync, and it never touches the runtime. |
+| `ssh_trust_host_key` | `key: HostKeyId` | `Result<(), String>` | Appends the SSH host key a dial reported as `SshError::HostKeyUnknown` to `<data_dir>/known_hosts`. The engine holds each observed key for ten minutes, at most 32 at a time, and each id trusts once, so the webview can trust only a key the engine saw. Sync and std-only: it never touches the runtime. |
 | `connection_connect` | `ConnectionId` | `Result<ServerInfo, ConnectError>` | Idempotent. Opens the home session and reads `pg_database`; catalogs load afterwards, each with its own status. |
 | `connection_disconnect` | `ConnectionId, force: bool` | `Result<(), DisconnectError>` | `OpenTransactions { tabs: Vec<OpenTxn> }` unless forced. |
 | `catalog_get` | `DatabaseRef` | `Result<Catalog, CatalogError>` | Whole snapshot of one database, loaded on first use. `NotShown` for a database neither shown nor targeted by a console. |
@@ -1153,7 +1154,7 @@ These items record where the current implementation differs from or adds to the 
   - `ConfigureError` is `TransactionOpen | Busy | UnknownConnection`.
   - `ExportError` is `Gone | Io { message }`.
   - `StoreError` is Rust-only, because only `Engine::open` returns it.
-- **Command parameter names** (the camelCase invoke keys) are `draft`, `id`, `force`, `schema`, `table`, `tabId`, `config`, `request`, `changes`, `resultRef`, `start`, `len`, `row`, `col`, `path`, `query`, `workspace`, and `settings`. `resultRef` replaces `ref` because `ref` is a Rust keyword.
+- **Command parameter names** (the camelCase invoke keys) are `draft`, `id`, `force`, `schema`, `table`, `tabId`, `config`, `request`, `changes`, `resultRef`, `start`, `len`, `row`, `col`, `path`, `query`, `workspace`, `settings`, and `key`. `resultRef` replaces `ref` because `ref` is a Rust keyword.
 - **`console_cancel` takes `AppHandle`, not `State`.** Tauri requires async commands that borrow `State` to return `Result`, and `console_cancel` returns `()`.
 - **Pins.** tauri-specta `=2.0.0-rc.25` requires specta `=2.0.0-rc.25` and specta-typescript `=0.0.12`. Bindings use `dangerously_cast_bigints_to_number()`, so `u64` and `i64` (revs, run ids, row counts, epoch millis) export as `number`. All of them stay below 2^53.
 - **Bindings regeneration.** Besides debug-build startup, `pnpm bindings` reruns `export_bindings_up_to_date` with `UPDATE_BINDINGS=1`, which rewrites the file without opening a window.

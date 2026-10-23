@@ -9,6 +9,7 @@ export const commands = {
 	connectionDelete: (id: ConnectionId) => typedError<null, DisconnectError>(__TAURI_INVOKE("connection_delete", { id })),
 	connectionTest: (draft: ConnectionDraft) => typedError<ServerInfo, ConnectError>(__TAURI_INVOKE("connection_test", { draft })),
 	connectionParseUrl: (url: string) => typedError<ConnectionDraft, string>(__TAURI_INVOKE("connection_parse_url", { url })),
+	sshTrustHostKey: (key: HostKeyId) => typedError<null, string>(__TAURI_INVOKE("ssh_trust_host_key", { key })),
 	connectionConnect: (id: ConnectionId) => typedError<ServerInfo, ConnectError>(__TAURI_INVOKE("connection_connect", { id })),
 	connectionDisconnect: (id: ConnectionId, force: boolean) => typedError<null, DisconnectError>(__TAURI_INVOKE("connection_disconnect", { id, force })),
 	catalogGet: (db: DatabaseRef) => typedError<Catalog, CatalogError>(__TAURI_INVOKE("catalog_get", { db })),
