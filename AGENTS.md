@@ -43,7 +43,7 @@ Run the checks that cover your change before you open a PR. Docker is needed onl
 | `cargo test -p engine --features mssql-tests` | engine against SQL Server | `pnpm db:mssql:up` |
 | `cargo test -p engine --features ssh-tests` | engine through the `dev/sshd` bastion: first-use host-key trust, each auth method, a catalog, a run and its cancel, the assistant's read-only query, a refused forward, and SQL Server when it is up | `pnpm db:up` and `pnpm db:ssh:up`, plus `pnpm db:mssql:up` for SQL Server |
 | `pnpm typecheck` | the frontend types | nothing |
-| `pnpm test` | vitest units for state, formatting, and shell | nothing |
+| `pnpm test` | vitest units for state, formatting, and shell, then the release scripts in `scripts/` | nothing |
 | `pnpm build` | the production bundle | nothing |
 | `pnpm self-check` | the engine booted inside the Tauri binary | `pnpm db:up` |
 | `python3 dev/mssql-smoke.py` | mixed PostgreSQL and SQL Server bridge flow | both databases and `cargo build -p dev-bridge -p engine`; free `:7077` |
