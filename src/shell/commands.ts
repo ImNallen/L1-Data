@@ -1,8 +1,11 @@
 import { closeTab } from "../features/editor/closeTab";
 import { openSqlTab } from "../features/editor/runActions";
 import { useWorkspace, type Overlay } from "../state/workspace";
+import { isMac } from "./hostedWindow";
 
-export type Command = { id: string; label: string; key: string; run: () => void };
+export type Command = { id: string; label: string; key: string; shift?: boolean; run: () => void };
+
+const MAC = typeof navigator !== "undefined" && isMac(navigator.userAgent);
 
 const ws = () => useWorkspace.getState();
 
@@ -33,11 +36,26 @@ const CLOSE_TAB: Command = {
 
 const KEYMAP = [...START_COMMANDS, CLOSE_TAB];
 
-export function commandForKey(e: Pick<KeyboardEvent, "key" | "metaKey" | "ctrlKey" | "shiftKey" | "altKey">): Command | undefined {
-  if (!(e.metaKey || e.ctrlKey) || e.shiftKey || e.altKey) return undefined;
-  return KEYMAP.find((c) => c.key === e.key.toLowerCase());
+/** On macOS a command takes ⌘ alone, because the editor owns the Ctrl chords there (Ctrl-T transposes, Ctrl-P moves up). */
+export function commandForKey(e: Pick<KeyboardEvent, "key" | "metaKey" | "ctrlKey" | "shiftKey" | "altKey">, mac = MAC): Command | undefined {
+  const mod = mac ? e.metaKey && !e.ctrlKey : e.ctrlKey && !e.metaKey;
+  if (!mod || e.altKey) return undefined;
+  const key = e.key.toLowerCase();
+  return KEYMAP.find((c) => c.key === key && !!c.shift === e.shiftKey);
+}
+
+/**
+ * The window's keydown listener. A control that handles a chord itself calls `preventDefault`, and the global
+ * command then stands down, so the chord never fires twice.
+ */
+export function handleGlobalKey(e: KeyboardEvent): void {
+  if (e.defaultPrevented) return;
+  const command = commandForKey(e);
+  if (!command) return;
+  e.preventDefault();
+  command.run();
 }
 
 export function shortcutLabel(c: Command): string {
-  return `⌘${c.key.toUpperCase()}`;
+  return `⌘${c.shift ? "⇧" : ""}${c.key.toUpperCase()}`;
 }

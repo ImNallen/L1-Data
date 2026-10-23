@@ -1,15 +1,39 @@
 import { afterEach, expect, it } from "vitest";
 import { useWorkspace } from "../state/workspace";
-import { commandForKey } from "./commands";
+import { commandForKey, handleGlobalKey } from "./commands";
 
-const press = (key: string, mods: Partial<Record<"metaKey" | "ctrlKey" | "shiftKey" | "altKey", boolean>> = { metaKey: true }) =>
-  commandForKey({ key, metaKey: false, ctrlKey: false, shiftKey: false, altKey: false, ...mods });
+type Mods = Partial<Record<"metaKey" | "ctrlKey" | "shiftKey" | "altKey", boolean>>;
+const chord = (key: string, mods: Mods) => ({ key, metaKey: false, ctrlKey: false, shiftKey: false, altKey: false, ...mods });
+const press = (key: string, mods: Mods = { metaKey: true }) => commandForKey(chord(key, mods), true);
+const pressOff = (key: string, mods: Mods) => commandForKey(chord(key, mods), false);
 
 afterEach(() => useWorkspace.setState(useWorkspace.getInitialState(), true));
 
-it("maps each shortcut to its command, with Ctrl standing in for Cmd", () => {
+it("maps each shortcut to its command", () => {
   expect(["t", "n", "p", ",", "w"].map((k) => press(k)?.id)).toEqual(["new-query", "new-connection", "search", "settings", "close-tab"]);
-  expect(press("T", { ctrlKey: true })?.id).toBe("new-query");
+  expect(press("T")?.id).toBe("new-query");
+});
+
+it("takes Cmd alone on macOS and leaves the Ctrl chords to the editor", () => {
+  expect([press("t", { ctrlKey: true }), press("p", { ctrlKey: true }), press("t", { metaKey: true, ctrlKey: true })]).toEqual([undefined, undefined, undefined]);
+});
+
+it("takes Ctrl alone off macOS", () => {
+  expect([pressOff("t", { ctrlKey: true })?.id, pressOff("w", { ctrlKey: true })?.id]).toEqual(["new-query", "close-tab"]);
+  expect([pressOff("t", { metaKey: true }), pressOff("t", { metaKey: true, ctrlKey: true })]).toEqual([undefined, undefined]);
+});
+
+function keydown(key: string, mods: Mods, defaultPrevented: boolean) {
+  const e = { ...chord(key, mods), defaultPrevented, prevented: false, preventDefault: () => (e.prevented = true) };
+  handleGlobalKey(e as unknown as KeyboardEvent);
+  return e;
+}
+
+it("leaves a chord a focused control already handled, and claims the ones it runs", () => {
+  const handled = keydown("n", { ctrlKey: true }, true);
+  expect([useWorkspace.getState().overlay, handled.prevented]).toEqual([{ kind: "none" }, false]);
+  const ran = keydown("n", { ctrlKey: true }, false);
+  expect([useWorkspace.getState().overlay, ran.prevented]).toEqual([{ kind: "connection", editing: null }, true]);
 });
 
 it("ignores plain keys and shifted or alt chords", () => {

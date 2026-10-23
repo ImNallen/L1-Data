@@ -10,7 +10,7 @@ import { Sidebar } from "../features/sidebar/Sidebar";
 import { InstallingOverlay } from "../features/updates/InstallingOverlay";
 import { useWorkspace, type Screen } from "../state/workspace";
 import { Kbd } from "../ui/primitives";
-import { START_COMMANDS, commandForKey, shortcutLabel } from "./commands";
+import { START_COMMANDS, handleGlobalKey, shortcutLabel } from "./commands";
 import { Overlays } from "./Overlays";
 import { PixelColumn } from "./PixelColumn";
 import { ResizeHandle } from "./ResizeHandle";
@@ -22,14 +22,8 @@ import { TopBar } from "./TopBar";
 
 function useGlobalKeys() {
   useEffect(() => {
-    const onKey = (e: KeyboardEvent) => {
-      const command = commandForKey(e);
-      if (!command) return;
-      e.preventDefault();
-      command.run();
-    };
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
+    window.addEventListener("keydown", handleGlobalKey);
+    return () => window.removeEventListener("keydown", handleGlobalKey);
   }, []);
 }
 

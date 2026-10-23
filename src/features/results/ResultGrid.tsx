@@ -22,6 +22,7 @@ import { useVirtualizer } from "@tanstack/react-virtual";
 import { useEffect, useImperativeHandle, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore, type KeyboardEvent, type Ref } from "react";
 import type { ColumnMeta, Density, FontSetting, ResultMeta, TypeCategory } from "../../ipc/bindings";
 import { DENSITY_FACTOR, gridRowHeight } from "../../shell/appearance";
+import { commandForKey } from "../../shell/commands";
 import { rowCacheFor, type RowCache } from "../../state/rowCache";
 import { findRelation, isPrimaryKey, useCatalog, viewFor, type CatalogView } from "../../state/catalog";
 import { sameDb, type DbKey } from "../../state/dbKey";
@@ -670,7 +671,14 @@ export function ResultGrid({
                         onMouseDown={(e) => e.stopPropagation()}
                         onChange={(e) => setEditingCell({ ...editingCell, draft: e.target.value })}
                         onKeyDown={(e) => {
+                          // The grid must not act on a key typed into the cell, so the window's shortcuts run from here.
                           e.stopPropagation();
+                          const command = commandForKey(e);
+                          if (command) {
+                            e.preventDefault();
+                            finishEdit(true);
+                            return command.run();
+                          }
                           if (e.key === "Enter") finishEdit(true);
                           if (e.key === "Escape") finishEdit(false);
                           if (e.key === "Tab") {
