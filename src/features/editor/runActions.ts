@@ -13,7 +13,7 @@ import {
   type TableScript,
   type TxnMode,
 } from "../../ipc/bindings";
-import { applyErrorText, configureErrorText, disconnectErrorText, runErrorText, txnErrorText } from "../../ipc/errors";
+import { applyErrorText, configureErrorText, runErrorText, txnErrorText } from "../../ipc/errors";
 import { databaseKindFor } from "../../state/databaseKind";
 import { homeDb, resolveDb, sameDb } from "../../state/dbKey";
 import { useLive } from "../../state/live";
@@ -381,7 +381,7 @@ export function updateTableQuery(tabId: TabId, update: (q: TableQuery) => TableQ
   setTablePage(tabId, 0);
 }
 
-const plural = (n: number, word: string) => `${n} ${word}${n === 1 ? "" : "s"}`;
+export const plural = (n: number, word: string) => `${n} ${word}${n === 1 ? "" : "s"}`;
 
 export async function submitEdits(tabId: TabId): Promise<void> {
   const tab = ws().tabs[tabId];
@@ -413,7 +413,7 @@ async function applyEdits(tab: TableTab, edits: TableEdits): Promise<void> {
   setTablePage(tabId, tab.table.page);
 }
 
-function forgetTab(tabId: TabId) {
+export function forgetTab(tabId: TabId) {
   sent.delete(tabId);
   queuedPages.delete(tabId);
   loadedTables.delete(tabId);
@@ -421,34 +421,6 @@ function forgetTab(tabId: TabId) {
   dropEditor(tabId);
   useTableEdits.getState().clear(tabId);
   ws().closeTab(tabId);
-}
-
-export async function closeTab(tabId: TabId, discardEdits = false): Promise<void> {
-  const edits = useTableEdits.getState().byTab[tabId];
-  if (!discardEdits && edits && pendingCount(edits) > 0) {
-    ws().open({
-      kind: "confirm",
-      title: "Close tab with unsaved changes?",
-      body: `Closing discards ${plural(pendingCount(edits), "change")} that haven't been submitted.`,
-      confirmLabel: "Discard and close",
-      onConfirm: () => void closeTab(tabId, true),
-    });
-    return;
-  }
-  if (!useLive.getState().consoles[tabId]) return forgetTab(tabId);
-  const res = await commands.consoleClose(tabId, false);
-  if (res.status === "ok") return forgetTab(tabId);
-  if (res.error.kind !== "OpenTransactions") {
-    notify(disconnectErrorText(res.error));
-    return;
-  }
-  ws().open({
-    kind: "confirm",
-    title: "Close tab with an open transaction?",
-    body: "Closing rolls back the uncommitted work in this tab.",
-    confirmLabel: "Roll back and close",
-    onConfirm: () => void commands.consoleClose(tabId, true).then(() => forgetTab(tabId)),
-  });
 }
 
 // The Finished event can arrive before or after consoleRun returns, so both paths call this.

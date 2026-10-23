@@ -1,4 +1,5 @@
-import { closeTab, openSqlTab } from "../features/editor/runActions";
+import { closeTab } from "../features/editor/closeTab";
+import { openSqlTab } from "../features/editor/runActions";
 import { useWorkspace, type Overlay } from "../state/workspace";
 
 export type Command = { id: string; label: string; key: string; run: () => void };

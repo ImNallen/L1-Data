@@ -1,5 +1,5 @@
 import type { ColorScheme, CustomTheme, Settings } from "../../ipc/bindings";
-import { useWorkspace } from "../../state/workspace";
+import { confirm, useWorkspace } from "../../state/workspace";
 import {
   APPEARANCES,
   customFamily,
@@ -60,12 +60,7 @@ export function deleteCustomTheme(familyId: string): Promise<void> {
   return saveSettings(patch);
 }
 
-export function confirmDeleteTheme(theme: Pick<CustomTheme, "id" | "name">): void {
-  useWorkspace.getState().open({
-    kind: "confirm",
-    title: `Delete ${theme.name}?`,
-    body: "The theme is removed from your themes. Modes using it go back to L1.",
-    confirmLabel: "Delete",
-    onConfirm: () => void deleteCustomTheme(theme.id),
-  });
+export async function confirmDeleteTheme(theme: Pick<CustomTheme, "id" | "name">): Promise<void> {
+  const ok = await confirm({ title: `Delete ${theme.name}?`, body: "The theme is removed from your themes. Modes using it go back to L1.", confirmLabel: "Delete" });
+  if (ok) await deleteCustomTheme(theme.id);
 }

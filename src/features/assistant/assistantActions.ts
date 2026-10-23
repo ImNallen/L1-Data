@@ -18,7 +18,7 @@ import { approveErrorText, chatErrorText, sendErrorText } from "../../ipc/errors
 import { useLive } from "../../state/live";
 import { resultView, type ResultPick, type RowResult } from "../../state/status";
 import { needsResync } from "../../state/transcript";
-import { useWorkspace, type Tab } from "../../state/workspace";
+import { confirm, useWorkspace, type Tab } from "../../state/workspace";
 import { editorStateOf, focusEditor, insertAtCursor, replaceDoc } from "../editor/editorStates";
 import { openSqlTab, runActive } from "../editor/runActions";
 
@@ -108,14 +108,13 @@ export async function configureChat(chatId: ChatId, options: ChatOptions): Promi
   useLive.getState().hydrateChat({ state: res.data, entries: [] });
 }
 
-export function confirmDeleteChat(chat: ChatState): void {
-  ws().open({
-    kind: "confirm",
+export async function confirmDeleteChat(chat: ChatState): Promise<void> {
+  const ok = await confirm({
     title: "Delete this chat?",
     body: `This removes the chat from L1 Data. ${chat.options.provider} keeps its own copy of the conversation in its config directory.`,
     confirmLabel: "Delete",
-    onConfirm: () => void commands.assistantDelete(chat.id),
   });
+  if (ok) await commands.assistantDelete(chat.id);
 }
 
 export function runInNewTab(sql: string, db: DatabaseRef | null): void {

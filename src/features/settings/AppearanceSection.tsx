@@ -129,7 +129,7 @@ function ThemeCard({ family, picks, appearance, onDuplicate }: CardProps) {
           </IconButton>
         )}
         {family.custom && (
-          <IconButton aria-label={`Delete ${family.name}`} title="Delete theme" onClick={() => confirmDeleteTheme(family)}>
+          <IconButton aria-label={`Delete ${family.name}`} title="Delete theme" onClick={() => void confirmDeleteTheme(family)}>
             <IconTrash size={14} />
           </IconButton>
         )}

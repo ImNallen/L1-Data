@@ -24,7 +24,7 @@ function HistoryItem({ chat, current, now }: { chat: ChatState; current: boolean
       onKeyDown={(e) => {
         if (e.key !== "Delete" && e.key !== "Backspace") return;
         e.preventDefault();
-        confirmDeleteChat(chat);
+        void confirmDeleteChat(chat);
       }}
       className={cx(
         "group flex h-8 cursor-default items-center gap-2 rounded-md pr-1 pl-2 text-ui-13 outline-none data-[highlighted]:bg-selected",
@@ -42,7 +42,7 @@ function HistoryItem({ chat, current, now }: { chat: ChatState; current: boolean
         className="hidden size-6 group-hover:inline-grid group-data-[highlighted]:inline-grid"
         onClick={(e) => {
           e.stopPropagation();
-          confirmDeleteChat(chat);
+          void confirmDeleteChat(chat);
         }}
       >
         <IconTrash size={13} />

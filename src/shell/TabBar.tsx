@@ -1,6 +1,6 @@
 import { IconTable, IconX } from "@tabler/icons-react";
 import { useState } from "react";
-import { closeTab } from "../features/editor/runActions";
+import { closeTab } from "../features/editor/closeTab";
 import type { TabId } from "../ipc/bindings";
 import { useLive } from "../state/live";
 import { hasUncommittedWork } from "../state/status";

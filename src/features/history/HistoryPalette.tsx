@@ -5,7 +5,7 @@ import { commands, type HistoryFilter, type HistoryOutcome } from "../../ipc/bin
 import { isMac } from "../../shell/hostedWindow";
 import { sameDb } from "../../state/dbKey";
 import { useLive } from "../../state/live";
-import { tabTarget, useWorkspace } from "../../state/workspace";
+import { confirm, tabTarget, useWorkspace } from "../../state/workspace";
 import { Button, cx, DialogBackdrop, Kbd, DatabaseBadge, StatusDot } from "../../ui/primitives";
 import { focusEditor } from "../editor/editorStates";
 import { formatElapsed, pluralRows } from "../results/format";
@@ -39,16 +39,15 @@ function day(at: number, now: Date): string {
 }
 const time = (at: number) => new Date(at).toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit" });
 
-function clearHistory() {
-  useWorkspace.getState().open({
-    kind: "confirm", title: "Clear query history?", body: "This removes every saved query from history.", confirmLabel: "Clear history",
-    onConfirm: () => {
-      void commands.historyClear().then(() => {
-        useLive.setState({ historyTail: [] });
-        useWorkspace.getState().open({ kind: "history" });
-      }).catch((e: unknown) => useWorkspace.getState().notify(String(e)));
-    },
-  });
+async function clearHistory() {
+  if (!(await confirm({ title: "Clear query history?", body: "This removes every saved query from history.", confirmLabel: "Clear history" }))) return;
+  try {
+    await commands.historyClear();
+    useLive.setState({ historyTail: [] });
+    useWorkspace.getState().open({ kind: "history" });
+  } catch (e) {
+    useWorkspace.getState().notify(String(e));
+  }
 }
 
 function HistoryBrowser({ close, restoreEditorFocus }: { close: () => void; restoreEditorFocus: () => void }) {
@@ -210,7 +209,7 @@ function HistoryBrowser({ close, restoreEditorFocus }: { close: () => void; rest
       <div className="flex min-h-10 shrink-0 items-center gap-3 border-t border-control px-4 text-ui-10.5 text-dim">
         <span><Kbd className="bg-pill">↑↓</Kbd> Navigate</span><span><Kbd className="bg-pill">↵</Kbd> Open</span><span><Kbd className="bg-pill">{mod}↵</Kbd> Run</span><span><Kbd className="bg-pill">esc</Kbd> Close</span>
         <span data-testid="history-count" role="status" className="ml-auto shrink-0">{count === null ? "…" : count.toLocaleString()} {count === 1 ? "query" : "queries"}</span>
-        <button type="button" data-testid="history-clear" onClick={clearHistory} disabled={!list} className="shrink-0 rounded px-1 py-1 text-dim outline-none hover:text-danger focus-visible:ring-1 focus-visible:ring-focus disabled:opacity-40">Clear history…</button>
+        <button type="button" data-testid="history-clear" onClick={() => void clearHistory()} disabled={!list} className="shrink-0 rounded px-1 py-1 text-dim outline-none hover:text-danger focus-visible:ring-1 focus-visible:ring-focus disabled:opacity-40">Clear history…</button>
       </div>
     </div>
   );

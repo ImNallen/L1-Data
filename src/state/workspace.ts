@@ -43,7 +43,16 @@ export type Overlay =
   | { kind: "history" }
   | { kind: "connection"; editing: ConnectionId | null }
   | { kind: "cell"; title: string; value: string | null }
-  | { kind: "confirm"; title: string; body: string; confirmLabel: string; onConfirm: () => void };
+  | ({ kind: "ask"; seq: number; settle: (choice: string | null) => void } & Required<Question<string>>);
+
+export type Choice<C extends string> = { id: C; label: string; variant: "primary" | "danger" | "ghost" };
+
+/**
+ * Every question also has a Cancel button. Cancel, Esc, the close button, and any overlay that replaces the
+ * question all answer `null`. The dialog's test ids are `<testId>-dialog`, `<testId>-cancel`, and
+ * `<testId>-<choice id>`.
+ */
+export type Question<C extends string> = { testId?: string; title: string; body: string; choices: readonly Choice<C>[] };
 
 /** `query` filters the settings in place; while it is set the page lists matches instead of `section`. */
 export type Screen = { kind: "workspace" } | { kind: "settings"; section: SettingsSectionId; query: string };
@@ -147,6 +156,7 @@ type WorkspaceActions = {
   select(r: RelationRef | null): void;
   open(o: Overlay): void;
   close(): void;
+  answer(choice: string): void;
   openSettings(section?: SettingsSectionId): void;
   closeSettings(): void;
   setTreeQuery(query: string): void;
@@ -159,7 +169,7 @@ type WorkspaceActions = {
 
 let toastSeq = 0;
 
-export const useWorkspace = create<WorkspaceData & WorkspaceActions>()((set) => ({
+export const useWorkspace = create<WorkspaceData & WorkspaceActions>()((set, get) => ({
   tabs: {},
   order: [],
   active: null,
@@ -262,6 +272,12 @@ export const useWorkspace = create<WorkspaceData & WorkspaceActions>()((set) => 
   select: (selected) => set({ selected }),
   open: (overlay) => set({ overlay }),
   close: () => set({ overlay: { kind: "none" } }),
+  answer: (choice) => {
+    const overlay = get().overlay;
+    if (overlay.kind !== "ask") return;
+    overlay.settle(choice);
+    set({ overlay: { kind: "none" } });
+  },
   openSettings: (section = "appearance") => set({ screen: { kind: "settings", section, query: "" }, overlay: { kind: "none" } }),
   closeSettings: () => set({ screen: { kind: "workspace" }, overlay: { kind: "none" } }),
   setTreeQuery: (treeQuery) => set({ treeQuery }),
@@ -272,3 +288,27 @@ export const useWorkspace = create<WorkspaceData & WorkspaceActions>()((set) => 
   notify: (text) => set({ toast: { id: ++toastSeq, text } }),
   setCursor: (cursor) => set({ cursor }),
 }));
+
+// Whatever replaces or clears a question answers it `null`, so no caller waits forever. A promise keeps only its first
+// answer, so the `null` that follows `answer` is ignored.
+useWorkspace.subscribe((s, prev) => {
+  if (prev.overlay !== s.overlay && prev.overlay.kind === "ask") prev.overlay.settle(null);
+});
+
+let askSeq = 0;
+
+/**
+ * Shows a question and resolves with the chosen id, or `null`. The caller's continuation runs after the click that
+ * answered has closed the dialog, so it can ask the next question straight away.
+ */
+export function ask<C extends string>(q: Question<C>): Promise<C | null> {
+  return new Promise((resolve) => {
+    const settle = (choice: string | null) => resolve(choice as C | null);
+    useWorkspace.getState().open({ kind: "ask", seq: ++askSeq, testId: q.testId ?? "ask", title: q.title, body: q.body, choices: q.choices, settle });
+  });
+}
+
+/** A question with one danger button, `confirm-btn`, in a `confirm-dialog`. Resolves `true` when it is pressed. */
+export async function confirm(q: { title: string; body: string; confirmLabel: string }): Promise<boolean> {
+  return (await ask({ testId: "confirm", title: q.title, body: q.body, choices: [{ id: "btn", label: q.confirmLabel, variant: "danger" }] })) === "btn";
+}
