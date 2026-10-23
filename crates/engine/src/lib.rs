@@ -27,7 +27,7 @@ use connection::{CatalogSlot, ConnEntry, ConnSlot, ConnectParams, DbSlot, Instan
 use console::{Console, Owed, PlannedStmt, RunPlan, SessionSlot};
 use model::*;
 use provider::ProbeDepth;
-use secrets::Vault;
+use secrets::{SecretSlot, Vault};
 use session::Session;
 use store::{HistoryInsert, Store};
 use view::{ConnectionView, Known, Selection};
@@ -141,7 +141,7 @@ impl Shared {
     }
 
     fn params(&self, config: &ConnectionConfig, database: &str) -> Result<ConnectParams, ConnectError> {
-        let password = if config.has_password { self.saved_password(config.id)? } else { None };
+        let password = if config.has_password { self.saved_secret(config.id, SecretSlot::Database)? } else { None };
         Ok(ConnectParams::for_database(config, database, password))
     }
 
@@ -162,10 +162,10 @@ impl Shared {
         self.next_chat_rev.fetch_add(1, Ordering::Relaxed)
     }
 
-    fn saved_password(&self, id: ConnectionId) -> Result<Option<String>, ConnectError> {
+    fn saved_secret(&self, id: ConnectionId, slot: SecretSlot) -> Result<Option<String>, ConnectError> {
         let keychain = |message: String| ConnectError::Keychain { message };
-        let Some(sealed) = self.store.secret(id).map_err(|e| keychain(e.to_string()))? else { return Ok(None) };
-        self.vault.open(id, &sealed).map_err(|e| keychain(e.to_string()))
+        let Some(sealed) = self.store.secret(id, slot).map_err(|e| keychain(e.to_string()))? else { return Ok(None) };
+        self.vault.open(id, slot, &sealed).map_err(|e| keychain(e.to_string()))
     }
 
     fn all_consoles(&self) -> Vec<Arc<Console>> {
@@ -716,12 +716,12 @@ impl Engine {
         let store = |e: StoreError| SaveError::Store { message: e.to_string() };
         let has_password = match &d.password {
             PasswordInput::Set(pw) => {
-                let sealed = s.vault.seal(id, pw).map_err(|e| SaveError::Keychain { message: e.to_string() })?;
-                s.store.set_secret(id, &sealed).map_err(store)?;
+                let sealed = s.vault.seal(id, SecretSlot::Database, pw).map_err(|e| SaveError::Keychain { message: e.to_string() })?;
+                s.store.set_secret(id, SecretSlot::Database, &sealed).map_err(store)?;
                 true
             }
             PasswordInput::Clear => {
-                s.store.delete_secret(id).map_err(store)?;
+                s.store.delete_secret(id, SecretSlot::Database).map_err(store)?;
                 false
             }
             PasswordInput::Keep => existing.as_ref().is_some_and(|c| c.has_password),
@@ -786,7 +786,7 @@ impl Engine {
         let password = match (&d.password, d.id) {
             (PasswordInput::Set(pw), _) => Some(pw.clone()),
             (PasswordInput::Clear, _) | (PasswordInput::Keep, None) => None,
-            (PasswordInput::Keep, Some(id)) => s.saved_password(id)?,
+            (PasswordInput::Keep, Some(id)) => s.saved_secret(id, SecretSlot::Database)?,
         };
         let session = Session::open(&ConnectParams::from_draft(&d, password), None, &s.timezone).await?;
         Ok(session.server)
@@ -1592,7 +1592,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let keys = Arc::new(MemoryKeyStore::default());
         let cfg = || EngineConfig { data_dir: dir.path().to_owned(), keys: keys.clone(), agent_path: AgentPath::Fixed("".into()) };
-        let password = |engine: &Engine, id| engine.shared.saved_password(id).unwrap();
+        let password = |engine: &Engine, id| engine.shared.saved_secret(id, SecretSlot::Database).unwrap();
         let saved = {
             let engine = Engine::open(cfg()).await.unwrap();
             let saved = engine
@@ -1625,7 +1625,7 @@ mod tests {
             .await
             .unwrap();
         assert!(!cleared.has_password);
-        assert_eq!(engine.shared.store.secret(saved.id).unwrap(), None);
+        assert_eq!(engine.shared.store.secret(saved.id, SecretSlot::Database).unwrap(), None);
         assert_eq!(password(&engine, saved.id), None);
         assert_eq!(engine.boot().connections.len(), 1);
 
