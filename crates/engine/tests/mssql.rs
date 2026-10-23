@@ -220,15 +220,16 @@ async fn every_batch_is_validated_before_any_execution_and_dynamic_use_stays_sco
 async fn cancelling_waitfor_retires_the_session_and_stops_the_server_request() {
     for sql in ["WAITFOR DELAY '00:00:30'; SELECT 99", "SELECT 1 AS first; WAITFOR DELAY '00:00:30'; SELECT 99"] {
         let mut h = Harness::open(TxnMode::AutoCommit).await;
-        let warm = h.ok("BEGIN TRANSACTION; SELECT @@SPID").await;
-        let pid: i32 = h.rows(Harness::rowsets(&warm)[0])[0][0].as_ref().unwrap().parse().unwrap();
+        // SQL Server gives a closed session's session_id to later logins; connection_id is never reused.
+        let warm = h.ok("BEGIN TRANSACTION; SELECT connection_id FROM sys.dm_exec_connections WHERE session_id = @@SPID").await;
+        let connection = h.rows(Harness::rowsets(&warm)[0])[0][0].clone().unwrap();
         let id = h.start(sql).await.run_id;
         tokio::time::sleep(Duration::from_millis(150)).await;
         tokio::time::timeout(Duration::from_secs(1), h.engine.console_cancel(h.tab)).await.unwrap();
         let state = h.finish(id).await;
         assert!(matches!(state.run, RunState::Finished { outcome: RunOutcome::Cancelled, .. }), "{:?}", state.run);
         assert!(matches!(state.session, SessionState::Lost { transaction: TransactionLoss::Unknown, .. }), "{:?}", state.session);
-        let state = h.ok(&format!("SELECT COUNT_BIG(*) FROM sys.dm_exec_requests WHERE session_id={pid} AND session_id <> @@SPID")).await;
+        let state = h.ok(&format!("SELECT COUNT_BIG(*) FROM sys.dm_exec_requests WHERE connection_id = '{connection}'")).await;
         assert_eq!(h.rows(Harness::rowsets(&state)[0])[0][0].as_deref(), Some("0"));
     }
     let mut h = Harness::open(TxnMode::AutoCommit).await;
