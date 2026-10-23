@@ -7,6 +7,7 @@ import { HistoryPalette } from "../features/history/HistoryPalette";
 import { ResultsPane } from "../features/results/ResultsPane";
 import { SettingsPage } from "../features/settings/SettingsScreen";
 import { Sidebar } from "../features/sidebar/Sidebar";
+import { InstallingOverlay } from "../features/updates/InstallingOverlay";
 import { useWorkspace, type Screen } from "../state/workspace";
 import { Kbd } from "../ui/primitives";
 import { START_COMMANDS, commandForKey, shortcutLabel } from "./commands";
@@ -145,6 +146,7 @@ export function AppLayout() {
       <ConnectionDialog />
       <StatementChooser />
       <Overlays />
+      <InstallingOverlay />
     </div>
   );
 }

@@ -123,6 +123,15 @@ it("puts the update button in the sidebar footer only while this build can updat
   expect(render({ screen: { kind: "workspace" } }, status({ kind: "Disabled", reason: "DevBuild" }))).not.toContain('data-testid="update-button"');
 });
 
+it("covers the window while an update installs, and only then", () => {
+  const status = (s: UpdateStatus): Partial<LiveData> => ({ updates: { rev: 1, track: "Stable", currentVersion: "0.1.0", status: s, checkedAtMs: null } });
+  const installing = render({ screen: { kind: "workspace" } }, status({ kind: "Installing", version: "0.2.0" }));
+  expect(installing).toMatch(/<div[^>]*data-testid="update-installing"[^>]*>.*Installing L1 Data 0\.2\.0… L1 Data will restart\.<\/div><\/div>/);
+  for (const s of [{ kind: "Downloaded", version: "0.2.0", downgrade: false }, { kind: "Failed", failure: { kind: "BadSignature" } }, { kind: "Idle" }] satisfies UpdateStatus[]) {
+    expect(render({ screen: { kind: "workspace" } }, status(s))).not.toContain('data-testid="update-installing"');
+  }
+});
+
 it.each([
   ["font", ["interfaceFont", "codeFont"]],
   ["row limit", ["maxRows"]],
