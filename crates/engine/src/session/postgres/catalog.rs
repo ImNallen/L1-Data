@@ -69,7 +69,9 @@ fn default_schema(search_path: &[String], schemas: &[SchemaInfo]) -> Option<Stri
 
 /// Five queries on one database's metadata session. Every schema is listed with its `system` flag
 /// and table count; relations and columns load for user schemas and for the system schemas in
-/// `extra_schemas`; functions load for user schemas only.
+/// `extra_schemas`; functions load for user schemas only. Each query reads its own snapshot, so a
+/// schema whose relations load counts its tables from them, and DDL between the queries cannot
+/// make the count disagree with the list.
 pub async fn load(client: &Client, db: DatabaseRef, version: u64, extra_schemas: &[String]) -> Result<Catalog, tokio_postgres::Error> {
     let schema_rows = client
         .query(
@@ -123,6 +125,9 @@ pub async fn load(client: &Client, db: DatabaseRef, version: u64, extra_schemas:
             row_estimate: (reltuples >= 0.0).then_some(reltuples.round() as i64),
             columns: Vec::new(),
         });
+    }
+    for schema in schemas.iter_mut().filter(|s| !s.system || extra_schemas.contains(&s.name)) {
+        schema.table_count = schema.relations.iter().filter(|r| !matches!(r.kind, RelKind::View | RelKind::MaterializedView)).count() as u32;
     }
 
     let column_rows = client
