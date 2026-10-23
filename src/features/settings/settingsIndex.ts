@@ -72,6 +72,14 @@ export const SETTINGS_INDEX = [
       },
     ],
   },
+  {
+    id: "about",
+    label: "About",
+    settings: [
+      { id: "appVersion", label: "Version", group: "Updates", keywords: "about version update check download install restart release" },
+      { id: "updateTrack", label: "Update track", group: "Updates", keywords: "update release channel track stable nightly downgrade switch" },
+    ],
+  },
 ] as const satisfies readonly IndexedSection[];
 
 export type SettingsSectionId = (typeof SETTINGS_INDEX)[number]["id"];

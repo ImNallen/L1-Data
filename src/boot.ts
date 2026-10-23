@@ -3,26 +3,14 @@ import { commands, type AppEvent } from "./ipc/bindings";
 import { useCatalog } from "./state/catalog";
 import { useLive, wantedCatalogs, type LiveData } from "./state/live";
 import { useRelationDetail } from "./state/relationDetail";
-import { tabFromSnapshot, tabTarget, useWorkspace, workspaceSnapshot } from "./state/workspace";
+import { tabFromSnapshot, tabTarget, useWorkspace } from "./state/workspace";
 import { startAppearance } from "./shell/appearance";
 import { startTheme } from "./shell/theme";
-import { seedEditor, textOf } from "./features/editor/editorStates";
-import { browseTemplate, installRunBehavior, onEditorDocChanged, openSqlTab } from "./features/editor/runActions";
+import { seedEditor } from "./features/editor/editorStates";
+import { startPersistence } from "./features/editor/persistence";
+import { browseTemplate, installRunBehavior, openSqlTab } from "./features/editor/runActions";
 import { startAssistantSync } from "./features/assistant/assistantActions";
-
-const SAVE_DEBOUNCE_MS = 500;
-
-function startPersistence() {
-  let timer: ReturnType<typeof setTimeout> | undefined;
-  const schedule = () => {
-    clearTimeout(timer);
-    timer = setTimeout(() => void commands.workspaceSave(workspaceSnapshot(useWorkspace.getState(), textOf)), SAVE_DEBOUNCE_MS);
-  };
-  useWorkspace.subscribe((s, prev) => {
-    if (s.tabs !== prev.tabs || s.order !== prev.order || s.active !== prev.active || s.layout !== prev.layout) schedule();
-  });
-  onEditorDocChanged(schedule);
-}
+import { startUpdateSync } from "./features/updates/updateActions";
 
 /** The catalog store holds exactly the catalogs the connection snapshots serve, and the detail store only their relations. */
 function startCatalogSync() {
@@ -64,4 +52,5 @@ export async function boot(): Promise<void> {
   startPersistence();
   startCatalogSync();
   startAssistantSync();
+  startUpdateSync();
 }

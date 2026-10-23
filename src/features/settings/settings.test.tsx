@@ -1,7 +1,7 @@
 import { mockIPC } from "@tauri-apps/api/mocks";
 import { renderToStaticMarkup } from "react-dom/server";
 import { afterEach, expect, it, vi } from "vitest";
-import type { CustomTheme, LimitsReport, ProviderState, Settings } from "../../ipc/bindings";
+import type { CustomTheme, LimitsReport, ProviderState, Settings, UpdateState, UpdateStatus } from "../../ipc/bindings";
 import { AppLayout } from "../../shell/AppLayout";
 import { clampWidth } from "../../shell/PixelColumn";
 import { startAppearance } from "../../shell/appearance";
@@ -103,6 +103,26 @@ it("returns to the workspace layout once settings close", () => {
 
 const matching = (query: string) => filterSettings(parseQuery(query)).map((s) => s.id);
 
+it("shows the running version and the engine's track in About, and locks the track while a download runs", () => {
+  const updates = (status: UpdateStatus): UpdateState => ({ rev: 1, track: "Nightly", currentVersion: "0.1.1-nightly.20261023.5", status, checkedAtMs: null });
+  const idle = render(settingsOpen("about"), { updates: updates({ kind: "Idle" }) });
+  expect(idle).toContain("L1 Data 0.1.1-nightly.20261023.5");
+  expect(idle).toMatch(/<option value="Nightly" selected="">Nightly<\/option>/);
+  expect(idle).toMatch(/<select[^>]*data-testid="update-track"(?![^>]*disabled="")[^>]*>/);
+  expect(idle).toMatch(/<button[^>]*data-testid="update-action"[^>]*>Check for updates<\/button>/);
+  expect(idle).toContain('data-testid="update-status" class="mt-1.5 text-ui-12 text-dim">Not checked yet.<');
+  const downloading = render(settingsOpen("about"), { updates: updates({ kind: "Downloading", version: "0.1.1-nightly.20261024.6", downgrade: false, percent: 40 }) });
+  expect(downloading).toMatch(/<select[^>]*data-testid="update-track"[^>]*disabled=""/);
+  expect(downloading).toMatch(/<button[^>]*data-testid="update-action"[^>]*disabled=""[^>]*>Downloading…<\/button>/);
+});
+
+it("puts the update button in the sidebar footer only while this build can update", () => {
+  const status = (s: UpdateStatus): Partial<LiveData> => ({ updates: { rev: 1, track: "Stable", currentVersion: "0.1.0", status: s, checkedAtMs: null } });
+  const offered = render({ screen: { kind: "workspace" } }, status({ kind: "Available", version: "0.2.0", downgrade: false }));
+  expect(offered).toMatch(/<button[^>]*data-testid="update-button" data-status="Available" aria-label="Download L1 Data 0.2.0"/);
+  expect(render({ screen: { kind: "workspace" } }, status({ kind: "Disabled", reason: "DevBuild" }))).not.toContain('data-testid="update-button"');
+});
+
 it.each([
   ["font", ["interfaceFont", "codeFont"]],
   ["row limit", ["maxRows"]],
@@ -124,6 +144,9 @@ it.each([
   ["advanced", ["providerHealthCheck"]],
   ["quota", ["usageLimits"]],
   ["codex", ["providerList", "usageLimits"]],
+  ["nightly", ["updateTrack"]],
+  ["version", ["providerList", "providerHealthCheck", "appVersion"]],
+  ["updates", ["appVersion", "updateTrack"]],
   ["zzqx", []],
 ])("filters %j to %j by label, section, group, and keywords", (query, ids) => {
   expect(matching(query)).toEqual(ids);
@@ -144,6 +167,8 @@ it("lists every setting in registry order for an empty query", () => {
     "providerList",
     "providerHealthCheck",
     "usageLimits",
+    "appVersion",
+    "updateTrack",
   ]);
 });
 
@@ -193,6 +218,7 @@ it("says when no setting matches, and shows the section with every nav entry onc
     ["queries", "Queries", true],
     ["providers", "Providers", false],
     ["usage", "Usage", false],
+    ["about", "About", false],
   ]);
   expect(blank).not.toContain('data-testid="settings-search-hint"');
 });

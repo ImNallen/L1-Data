@@ -9,6 +9,7 @@ import type { HostedWindow } from "../../shell/hostedWindow";
 import { SidebarToggle, windowLeadingInset } from "../../shell/WindowEdgeActions";
 import { openTableTab } from "../editor/runActions";
 import { SettingsSidebarBody } from "../settings/SettingsSidebarBody";
+import { UpdateButton } from "../updates/UpdateButton";
 import { ConnectionTree } from "./ConnectionTree";
 import { SidebarSearch } from "./SidebarSearch";
 import { filterTree, firstRelation, type TreeFilter } from "./treeFilter";
@@ -102,6 +103,7 @@ function WorkspaceSidebarBody() {
         >
           <IconClock size={16} />
         </IconButton>
+        <UpdateButton />
       </div>
     </>
   );

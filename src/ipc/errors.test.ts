@@ -1,6 +1,6 @@
 import { expect, it } from "vitest";
-import type { ApproveError, ChatError, SendError } from "./bindings";
-import { applyErrorText, approveErrorText, chatErrorText, configureErrorText, connectErrorText, runErrorText, sendErrorText } from "./errors";
+import type { ApproveError, ChatError, SendError, UpdateFailure } from "./bindings";
+import { applyErrorText, approveErrorText, chatErrorText, configureErrorText, connectErrorText, runErrorText, sendErrorText, updateErrorText, updateFailureText } from "./errors";
 
 it("keeps the engine's actionable capability refusal intact", () => {
   const what = "SQL Server Manual mode is unavailable. Select Auto-commit and use explicit transaction statements.";
@@ -58,4 +58,23 @@ it("names the host key an SSH server offered, and the fix for a changed one", ()
     "ssh-keygen -R '[bastion]:2222' -f '/Users/a/.ssh/known_hosts'",
   );
   expect(connectErrorText({ kind: "Ssh", error: { kind: "MissingSecret" } })).toMatch(/^SSH: /);
+});
+
+it("says what went wrong with an update, and nothing for a click the update already moved past", () => {
+  const failures: UpdateFailure[] = [
+    { kind: "Offline" },
+    { kind: "BadSignature" },
+    { kind: "ReadOnlyLocation" },
+    { kind: "PermissionDenied" },
+    { kind: "Other", message: "binary for the current target not found in the archive" },
+  ];
+  expect(failures.map(updateFailureText)).toEqual([
+    "Couldn't reach GitHub for updates.",
+    "The update's signature didn't match, so it was discarded.",
+    "L1 Data can't replace itself where it runs. On macOS, move it to Applications.",
+    "L1 Data couldn't replace itself. Check that you can change the folder it runs from.",
+    "The update failed: binary for the current target not found in the archive",
+  ]);
+  expect(updateErrorText({ kind: "Stale" })).toBeNull();
+  expect(updateErrorText({ kind: "Busy" })).toBe("Wait for the update to finish downloading or installing before you switch tracks.");
 });
