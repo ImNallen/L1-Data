@@ -998,7 +998,7 @@ export type SshError = { kind: "Network"; message: string } |
  *  `ssh_trust_host_key`; it expires after ten minutes.
  */
 { kind: "HostKeyUnknown"; host: string; port: number; algorithm: string; fingerprint: string; trust: HostKeyId } | 
-/**  A known_hosts file holds another key of this algorithm for the server, at `file:line`. */
+/**  No known_hosts file holds this key, but one holds another key of its algorithm for the server, at `file:line`. */
 { kind: "HostKeyChanged"; host: string; port: number; algorithm: string; fingerprint: string; knownAt: string } | 
 /**  The key is on an `@revoked` line, at `file:line`. */
 { kind: "HostKeyRevoked"; host: string; port: number; algorithm: string; fingerprint: string; revokedAt: string } | 

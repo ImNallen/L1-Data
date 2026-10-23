@@ -272,7 +272,7 @@ pub enum SshError {
     /// No known_hosts file knows this server. `trust` names the key the engine saw, for
     /// `ssh_trust_host_key`; it expires after ten minutes.
     HostKeyUnknown { host: String, port: u16, algorithm: String, fingerprint: String, trust: HostKeyId },
-    /// A known_hosts file holds another key of this algorithm for the server, at `file:line`.
+    /// No known_hosts file holds this key, but one holds another key of its algorithm for the server, at `file:line`.
     HostKeyChanged { host: String, port: u16, algorithm: String, fingerprint: String, known_at: String },
     /// The key is on an `@revoked` line, at `file:line`.
     HostKeyRevoked { host: String, port: u16, algorithm: String, fingerprint: String, revoked_at: String },
