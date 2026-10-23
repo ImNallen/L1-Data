@@ -62,6 +62,14 @@ L1 Data is a desktop IDE for PostgreSQL and Microsoft SQL Server, built with Tau
 - **Settings** > **Providers** shows the CLI's version, sign-in state, and plan, with a switch that turns the provider on or off. It also sets the display name, the binary path, the config directory, and the launch arguments. Launch arguments pass to the CLI, except the flags the app sets itself, which the field lists as ignored. `--model` and `--effort` there set the model and effort a new chat starts with. **Health check interval** under **Advanced** sets how often the app checks the CLI in the background. The default is 300 seconds, and 0 turns the check off.
 - **Settings** > **Usage**, also opened by the chart button at the bottom of the sidebar, shows how much of each Claude and Codex subscription limit is left. Each window, such as the five-hour session or the week, gets a card with the percent left, a **Running low** warning, and the time until it resets. The app asks your own `claude` and `codex` CLIs for these numbers and reads no credentials itself. The refresh button at the top right reads them again, and the page also reads them again when a window resets while it is open. A CLI that is not installed shows as **not installed**, and a signed-out one shows the command that signs it in.
 
+### Updates
+
+- L1 Data follows one of two update tracks, **Stable** or **Nightly**, which you choose in **Settings** > **About**. A build whose version contains `-nightly.` follows Nightly until you choose. The first launch saves that track, so a nightly install that the Nightly feed later moves onto a stable release stays on Nightly.
+- The round button at the right end of the sidebar footer shows the update status. Click it to check for an update, click again to download what the check found, and click a third time to restart into the new build. A ring shows the download's progress, and a toast says when the download is ready. Nothing downloads without a click.
+- Before the restart, a dialog names what the restart ends: running queries, open transactions, and assistant turns. If more starts before you confirm, the dialog opens again with the longer list.
+- The app checks 15 seconds after launch, then every 4 hours, and an hour after a failed check. Switching tracks checks at once. A nightly build on the Stable track is offered the latest stable release even when that release is older, so you can leave Nightly. Every other check offers only a newer build. The track cannot change while a download or an install runs.
+- **Settings** > **About** shows the running version, the update status, and a button for the same next step as the sidebar button. Development builds, and Linux installs other than the AppImage, do not update themselves and show no sidebar button.
+
 ### The window
 
 - **Settings** (`⌘,`) opens in place of the sidebar and editor. **Appearance** picks a System, Light, or Dark scheme and the themes for each. It also sets the density (Compact, Standard, or Spacious), the speed of panel, dialog, and menu animations, and the interface and monospace fonts and sizes. The monospace font is used by the SQL editor and the result tables. **Queries** sets the row limit, the table page size, and whether a script stops at its first error. The search box above the sections filters the settings in place and shows the matches with their controls. `Esc` clears it and returns to the section you were on.
@@ -151,6 +159,7 @@ The `claude-smoke` test needs the `claude` CLI installed and signed in, and the 
 | `L1_DATA_TEST_MSSQL_HOST` | Host for the SQL Server Rust integration tests. Default `localhost`. |
 | `L1_DATA_TEST_MSSQL_PORT` | Port for the SQL Server Rust integration tests. Default `1434`. |
 | `L1_DATA_TEST_MSSQL_PASSWORD` | The `sa` password for the SQL Server Rust integration tests. Default is the development fixture password above. |
+| `L1_DATA_UPDATE_SCENARIO` | The scripted update feed the dev-bridge serves: `current` (the default), `available`, `nightly-build`, `offline`, `bad-signature`, `install-fails`, or `off`. AGENTS.md describes each. |
 | `UPDATE_BINDINGS=1` | Makes the bindings drift test rewrite `src/ipc/bindings.ts` instead of failing. |
 
 ## Layout

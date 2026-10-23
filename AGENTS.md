@@ -63,6 +63,18 @@ A passing typecheck does not show that a UI change works. Drive the real UI agai
 
 To drive the assistant, use the real CLI or the fake one. The real `claude` must be installed and signed in, and each turn spends that account's usage. For scripted turns with no account, run `cargo build -p engine --bin fake-claude`. Then, in **Settings** > **Providers**, set **Binary path** to `target/debug/fake-claude` and **Launch arguments** to `--fake-scenario <name>`, where `<name>` is one of `card`, `query`, `query-tampered`, `ask-differs`, `describe`, `slow`, `stop-then-query`, `wedged`, `crash`, `resume-lost`, `resume-lost-late`, `resume-lost-twice`, `resume-crash`, `signed-out-start`, or `echo`. `--fake-sql '<sql>'` sets the query the `query` scenario asks to run, and `--fake-linger-ms <n>` delays its exit on EOF. The relative path works because `pnpm bridge` runs from the repo root. In every scenario, fake-claude answers a `get_usage` request with a reply shaped like the real one, so **Settings** > **Usage** shows Claude's cards: 10% of the session left, which warns Running low, and 40% and 38% of the week. With `signed-out-start`, or a config directory whose name ends in `signed-out`, it answers with no limits. The comment at the top of `crates/engine/src/bin/fake_claude.rs` describes each scenario. The main controls are `assistant-input`, `assistant-send`, `approval-run`, `sql-card-uses`, `sql-run-new-tab`, and `provider-row-Claude`.
 
+To drive the updater, start the bridge with `L1_DATA_UPDATE_SCENARIO=<name> pnpm bridge`. The bridge gives the engine a `ScriptedTransport` from `crates/engine/src/update/scripted.rs`, so the engine's real update machine and policy run against scripted feeds. A check takes 0.6 s and a download takes 5 s. The first check runs 15 s after the bridge starts, or when you click the button. The scenarios are:
+
+- `current`, the default: build 0.1.0. Stable offers 0.1.0, so the build is up to date. Nightly offers 0.1.1-nightly.20261023.7.
+- `available`: build 0.1.0. Stable offers 0.2.0, and Nightly offers 0.2.1-nightly.20261023.7.
+- `nightly-build`: build 0.1.1-nightly.20261023.5 with no saved track, so it follows Nightly, which offers 0.1.1-nightly.20261024.6. Switching to Stable offers 0.1.0 as an older build.
+- `offline`: build 0.1.0. Every check fails as offline.
+- `bad-signature`: like `available`, but the download fails verification after its last chunk.
+- `install-fails`: like `available`, but the install fails because the app runs from a read-only location.
+- `off`: build 0.1.0 reports a development build, so updates are off and the sidebar shows no update button.
+
+A successful install stays at **Restarting…** in the bridge, because nothing relaunches. The controls are `update-button`, whose `data-status` names the status, `update-track`, `update-action`, `update-status`, and the existing `confirm-btn`. The bridge cannot show the shell's `TauriTransport`. Only an installed, signed release build that a feed offers a newer signed build exercises it.
+
 The bridge has three limits. It runs in Chromium, not WKWebView. It has no native dialogs, so **Export** fails there. It serves commands inside a tokio runtime, so it cannot show a sync command that crashes the desktop app. For window chrome, file dialogs, a new or changed sync command, or anything WebKit-specific, run `pnpm tauri dev` and check the real window. On macOS, `pnpm screenshot` rewrites `docs/images/l1-data.png` from the running app.
 
 The environment variables that change the data directory, the credential store, and the test databases are listed in the README.
