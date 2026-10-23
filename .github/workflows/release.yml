@@ -24,7 +24,6 @@ on:
       - .github/workflows/ci.yml
       - scripts/**
 
-# Every release writes the nightly feed, so releases run one at a time and queue rather than cancel.
 concurrency:
   group: ${{ github.event_name == 'pull_request' && format('release-dry-run-{0}', github.ref) || 'release' }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
@@ -120,9 +119,10 @@ jobs:
         with:
           ref: ${{ needs.plan.outputs.sha }}
 
-      # The scripts come from the workflow's commit, not the commit being built, so they always match this file.
-      - uses: actions/checkout@v4
+      - name: Check out the release scripts from the workflow commit
+        uses: actions/checkout@v4
         with:
+          ref: ${{ github.sha }}
           path: .release-tools
           sparse-checkout: scripts
 
@@ -271,6 +271,11 @@ jobs:
           {
             echo "### Dry run of $TAG"
             echo "Nothing was published. This is the latest.json the release would serve."
+            echo '```'
+            for sig in assets/*.sig; do
+              echo "$(basename "$sig"): $(base64 -d < "$sig" | grep '^trusted comment:')"
+            done
+            echo '```'
             echo '```json'
             cat latest.json
             echo '```'
@@ -311,9 +316,8 @@ jobs:
           merge-multiple: true
           path: assets
 
-      # A rerun finds the draft or the published release this run already made and continues from there.
-      - name: Create or resume the draft
-        id: draft
+      - name: Create or resume the release
+        id: release
         run: |
           set -euo pipefail
           if release=$(gh release view "$TAG" --json isDraft,targetCommitish 2>/dev/null); then
@@ -333,7 +337,7 @@ jobs:
           echo "state=draft" >> "$GITHUB_OUTPUT"
 
       - name: Upload the bundles and latest.json
-        if: steps.draft.outputs.state == 'draft'
+        if: steps.release.outputs.state == 'draft'
         run: |
           set -euo pipefail
           gh release upload "$TAG" assets/* --clobber
@@ -344,7 +348,7 @@ jobs:
           cmp latest.json uploaded/latest.json
 
       - name: Publish the release
-        if: steps.draft.outputs.state == 'draft'
+        if: steps.release.outputs.state == 'draft'
         run: |
           set -euo pipefail
           if [[ "$CHANNEL" == stable ]]; then latest=--latest; else latest=--latest=false; fi
