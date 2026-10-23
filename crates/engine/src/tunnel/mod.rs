@@ -126,8 +126,10 @@ impl Tunnels {
 struct Cell {
     spec: Arc<TunnelSpec>,
     hosts: Arc<HostKeys>,
-    /// Dials finished. A caller reads it before waiting, so a failure recorded after that read is
-    /// the one it waited on, and an older one is not handed to it.
+    /// Dials finished, published only after the lock is released. A caller reads it before
+    /// waiting, so a failure newer than that read is the one it waited on, and an older one is
+    /// not handed to it. Publishing under the lock would let a caller read the new count and then
+    /// wait, see no newer failure, and dial again.
     finished: AtomicU64,
     state: tokio::sync::Mutex<CellState>,
 }
@@ -155,8 +157,8 @@ impl Cell {
             return Err(error.clone());
         }
         let dialed = dial(&self.spec, &self.hosts).await;
-        let attempt = self.finished.fetch_add(1, Ordering::AcqRel) + 1;
-        match dialed {
+        let attempt = self.finished.load(Ordering::Relaxed) + 1;
+        let result = match dialed {
             Ok(handle) => {
                 let tunnel = Arc::new(Tunnel { handle });
                 *state = CellState { up: Arc::downgrade(&tunnel), failed: None };
@@ -166,7 +168,10 @@ impl Cell {
                 state.failed = Some((attempt, error.clone()));
                 Err(error)
             }
-        }
+        };
+        drop(state);
+        self.finished.store(attempt, Ordering::Release);
+        result
     }
 }
 
