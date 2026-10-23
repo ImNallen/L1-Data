@@ -63,7 +63,7 @@ impl Harness {
         let connection = engine.save_connection(ConnectionDraft {
             id: None, database_kind: DatabaseKind::SqlServer, name: "Native state regression".into(),
             host, port, database: database.into(), user: user.into(), password: PasswordInput::Set(password.into()),
-            ssl_mode: SslMode::Require, ca_cert_path: None, color: None,
+            ssl_mode: SslMode::Require, ca_cert_path: None, color: None, ssh: None,
         }).await.unwrap();
         let tab = TabId(uuid::Uuid::new_v4());
         engine.console_configure(tab, ConsoleConfig {

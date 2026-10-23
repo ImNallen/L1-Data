@@ -1,6 +1,6 @@
 import { expect, it } from "vitest";
 import type { ConnectionConfig } from "../../ipc/bindings";
-import { initialFields, isDirty } from "./connectionForm";
+import { initialFields, isDirty, keptTunnel } from "./connectionForm";
 
 const saved: ConnectionConfig = {
   id: "c1",
@@ -14,6 +14,7 @@ const saved: ConnectionConfig = {
   caCertPath: null,
   hasPassword: true,
   color: "red",
+  ssh: null,
 };
 
 const savedFields = { databaseKind: "Postgres", caCertPath: "", name: "shop", host: "db.internal", port: "5433", database: "shop", user: "l1data", sslMode: "Require", color: "red" } as const;
@@ -47,4 +48,11 @@ it("starts SQL Server with SQL login, master and verified TLS", () => {
   const fields = initialFields({ ...saved, databaseKind: "SqlServer", port: 1434, database: "reporting", sslMode: "Require" });
   expect(fields).toMatchObject({ databaseKind: "SqlServer", port: "1434", database: "reporting", sslMode: "Require" });
   expect(isDirty(undefined, { fields: initialFields(undefined, "SqlServer"), password: { kind: "clear" }, url: "" })).toBe(true);
+});
+
+it("carries a saved tunnel through a save and keeps its secret", () => {
+  const ssh = { host: "bastion", port: 22, user: "tunnel", auth: { kind: "Key", path: "~/.ssh/id_ed25519" }, hasSecret: true } as const;
+  expect(keptTunnel({ ...saved, ssh })).toEqual({ host: "bastion", port: 22, user: "tunnel", auth: { kind: "Key", path: "~/.ssh/id_ed25519" }, secret: "Keep" });
+  expect(keptTunnel(saved)).toBeNull();
+  expect(keptTunnel(undefined)).toBeNull();
 });

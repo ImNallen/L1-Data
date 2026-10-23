@@ -10,7 +10,7 @@ import { useWorkspace } from "../../state/workspace";
 import { Button, cx, DatabaseBadge, DialogBackdrop, IconButton, inputClass, Modal, Spinner, StatusDot } from "../../ui/primitives";
 import { connect } from "./connectionActions";
 import { CONNECTION_COLORS, ConnectionColorDot, connectionColorId, type ConnectionColorId } from "./connectionColors";
-import { initialFields, initialPassword, isDirty, type Fields, type PasswordEdit } from "./connectionForm";
+import { initialFields, initialPassword, isDirty, keptTunnel, type Fields, type PasswordEdit } from "./connectionForm";
 
 /** Each hint says what the engine's `tls()` does for the mode. */
 const SSL_MODES: { value: SslMode; label: string; hint: string }[] = [
@@ -264,6 +264,7 @@ function ConnectionForm({
     caCertPath: fields.caCertPath.trim() || null,
     password: toPasswordInput(password),
     color: fields.color,
+    ssh: keptTunnel(existing),
   });
 
   const test = async () => {

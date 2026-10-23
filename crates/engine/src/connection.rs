@@ -67,6 +67,30 @@ pub fn connect_error_text(e: &ConnectError) -> String {
         ConnectError::Network { message } | ConnectError::Tls { message } | ConnectError::Auth { message } | ConnectError::Keychain { message } => message.clone(),
         ConnectError::MissingPassword => "password missing".into(),
         ConnectError::Server(q) => q.message.clone(),
+        ConnectError::Ssh { error } => ssh_error_text(error),
+    }
+}
+
+/// How OpenSSH names a server in known_hosts and in `ssh-keygen -R`.
+pub fn known_hosts_name(host: &str, port: u16) -> String {
+    if port == 22 { host.to_owned() } else { format!("[{host}]:{port}") }
+}
+
+fn ssh_error_text(e: &SshError) -> String {
+    match e {
+        SshError::Network { message } | SshError::KnownHosts { message } | SshError::Auth { message } | SshError::Key { message } | SshError::Agent { message } | SshError::Forward { message } => {
+            format!("SSH: {message}")
+        }
+        SshError::HostKeyUnknown { host, port, algorithm, fingerprint, .. } => format!("SSH: {host}:{port} offered an unknown {algorithm} host key {fingerprint}"),
+        SshError::HostKeyChanged { host, port, algorithm, fingerprint, known_at } => {
+            let (file, _) = known_at.rsplit_once(':').unwrap_or((known_at, ""));
+            format!(
+                "SSH: the {algorithm} host key of {host}:{port} is now {fingerprint}, but {known_at} holds another. If the server's key was replaced, run `ssh-keygen -R '{}' -f '{file}'`",
+                known_hosts_name(host, *port)
+            )
+        }
+        SshError::HostKeyRevoked { host, port, algorithm, fingerprint, revoked_at } => format!("SSH: the {algorithm} host key {fingerprint} of {host}:{port} is revoked at {revoked_at}"),
+        SshError::MissingSecret => "SSH: no password or key passphrase is saved for the tunnel".into(),
     }
 }
 
@@ -377,6 +401,7 @@ mod tests {
             ca_cert_path: None,
             has_password: false,
             color: None,
+            ssh: None,
         };
         let databases = ["Shop", "shop"].map(|name| DatabaseInfo { name: name.into(), system: false, access: DbAccess::Ok });
         let home = DbSlot::new(DatabaseRef { connection_id: id, database: "Shop".into() });

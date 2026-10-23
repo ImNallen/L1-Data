@@ -43,6 +43,7 @@ impl Harness {
                 ssl_mode: SslMode::Require,
                 ca_cert_path: None,
                 color: None,
+                ssh: None,
             },
         };
         assert_eq!(draft.database, "shop", "Refresh regressions only create disposable objects in shop");

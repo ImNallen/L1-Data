@@ -10,6 +10,7 @@ import type {
   ExportError,
   RunError,
   SendError,
+  SshError,
   TxnError,
 } from "./bindings";
 
@@ -23,6 +24,38 @@ export function connectErrorText(e: ConnectError): string {
       return e.message;
     case "MissingPassword":
       return "No password is saved for this connection. Edit the connection to set one.";
+    case "Ssh":
+      return sshErrorText(e.error);
+    default: {
+      const unreachable: never = e;
+      return unreachable;
+    }
+  }
+}
+
+function knownHostsName(host: string, port: number): string {
+  return port === 22 ? host : `[${host}]:${port}`;
+}
+
+export function sshErrorText(e: SshError): string {
+  switch (e.kind) {
+    case "Network":
+    case "KnownHosts":
+    case "Auth":
+    case "Key":
+    case "Agent":
+    case "Forward":
+      return `SSH: ${e.message}`;
+    case "HostKeyUnknown":
+      return `SSH: ${e.host}:${e.port} offered an unknown ${e.algorithm} host key ${e.fingerprint}.`;
+    case "HostKeyChanged": {
+      const file = e.knownAt.slice(0, e.knownAt.lastIndexOf(":"));
+      return `SSH: the ${e.algorithm} host key of ${e.host}:${e.port} is now ${e.fingerprint}, but ${e.knownAt} holds another. If the server's key was replaced, run ssh-keygen -R '${knownHostsName(e.host, e.port)}' -f '${file}'.`;
+    }
+    case "HostKeyRevoked":
+      return `SSH: the ${e.algorithm} host key ${e.fingerprint} of ${e.host}:${e.port} is revoked at ${e.revokedAt}.`;
+    case "MissingSecret":
+      return "SSH: no password or key passphrase is saved for the tunnel. Edit the connection to set one.";
     default: {
       const unreachable: never = e;
       return unreachable;

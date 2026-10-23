@@ -19,6 +19,7 @@ fn draft(database: &str) -> ConnectionDraft {
         ssl_mode: SslMode::Require,
         ca_cert_path: None,
         color: None,
+        ssh: None,
     }
 }
 

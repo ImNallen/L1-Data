@@ -457,6 +457,7 @@ mod tests {
             ca_cert_path: None,
             has_password: true,
             color: None,
+            ssh: None,
         };
         {
             let s = Store::open(&path).unwrap();

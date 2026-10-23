@@ -225,6 +225,7 @@ pub fn draft_from_url(url: &str, name: &str) -> Result<ConnectionDraft, String> 
         ca_cert_path: None,
         password: password.map_or(PasswordInput::Clear, PasswordInput::Set),
         color: None,
+        ssh: None,
     })
 }
 

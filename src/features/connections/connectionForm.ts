@@ -1,4 +1,4 @@
-import type { ConnectionConfig, DatabaseKind, SslMode } from "../../ipc/bindings";
+import type { ConnectionConfig, DatabaseKind, SshTunnelDraft, SslMode } from "../../ipc/bindings";
 import { connectionColorId, type ConnectionColorId } from "./connectionColors";
 
 export type Fields = { databaseKind: DatabaseKind; name: string; host: string; port: string; database: string; user: string; sslMode: SslMode; caCertPath: string; color: ConnectionColorId | null };
@@ -32,4 +32,11 @@ export function isDirty(existing: ConnectionConfig | undefined, form: FormState)
   const fieldChanged = (Object.keys(start) as (keyof Fields)[]).some((k) => start[k] !== form.fields[k]);
   // The initial edit is never `set`, so comparing kinds is enough.
   return fieldChanged || form.password.kind !== initialPassword(existing).kind || form.url !== "";
+}
+
+/** The saved tunnel as a draft that keeps its secret, so a save from this form never drops it. */
+export function keptTunnel(c: ConnectionConfig | undefined): SshTunnelDraft | null {
+  if (!c?.ssh) return null;
+  const { host, port, user, auth } = c.ssh;
+  return { host, port, user, auth, secret: "Keep" };
 }
