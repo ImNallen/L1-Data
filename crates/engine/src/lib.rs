@@ -674,7 +674,16 @@ impl Engine {
     pub async fn open(cfg: EngineConfig) -> Result<Arc<Self>, StoreError> {
         tokio::fs::create_dir_all(&cfg.data_dir).await?;
         let store = Store::open(&cfg.data_dir.join(DB_FILE))?;
-        let settings = store.kv_get::<Settings>(KV_SETTINGS)?.unwrap_or_default();
+        // An update can install an older build, which must still start when a newer build saved
+        // settings it cannot read. The row stays as saved until the user changes a setting.
+        let settings = match store.kv_get::<Settings>(KV_SETTINGS) {
+            Err(StoreError::Json(e)) => {
+                eprintln!("settings load failed, so this launch uses the defaults: {e}");
+                None
+            }
+            loaded => loaded?,
+        }
+        .unwrap_or_default();
         let (events, _) = broadcast::channel(EVENT_BUFFER);
         let tunnels = tunnel::Tunnels::new(cfg.user_known_hosts, cfg.data_dir.join("known_hosts"));
         let updates = update::Updates::open(&store, cfg.updates);
@@ -1707,6 +1716,19 @@ mod tests {
         engine.delete_connection(saved.id).await.unwrap();
         let err = engine.save_connection(draft("dev")).await.unwrap_err();
         assert!(matches!(err, SaveError::Keychain { ref message } if message == "keychain touched"));
+    }
+
+    #[tokio::test]
+    async fn settings_a_newer_build_saved_load_as_the_defaults_and_stay_saved() {
+        let (engine, dir) = engine().await;
+        let newer = serde_json::json!({ "colorScheme": "Sepia", "maxRows": 5 });
+        engine.shared.store.kv_set(KV_SETTINGS, &newer).unwrap();
+        engine.shutdown().await;
+        drop(engine);
+        let config = EngineConfig { data_dir: dir.path().join("nested"), keys: Arc::new(MemoryKeyStore::default()), agent_path: AgentPath::Fixed("".into()), user_known_hosts: None, updates: Arc::new(crate::ScriptedTransport::named("off").unwrap()) };
+        let reopened = Engine::open(config).await.unwrap();
+        assert_eq!(reopened.boot().settings.max_rows, Settings::default().max_rows);
+        assert_eq!(reopened.shared.store.kv_get::<serde_json::Value>(KV_SETTINGS).unwrap(), Some(newer));
     }
 
     #[tokio::test]
