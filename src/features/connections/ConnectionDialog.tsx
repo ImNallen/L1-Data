@@ -1,16 +1,28 @@
 import * as Dialog from "@radix-ui/react-dialog";
-import { IconAlertCircle, IconCheck, IconEye, IconEyeOff, IconLock, IconPlus, IconSelector, IconX } from "@tabler/icons-react";
+import { IconAlertCircle, IconCheck, IconEye, IconEyeOff, IconKey, IconLock, IconPlus, IconSelector, IconX } from "@tabler/icons-react";
 import { useEffect, useId, useRef, useState, type ReactNode } from "react";
-import { commands, type ConnectionConfig, type ConnectionDraft, type ConnectionId, type PasswordInput, type SslMode } from "../../ipc/bindings";
+import { commands, type ConnectionConfig, type ConnectionDraft, type ConnectionId, type SslMode } from "../../ipc/bindings";
 import { connectErrorText } from "../../ipc/errors";
 import { DATABASE_LABEL } from "../../state/databaseKind";
 import { useLive } from "../../state/live";
 import { connectionTone } from "../../state/status";
 import { useWorkspace } from "../../state/workspace";
-import { Button, cx, DatabaseBadge, DialogBackdrop, IconButton, inputClass, Modal, Spinner, StatusDot } from "../../ui/primitives";
-import { connect } from "./connectionActions";
+import { Button, cx, DatabaseBadge, DialogBackdrop, IconButton, inputClass, Modal, Spinner, StatusDot, Switch } from "../../ui/primitives";
+import { connect, unknownHostKey, type UnknownHostKey } from "./connectionActions";
 import { CONNECTION_COLORS, ConnectionColorDot, connectionColorId, type ConnectionColorId } from "./connectionColors";
-import { initialFields, initialPassword, isDirty, keptTunnel, type Fields, type PasswordEdit } from "./connectionForm";
+import {
+  initialFields,
+  initialPassword,
+  initialSshSecret,
+  isDirty,
+  parsePort,
+  sshValid,
+  toPasswordInput,
+  toSshDraft,
+  type Fields,
+  type PasswordEdit,
+  type SshAuthKind,
+} from "./connectionForm";
 
 /** Each hint says what the engine's `tls()` does for the mode. */
 const SSL_MODES: { value: SslMode; label: string; hint: string }[] = [
@@ -21,25 +33,17 @@ const SSL_MODES: { value: SslMode; label: string; hint: string }[] = [
   { value: "VerifyFull", label: "Verify full", hint: "Always uses TLS and checks the certificate chain and the host name." },
 ];
 
-function toPasswordInput(edit: PasswordEdit): PasswordInput {
-  switch (edit.kind) {
-    case "keep":
-      return "Keep";
-    case "clear":
-      return "Clear";
-    case "set":
-      return { Set: edit.value };
-    default: {
-      const unreachable: never = edit;
-      return unreachable;
-    }
-  }
-}
+const SSH_AUTHS: { value: SshAuthKind; label: string }[] = [
+  { value: "Password", label: "Password" },
+  { value: "Key", label: "Key file" },
+  { value: "Agent", label: "SSH agent" },
+];
 
-type Probe = { kind: "idle" } | { kind: "testing" } | { kind: "ok"; version: string } | { kind: "error"; message: string };
+type Probe = { kind: "idle" } | { kind: "testing" } | { kind: "ok"; version: string } | { kind: "error"; message: string } | { kind: "hostKey"; key: UnknownHostKey };
 
-function serverText(c: { host: string; port: number; database: string }): string {
-  return `${c.host}:${c.port}/${c.database}`;
+function serverText(c: ConnectionConfig): string {
+  const server = `${c.host}:${c.port}/${c.database}`;
+  return c.ssh ? `${server} via ${c.ssh.host}:${c.ssh.port}` : server;
 }
 
 function ListRow({
@@ -137,6 +141,47 @@ function FormRow({ label, htmlFor, labelId, hint, children }: { label: string; h
   );
 }
 
+function SecretInput({ testId, label, value, placeholder, onChange }: { testId: string; label: string; value: string; placeholder: string; onChange: (value: string) => void }) {
+  const [reveal, setReveal] = useState(false);
+  const noun = label.toLowerCase();
+  return (
+    <div className="relative w-full">
+      <input
+        data-testid={testId}
+        aria-label={label}
+        type={reveal ? "text" : "password"}
+        className={cx(inputClass, "pr-8")}
+        value={value}
+        placeholder={placeholder}
+        onChange={(e) => onChange(e.target.value)}
+      />
+      <button
+        type="button"
+        data-testid={`${testId}-reveal`}
+        aria-label={reveal ? `Hide ${noun}` : `Show ${noun}`}
+        aria-pressed={reveal}
+        onClick={() => setReveal(!reveal)}
+        className="absolute top-1/2 right-1 grid size-6 -translate-y-1/2 place-items-center rounded-md text-dim hover:bg-hover hover:text-fg"
+      >
+        {reveal ? <IconEyeOff size={14} /> : <IconEye size={14} />}
+      </button>
+    </div>
+  );
+}
+
+function ClearSecretButton({ testId, noun, cleared, onToggle }: { testId: string; noun: string; cleared: boolean; onToggle: () => void }) {
+  return (
+    <button type="button" data-testid={testId} onClick={onToggle} className="hover:text-fg">
+      {cleared ? `Keep the saved ${noun}` : `Remove the saved ${noun}`}
+    </button>
+  );
+}
+
+function secretPlaceholder(edit: PasswordEdit, saved: boolean, noun: string, empty: string): string {
+  if (edit.kind === "keep") return `Saved ${noun}`;
+  return edit.kind === "clear" && saved ? `${noun[0]?.toUpperCase()}${noun.slice(1)} will be removed` : empty;
+}
+
 type ColorChoice = ConnectionColorId | null;
 const COLOR_CHOICES: readonly ColorChoice[] = [null, ...CONNECTION_COLORS.map((c) => c.id)];
 
@@ -205,7 +250,7 @@ function ConnectionForm({
   const ids = useId();
   const [fields, setFields] = useState(() => initialFields(existing));
   const [password, setPassword] = useState<PasswordEdit>(() => initialPassword(existing));
-  const [reveal, setReveal] = useState(false);
+  const [sshSecret, setSshSecret] = useState<PasswordEdit>(() => initialSshSecret(existing));
   const [url, setUrl] = useState("");
   const [urlError, setUrlError] = useState<string | null>(null);
   const [urlBlurred, setUrlBlurred] = useState(false);
@@ -215,18 +260,26 @@ function ConnectionForm({
   const [saving, setSaving] = useState(false);
   const [saveError, setSaveError] = useState<string | null>(null);
 
-  const dirty = isDirty(existing, { fields, password, url });
+  const dirty = isDirty(existing, { fields, password, sshSecret, url });
   useEffect(() => {
     onDirtyChange(dirty);
     return () => onDirtyChange(false);
   }, [dirty, onDirtyChange]);
 
-  const update = (patch: Partial<Fields>) => {
+  const resetProbe = () => {
     ++probeRequest.current;
-    setFields((f) => ({ ...f, ...patch }));
     setProbe({ kind: "idle" });
   };
-  const set = (key: "name" | "host" | "port" | "database" | "user") => (e: React.ChangeEvent<HTMLInputElement>) => update({ [key]: e.target.value });
+  const update = (patch: Partial<Fields>) => {
+    resetProbe();
+    setFields((f) => ({ ...f, ...patch }));
+  };
+  const set = (key: "name" | "host" | "port" | "database" | "user" | "sshHost" | "sshPort" | "sshUser" | "sshKeyPath" | "sshAgentSocket") => (e: React.ChangeEvent<HTMLInputElement>) =>
+    update({ [key]: e.target.value });
+  const editSshSecret = (edit: PasswordEdit) => {
+    resetProbe();
+    setSshSecret(edit);
+  };
 
   const parseUrl = async (text: string) => {
     const request = ++urlRequest.current;
@@ -248,8 +301,8 @@ function ConnectionForm({
   // A half-typed URL fails to parse, so its error waits for a blur or until it reads like a URL or a key=value string.
   const shownUrlError = urlError !== null && (urlBlurred || url.includes("://") || url.includes("=")) ? urlError : null;
 
-  const port = Number(fields.port);
-  const valid = fields.host.trim() !== "" && Number.isInteger(port) && port > 0 && port < 65_536;
+  const port = parsePort(fields.port);
+  const valid = fields.host.trim() !== "" && port !== null && sshValid(fields);
   const fallbackName = `${fields.host.trim()} / ${fields.database.trim()}`;
 
   const draft = (): ConnectionDraft => ({
@@ -257,14 +310,14 @@ function ConnectionForm({
     databaseKind: fields.databaseKind,
     name: fields.name.trim() || fallbackName,
     host: fields.host.trim(),
-    port,
+    port: port ?? 0,
     database: fields.database.trim(),
     user: fields.user.trim(),
     sslMode: fields.sslMode,
     caCertPath: fields.caCertPath.trim() || null,
     password: toPasswordInput(password),
     color: fields.color,
-    ssh: keptTunnel(existing),
+    ssh: toSshDraft(fields, sshSecret),
   });
 
   const test = async () => {
@@ -272,7 +325,21 @@ function ConnectionForm({
     setProbe({ kind: "testing" });
     const res = await commands.connectionTest(draft());
     if (request !== probeRequest.current) return;
-    setProbe(res.status === "ok" ? { kind: "ok", version: res.data.version } : { kind: "error", message: connectErrorText(res.error) });
+    if (res.status === "ok") {
+      setProbe({ kind: "ok", version: res.data.version });
+      return;
+    }
+    const key = unknownHostKey(res.error);
+    setProbe(key ? { kind: "hostKey", key } : { kind: "error", message: connectErrorText(res.error) });
+  };
+
+  const trustAndTest = async (key: UnknownHostKey) => {
+    const request = ++probeRequest.current;
+    setProbe({ kind: "testing" });
+    const res = await commands.sshTrustHostKey(key.trust);
+    if (request !== probeRequest.current) return;
+    if (res.status === "error") setProbe({ kind: "error", message: `SSH: ${res.error}` });
+    else await test();
   };
 
   const submit = async () => {
@@ -289,7 +356,25 @@ function ConnectionForm({
     if (!existing) void connect(res.data.id);
   };
 
-  const passwordPlaceholder = password.kind === "keep" ? "Saved password" : password.kind === "clear" && existing?.hasPassword ? "Password will be removed" : "password";
+  const sshSecretSaved = initialSshSecret(existing, fields.sshAuth).kind === "keep";
+  const sshNoun = fields.sshAuth === "Key" ? "passphrase" : "password";
+  const sshSecretInput = (empty: string) => (
+    <SecretInput
+      testId="conn-ssh-secret"
+      label={fields.sshAuth === "Key" ? "Passphrase" : "SSH password"}
+      value={sshSecret.kind === "set" ? sshSecret.value : ""}
+      placeholder={secretPlaceholder(sshSecret, sshSecretSaved, sshNoun, empty)}
+      onChange={(value) => editSshSecret(value ? { kind: "set", value } : initialSshSecret(existing, fields.sshAuth))}
+    />
+  );
+  const sshSecretClear = sshSecretSaved && (
+    <ClearSecretButton
+      testId="conn-ssh-secret-clear"
+      noun={sshNoun}
+      cleared={sshSecret.kind === "clear"}
+      onToggle={() => editSshSecret(sshSecret.kind === "clear" ? { kind: "keep" } : { kind: "clear" })}
+    />
+  );
   const sslModes = fields.databaseKind === "SqlServer" ? SSL_MODES.filter((m) => m.value === "VerifyFull" || m.value === "Require") : SSL_MODES;
   const sslHint = sslModes.find((m) => m.value === fields.sslMode)?.hint;
 
@@ -326,8 +411,8 @@ function ConnectionForm({
               ++urlRequest.current;
               setUrl("");
               setUrlError(null);
-              const defaults = initialFields(undefined, databaseKind);
-              update({ ...defaults, name: fields.name, host: fields.host, color: fields.color });
+              const { port, database, user, sslMode, caCertPath } = initialFields(undefined, databaseKind);
+              update({ databaseKind, port, database, user, sslMode, caCertPath });
               setPassword({ kind: "clear" });
             }}
           >
@@ -358,7 +443,7 @@ function ConnectionForm({
             />
           </FormRow>
         )}
-        <FormRow label="Server" htmlFor={`${ids}-host`}>
+        <FormRow label="Server" htmlFor={`${ids}-host`} hint={fields.sshEnabled ? "Resolved and dialed by the SSH server." : undefined}>
           <div className="flex gap-2">
             <div className="min-w-0 flex-1">
               <input id={`${ids}-host`} data-testid="conn-host" className={inputClass} value={fields.host} onChange={set("host")} />
@@ -378,50 +463,31 @@ function ConnectionForm({
             <>
               {fields.databaseKind === "SqlServer" && <span className="block">SQL login over TCP. Windows and Microsoft Entra authentication are not supported.</span>}
               {existing?.hasPassword && (
-                <button
-                  type="button"
-                  data-testid="conn-password-clear"
-                  onClick={() => {
-                    ++probeRequest.current;
-                    setProbe({ kind: "idle" });
+                <ClearSecretButton
+                  testId="conn-password-clear"
+                  noun="password"
+                  cleared={password.kind === "clear"}
+                  onToggle={() => {
+                    resetProbe();
                     setPassword(password.kind === "clear" ? { kind: "keep" } : { kind: "clear" });
                   }}
-                  className="hover:text-fg"
-                >
-                  {password.kind === "clear" ? "Keep the saved password" : "Remove the saved password"}
-                </button>
+                />
               )}
             </>
           }
         >
           <div className="flex gap-2">
             <input id={`${ids}-user`} data-testid="conn-user" className={inputClass} value={fields.user} onChange={set("user")} placeholder="user" />
-            <div className="relative w-full">
-              <input
-                data-testid="conn-password"
-                aria-label="Password"
-                type={reveal ? "text" : "password"}
-                className={cx(inputClass, "pr-8")}
-                value={password.kind === "set" ? password.value : ""}
-                placeholder={passwordPlaceholder}
-                onChange={(e) => {
-                  const value = e.target.value;
-                  ++probeRequest.current;
-                  setProbe({ kind: "idle" });
-                  setPassword(value ? { kind: "set", value } : initialPassword(existing));
-                }}
-              />
-              <button
-                type="button"
-                data-testid="conn-password-reveal"
-                aria-label={reveal ? "Hide password" : "Show password"}
-                aria-pressed={reveal}
-                onClick={() => setReveal(!reveal)}
-                className="absolute top-1/2 right-1 grid size-6 -translate-y-1/2 place-items-center rounded-md text-dim hover:bg-hover hover:text-fg"
-              >
-                {reveal ? <IconEyeOff size={14} /> : <IconEye size={14} />}
-              </button>
-            </div>
+            <SecretInput
+              testId="conn-password"
+              label="Password"
+              value={password.kind === "set" ? password.value : ""}
+              placeholder={secretPlaceholder(password, existing?.hasPassword ?? false, "password", "password")}
+              onChange={(value) => {
+                resetProbe();
+                setPassword(value ? { kind: "set", value } : initialPassword(existing));
+              }}
+            />
           </div>
         </FormRow>
         <FormRow label="TLS" htmlFor={`${ids}-ssl`} hint={sslHint}>
@@ -450,6 +516,93 @@ function ConnectionForm({
             <input id={`${ids}-ca`} data-testid="conn-ca-cert" className={inputClass} value={fields.caCertPath} onChange={(e) => update({ caCertPath: e.target.value })} />
           </FormRow>
         )}
+        <FormRow
+          label="SSH tunnel"
+          htmlFor={fields.sshEnabled ? `${ids}-ssh-host` : undefined}
+          hint={fields.sshEnabled ? "Checks ~/.ssh/known_hosts. Does not read ~/.ssh/config." : undefined}
+        >
+          <div className="flex h-8 items-center gap-2">
+            <Switch checked={fields.sshEnabled} onCheckedChange={(sshEnabled) => update({ sshEnabled })} label="SSH tunnel" testId="conn-ssh-enabled" />
+            {fields.sshEnabled ? (
+              <>
+                <div className="ml-1 min-w-0 flex-1">
+                  <input id={`${ids}-ssh-host`} data-testid="conn-ssh-host" className={inputClass} value={fields.sshHost} onChange={set("sshHost")} placeholder="bastion.example.com" />
+                </div>
+                <div className="w-24 shrink-0">
+                  <input data-testid="conn-ssh-port" aria-label="SSH port" className={inputClass} value={fields.sshPort} onChange={set("sshPort")} inputMode="numeric" />
+                </div>
+              </>
+            ) : (
+              <span className="text-ui-13 text-dim">Connect through an SSH server</span>
+            )}
+          </div>
+        </FormRow>
+        {fields.sshEnabled && (
+          <>
+            <FormRow label="SSH sign in" htmlFor={`${ids}-ssh-user`}>
+              <div className="flex gap-2">
+                <input id={`${ids}-ssh-user`} data-testid="conn-ssh-user" className={inputClass} value={fields.sshUser} onChange={set("sshUser")} placeholder="user" />
+                <div className="relative w-full">
+                  <select
+                    data-testid="conn-ssh-auth"
+                    aria-label="SSH authentication"
+                    className={cx(inputClass, "appearance-none pr-8")}
+                    value={fields.sshAuth}
+                    onChange={(e) => {
+                      const auth = SSH_AUTHS.find((a) => a.value === e.target.value);
+                      if (!auth) return;
+                      update({ sshAuth: auth.value });
+                      setSshSecret(initialSshSecret(existing, auth.value));
+                    }}
+                  >
+                    {SSH_AUTHS.map((a) => (
+                      <option key={a.value} value={a.value}>
+                        {a.label}
+                      </option>
+                    ))}
+                  </select>
+                  <IconSelector size={14} className="pointer-events-none absolute top-1/2 right-2.5 -translate-y-1/2 text-dim" />
+                </div>
+              </div>
+            </FormRow>
+            {fields.sshAuth === "Password" && (
+              <FormRow label="SSH password" hint={sshSecretClear || undefined}>
+                {sshSecretInput("password")}
+              </FormRow>
+            )}
+            {fields.sshAuth === "Key" && (
+              <FormRow
+                label="Key file"
+                htmlFor={`${ids}-ssh-key`}
+                hint={
+                  <>
+                    <span className="block">Leave the passphrase empty for an unencrypted key.</span>
+                    {sshSecretClear}
+                  </>
+                }
+              >
+                <div className="flex gap-2">
+                  <div className="min-w-0 flex-1">
+                    <input id={`${ids}-ssh-key`} data-testid="conn-ssh-key" className={inputClass} value={fields.sshKeyPath} onChange={set("sshKeyPath")} placeholder="~/.ssh/id_ed25519" />
+                  </div>
+                  <div className="w-40 shrink-0">{sshSecretInput("passphrase")}</div>
+                </div>
+              </FormRow>
+            )}
+            {fields.sshAuth === "Agent" && (
+              <FormRow label="Agent socket" htmlFor={`${ids}-ssh-agent`} hint="Optional. Leave empty to use the agent at SSH_AUTH_SOCK.">
+                <input
+                  id={`${ids}-ssh-agent`}
+                  data-testid="conn-ssh-agent-socket"
+                  className={inputClass}
+                  value={fields.sshAgentSocket}
+                  onChange={set("sshAgentSocket")}
+                  placeholder="SSH_AUTH_SOCK"
+                />
+              </FormRow>
+            )}
+          </>
+        )}
         <FormRow label="Name" htmlFor={`${ids}-name`} hint="Leave empty to use the host and database.">
           <input
             id={`${ids}-name`}
@@ -466,6 +619,7 @@ function ConnectionForm({
         </FormRow>
       </div>
 
+      {probe.kind === "hostKey" && <HostKeyCard hostKey={probe.key} onTrust={() => void trustAndTest(probe.key)} />}
       <div className="flex shrink-0 items-center gap-3 border-t border-border px-5 py-3">
         <Button data-testid="conn-test" disabled={!valid || probe.kind === "testing"} onClick={() => void test()}>
           Test
@@ -493,6 +647,26 @@ function ConnectionForm({
         </Button>
       </div>
     </form>
+  );
+}
+
+function HostKeyCard({ hostKey, onTrust }: { hostKey: UnknownHostKey; onTrust: () => void }) {
+  const fingerprint = `${hostKey.algorithm} ${hostKey.fingerprint}`;
+  return (
+    <div data-testid="ssh-host-key" className="flex shrink-0 items-center gap-3 border-t border-border px-5 py-3">
+      <IconKey size={16} className="shrink-0 text-amber" />
+      <div className="min-w-0 flex-1 text-ui-12.5 leading-4">
+        <div className="truncate text-fg">
+          {hostKey.host}:{hostKey.port} offered an unknown host key
+        </div>
+        <div className="selectable mt-1 font-mono text-ui-11 break-all text-dim">
+          {fingerprint}
+        </div>
+      </div>
+      <Button data-testid="ssh-trust" onClick={onTrust}>
+        Trust and test again
+      </Button>
+    </div>
   );
 }
 
