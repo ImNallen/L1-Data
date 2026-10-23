@@ -66,6 +66,10 @@ impl Assistant {
             .collect()
     }
 
+    pub(crate) fn running_chats(&self) -> Vec<ChatId> {
+        self.all().iter().filter(|chat| chat.inner.lock().unwrap().turn.is_some()).map(|chat| chat.id).collect()
+    }
+
     pub(crate) fn live_states(&self) -> HashMap<ChatId, ChatState> {
         self.all().iter().map(|chat| (chat.id, chat.state())).collect()
     }

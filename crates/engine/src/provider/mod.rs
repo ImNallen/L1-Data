@@ -5,9 +5,7 @@ pub(crate) mod limits;
 
 use std::collections::HashMap;
 use std::ffi::OsString;
-use std::future::Future;
 use std::path::{Path, PathBuf};
-use std::pin::Pin;
 use std::sync::{Arc, Mutex, Weak};
 use std::time::Duration;
 
@@ -17,7 +15,7 @@ use crate::Shared;
 use crate::console::now_ms;
 use crate::model::{AgentError, AppEvent, Decision, EffortId, ModelId, ModelOption, ProbeOutcome, ProviderConfig, ProviderInfo, ProviderKind, ProviderState, ToolCallId, TurnOutcome};
 
-pub(crate) type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
+pub(crate) use crate::BoxFuture;
 
 const HEALTH_TICK: Duration = Duration::from_secs(5);
 const LOGIN_SHELL_TIMEOUT: Duration = Duration::from_secs(3);

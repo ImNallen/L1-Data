@@ -13,11 +13,13 @@ mod store;
 mod text;
 mod tunnel;
 mod txn;
+mod update;
 mod view;
 
 use std::collections::{BTreeSet, HashMap};
 use std::future::Future;
 use std::path::{Path, PathBuf};
+use std::pin::Pin;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, RwLock, Weak};
 use std::time::Duration;
@@ -40,6 +42,9 @@ pub use provider::AgentPath;
 pub use secrets::{KeyStore, KeyringKeyStore, MemoryKeyStore, SecretError};
 pub use store::StoreError;
 pub use tunnel::openssh_known_hosts;
+pub use update::{Installed, Progress, Release, ScriptedTransport, UpdateTransport, Verified};
+
+pub type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 
 pub struct EngineConfig {
     pub data_dir: PathBuf,
@@ -49,6 +54,7 @@ pub struct EngineConfig {
     /// The app passes `openssh_known_hosts()`. Tests pass `None`, so they never read the
     /// developer's file.
     pub user_known_hosts: Option<PathBuf>,
+    pub updates: Arc<dyn UpdateTransport>,
 }
 
 pub struct Engine {
@@ -79,6 +85,7 @@ pub(crate) struct Shared {
     process_groups: Arc<provider::agent::ProcessGroups>,
     next_chat_rev: AtomicU64,
     tunnels: tunnel::Tunnels,
+    updates: update::Updates,
 }
 
 /// A saved SSH secret applies only to the auth kind it was saved for.
@@ -670,6 +677,7 @@ impl Engine {
         let settings = store.kv_get::<Settings>(KV_SETTINGS)?.unwrap_or_default();
         let (events, _) = broadcast::channel(EVENT_BUFFER);
         let tunnels = tunnel::Tunnels::new(cfg.user_known_hosts, cfg.data_dir.join("known_hosts"));
+        let updates = update::Updates::open(&store, cfg.updates);
         let shared = Arc::new(Shared {
             data_dir: cfg.data_dir,
             vault: Vault::new(cfg.keys),
@@ -688,10 +696,12 @@ impl Engine {
             process_groups: Arc::new(provider::agent::ProcessGroups::default()),
             next_chat_rev: AtomicU64::new(1),
             tunnels,
+            updates,
         });
         tokio::fs::create_dir_all(shared.assistant_dir()).await?;
         shared.probe_all(ProbeDepth::Full);
         shared.spawn(provider::health_loop(Arc::downgrade(&shared)));
+        shared.spawn(update::schedule(Arc::downgrade(&shared)));
         Ok(Arc::new(Self { shared }))
     }
 
@@ -731,7 +741,7 @@ impl Engine {
             .into_iter()
             .map(|(id, r)| live_chats.remove(&id).unwrap_or_else(|| ChatState { id, rev: 0, title: r.title, updated_at_ms: r.updated_at_ms, options: r.options, status: ChatStatus::Idle, entry_count: r.entry_count }))
             .collect();
-        BootSnapshot { connections, live, consoles, workspace, settings: s.settings(), providers: s.provider_states(), chats }
+        BootSnapshot { connections, live, consoles, workspace, settings: s.settings(), providers: s.provider_states(), chats, updates: s.updates.state() }
     }
 
     pub async fn save_connection(&self, d: ConnectionDraft) -> Result<ConnectionConfig, SaveError> {
@@ -1542,6 +1552,29 @@ impl Engine {
         self.shared.read_limits().await
     }
 
+    /// Starts a check now, fire and forget. It does nothing while a check runs, while a release is
+    /// held, or while one downloads or installs.
+    pub fn update_check(&self) {
+        self.shared.update_check()
+    }
+
+    /// Starts downloading the release the snapshot offers. `Stale` unless the snapshot offers
+    /// `version` or already holds it.
+    pub fn update_download(&self, version: String) -> Result<(), UpdateError> {
+        self.shared.update_download(&version)
+    }
+
+    /// Answers `Confirm` with what a restart would end, until `accepted` covers it. Then it stops
+    /// the assistant's turns, installs the verified download, and asks the shell to relaunch.
+    pub async fn update_install(&self, version: String, accepted: Option<RestartImpact>) -> Result<InstallReply, UpdateError> {
+        self.shared.update_install(&version, accepted).await
+    }
+
+    /// Saves the track and checks it at once. `Busy` while a download or an install runs.
+    pub fn update_set_track(&self, track: UpdateTrack) -> Result<(), UpdateError> {
+        self.shared.update_set_track(track)
+    }
+
     /// Stops every assistant turn, then kills any agent process still alive. The shell calls it
     /// on quit. It returns within `SHUTDOWN_BOUND`, so the shell's own bound must be larger.
     pub async fn shutdown(&self) {
@@ -1560,6 +1593,7 @@ mod tests {
             keys: Arc::new(MemoryKeyStore::default()),
             agent_path: AgentPath::Fixed("".into()),
             user_known_hosts: None,
+            updates: Arc::new(crate::ScriptedTransport::named("off").unwrap()),
         })
         .await
         .unwrap();
@@ -1663,7 +1697,7 @@ mod tests {
     #[tokio::test]
     async fn passwordless_save_clear_and_delete_never_touch_the_keychain() {
         let dir = tempfile::tempdir().unwrap();
-        let engine = Engine::open(EngineConfig { data_dir: dir.path().to_owned(), keys: Arc::new(NoKeychain), agent_path: AgentPath::Fixed("".into()), user_known_hosts: None }).await.unwrap();
+        let engine = Engine::open(EngineConfig { data_dir: dir.path().to_owned(), keys: Arc::new(NoKeychain), agent_path: AgentPath::Fixed("".into()), user_known_hosts: None, updates: Arc::new(crate::ScriptedTransport::named("off").unwrap()) }).await.unwrap();
         let saved = engine.save_connection(ConnectionDraft { password: PasswordInput::Clear, ..draft("dev") }).await.unwrap();
         let kept = engine
             .save_connection(ConnectionDraft { id: Some(saved.id), password: PasswordInput::Keep, ..draft("dev") })
@@ -1679,7 +1713,7 @@ mod tests {
     async fn connections_settings_and_workspace_persist_across_open() {
         let dir = tempfile::tempdir().unwrap();
         let keys = Arc::new(MemoryKeyStore::default());
-        let cfg = || EngineConfig { data_dir: dir.path().to_owned(), keys: keys.clone(), agent_path: AgentPath::Fixed("".into()), user_known_hosts: None };
+        let cfg = || EngineConfig { data_dir: dir.path().to_owned(), keys: keys.clone(), agent_path: AgentPath::Fixed("".into()), user_known_hosts: None, updates: Arc::new(crate::ScriptedTransport::named("off").unwrap()) };
         let password = |engine: &Engine, id| engine.shared.saved_secret(id, SecretSlot::Database).unwrap();
         let saved = {
             let engine = Engine::open(cfg()).await.unwrap();
@@ -1763,7 +1797,7 @@ mod tests {
     #[tokio::test]
     async fn an_invalid_tunnel_is_rejected_before_any_secret_is_sealed() {
         let dir = tempfile::tempdir().unwrap();
-        let engine = Engine::open(EngineConfig { data_dir: dir.path().to_owned(), keys: Arc::new(NoKeychain), agent_path: AgentPath::Fixed("".into()), user_known_hosts: None }).await.unwrap();
+        let engine = Engine::open(EngineConfig { data_dir: dir.path().to_owned(), keys: Arc::new(NoKeychain), agent_path: AgentPath::Fixed("".into()), user_known_hosts: None, updates: Arc::new(crate::ScriptedTransport::named("off").unwrap()) }).await.unwrap();
         let tunnel = SshTunnelDraft { host: "bastion".into(), port: 22, user: "tunnel".into(), auth: SshAuth::Password, secret: PasswordInput::Set("pw".into()) };
         for bad in [
             SshTunnelDraft { host: " ".into(), ..tunnel.clone() },

@@ -72,7 +72,9 @@ export type AppEvent = {
 /**  Coalesced to at most 20/s per chat while a text block streams. */
 {
 	kind: "ChatEntryChanged",
-} & EntrySnapshot;
+} & EntrySnapshot | {
+	kind: "UpdateChanged",
+} & UpdateState;
 
 export type Appearance = "light" | "dark";
 
@@ -122,6 +124,7 @@ export type BootSnapshot = {
 	providers: ProviderState[],
 	/**  Stored chats, newest first, at most 200. */
 	chats: ChatState[],
+	updates: UpdateState,
 };
 
 export type Catalog = {
@@ -702,7 +705,7 @@ export type ModelOption = {
 	recommended: boolean,
 };
 
-/**  A console whose transaction would be lost by a disconnect or close. */
+/**  A console whose transaction would be lost by a disconnect, a close, or a restart. */
 export type OpenTxn = {
 	tabId: TabId,
 	hasWrites: boolean,
@@ -1176,6 +1179,42 @@ export type TypeCategory =
 "Integer" | 
 /**  numeric, real, double precision, money. */
 "Numeric" | "Text" | "Bool" | "Temporal" | "Json" | "Binary" | "Uuid" | "Network" | "Array" | "Enum" | "Composite" | "Range" | "Other";
+
+export type UpdateFailure = { kind: "Offline" } | { kind: "BadSignature" } | 
+/**  A mounted disk image or a translocated app cannot replace itself. */
+{ kind: "ReadOnlyLocation" } | { kind: "PermissionDenied" } | { kind: "Other"; message: string };
+
+export type UpdateState = {
+	rev: number,
+	track: UpdateTrack,
+	currentVersion: string,
+	status: UpdateStatus,
+	/**  When the last check came back. A failed check leaves it as it was. */
+	checkedAtMs: number | null,
+};
+
+export type UpdateStatus = 
+/**  Nothing checks. The track can still be chosen. */
+{ kind: "Disabled"; reason: UpdatesOff } | { kind: "Idle" } | { kind: "Checking" } | { kind: "UpToDate" } | 
+/**
+ *  `downgrade` means the release is older than the running build, which happens only for a
+ *  nightly build on the Stable track.
+ */
+{ kind: "Available"; version: string; downgrade: boolean } | 
+/**  `percent` is `None` while the server sends no length. */
+{ kind: "Downloading"; version: string; downgrade: boolean; percent: number | null } | 
+/**  Verified against the built-in key. The engine holds the bytes. */
+{ kind: "Downloaded"; version: string; downgrade: boolean } | { kind: "Installing"; version: string } | { kind: "Failed"; failure: UpdateFailure };
+
+/**
+ *  The release line that update checks follow. `Settings` never holds it, because the webview
+ *  writes `Settings` whole and a stale copy there would switch the track back.
+ */
+export type UpdateTrack = "Stable" | "Nightly";
+
+export type UpdatesOff = "DevBuild" | 
+/**  On Linux only the AppImage can replace itself. */
+"NotAppImage" | "UnsupportedTarget" | "UnknownVersion";
 
 /**
  *  One edit to a connection's stored view, sent by the pickers. Each is an intent that the engine

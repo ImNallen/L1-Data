@@ -190,6 +190,7 @@ mod tests {
             keys: Arc::new(MemoryKeyStore::default()),
             agent_path: AgentPath::Fixed("".into()),
             user_known_hosts: None,
+            updates: Arc::new(engine::ScriptedTransport::named("off").unwrap()),
         })
         .await
         .unwrap();

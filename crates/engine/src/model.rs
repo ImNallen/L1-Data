@@ -1365,6 +1365,7 @@ pub struct BootSnapshot {
     pub providers: Vec<ProviderState>,
     /// Stored chats, newest first, at most 200.
     pub chats: Vec<ChatState>,
+    pub updates: UpdateState,
 }
 
 #[derive(Debug, Clone, Serialize, Type)]
@@ -1382,6 +1383,7 @@ pub enum AppEvent {
     ChatChanged(ChatState),
     /// Coalesced to at most 20/s per chat while a text block streams.
     ChatEntryChanged(EntrySnapshot),
+    UpdateChanged(UpdateState),
 }
 
 #[derive(Debug, Clone, Serialize, Type)]
@@ -1392,8 +1394,8 @@ pub enum SaveError {
     Store { message: String },
 }
 
-/// A console whose transaction would be lost by a disconnect or close.
-#[derive(Debug, Clone, Copy, Serialize, Type)]
+/// A console whose transaction would be lost by a disconnect, a close, or a restart.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Type)]
 #[serde(rename_all = "camelCase")]
 pub struct OpenTxn {
     pub tab_id: TabId,
@@ -1405,6 +1407,93 @@ pub struct OpenTxn {
 pub enum DisconnectError {
     OpenTransactions { tabs: Vec<OpenTxn> },
     Store { message: String },
+}
+
+/// The release line that update checks follow. `Settings` never holds it, because the webview
+/// writes `Settings` whole and a stale copy there would switch the track back.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Type)]
+pub enum UpdateTrack {
+    Stable,
+    Nightly,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct UpdateState {
+    pub rev: u64,
+    pub track: UpdateTrack,
+    pub current_version: String,
+    pub status: UpdateStatus,
+    /// When the last check came back. A failed check leaves it as it was.
+    pub checked_at_ms: Option<i64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Type)]
+#[serde(tag = "kind", rename_all_fields = "camelCase")]
+pub enum UpdateStatus {
+    /// Nothing checks. The track can still be chosen.
+    Disabled { reason: UpdatesOff },
+    Idle,
+    Checking,
+    UpToDate,
+    /// `downgrade` means the release is older than the running build, which happens only for a
+    /// nightly build on the Stable track.
+    Available { version: String, downgrade: bool },
+    /// `percent` is `None` while the server sends no length.
+    Downloading { version: String, downgrade: bool, percent: Option<u8> },
+    /// Verified against the built-in key. The engine holds the bytes.
+    Downloaded { version: String, downgrade: bool },
+    Installing { version: String },
+    Failed { failure: UpdateFailure },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Type)]
+pub enum UpdatesOff {
+    DevBuild,
+    /// On Linux only the AppImage can replace itself.
+    NotAppImage,
+    UnsupportedTarget,
+    UnknownVersion,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Type)]
+#[serde(tag = "kind", rename_all_fields = "camelCase")]
+pub enum UpdateFailure {
+    Offline,
+    BadSignature,
+    /// A mounted disk image or a translocated app cannot replace itself.
+    ReadOnlyLocation,
+    PermissionDenied,
+    Other { message: String },
+}
+
+/// Everything a restart would end, as of the call. The frontend sends it back as what the user
+/// accepted, and the engine installs only if that still covers what a restart would end.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct RestartImpact {
+    /// Tabs with a run, count, commit, rollback, or staged-edit apply in flight.
+    pub running: Vec<TabId>,
+    pub transactions: Vec<OpenTxn>,
+    /// Chats with a running assistant turn.
+    pub chats: Vec<ChatId>,
+}
+
+#[derive(Debug, Clone, Serialize, Type)]
+#[serde(tag = "kind", rename_all_fields = "camelCase")]
+pub enum InstallReply {
+    /// Nothing was installed. Show `impact`, then call again with it as the acceptance.
+    Confirm { impact: RestartImpact },
+    Restarting,
+}
+
+#[derive(Debug, Clone, Serialize, Type)]
+#[serde(tag = "kind")]
+pub enum UpdateError {
+    /// The update is not in the state the action names. The live snapshot already shows where it is.
+    Stale,
+    /// A track switch while a download or an install runs.
+    Busy,
 }
 
 #[derive(Debug, Clone, Serialize, Type)]
@@ -2331,6 +2420,31 @@ mod tests {
                 "checking": true, "checkedAtMs": 1700, "outcome": { "kind": "SignedOut", "version": "2.1.301" }
             })
         );
+    }
+
+    #[test]
+    fn update_changed_keeps_its_own_tag() {
+        let state = |status| UpdateState { rev: 3, track: UpdateTrack::Nightly, current_version: "0.1.1-nightly.20261023.5".into(), status, checked_at_ms: Some(1700) };
+        assert_eq!(
+            serde_json::to_value(AppEvent::UpdateChanged(state(UpdateStatus::Downloading { version: "0.1.0".into(), downgrade: true, percent: Some(40) }))).unwrap(),
+            json!({
+                "kind": "UpdateChanged", "rev": 3, "track": "Nightly", "currentVersion": "0.1.1-nightly.20261023.5", "checkedAtMs": 1700,
+                "status": { "kind": "Downloading", "version": "0.1.0", "downgrade": true, "percent": 40 }
+            })
+        );
+        assert_eq!(
+            serde_json::to_value(state(UpdateStatus::Failed { failure: UpdateFailure::Other { message: "disk full".into() } })).unwrap()["status"],
+            json!({ "kind": "Failed", "failure": { "kind": "Other", "message": "disk full" } })
+        );
+    }
+
+    #[test]
+    fn a_restart_impact_round_trips_as_the_acceptance() {
+        let tab = TabId(Uuid::from_u128(1));
+        let impact = RestartImpact { running: vec![tab], transactions: vec![OpenTxn { tab_id: tab, has_writes: true }], chats: vec![ChatId(Uuid::from_u128(2))] };
+        let value = serde_json::to_value(&impact).unwrap();
+        assert_eq!(value["transactions"], json!([{ "tabId": "00000000-0000-0000-0000-000000000001", "hasWrites": true }]));
+        assert_eq!(serde_json::from_value::<RestartImpact>(value).unwrap(), impact);
     }
 
     #[test]

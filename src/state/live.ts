@@ -17,6 +17,7 @@ import type {
   ProviderKind,
   ProviderState,
   TabId,
+  UpdateState,
 } from "../ipc/bindings";
 import { dbKey, type DbKey } from "./dbKey";
 
@@ -31,6 +32,7 @@ export type LiveData = {
   providers: Partial<Record<ProviderKind, ProviderState>>;
   chats: Record<ChatId, ChatState>;
   transcripts: Record<ChatId, Record<number, EntrySnapshot>>;
+  updates: UpdateState | null;
 };
 
 type LiveState = LiveData & {
@@ -40,11 +42,15 @@ type LiveState = LiveData & {
   apply(e: AppEvent): void;
 };
 
-export const emptyLive: LiveData = { connections: {}, consoles: {}, output: {}, historyTail: [], providers: {}, chats: {}, transcripts: {} };
+export const emptyLive: LiveData = { connections: {}, consoles: {}, output: {}, historyTail: [], providers: {}, chats: {}, transcripts: {}, updates: null };
 
 function keepHigher<K extends PropertyKey, V extends { rev: number }, M extends Partial<Record<K, V>>>(map: M, key: K, next: V): M {
   const prev = map[key];
   return prev && prev.rev >= next.rev ? map : { ...map, [key]: next };
+}
+
+function newerUpdate(prev: UpdateState | null, next: UpdateState): UpdateState {
+  return prev && prev.rev >= next.rev ? prev : next;
 }
 
 function withChat(s: LiveData, chat: ChatState): LiveData {
@@ -126,6 +132,10 @@ export function applyEvent(s: LiveData, e: AppEvent): LiveData {
       const held = s.transcripts[entry.chatId];
       return held ? withEntries(s, entry.chatId, held, [entry]) : s;
     }
+    case "UpdateChanged": {
+      const { kind: _, ...state } = e;
+      return { ...s, updates: newerUpdate(s.updates, state) };
+    }
     default: {
       const unreachable: never = e;
       return unreachable;
@@ -139,7 +149,7 @@ export function hydrateLive(s: LiveData, b: BootSnapshot): LiveData {
   for (const c of b.consoles) next = { ...next, consoles: keepHigher(next.consoles, c.tabId, c) };
   for (const p of b.providers) next = { ...next, providers: keepHigher(next.providers, p.provider, p) };
   for (const c of b.chats) next = withChat(next, c);
-  return next;
+  return { ...next, updates: newerUpdate(next.updates, b.updates) };
 }
 
 export function hydrateChatLive(s: LiveData, view: ChatView): LiveData {

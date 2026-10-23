@@ -1,6 +1,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod ipc;
+mod updater;
 
 use std::error::Error;
 use std::path::Path;
@@ -84,7 +85,13 @@ fn engine_config(app: &tauri::App) -> Result<EngineConfig, Box<dyn Error>> {
         Some("memory") => Arc::new(MemoryKeyStore::default()),
         _ => Arc::new(KeyringKeyStore),
     };
-    Ok(EngineConfig { data_dir, keys, agent_path: AgentPath::LoginShell, user_known_hosts: engine::openssh_known_hosts() })
+    Ok(EngineConfig {
+        data_dir,
+        keys,
+        agent_path: AgentPath::LoginShell,
+        user_known_hosts: engine::openssh_known_hosts(),
+        updates: Arc::new(updater::TauriTransport::new(app.handle().clone())),
+    })
 }
 
 // Tauri's default macOS menu binds Cmd+W to Close Window, which would swallow the key before the webview's
@@ -298,6 +305,7 @@ fn main() {
         }
     });
     app.plugin(tauri_plugin_dialog::init())
+        .plugin(updater::plugin())
         .invoke_handler(builder.invoke_handler())
         .setup(move |app| {
             let engine = tauri::async_runtime::block_on(Engine::open(engine_config(app)?))?;
@@ -396,6 +404,16 @@ mod tests {
             checked += 1;
         }
         assert_eq!(checked, 20, "the sync commands in ipc.rs");
+    }
+
+    /// The engine decides what to install and when. A webview that could call the plugin would
+    /// skip the restart consent and the version policy.
+    #[test]
+    fn the_webview_cannot_reach_the_updater() {
+        let capabilities = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/capabilities/default.json")).unwrap();
+        let package = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/../package.json")).unwrap();
+        assert!(capabilities.contains("core:default") && !capabilities.contains("updater:"), "a capability grants the webview an updater permission");
+        assert!(package.contains("@tauri-apps/api") && !package.contains("@tauri-apps/plugin-updater"), "the frontend depends on the updater plugin's JS API");
     }
 
     #[test]

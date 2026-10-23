@@ -11,7 +11,7 @@ use axum::http::{HeaderValue, Method, StatusCode, header};
 use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::response::{IntoResponse, Json, Response};
 use axum::routing::{get, post};
-use engine::{AgentPath, Engine, EngineConfig, MemoryKeyStore};
+use engine::{AgentPath, Engine, EngineConfig, MemoryKeyStore, ScriptedTransport};
 use futures_util::Stream;
 use serde_json::{Map, Value, json};
 use tokio_stream::StreamExt;
@@ -85,11 +85,14 @@ async fn events(State(engine): State<Arc<Engine>>) -> Sse<impl Stream<Item = Res
 async fn main() {
     let temp_dir = tempfile::tempdir().expect("create temp data dir");
     let data_dir = std::env::var_os("L1_DATA_DATA_DIR").map_or_else(|| temp_dir.path().to_owned(), Into::into);
+    let scenario = std::env::var("L1_DATA_UPDATE_SCENARIO").unwrap_or_else(|_| "current".into());
+    let updates = ScriptedTransport::named(&scenario).unwrap_or_else(|e| panic!("L1_DATA_UPDATE_SCENARIO: {e}"));
     let engine = Engine::open(EngineConfig {
         data_dir,
         keys: Arc::new(MemoryKeyStore::default()),
         agent_path: AgentPath::LoginShell,
         user_known_hosts: engine::openssh_known_hosts(),
+        updates: Arc::new(updates),
     })
     .await
     .expect("open engine");
@@ -105,7 +108,7 @@ async fn main() {
         .with_state(engine.clone());
 
     let listener = tokio::net::TcpListener::bind(ADDR).await.expect("bind dev-bridge port");
-    eprintln!("dev-bridge on http://{ADDR} (data dir {})", engine.data_dir().display());
+    eprintln!("dev-bridge on http://{ADDR} (data dir {}, update scenario {scenario})", engine.data_dir().display());
     // Not a graceful shutdown: that would wait for the `/events` stream, which never ends.
     tokio::select! {
         served = axum::serve(listener, app) => served.expect("serve"),
