@@ -1,12 +1,36 @@
-import { commands, type ConnectionId, type DatabaseRef, type ViewEdit } from "../../ipc/bindings";
+import { commands, type ConnectError, type ConnectionId, type DatabaseRef, type SshError, type ViewEdit } from "../../ipc/bindings";
 import { catalogErrorText, connectErrorText, disconnectErrorText } from "../../ipc/errors";
 import { useWorkspace } from "../../state/workspace";
 
 const ws = () => useWorkspace.getState();
 
+export type UnknownHostKey = Extract<SshError, { kind: "HostKeyUnknown" }>;
+
+/** The bastion key a Test or Connect can trust and retry with. Changed and revoked keys are not offered. */
+export function unknownHostKey(e: ConnectError): UnknownHostKey | null {
+  return e.kind === "Ssh" && e.error.kind === "HostKeyUnknown" ? e.error : null;
+}
+
 export async function connect(id: ConnectionId): Promise<void> {
   const res = await commands.connectionConnect(id);
-  if (res.status === "error") ws().notify(`${ws().configs[id]?.name ?? "Connection"}: ${connectErrorText(res.error)}`);
+  if (res.status === "ok") return;
+  const name = ws().configs[id]?.name ?? "Connection";
+  const key = unknownHostKey(res.error);
+  if (!key) {
+    ws().notify(`${name}: ${connectErrorText(res.error)}`);
+    return;
+  }
+  ws().open({
+    kind: "confirm",
+    title: `Trust the host key of ${key.host}:${key.port}?`,
+    body: `${name} connects through this SSH server, which offered an unknown ${key.algorithm} key ${key.fingerprint}. Trust it only if it matches the server's key.`,
+    confirmLabel: "Trust and connect",
+    onConfirm: async () => {
+      const trusted = await commands.sshTrustHostKey(key.trust);
+      if (trusted.status === "error") ws().notify(`${name}: SSH: ${trusted.error}`);
+      else await connect(id);
+    },
+  });
 }
 
 export async function disconnect(id: ConnectionId): Promise<void> {
