@@ -21,6 +21,7 @@ impl TauriTransport {
 
     #[cfg(target_os = "linux")]
     fn replaceable(&self) -> bool {
+        use tauri::Manager;
         self.app.env().appimage.is_some()
     }
 
