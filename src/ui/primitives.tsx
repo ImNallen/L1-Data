@@ -281,7 +281,7 @@ export function Modal({
             <div>
               <Dialog.Title className="text-ui-14 font-semibold text-fg">{title}</Dialog.Title>
               {description ? (
-                <Dialog.Description className="mt-1 text-ui-12.5 text-dim">{description}</Dialog.Description>
+                <Dialog.Description className="mt-1 text-ui-12.5 [overflow-wrap:anywhere] text-dim">{description}</Dialog.Description>
               ) : (
                 <Dialog.Description className="sr-only">{title}</Dialog.Description>
               )}

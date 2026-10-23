@@ -103,6 +103,7 @@ routes! { e;
     connection_delete(id: ConnectionId) => e.delete_connection(id).await;
     connection_test(draft: ConnectionDraft) => e.test_connection(draft).await;
     connection_parse_url(url: String) => e.parse_connection_url(&url);
+    ssh_trust_host_key(key: HostKeyId) => e.ssh_trust_host_key(key);
     connection_connect(id: ConnectionId) => e.connect(id).await;
     connection_disconnect(id: ConnectionId, force: bool) => e.disconnect(id, force).await;
     catalog_get(db: DatabaseRef) => e.catalog(db).await;
@@ -188,6 +189,7 @@ mod tests {
             data_dir: dir.path().to_owned(),
             keys: Arc::new(MemoryKeyStore::default()),
             agent_path: AgentPath::Fixed("".into()),
+            user_known_hosts: None,
         })
         .await
         .unwrap();

@@ -11,6 +11,7 @@ mod session;
 mod sql;
 mod store;
 mod text;
+mod tunnel;
 mod txn;
 mod view;
 
@@ -27,9 +28,10 @@ use connection::{CatalogSlot, ConnEntry, ConnSlot, ConnectParams, DbSlot, Instan
 use console::{Console, Owed, PlannedStmt, RunPlan, SessionSlot};
 use model::*;
 use provider::ProbeDepth;
-use secrets::Vault;
+use secrets::{SecretSlot, Vault};
 use session::Session;
 use store::{HistoryInsert, Store};
+use tunnel::TunnelSpec;
 use view::{ConnectionView, Known, Selection};
 
 pub use assistant::SHUTDOWN_BOUND;
@@ -37,11 +39,16 @@ pub use connection::draft_from_url;
 pub use provider::AgentPath;
 pub use secrets::{KeyStore, KeyringKeyStore, MemoryKeyStore, SecretError};
 pub use store::StoreError;
+pub use tunnel::openssh_known_hosts;
 
 pub struct EngineConfig {
     pub data_dir: PathBuf,
     pub keys: Arc<dyn KeyStore>,
     pub agent_path: AgentPath,
+    /// The OpenSSH known_hosts that SSH tunnels also trust, read at each dial and never written.
+    /// The app passes `openssh_known_hosts()`. Tests pass `None`, so they never read the
+    /// developer's file.
+    pub user_known_hosts: Option<PathBuf>,
 }
 
 pub struct Engine {
@@ -71,6 +78,12 @@ pub(crate) struct Shared {
     assistant: assistant::Assistant,
     process_groups: Arc<provider::agent::ProcessGroups>,
     next_chat_rev: AtomicU64,
+    tunnels: tunnel::Tunnels,
+}
+
+/// A saved SSH secret applies only to the auth kind it was saved for.
+fn keeps_ssh_secret(prior: Option<&SshTunnel>, auth: &SshAuth) -> bool {
+    prior.is_some_and(|p| p.has_secret && std::mem::discriminant(&p.auth) == std::mem::discriminant(auth))
 }
 
 const EVENT_BUFFER: usize = 1024;
@@ -141,8 +154,15 @@ impl Shared {
     }
 
     fn params(&self, config: &ConnectionConfig, database: &str) -> Result<ConnectParams, ConnectError> {
-        let password = if config.has_password { self.saved_password(config.id)? } else { None };
-        Ok(ConnectParams::for_database(config, database, password))
+        let password = if config.has_password { self.saved_secret(config.id, SecretSlot::Database)? } else { None };
+        let via = match &config.ssh {
+            Some(t) => {
+                let secret = if t.has_secret { self.saved_secret(config.id, SecretSlot::Ssh)? } else { None };
+                Some(self.tunnels.route(Some(config.id), TunnelSpec::new(&t.host, t.port, &t.user, &t.auth, secret))?)
+            }
+            None => None,
+        };
+        Ok(ConnectParams::for_database(config, database, password, via))
     }
 
     /// Parameters for a console session on `database`, from the config as saved now.
@@ -162,10 +182,32 @@ impl Shared {
         self.next_chat_rev.fetch_add(1, Ordering::Relaxed)
     }
 
-    fn saved_password(&self, id: ConnectionId) -> Result<Option<String>, ConnectError> {
+    fn saved_secret(&self, id: ConnectionId, slot: SecretSlot) -> Result<Option<String>, ConnectError> {
         let keychain = |message: String| ConnectError::Keychain { message };
-        let Some(sealed) = self.store.secret(id).map_err(|e| keychain(e.to_string()))? else { return Ok(None) };
-        self.vault.open(id, &sealed).map_err(|e| keychain(e.to_string()))
+        let Some(sealed) = self.store.secret(id, slot).map_err(|e| keychain(e.to_string()))? else { return Ok(None) };
+        self.vault.open(id, slot, &sealed).map_err(|e| keychain(e.to_string()))
+    }
+
+    fn save_ssh(&self, id: ConnectionId, prior: Option<&SshTunnel>, t: SshTunnelDraft) -> Result<SshTunnel, SaveError> {
+        let store = |e: StoreError| SaveError::Store { message: e.to_string() };
+        let auth = match t.auth {
+            SshAuth::Key { path } => SshAuth::Key { path: path.trim().to_owned() },
+            SshAuth::Agent { socket } => SshAuth::Agent { socket: socket.map(|s| s.trim().to_owned()).filter(|s| !s.is_empty()) },
+            SshAuth::Password => SshAuth::Password,
+        };
+        let has_secret = match (&auth, t.secret) {
+            (SshAuth::Agent { .. }, _) | (_, PasswordInput::Clear) => false,
+            (_, PasswordInput::Keep) => keeps_ssh_secret(prior, &auth),
+            (_, PasswordInput::Set(secret)) => {
+                let sealed = self.vault.seal(id, SecretSlot::Ssh, &secret).map_err(|e| SaveError::Keychain { message: e.to_string() })?;
+                self.store.set_secret(id, SecretSlot::Ssh, &sealed).map_err(store)?;
+                true
+            }
+        };
+        if !has_secret {
+            self.store.delete_secret(id, SecretSlot::Ssh).map_err(store)?;
+        }
+        Ok(SshTunnel { host: t.host.trim().to_owned(), port: t.port, user: t.user.trim().to_owned(), auth, has_secret })
     }
 
     fn all_consoles(&self) -> Vec<Arc<Console>> {
@@ -627,6 +669,7 @@ impl Engine {
         let store = Store::open(&cfg.data_dir.join(DB_FILE))?;
         let settings = store.kv_get::<Settings>(KV_SETTINGS)?.unwrap_or_default();
         let (events, _) = broadcast::channel(EVENT_BUFFER);
+        let tunnels = tunnel::Tunnels::new(cfg.user_known_hosts, cfg.data_dir.join("known_hosts"));
         let shared = Arc::new(Shared {
             data_dir: cfg.data_dir,
             vault: Vault::new(cfg.keys),
@@ -644,6 +687,7 @@ impl Engine {
             assistant: assistant::Assistant::new(),
             process_groups: Arc::new(provider::agent::ProcessGroups::default()),
             next_chat_rev: AtomicU64::new(1),
+            tunnels,
         });
         tokio::fs::create_dir_all(shared.assistant_dir()).await?;
         shared.probe_all(ProbeDepth::Full);
@@ -708,6 +752,20 @@ impl Engine {
         if d.user.trim().is_empty() {
             return Err(invalid("user is required"));
         }
+        if let Some(t) = &d.ssh {
+            if t.host.trim().is_empty() {
+                return Err(invalid("SSH host is required"));
+            }
+            if t.port == 0 {
+                return Err(invalid("SSH port must be between 1 and 65535"));
+            }
+            if t.user.trim().is_empty() {
+                return Err(invalid("SSH user is required"));
+            }
+            if matches!(&t.auth, SshAuth::Key { path } if path.trim().is_empty()) {
+                return Err(invalid("SSH key file is required"));
+            }
+        }
         let existing = d.id.and_then(|id| s.config(id));
         if existing.as_ref().is_some_and(|c| c.database_kind != d.database_kind) {
             return Err(invalid("An existing connection cannot change database kind. Create a new connection."));
@@ -716,15 +774,23 @@ impl Engine {
         let store = |e: StoreError| SaveError::Store { message: e.to_string() };
         let has_password = match &d.password {
             PasswordInput::Set(pw) => {
-                let sealed = s.vault.seal(id, pw).map_err(|e| SaveError::Keychain { message: e.to_string() })?;
-                s.store.set_secret(id, &sealed).map_err(store)?;
+                let sealed = s.vault.seal(id, SecretSlot::Database, pw).map_err(|e| SaveError::Keychain { message: e.to_string() })?;
+                s.store.set_secret(id, SecretSlot::Database, &sealed).map_err(store)?;
                 true
             }
             PasswordInput::Clear => {
-                s.store.delete_secret(id).map_err(store)?;
+                s.store.delete_secret(id, SecretSlot::Database).map_err(store)?;
                 false
             }
             PasswordInput::Keep => existing.as_ref().is_some_and(|c| c.has_password),
+        };
+        let prior = existing.as_ref().and_then(|c| c.ssh.as_ref());
+        let ssh = match d.ssh {
+            Some(t) => Some(s.save_ssh(id, prior, t)?),
+            None => {
+                s.store.delete_secret(id, SecretSlot::Ssh).map_err(store)?;
+                None
+            }
         };
         let config = ConnectionConfig {
             database_kind: d.database_kind,
@@ -738,6 +804,7 @@ impl Engine {
             ca_cert_path: d.ca_cert_path.filter(|p| !p.trim().is_empty()),
             has_password,
             color: d.color,
+            ssh,
         };
         s.store.upsert_connection(&config).map_err(store)?;
         Ok(config)
@@ -786,9 +853,21 @@ impl Engine {
         let password = match (&d.password, d.id) {
             (PasswordInput::Set(pw), _) => Some(pw.clone()),
             (PasswordInput::Clear, _) | (PasswordInput::Keep, None) => None,
-            (PasswordInput::Keep, Some(id)) => s.saved_password(id)?,
+            (PasswordInput::Keep, Some(id)) => s.saved_secret(id, SecretSlot::Database)?,
         };
-        let session = Session::open(&ConnectParams::from_draft(&d, password), None, &s.timezone).await?;
+        let via = match &d.ssh {
+            Some(t) => {
+                let prior = d.id.and_then(|id| s.config(id)).and_then(|c| c.ssh);
+                let secret = match (&t.secret, d.id) {
+                    (PasswordInput::Set(secret), _) => Some(secret.clone()),
+                    (PasswordInput::Keep, Some(id)) if keeps_ssh_secret(prior.as_ref(), &t.auth) => s.saved_secret(id, SecretSlot::Ssh)?,
+                    _ => None,
+                };
+                Some(s.tunnels.route(None, TunnelSpec::new(&t.host, t.port, &t.user, &t.auth, secret))?)
+            }
+            None => None,
+        };
+        let session = Session::open(&ConnectParams::from_draft(&d, password, via), None, &s.timezone).await?;
         Ok(session.server)
     }
 
@@ -824,7 +903,14 @@ impl Engine {
         if let Some(instance) = instance {
             instance.close();
         }
+        s.tunnels.forget(id);
         Ok(())
+    }
+
+    /// Adds a host key a dial reported as `HostKeyUnknown` to the app's known_hosts. Only a key
+    /// the engine observed can be trusted, once, within ten minutes.
+    pub fn ssh_trust_host_key(&self, key: HostKeyId) -> Result<(), String> {
+        self.shared.tunnels.trust(key)
     }
 
     pub async fn catalog(&self, db: DatabaseRef) -> Result<Arc<Catalog>, CatalogError> {
@@ -1473,6 +1559,7 @@ mod tests {
             data_dir: dir.path().join("nested"),
             keys: Arc::new(MemoryKeyStore::default()),
             agent_path: AgentPath::Fixed("".into()),
+            user_known_hosts: None,
         })
         .await
         .unwrap();
@@ -1491,6 +1578,7 @@ mod tests {
             ca_cert_path: None,
             password: PasswordInput::Set("pw".into()),
             color: None,
+            ssh: None,
         }
     }
 
@@ -1575,7 +1663,7 @@ mod tests {
     #[tokio::test]
     async fn passwordless_save_clear_and_delete_never_touch_the_keychain() {
         let dir = tempfile::tempdir().unwrap();
-        let engine = Engine::open(EngineConfig { data_dir: dir.path().to_owned(), keys: Arc::new(NoKeychain), agent_path: AgentPath::Fixed("".into()) }).await.unwrap();
+        let engine = Engine::open(EngineConfig { data_dir: dir.path().to_owned(), keys: Arc::new(NoKeychain), agent_path: AgentPath::Fixed("".into()), user_known_hosts: None }).await.unwrap();
         let saved = engine.save_connection(ConnectionDraft { password: PasswordInput::Clear, ..draft("dev") }).await.unwrap();
         let kept = engine
             .save_connection(ConnectionDraft { id: Some(saved.id), password: PasswordInput::Keep, ..draft("dev") })
@@ -1591,8 +1679,8 @@ mod tests {
     async fn connections_settings_and_workspace_persist_across_open() {
         let dir = tempfile::tempdir().unwrap();
         let keys = Arc::new(MemoryKeyStore::default());
-        let cfg = || EngineConfig { data_dir: dir.path().to_owned(), keys: keys.clone(), agent_path: AgentPath::Fixed("".into()) };
-        let password = |engine: &Engine, id| engine.shared.saved_password(id).unwrap();
+        let cfg = || EngineConfig { data_dir: dir.path().to_owned(), keys: keys.clone(), agent_path: AgentPath::Fixed("".into()), user_known_hosts: None };
+        let password = |engine: &Engine, id| engine.shared.saved_secret(id, SecretSlot::Database).unwrap();
         let saved = {
             let engine = Engine::open(cfg()).await.unwrap();
             let saved = engine
@@ -1625,11 +1713,67 @@ mod tests {
             .await
             .unwrap();
         assert!(!cleared.has_password);
-        assert_eq!(engine.shared.store.secret(saved.id).unwrap(), None);
+        assert_eq!(engine.shared.store.secret(saved.id, SecretSlot::Database).unwrap(), None);
         assert_eq!(password(&engine, saved.id), None);
         assert_eq!(engine.boot().connections.len(), 1);
 
         engine.delete_connection(saved.id).await.unwrap();
+        assert!(engine.boot().connections.is_empty());
+    }
+
+    #[tokio::test]
+    async fn the_ssh_secret_follows_the_save_rules() {
+        let (engine, _dir) = engine().await;
+        let tunnel = |auth: SshAuth, secret| Some(SshTunnelDraft { host: " bastion ".into(), port: 22, user: "tunnel ".into(), auth, secret });
+        let set = |s: &str| PasswordInput::Set(s.into());
+        let saved = engine.save_connection(ConnectionDraft { ssh: tunnel(SshAuth::Password, set("pw")), ..draft("t") }).await.unwrap();
+        let id = saved.id;
+        let secret = || engine.shared.saved_secret(id, SecretSlot::Ssh).unwrap();
+        let save = |ssh| engine.save_connection(ConnectionDraft { id: Some(id), password: PasswordInput::Keep, ssh, ..draft("t") });
+        assert_eq!(saved.ssh, Some(SshTunnel { host: "bastion".into(), port: 22, user: "tunnel".into(), auth: SshAuth::Password, has_secret: true }));
+        assert_eq!(secret().as_deref(), Some("pw"));
+
+        assert!(save(tunnel(SshAuth::Password, PasswordInput::Keep)).await.unwrap().ssh.unwrap().has_secret);
+        assert_eq!(secret().as_deref(), Some("pw"), "Keep keeps the secret while the auth kind is unchanged");
+
+        let key = SshAuth::Key { path: " ~/.ssh/id_ed25519 ".into() };
+        let switched = save(tunnel(key.clone(), PasswordInput::Keep)).await.unwrap().ssh.unwrap();
+        assert_eq!((switched.auth, switched.has_secret), (SshAuth::Key { path: "~/.ssh/id_ed25519".into() }, false));
+        assert_eq!(secret(), None, "a password is never kept as a passphrase");
+
+        assert!(save(tunnel(key, set("l1data"))).await.unwrap().ssh.unwrap().has_secret);
+        let agent = save(tunnel(SshAuth::Agent { socket: Some(" ".into()) }, set("ignored"))).await.unwrap().ssh.unwrap();
+        assert_eq!((agent.auth, agent.has_secret), (SshAuth::Agent { socket: None }, false));
+        assert_eq!(secret(), None, "agent auth holds no secret");
+
+        save(tunnel(SshAuth::Password, set("pw2"))).await.unwrap();
+        assert!(!save(tunnel(SshAuth::Password, PasswordInput::Clear)).await.unwrap().ssh.unwrap().has_secret);
+        assert_eq!(secret(), None);
+
+        save(tunnel(SshAuth::Password, set("pw3"))).await.unwrap();
+        assert_eq!(save(None).await.unwrap().ssh, None);
+        assert_eq!(secret(), None, "removing the tunnel deletes its secret");
+        assert_eq!(engine.shared.saved_secret(id, SecretSlot::Database).unwrap().as_deref(), Some("pw"), "the database password is untouched");
+
+        save(tunnel(SshAuth::Password, set("pw4"))).await.unwrap();
+        engine.delete_connection(id).await.unwrap();
+        assert_eq!(engine.shared.store.secret(id, SecretSlot::Ssh).unwrap(), None);
+    }
+
+    #[tokio::test]
+    async fn an_invalid_tunnel_is_rejected_before_any_secret_is_sealed() {
+        let dir = tempfile::tempdir().unwrap();
+        let engine = Engine::open(EngineConfig { data_dir: dir.path().to_owned(), keys: Arc::new(NoKeychain), agent_path: AgentPath::Fixed("".into()), user_known_hosts: None }).await.unwrap();
+        let tunnel = SshTunnelDraft { host: "bastion".into(), port: 22, user: "tunnel".into(), auth: SshAuth::Password, secret: PasswordInput::Set("pw".into()) };
+        for bad in [
+            SshTunnelDraft { host: " ".into(), ..tunnel.clone() },
+            SshTunnelDraft { port: 0, ..tunnel.clone() },
+            SshTunnelDraft { user: "".into(), ..tunnel.clone() },
+            SshTunnelDraft { auth: SshAuth::Key { path: " ".into() }, ..tunnel.clone() },
+        ] {
+            let err = engine.save_connection(ConnectionDraft { ssh: Some(bad.clone()), ..draft("x") }).await.unwrap_err();
+            assert!(matches!(err, SaveError::Invalid { .. }), "{bad:?}: {err:?}");
+        }
         assert!(engine.boot().connections.is_empty());
     }
 

@@ -7,12 +7,12 @@ use crate::connection::{CONNECT_TIMEOUT, ConnectParams};
 use crate::model::*;
 use futures_util::{StreamExt, TryStreamExt};
 use std::time::Duration;
+use super::stream::DbStream;
 use tiberius::{AuthMethod, Client, Config, EncryptionLevel, QueryItem};
-use tokio::net::TcpStream;
 use tokio::sync::watch;
 use tokio_util::compat::{Compat, TokioAsyncWriteCompatExt};
 
-type TdsClient = Client<Compat<TcpStream>>;
+type TdsClient = Client<Compat<DbStream>>;
 const ATTENTION_TIMEOUT: Duration = Duration::from_millis(300);
 
 pub(super) struct MsSession {
@@ -110,16 +110,13 @@ fn config(p: &ConnectParams) -> Result<Config, ConnectError> {
 impl MsSession {
     pub(super) async fn open(p: &ConnectParams) -> Result<Self, ConnectError> {
         let cfg = config(p)?;
-        let connection = async {
-            let tcp = TcpStream::connect((p.host.as_str(), p.port)).await.map_err(|e| ConnectError::Network { message: e.to_string() })?;
-            tcp.set_nodelay(true).map_err(|e| ConnectError::Network { message: e.to_string() })?;
-            Client::connect(cfg, tcp.compat_write()).await.map_err(|e| match e {
-                tiberius::error::Error::Tls(message) => ConnectError::Tls { message },
-                tiberius::error::Error::Server(e) if e.code() == 18456 => ConnectError::Auth { message: e.message().to_owned() },
-                e => ConnectError::Server(query_error(e)),
-            })
-        };
-        let client = tokio::time::timeout(CONNECT_TIMEOUT, connection).await.map_err(|_| ConnectError::Network { message: "SQL Server connection timed out".into() })??;
+        let stream = p.dial().await?;
+        let connection = Client::connect(cfg, stream.compat_write());
+        let client = tokio::time::timeout(CONNECT_TIMEOUT, connection).await.map_err(|_| ConnectError::Network { message: "SQL Server connection timed out".into() })?.map_err(|e| match e {
+            tiberius::error::Error::Tls(message) => ConnectError::Tls { message },
+            tiberius::error::Error::Server(e) if e.code() == 18456 => ConnectError::Auth { message: e.message().to_owned() },
+            e => ConnectError::Server(query_error(e)),
+        })?;
         let state = client.session_state().map_err(|e| ConnectError::Server(query_error(e)))?;
         let backend_pid = i32::from(state.server_process_id);
         let (major, minor, build) = state.server_version;
@@ -317,6 +314,7 @@ mod tests {
             password: Some(std::env::var("L1_DATA_TEST_MSSQL_PASSWORD").unwrap_or_else(|_| "L1Data_dev_Str0ng".into())),
             ssl_mode: SslMode::Require,
             ca_cert_path: None,
+            via: None,
         }
     }
 

@@ -50,9 +50,11 @@ impl<'de> Deserialize<'de> for ConnectionConfig {
             ca_cert_path: Option<String>,
             has_password: bool,
             color: Option<String>,
+            #[serde(default)]
+            ssh: Option<SshTunnel>,
         }
-        let Stored { database_kind, id, name, host, port, database, user, ssl_mode, ca_cert_path, has_password, color } = Stored::deserialize(d)?;
-        Ok(Self { database_kind, id, name, host, port, database, user, ssl_mode, ca_cert_path, has_password, color })
+        let Stored { database_kind, id, name, host, port, database, user, ssl_mode, ca_cert_path, has_password, color, ssh } = Stored::deserialize(d)?;
+        Ok(Self { database_kind, id, name, host, port, database, user, ssl_mode, ca_cert_path, has_password, color, ssh })
     }
 }
 
@@ -79,6 +81,42 @@ pub struct ConnectionConfig {
     pub ca_cert_path: Option<String>,
     pub has_password: bool,
     pub color: Option<String>,
+    /// Sessions reach the database through this SSH server. `host` and `port` above are then
+    /// resolved and dialed by that server.
+    pub ssh: Option<SshTunnel>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct SshTunnel {
+    pub host: String,
+    pub port: u16,
+    pub user: String,
+    pub auth: SshAuth,
+    /// A password for `Password`, or a key passphrase for `Key`, is sealed in the vault.
+    pub has_secret: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize, Type)]
+#[serde(tag = "kind", rename_all_fields = "camelCase")]
+pub enum SshAuth {
+    Password,
+    /// An OpenSSH private key file, read at each dial. A leading `~` is the home directory.
+    Key { path: String },
+    /// `None` is the agent at `SSH_AUTH_SOCK`, or the OpenSSH agent pipe on Windows.
+    Agent { socket: Option<String> },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct SshTunnelDraft {
+    pub host: String,
+    pub port: u16,
+    pub user: String,
+    pub auth: SshAuth,
+    /// The password or key passphrase. `Keep` keeps the saved one only while the auth kind is
+    /// unchanged, so a password is never tried as a passphrase.
+    pub secret: PasswordInput,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Type)]
@@ -103,6 +141,7 @@ pub struct ConnectionDraft {
     pub ca_cert_path: Option<String>,
     pub password: PasswordInput,
     pub color: Option<String>,
+    pub ssh: Option<SshTunnelDraft>,
 }
 
 #[derive(Debug, Clone, Serialize, Type)]
@@ -222,7 +261,35 @@ pub enum ConnectError {
     MissingPassword,
     Server(QueryError),
     Keychain { message: String },
+    /// The SSH tunnel failed before the database was reached. The variants above are the database's.
+    Ssh { error: SshError },
 }
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Type)]
+#[serde(tag = "kind", rename_all_fields = "camelCase")]
+pub enum SshError {
+    Network { message: String },
+    /// No known_hosts file knows this server. `trust` names the key the engine saw, for
+    /// `ssh_trust_host_key`; it expires after ten minutes.
+    HostKeyUnknown { host: String, port: u16, algorithm: String, fingerprint: String, trust: HostKeyId },
+    /// No known_hosts file holds this key, but one holds another key of its algorithm for the server, at `file:line`.
+    HostKeyChanged { host: String, port: u16, algorithm: String, fingerprint: String, known_at: String },
+    /// The key is on an `@revoked` line, at `file:line`.
+    HostKeyRevoked { host: String, port: u16, algorithm: String, fingerprint: String, revoked_at: String },
+    /// A known_hosts file exists but cannot be read or parsed, so the key cannot be checked.
+    KnownHosts { message: String },
+    Auth { message: String },
+    /// Password auth with no saved password, or an encrypted key with no passphrase.
+    MissingSecret,
+    Key { message: String },
+    Agent { message: String },
+    /// The SSH server refused or failed to open the connection to the database.
+    Forward { message: String },
+}
+
+/// Engine-wide monotonic. Names one host key the engine observed and is holding for a trust decision.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Type)]
+pub struct HostKeyId(pub u64);
 
 #[derive(Debug, Clone, Serialize, Type)]
 #[serde(rename_all = "camelCase")]
@@ -2143,6 +2210,17 @@ mod tests {
     }
 
     #[test]
+    fn ssh_errors_keep_their_own_tag_inside_a_connect_error() {
+        let unknown = SshError::HostKeyUnknown { host: "bastion".into(), port: 22, algorithm: "ssh-ed25519".into(), fingerprint: "SHA256:x".into(), trust: HostKeyId(3) };
+        assert_eq!(
+            serde_json::to_value(RunError::Connect { error: ConnectError::Ssh { error: unknown } }).unwrap(),
+            json!({ "kind": "Connect", "error": { "kind": "Ssh", "error": { "kind": "HostKeyUnknown", "host": "bastion", "port": 22, "algorithm": "ssh-ed25519", "fingerprint": "SHA256:x", "trust": 3 } } })
+        );
+        let changed = SshError::HostKeyChanged { host: "b".into(), port: 2222, algorithm: "ssh-rsa".into(), fingerprint: "SHA256:y".into(), known_at: "/k:4".into() };
+        assert_eq!(serde_json::to_value(changed).unwrap()["knownAt"], "/k:4");
+    }
+
+    #[test]
     fn layout_saved_before_panel_widths_existed_still_loads() {
         let tab: TabSnapshot = serde_json::from_value(json!({
             "kind": "Table", "id": "00000000-0000-0000-0000-000000000001", "connectionId": "00000000-0000-0000-0000-000000000002",
@@ -2293,5 +2371,28 @@ mod database_compatibility_tests {
         assert_eq!(sent.database_kind, Some(DatabaseKind::Postgres));
         let entry: Entry = serde_json::from_value(serde_json::json!({"kind":"User", "atMs":0,"text":"question","context":{"db":{"connectionId":Uuid::nil(),"database":"shop"},"connectionName":"old", "tabTitle":"query"}})).unwrap();
         assert!(matches!(entry, Entry::User { context: Some(SentContext { database_kind: Some(DatabaseKind::Postgres), .. }), .. }));
+    }
+
+    #[test]
+    fn connections_saved_before_tunnels_existed_load_without_one() {
+        let saved = serde_json::json!({"databaseKind":"Postgres", "id":Uuid::nil(), "name":"legacy", "host":"localhost", "port":5432, "database":"shop", "user":"reader", "sslMode":"Prefer", "caCertPath":null, "hasPassword":true, "color":null});
+        let config: ConnectionConfig = serde_json::from_value(saved).unwrap();
+        assert_eq!(config.ssh, None);
+        let tunnel = SshTunnel { host: "bastion".into(), port: 2222, user: "tunnel".into(), auth: SshAuth::Key { path: "~/.ssh/id_ed25519".into() }, has_secret: true };
+        let stored = serde_json::to_value(ConnectionConfig { ssh: Some(tunnel.clone()), ..config }).unwrap();
+        assert_eq!(stored["ssh"], serde_json::json!({"host":"bastion", "port":2222, "user":"tunnel", "auth":{"kind":"Key", "path":"~/.ssh/id_ed25519"}, "hasSecret":true}));
+        assert_eq!(serde_json::from_value::<ConnectionConfig>(stored).unwrap().ssh, Some(tunnel));
+    }
+
+    /// The hand-written reader defaults `ssh` for old rows; the wire type must still require it.
+    #[test]
+    fn bindings_require_the_tunnel_field() {
+        let bindings = include_str!("../../../src/ipc/bindings.ts");
+        let block = |name: &str| {
+            let start = bindings.find(&format!("export type {name} = {{")).unwrap_or_else(|| panic!("{name} is not in bindings.ts"));
+            &bindings[start..start + bindings[start..].find("};").unwrap()]
+        };
+        assert!(block("ConnectionConfig").contains("\tssh: SshTunnel | null,"), "{}", block("ConnectionConfig"));
+        assert!(block("ConnectionDraft").contains("\tssh: SshTunnelDraft | null,"), "{}", block("ConnectionDraft"));
     }
 }

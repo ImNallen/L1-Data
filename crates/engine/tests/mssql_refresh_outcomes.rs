@@ -25,6 +25,7 @@ impl Harness {
             data_dir: dir.path().into(),
             keys: Arc::new(MemoryKeyStore::default()),
             agent_path: AgentPath::Fixed("".into()),
+            user_known_hosts: None,
         }).await.unwrap();
         let draft = match kind {
             DatabaseKind::Postgres => draft_from_url(
@@ -43,6 +44,7 @@ impl Harness {
                 ssl_mode: SslMode::Require,
                 ca_cert_path: None,
                 color: None,
+                ssh: None,
             },
         };
         assert_eq!(draft.database, "shop", "Refresh regressions only create disposable objects in shop");

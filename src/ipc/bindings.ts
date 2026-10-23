@@ -9,6 +9,7 @@ export const commands = {
 	connectionDelete: (id: ConnectionId) => typedError<null, DisconnectError>(__TAURI_INVOKE("connection_delete", { id })),
 	connectionTest: (draft: ConnectionDraft) => typedError<ServerInfo, ConnectError>(__TAURI_INVOKE("connection_test", { draft })),
 	connectionParseUrl: (url: string) => typedError<ConnectionDraft, string>(__TAURI_INVOKE("connection_parse_url", { url })),
+	sshTrustHostKey: (key: HostKeyId) => typedError<null, string>(__TAURI_INVOKE("ssh_trust_host_key", { key })),
 	connectionConnect: (id: ConnectionId) => typedError<ServerInfo, ConnectError>(__TAURI_INVOKE("connection_connect", { id })),
 	connectionDisconnect: (id: ConnectionId, force: boolean) => typedError<null, DisconnectError>(__TAURI_INVOKE("connection_disconnect", { id, force })),
 	catalogGet: (db: DatabaseRef) => typedError<Catalog, CatalogError>(__TAURI_INVOKE("catalog_get", { db })),
@@ -274,9 +275,11 @@ export type ConnStatus = { kind: "Disconnected" } | { kind: "Connecting" } |
 /**  The home database's metadata session died after being `Connected`. */
 { kind: "Lost"; reason: string };
 
-export type ConnectError = { kind: "Network"; message: string } | { kind: "Tls"; message: string } | { kind: "Auth"; message: string } | ({ kind: "MissingPassword" }) & { message?: never } | {
+export type ConnectError = ({ kind: "Network"; message: string }) & { error?: never } | ({ kind: "Tls"; message: string }) & { error?: never } | ({ kind: "Auth"; message: string }) & { error?: never } | ({ kind: "MissingPassword" }) & { error?: never; message?: never } | {
 	kind: "Server",
-} & QueryError | { kind: "Keychain"; message: string };
+} & QueryError | ({ kind: "Keychain"; message: string }) & { error?: never } | 
+/**  The SSH tunnel failed before the database was reached. The variants above are the database's. */
+({ kind: "Ssh"; error: SshError }) & { message?: never };
 
 export type ConnectionConfig = {
 	databaseKind: DatabaseKind,
@@ -290,6 +293,11 @@ export type ConnectionConfig = {
 	caCertPath: string | null,
 	hasPassword: boolean,
 	color: string | null,
+	/**
+	 *  Sessions reach the database through this SSH server. `host` and `port` above are then
+	 *  resolved and dialed by that server.
+	 */
+	ssh: SshTunnel | null,
 };
 
 export type ConnectionDraft = {
@@ -305,6 +313,7 @@ export type ConnectionDraft = {
 	caCertPath: string | null,
 	password: PasswordInput,
 	color: string | null,
+	ssh: SshTunnelDraft | null,
 };
 
 export type ConnectionId = string;
@@ -596,6 +605,9 @@ export type HistoryRun = {
 	elapsedMs: number,
 	outcome: HistoryOutcome,
 };
+
+/**  Engine-wide monotonic. Names one host key the engine observed and is holding for a trust decision. */
+export type HostKeyId = number;
 
 export type IndexInfo = {
 	name: string,
@@ -972,6 +984,50 @@ export type SqlTypeRef = {
 	/**  `"bigint"`, `"integer[]"`, `"order_status"`. */
 	display: string,
 	category: TypeCategory,
+};
+
+export type SshAuth = { kind: "Password" } | 
+/**  An OpenSSH private key file, read at each dial. A leading `~` is the home directory. */
+{ kind: "Key"; path: string } | 
+/**  `None` is the agent at `SSH_AUTH_SOCK`, or the OpenSSH agent pipe on Windows. */
+{ kind: "Agent"; socket: string | null };
+
+export type SshError = { kind: "Network"; message: string } | 
+/**
+ *  No known_hosts file knows this server. `trust` names the key the engine saw, for
+ *  `ssh_trust_host_key`; it expires after ten minutes.
+ */
+{ kind: "HostKeyUnknown"; host: string; port: number; algorithm: string; fingerprint: string; trust: HostKeyId } | 
+/**  No known_hosts file holds this key, but one holds another key of its algorithm for the server, at `file:line`. */
+{ kind: "HostKeyChanged"; host: string; port: number; algorithm: string; fingerprint: string; knownAt: string } | 
+/**  The key is on an `@revoked` line, at `file:line`. */
+{ kind: "HostKeyRevoked"; host: string; port: number; algorithm: string; fingerprint: string; revokedAt: string } | 
+/**  A known_hosts file exists but cannot be read or parsed, so the key cannot be checked. */
+{ kind: "KnownHosts"; message: string } | { kind: "Auth"; message: string } | 
+/**  Password auth with no saved password, or an encrypted key with no passphrase. */
+{ kind: "MissingSecret" } | { kind: "Key"; message: string } | { kind: "Agent"; message: string } | 
+/**  The SSH server refused or failed to open the connection to the database. */
+{ kind: "Forward"; message: string };
+
+export type SshTunnel = {
+	host: string,
+	port: number,
+	user: string,
+	auth: SshAuth,
+	/**  A password for `Password`, or a key passphrase for `Key`, is sealed in the vault. */
+	hasSecret: boolean,
+};
+
+export type SshTunnelDraft = {
+	host: string,
+	port: number,
+	user: string,
+	auth: SshAuth,
+	/**
+	 *  The password or key passphrase. `Keep` keeps the saved one only while the auth kind is
+	 *  unchanged, so a password is never tried as a passphrase.
+	 */
+	secret: PasswordInput,
 };
 
 export type SslMode = "Disable" | "Prefer" | "Require" | "VerifyCa" | "VerifyFull";

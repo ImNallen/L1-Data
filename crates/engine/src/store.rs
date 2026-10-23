@@ -7,7 +7,7 @@ use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 
 use crate::model::{ChatId, ChatOptions, ConnectionConfig, ConnectionId, DatabaseKind, Entry, HistoryEntry, HistoryOutcome, HistoryPage, HistoryQuery, ProviderKind};
-use crate::secrets::Sealed;
+use crate::secrets::{Sealed, SecretSlot};
 use crate::view::ConnectionView;
 
 #[derive(Debug, thiserror::Error)]
@@ -22,7 +22,7 @@ pub enum StoreError {
 
 pub const HISTORY_KEEP: i64 = 10_000;
 
-const MIGRATIONS: [&str; 6] = [
+const MIGRATIONS: [&str; 7] = [
     "
     CREATE TABLE connections (id TEXT PRIMARY KEY, json TEXT NOT NULL);
     CREATE TABLE history (
@@ -53,6 +53,7 @@ const MIGRATIONS: [&str; 6] = [
     ) WITHOUT ROWID;
 ",
     "ALTER TABLE history ADD COLUMN database_kind TEXT NOT NULL DEFAULT 'Postgres';",
+    "CREATE TABLE ssh_secrets (connection_id TEXT PRIMARY KEY, nonce BLOB NOT NULL, ciphertext BLOB NOT NULL);",
 ];
 
 pub struct Store {
@@ -155,7 +156,9 @@ impl Store {
         self.with(|c| {
             let tx = c.unchecked_transaction()?;
             tx.execute("DELETE FROM connections WHERE id = ?1", [id.0.to_string()])?;
-            tx.execute("DELETE FROM secrets WHERE connection_id = ?1", [id.0.to_string()])?;
+            for slot in [SecretSlot::Database, SecretSlot::Ssh] {
+                tx.execute(&format!("DELETE FROM {} WHERE connection_id = ?1", slot.table()), [id.0.to_string()])?;
+            }
             tx.execute("DELETE FROM connection_views WHERE connection_id = ?1", [id.0.to_string()])?;
             tx.commit()?;
             Ok(())
@@ -188,29 +191,32 @@ impl Store {
         })
     }
 
-    pub fn secret(&self, id: ConnectionId) -> Result<Option<Sealed>, StoreError> {
+    pub fn secret(&self, id: ConnectionId, slot: SecretSlot) -> Result<Option<Sealed>, StoreError> {
         self.with(|c| {
-            Ok(c.query_row("SELECT nonce, ciphertext FROM secrets WHERE connection_id = ?1", [id.0.to_string()], |r| {
+            Ok(c.query_row(&format!("SELECT nonce, ciphertext FROM {} WHERE connection_id = ?1", slot.table()), [id.0.to_string()], |r| {
                 Ok(Sealed { nonce: r.get(0)?, ciphertext: r.get(1)? })
             })
             .optional()?)
         })
     }
 
-    pub fn set_secret(&self, id: ConnectionId, sealed: &Sealed) -> Result<(), StoreError> {
+    pub fn set_secret(&self, id: ConnectionId, slot: SecretSlot, sealed: &Sealed) -> Result<(), StoreError> {
         self.with(|c| {
             c.execute(
-                "INSERT INTO secrets (connection_id, nonce, ciphertext) VALUES (?1, ?2, ?3)
-                 ON CONFLICT (connection_id) DO UPDATE SET nonce = excluded.nonce, ciphertext = excluded.ciphertext",
+                &format!(
+                    "INSERT INTO {} (connection_id, nonce, ciphertext) VALUES (?1, ?2, ?3)
+                     ON CONFLICT (connection_id) DO UPDATE SET nonce = excluded.nonce, ciphertext = excluded.ciphertext",
+                    slot.table()
+                ),
                 params![id.0.to_string(), sealed.nonce, sealed.ciphertext],
             )?;
             Ok(())
         })
     }
 
-    pub fn delete_secret(&self, id: ConnectionId) -> Result<(), StoreError> {
+    pub fn delete_secret(&self, id: ConnectionId, slot: SecretSlot) -> Result<(), StoreError> {
         self.with(|c| {
-            c.execute("DELETE FROM secrets WHERE connection_id = ?1", [id.0.to_string()])?;
+            c.execute(&format!("DELETE FROM {} WHERE connection_id = ?1", slot.table()), [id.0.to_string()])?;
             Ok(())
         })
     }
@@ -451,6 +457,7 @@ mod tests {
             ca_cert_path: None,
             has_password: true,
             color: None,
+            ssh: None,
         };
         {
             let s = Store::open(&path).unwrap();
@@ -467,6 +474,24 @@ mod tests {
         assert_eq!(s.history(&HistoryQuery { text: None, connection_id: None, before_id: None, limit: 10 }).unwrap().entries[0].sql, "select 1");
         s.delete_connection(config.id).unwrap();
         assert!(s.connections().unwrap().is_empty());
+    }
+
+    #[test]
+    fn each_secret_slot_has_its_own_row_and_delete_removes_both() {
+        let (s, _dir) = store();
+        let (id, other) = (ConnectionId(uuid::Uuid::new_v4()), ConnectionId(uuid::Uuid::new_v4()));
+        let sealed = |byte| Sealed { nonce: [byte; 24], ciphertext: vec![byte] };
+        s.set_secret(id, SecretSlot::Database, &sealed(1)).unwrap();
+        s.set_secret(id, SecretSlot::Ssh, &sealed(2)).unwrap();
+        s.set_secret(other, SecretSlot::Ssh, &sealed(3)).unwrap();
+        assert_eq!(s.secret(id, SecretSlot::Database).unwrap(), Some(sealed(1)));
+        assert_eq!(s.secret(id, SecretSlot::Ssh).unwrap(), Some(sealed(2)));
+        s.delete_secret(id, SecretSlot::Ssh).unwrap();
+        assert_eq!((s.secret(id, SecretSlot::Ssh).unwrap(), s.secret(id, SecretSlot::Database).unwrap()), (None, Some(sealed(1))));
+        s.set_secret(id, SecretSlot::Ssh, &sealed(4)).unwrap();
+        s.delete_connection(id).unwrap();
+        assert_eq!((s.secret(id, SecretSlot::Database).unwrap(), s.secret(id, SecretSlot::Ssh).unwrap()), (None, None));
+        assert_eq!(s.secret(other, SecretSlot::Ssh).unwrap(), Some(sealed(3)));
     }
 
     #[test]
@@ -576,7 +601,7 @@ mod tests {
         Store::open(&path).unwrap().put_chat(chat_id(1), &first).unwrap();
         let s = Store::open(&path).unwrap();
         let version: i64 = s.with(|c| Ok(c.query_row("PRAGMA user_version", [], |r| r.get(0))?)).unwrap();
-        assert_eq!(version, 6);
+        assert_eq!(version, MIGRATIONS.len() as i64);
         assert_eq!(s.chats(10).unwrap(), vec![(chat_id(1), first)]);
         assert_eq!(s.kv_get::<serde_json::Value>("workspace").unwrap(), Some(serde_json::json!({})));
     }

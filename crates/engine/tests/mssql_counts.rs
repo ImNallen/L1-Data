@@ -24,7 +24,7 @@ impl Harness {
         let fixture = FIXTURES.lock().await;
         let dir = tempfile::tempdir().unwrap();
         let engine = Engine::open(EngineConfig {
-            data_dir: dir.path().into(), keys: Arc::new(MemoryKeyStore::default()), agent_path: AgentPath::Fixed("".into()),
+            data_dir: dir.path().into(), keys: Arc::new(MemoryKeyStore::default()), agent_path: AgentPath::Fixed("".into()), user_known_hosts: None,
         }).await.unwrap();
         let connection = engine.save_connection(ConnectionDraft {
             id: None, database_kind: DatabaseKind::SqlServer, name: "Native count regression".into(),
@@ -32,7 +32,7 @@ impl Harness {
             port: std::env::var("L1_DATA_TEST_MSSQL_PORT").ok().and_then(|p| p.parse().ok()).unwrap_or(1434),
             database: "shop".into(), user: "sa".into(),
             password: PasswordInput::Set(std::env::var("L1_DATA_TEST_MSSQL_PASSWORD").unwrap_or_else(|_| "L1Data_dev_Str0ng".into())),
-            ssl_mode: SslMode::Require, ca_cert_path: None, color: None,
+            ssl_mode: SslMode::Require, ca_cert_path: None, color: None, ssh: None,
         }).await.unwrap();
         engine.connect(connection.id).await.unwrap();
         let h = Self {

@@ -14,6 +14,7 @@ const config: ConnectionConfig = {
   databaseKind: "Postgres",
   hasPassword: false,
   color: null,
+  ssh: null,
 };
 
 const db = (name: string, over: Partial<DatabaseState> = {}): DatabaseState => ({

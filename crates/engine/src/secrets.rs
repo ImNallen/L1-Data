@@ -64,6 +64,30 @@ pub struct Sealed {
     pub ciphertext: Vec<u8>,
 }
 
+/// Which secret of a connection a sealed blob holds. Each slot is sealed with its own associated
+/// data, so a blob moved between slots does not open.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SecretSlot {
+    Database,
+    Ssh,
+}
+
+impl SecretSlot {
+    pub fn table(self) -> &'static str {
+        match self {
+            SecretSlot::Database => "secrets",
+            SecretSlot::Ssh => "ssh_secrets",
+        }
+    }
+
+    fn aad(self, id: ConnectionId) -> String {
+        match self {
+            SecretSlot::Database => id.0.to_string(),
+            SecretSlot::Ssh => format!("{}/ssh", id.0),
+        }
+    }
+}
+
 pub struct Vault {
     keys: Arc<dyn KeyStore>,
     key: Mutex<Option<Key>>,
@@ -82,19 +106,19 @@ impl Vault {
         Ok(key)
     }
 
-    pub fn seal(&self, id: ConnectionId, password: &str) -> Result<Sealed, SecretError> {
-        let mut slot = self.loaded()?;
-        let key = match *slot {
+    pub fn seal(&self, id: ConnectionId, slot: SecretSlot, password: &str) -> Result<Sealed, SecretError> {
+        let mut loaded = self.loaded()?;
+        let key = match *loaded {
             Some(key) => key,
             None => {
                 let key = XChaCha20Poly1305::generate_key(&mut OsRng);
                 self.keys.save(&key.into())?;
-                *slot.insert(key)
+                *loaded.insert(key)
             }
         };
-        drop(slot);
+        drop(loaded);
         let nonce = XChaCha20Poly1305::generate_nonce(&mut OsRng);
-        let aad = id.0.to_string();
+        let aad = slot.aad(id);
         let ciphertext = XChaCha20Poly1305::new(&key)
             .encrypt(&nonce, Payload { msg: password.as_bytes(), aad: aad.as_bytes() })
             .map_err(|e| SecretError(e.to_string()))?;
@@ -103,11 +127,11 @@ impl Vault {
 
     /// `None` when the password cannot be recovered, so the caller asks for it again. Never creates
     /// a key: a missing one means it was lost (wiped keychain, copied data dir, memory store restart).
-    pub fn open(&self, id: ConnectionId, sealed: &Sealed) -> Result<Option<String>, SecretError> {
+    pub fn open(&self, id: ConnectionId, slot: SecretSlot, sealed: &Sealed) -> Result<Option<String>, SecretError> {
         let Some(key) = *self.loaded()? else {
             return Ok(None);
         };
-        let aad = id.0.to_string();
+        let aad = slot.aad(id);
         let plain = XChaCha20Poly1305::new(&key)
             .decrypt(XNonce::from_slice(&sealed.nonce), Payload { msg: &sealed.ciphertext, aad: aad.as_bytes() })
             .ok();
@@ -147,17 +171,17 @@ mod tests {
     fn seal_then_open_returns_the_password() {
         let vault = Vault::new(Arc::new(MemoryKeyStore::default()));
         let id = id();
-        let sealed = vault.seal(id, "hunter2").unwrap();
+        let sealed = vault.seal(id, SecretSlot::Database, "hunter2").unwrap();
         assert!(!sealed.ciphertext.windows(7).any(|w| w == b"hunter2"));
-        assert_eq!(vault.open(id, &sealed).unwrap().as_deref(), Some("hunter2"));
+        assert_eq!(vault.open(id, SecretSlot::Database, &sealed).unwrap().as_deref(), Some("hunter2"));
     }
 
     #[test]
     fn a_reopened_vault_on_the_same_key_store_opens_the_password() {
         let keys = Arc::new(MemoryKeyStore::default());
         let id = id();
-        let sealed = Vault::new(keys.clone()).seal(id, "hunter2").unwrap();
-        assert_eq!(Vault::new(keys).open(id, &sealed).unwrap().as_deref(), Some("hunter2"));
+        let sealed = Vault::new(keys.clone()).seal(id, SecretSlot::Database, "hunter2").unwrap();
+        assert_eq!(Vault::new(keys).open(id, SecretSlot::Database, &sealed).unwrap().as_deref(), Some("hunter2"));
     }
 
     #[test]
@@ -166,14 +190,14 @@ mod tests {
         let sealed: Vec<_> = (0..3)
             .map(|_| {
                 let id = id();
-                (id, Vault::new(keys.clone()).seal(id, "pw").unwrap())
+                (id, Vault::new(keys.clone()).seal(id, SecretSlot::Database, "pw").unwrap())
             })
             .collect();
         let loads_before = keys.loads.load(Ordering::Relaxed);
         let vault = Vault::new(keys.clone());
         for _ in 0..4 {
             for (id, s) in &sealed {
-                assert_eq!(vault.open(*id, s).unwrap().as_deref(), Some("pw"));
+                assert_eq!(vault.open(*id, SecretSlot::Database, s).unwrap().as_deref(), Some("pw"));
             }
         }
         assert_eq!(keys.loads.load(Ordering::Relaxed) - loads_before, 1);
@@ -182,16 +206,41 @@ mod tests {
     #[test]
     fn a_password_sealed_for_another_connection_does_not_open() {
         let vault = Vault::new(Arc::new(MemoryKeyStore::default()));
-        let sealed = vault.seal(id(), "hunter2").unwrap();
-        assert_eq!(vault.open(id(), &sealed).unwrap(), None);
+        let sealed = vault.seal(id(), SecretSlot::Database, "hunter2").unwrap();
+        assert_eq!(vault.open(id(), SecretSlot::Database, &sealed).unwrap(), None);
+    }
+
+    #[test]
+    fn a_secret_sealed_in_one_slot_does_not_open_in_the_other() {
+        let vault = Vault::new(Arc::new(MemoryKeyStore::default()));
+        let id = id();
+        let password = vault.seal(id, SecretSlot::Database, "hunter2").unwrap();
+        let passphrase = vault.seal(id, SecretSlot::Ssh, "l1data").unwrap();
+        assert_eq!(vault.open(id, SecretSlot::Ssh, &password).unwrap(), None);
+        assert_eq!(vault.open(id, SecretSlot::Database, &passphrase).unwrap(), None);
+        assert_eq!(vault.open(id, SecretSlot::Ssh, &passphrase).unwrap().as_deref(), Some("l1data"));
+    }
+
+    #[test]
+    fn a_password_sealed_before_slots_existed_still_opens() {
+        let keys = Arc::new(MemoryKeyStore::default());
+        let vault = Vault::new(keys.clone());
+        let id = id();
+        vault.seal(id, SecretSlot::Ssh, "creates the key").unwrap();
+        let key = Key::from(keys.load().unwrap().unwrap());
+        let nonce = XChaCha20Poly1305::generate_nonce(&mut OsRng);
+        let aad = id.0.to_string();
+        let ciphertext = XChaCha20Poly1305::new(&key).encrypt(&nonce, Payload { msg: b"hunter2", aad: aad.as_bytes() }).unwrap();
+        let sealed = Sealed { nonce: nonce.into(), ciphertext };
+        assert_eq!(vault.open(id, SecretSlot::Database, &sealed).unwrap().as_deref(), Some("hunter2"));
     }
 
     #[test]
     fn a_lost_key_opens_nothing_and_creates_no_key() {
         let id = id();
-        let sealed = Vault::new(Arc::new(MemoryKeyStore::default())).seal(id, "hunter2").unwrap();
+        let sealed = Vault::new(Arc::new(MemoryKeyStore::default())).seal(id, SecretSlot::Database, "hunter2").unwrap();
         let keys = Arc::new(CountingKeys::default());
-        assert_eq!(Vault::new(keys.clone()).open(id, &sealed).unwrap(), None);
+        assert_eq!(Vault::new(keys.clone()).open(id, SecretSlot::Database, &sealed).unwrap(), None);
         assert_eq!(keys.saves.load(Ordering::Relaxed), 0);
         assert_eq!(keys.load().unwrap(), None);
     }
@@ -205,7 +254,7 @@ mod tests {
                 let vault = vault.clone();
                 std::thread::spawn(move || {
                     let id = id();
-                    (id, vault.seal(id, "pw").unwrap())
+                    (id, vault.seal(id, SecretSlot::Database, "pw").unwrap())
                 })
             })
             .collect::<Vec<_>>()
@@ -215,7 +264,7 @@ mod tests {
         assert_eq!(keys.saves.load(Ordering::Relaxed), 1);
         let fresh = Vault::new(keys.clone());
         for (id, s) in &sealed {
-            assert_eq!(fresh.open(*id, s).unwrap().as_deref(), Some("pw"));
+            assert_eq!(fresh.open(*id, SecretSlot::Database, s).unwrap().as_deref(), Some("pw"));
         }
     }
 }

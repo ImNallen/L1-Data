@@ -33,3 +33,16 @@ services:
       interval: 2s
       timeout: 5s
       retries: 60
+  sshd:
+    profiles: [ssh]
+    build: ./sshd
+    container_name: l1-data-sshd
+    ports:
+      - "2222:22"
+    depends_on:
+      - postgres
+    healthcheck:
+      test: ["CMD-SHELL", "nc -z 127.0.0.1 22"]
+      interval: 1s
+      timeout: 3s
+      retries: 30

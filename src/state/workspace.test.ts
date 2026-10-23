@@ -14,6 +14,7 @@ const config = (id: string): ConnectionConfig => ({
   databaseKind: "Postgres",
   hasPassword: true,
   color: null,
+  ssh: null,
 });
 
 describe("workspace.upsertConfig", () => {

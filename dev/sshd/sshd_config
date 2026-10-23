@@ -1,0 +1,14 @@
+HostKey /etc/ssh/ssh_host_ed25519_key
+AllowUsers tunnel
+PermitRootLogin no
+PubkeyAuthentication yes
+PasswordAuthentication yes
+KbdInteractiveAuthentication no
+AuthorizedKeysFile .ssh/authorized_keys
+AllowTcpForwarding local
+PermitOpen postgres:5432 mssql:1433
+ForceCommand /sbin/nologin
+PermitTTY no
+X11Forwarding no
+AllowAgentForwarding no
+PermitTunnel no

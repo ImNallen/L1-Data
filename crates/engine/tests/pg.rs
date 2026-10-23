@@ -56,7 +56,7 @@ impl Harness {
     }
 
     async fn start_with(dir: tempfile::TempDir, draft: ConnectionDraft) -> Self {
-        let engine = Engine::open(EngineConfig { data_dir: dir.path().to_owned(), keys: Arc::new(MemoryKeyStore::default()), agent_path: AgentPath::Fixed("".into()) })
+        let engine = Engine::open(EngineConfig { data_dir: dir.path().to_owned(), keys: Arc::new(MemoryKeyStore::default()), agent_path: AgentPath::Fixed("".into()), user_known_hosts: None })
             .await
             .unwrap();
         let events = engine.subscribe();

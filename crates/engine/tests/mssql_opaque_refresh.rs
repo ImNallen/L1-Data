@@ -26,6 +26,7 @@ impl Harness {
             data_dir: dir.path().into(),
             keys: Arc::new(MemoryKeyStore::default()),
             agent_path: AgentPath::Fixed("".into()),
+            user_known_hosts: None,
         }).await.unwrap();
         let connection = engine.save_connection(ConnectionDraft {
             database_kind: DatabaseKind::SqlServer,
@@ -39,6 +40,7 @@ impl Harness {
             ssl_mode: SslMode::Require,
             ca_cert_path: None,
             color: None,
+            ssh: None,
         }).await.unwrap().id;
         engine.connect(connection).await.unwrap();
         let prefix = format!("l1_opaque_{}", uuid::Uuid::new_v4().simple());

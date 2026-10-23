@@ -18,7 +18,7 @@ impl Harness {
     async fn open() -> Self {
         let dir = tempfile::tempdir().unwrap();
         let engine =
-            Engine::open(EngineConfig { data_dir: dir.path().into(), keys: Arc::new(MemoryKeyStore::default()), agent_path: AgentPath::Fixed("".into()) })
+            Engine::open(EngineConfig { data_dir: dir.path().into(), keys: Arc::new(MemoryKeyStore::default()), agent_path: AgentPath::Fixed("".into()), user_known_hosts: None })
                 .await
                 .unwrap();
         Self { engine, _dir: dir }
@@ -38,6 +38,7 @@ impl Harness {
                 ssl_mode: SslMode::Require,
                 ca_cert_path: None,
                 color: None,
+                ssh: None,
             })
             .await
             .unwrap()

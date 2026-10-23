@@ -22,6 +22,7 @@ fn specta_builder() -> tauri_specta::Builder<tauri::Wry> {
             ipc::connection_delete,
             ipc::connection_test,
             ipc::connection_parse_url,
+            ipc::ssh_trust_host_key,
             ipc::connection_connect,
             ipc::connection_disconnect,
             ipc::catalog_get,
@@ -83,7 +84,7 @@ fn engine_config(app: &tauri::App) -> Result<EngineConfig, Box<dyn Error>> {
         Some("memory") => Arc::new(MemoryKeyStore::default()),
         _ => Arc::new(KeyringKeyStore),
     };
-    Ok(EngineConfig { data_dir, keys, agent_path: AgentPath::LoginShell })
+    Ok(EngineConfig { data_dir, keys, agent_path: AgentPath::LoginShell, user_known_hosts: engine::openssh_known_hosts() })
 }
 
 // Tauri's default macOS menu binds Cmd+W to Close Window, which would swallow the key before the webview's
@@ -394,7 +395,7 @@ mod tests {
             }
             checked += 1;
         }
-        assert_eq!(checked, 19, "the sync commands in ipc.rs");
+        assert_eq!(checked, 20, "the sync commands in ipc.rs");
     }
 
     #[test]

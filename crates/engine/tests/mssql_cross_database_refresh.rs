@@ -33,6 +33,7 @@ impl Harness {
             data_dir: dir.path().into(),
             keys: Arc::new(MemoryKeyStore::default()),
             agent_path: AgentPath::Fixed("".into()),
+            user_known_hosts: None,
         }).await.unwrap();
         let mut connections = Vec::new();
         for name in ["Cross-database refresh", "Independent catalog identity"] {
@@ -48,6 +49,7 @@ impl Harness {
                 ssl_mode: SslMode::Require,
                 ca_cert_path: None,
                 color: None,
+                ssh: None,
             }).await.unwrap().id;
             engine.connect(id).await.unwrap();
             connections.push(id);

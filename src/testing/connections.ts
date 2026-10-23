@@ -12,6 +12,7 @@ export const connectionConfig = (id: string, name: string): ConnectionConfig => 
   caCertPath: null,
   hasPassword: false,
   color: null,
+  ssh: null,
 });
 
 export const databaseState = (name: string, shown: boolean, shownSchemas: string[]): DatabaseState => ({

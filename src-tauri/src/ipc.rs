@@ -37,6 +37,12 @@ pub fn connection_parse_url(engine: State<'_, Arc<Engine>>, url: String) -> Resu
 
 #[tauri::command]
 #[specta::specta]
+pub fn ssh_trust_host_key(engine: State<'_, Arc<Engine>>, key: HostKeyId) -> Result<(), String> {
+    engine.ssh_trust_host_key(key)
+}
+
+#[tauri::command]
+#[specta::specta]
 pub async fn connection_connect(engine: State<'_, Arc<Engine>>, id: ConnectionId) -> Result<ServerInfo, ConnectError> {
     engine.connect(id).await
 }

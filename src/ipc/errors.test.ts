@@ -1,6 +1,6 @@
 import { expect, it } from "vitest";
 import type { ApproveError, ChatError, SendError } from "./bindings";
-import { applyErrorText, approveErrorText, chatErrorText, configureErrorText, runErrorText, sendErrorText } from "./errors";
+import { applyErrorText, approveErrorText, chatErrorText, configureErrorText, connectErrorText, runErrorText, sendErrorText } from "./errors";
 
 it("keeps the engine's actionable capability refusal intact", () => {
   const what = "SQL Server Manual mode is unavailable. Select Auto-commit and use explicit transaction statements.";
@@ -49,4 +49,13 @@ it("says why a chat could not be opened or configured, and why an approval misse
   ]);
   const late: ApproveError = { kind: "NotPending" };
   expect(approveErrorText(late)).toBe("This query was already answered, stopped, or expired.");
+});
+
+it("names the host key an SSH server offered, and the fix for a changed one", () => {
+  const server = { host: "bastion", port: 2222, algorithm: "ssh-ed25519", fingerprint: "SHA256:abc" };
+  expect(connectErrorText({ kind: "Ssh", error: { kind: "HostKeyUnknown", ...server, trust: 1 } })).toBe("SSH: bastion:2222 offered an unknown ssh-ed25519 host key SHA256:abc.");
+  expect(connectErrorText({ kind: "Ssh", error: { kind: "HostKeyChanged", ...server, knownAt: "/Users/a/.ssh/known_hosts:4" } })).toContain(
+    "ssh-keygen -R '[bastion]:2222' -f '/Users/a/.ssh/known_hosts'",
+  );
+  expect(connectErrorText({ kind: "Ssh", error: { kind: "MissingSecret" } })).toMatch(/^SSH: /);
 });

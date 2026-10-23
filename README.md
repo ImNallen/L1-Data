@@ -20,7 +20,8 @@ L1 Data is a desktop IDE for PostgreSQL and Microsoft SQL Server, built with Tau
 - Double-click a table or a view to browse its rows in a tab. Saved PostgreSQL browse tabs keep paging, filters, sorting and editing with a trailing semicolon or outer whitespace in their generated query. Double-click a routine to insert its template at the active tab's cursor. The tab must target a saved connection of the same database kind. An unresolved or mismatched target shows an error without editing or retargeting the tab. SQL Server functions insert schema-qualified expressions for `SELECT` or `FROM`, and procedures insert `EXEC` calls. Templates with parameters require argument values. Replace the editable `NULL` placeholders as needed, declare table-valued arguments as `@table_argument_N` variables, and use variables with `OUTPUT` to capture output parameters.
 - The sidebar's search box filters the tree in place. The tree keeps the tables, views, columns, and functions whose names contain every word you type, in the schemas it shows, and opens each match's parents and highlights the match. A matching column sits under its table. `Enter` opens the first table or view whose name starts with the words you typed, else the first one listed. `Esc` clears the search. `⌘P` focuses the box.
 - The connection dialog lists the saved connections on the left, with a live dot on each connected one. Click one to edit it, or **New** to add another. Paste a `postgres://` or `sqlserver://` URL to fill in the database kind, server, database, user, password, and TLS mode. The name is optional and defaults to the host and database. Pick a color to mark the connection in the tree and the top bar. To shade each colored connection in the tree with its color instead of a dot, turn on **Tint connections by color** in **Settings** > **Appearance**. **Test** shows the server version before you save. Leaving a form with unsaved edits, by choosing another connection or closing the dialog, asks before it drops them. Right-clicking a connection connects, disconnects, opens a SQL tab, refreshes the catalog, edits, and deletes.
-- The OS credential store holds one master key, and saved passwords are sealed under it. macOS asks for keychain access once per launch.
+- Turn on **SSH tunnel** in the connection dialog to reach the database through an SSH server. Sign in with a password, a private key file with an optional passphrase, or an SSH agent at `SSH_AUTH_SOCK` or a socket you name. The SSH server resolves and dials the database host, so a name only it knows, such as `db.internal`, works. The connection list shows the server after `via`. The app checks the server's host key against `~/.ssh/known_hosts`, which it never writes, and against its own `known_hosts` file in its data folder. When the key is unknown, **Test** shows its fingerprint with **Trust and test again**, and **Connect** asks before it trusts it. Trusting adds that key to the app's own file. A changed or revoked key fails, and the error says how to fix it. `~/.ssh/config` is not read, so enter the host, port, user, and key file in the dialog.
+- The OS credential store holds one master key, and saved passwords and SSH secrets are sealed under it. macOS asks for keychain access once per launch.
 
 ### Query tabs
 
@@ -113,6 +114,7 @@ For SQL Server development, run `pnpm db:mssql:up`. It starts SQL Server 2022 De
 cargo test --workspace   # engine units, bindings drift test, bridge coverage test
 cargo test -p engine --features pg-tests   # engine against PostgreSQL
 cargo test -p engine --features mssql-tests   # engine against SQL Server; needs pnpm db:mssql:up
+cargo test -p engine --features ssh-tests   # engine through an SSH bastion; needs pnpm db:up and pnpm db:ssh:up
 python3 dev/mssql-tls-smoke.py   # public Engine VerifyFull CA/name checks against a disposable SQL Server
 pnpm typecheck
 pnpm test                # vitest
@@ -127,6 +129,8 @@ pnpm screenshot          # macOS: rewrites docs/images/l1-data.png from the runn
 ```
 
 The SQL Server TLS smoke needs Docker, OpenSSL, Rust, and the cached `mcr.microsoft.com/mssql/server:2022-latest` image. It builds the engine and a temporary public-API probe, starts its own container on a free loopback port, and uses generated fixture credentials and certificates. It checks trusted `localhost`, hostname rejection on `127.0.0.1`, unrelated-CA rejection, and **Require** controls. Each probe child gets isolated `SSL_CERT_FILE` and `SSL_CERT_DIR` settings. The script removes its container and temporary files on success or failure. It does not use the seeded databases or bridge.
+
+`pnpm db:ssh:up` starts an OpenSSH bastion on `localhost:2222` that forwards only to `postgres:5432`, and to `mssql:1433` when `pnpm db:mssql:up` is up too. The `ssh-tests` SQL Server case runs only then. The bastion's host key and the client keys under `dev/sshd` are test-only fixtures.
 
 A debug binary rewrites `src/ipc/bindings.ts` each time it starts, so `pnpm tauri dev` and `pnpm self-check` keep it current too.
 
