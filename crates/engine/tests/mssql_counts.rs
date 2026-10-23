@@ -24,7 +24,7 @@ impl Harness {
         let fixture = FIXTURES.lock().await;
         let dir = tempfile::tempdir().unwrap();
         let engine = Engine::open(EngineConfig {
-            data_dir: dir.path().into(), keys: Arc::new(MemoryKeyStore::default()), agent_path: AgentPath::Fixed("".into()),
+            data_dir: dir.path().into(), keys: Arc::new(MemoryKeyStore::default()), agent_path: AgentPath::Fixed("".into()), user_known_hosts: None,
         }).await.unwrap();
         let connection = engine.save_connection(ConnectionDraft {
             id: None, database_kind: DatabaseKind::SqlServer, name: "Native count regression".into(),

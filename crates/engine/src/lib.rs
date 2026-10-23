@@ -11,6 +11,7 @@ mod session;
 mod sql;
 mod store;
 mod text;
+mod tunnel;
 mod txn;
 mod view;
 
@@ -30,6 +31,7 @@ use provider::ProbeDepth;
 use secrets::{SecretSlot, Vault};
 use session::Session;
 use store::{HistoryInsert, Store};
+use tunnel::TunnelSpec;
 use view::{ConnectionView, Known, Selection};
 
 pub use assistant::SHUTDOWN_BOUND;
@@ -37,11 +39,16 @@ pub use connection::draft_from_url;
 pub use provider::AgentPath;
 pub use secrets::{KeyStore, KeyringKeyStore, MemoryKeyStore, SecretError};
 pub use store::StoreError;
+pub use tunnel::openssh_known_hosts;
 
 pub struct EngineConfig {
     pub data_dir: PathBuf,
     pub keys: Arc<dyn KeyStore>,
     pub agent_path: AgentPath,
+    /// The OpenSSH known_hosts that SSH tunnels also trust, read at each dial and never written.
+    /// The app passes `openssh_known_hosts()`. Tests pass `None`, so they never read the
+    /// developer's file.
+    pub user_known_hosts: Option<PathBuf>,
 }
 
 pub struct Engine {
@@ -71,6 +78,7 @@ pub(crate) struct Shared {
     assistant: assistant::Assistant,
     process_groups: Arc<provider::agent::ProcessGroups>,
     next_chat_rev: AtomicU64,
+    tunnels: tunnel::Tunnels,
 }
 
 /// A saved SSH secret applies only to the auth kind it was saved for.
@@ -147,7 +155,14 @@ impl Shared {
 
     fn params(&self, config: &ConnectionConfig, database: &str) -> Result<ConnectParams, ConnectError> {
         let password = if config.has_password { self.saved_secret(config.id, SecretSlot::Database)? } else { None };
-        Ok(ConnectParams::for_database(config, database, password))
+        let via = match &config.ssh {
+            Some(t) => {
+                let secret = if t.has_secret { self.saved_secret(config.id, SecretSlot::Ssh)? } else { None };
+                Some(self.tunnels.route(Some(config.id), TunnelSpec::new(&t.host, t.port, &t.user, &t.auth, secret))?)
+            }
+            None => None,
+        };
+        Ok(ConnectParams::for_database(config, database, password, via))
     }
 
     /// Parameters for a console session on `database`, from the config as saved now.
@@ -654,6 +669,7 @@ impl Engine {
         let store = Store::open(&cfg.data_dir.join(DB_FILE))?;
         let settings = store.kv_get::<Settings>(KV_SETTINGS)?.unwrap_or_default();
         let (events, _) = broadcast::channel(EVENT_BUFFER);
+        let tunnels = tunnel::Tunnels::new(cfg.user_known_hosts, cfg.data_dir.join("known_hosts"));
         let shared = Arc::new(Shared {
             data_dir: cfg.data_dir,
             vault: Vault::new(cfg.keys),
@@ -671,6 +687,7 @@ impl Engine {
             assistant: assistant::Assistant::new(),
             process_groups: Arc::new(provider::agent::ProcessGroups::default()),
             next_chat_rev: AtomicU64::new(1),
+            tunnels,
         });
         tokio::fs::create_dir_all(shared.assistant_dir()).await?;
         shared.probe_all(ProbeDepth::Full);
@@ -838,7 +855,19 @@ impl Engine {
             (PasswordInput::Clear, _) | (PasswordInput::Keep, None) => None,
             (PasswordInput::Keep, Some(id)) => s.saved_secret(id, SecretSlot::Database)?,
         };
-        let session = Session::open(&ConnectParams::from_draft(&d, password), None, &s.timezone).await?;
+        let via = match &d.ssh {
+            Some(t) => {
+                let prior = d.id.and_then(|id| s.config(id)).and_then(|c| c.ssh);
+                let secret = match (&t.secret, d.id) {
+                    (PasswordInput::Set(secret), _) => Some(secret.clone()),
+                    (PasswordInput::Keep, Some(id)) if keeps_ssh_secret(prior.as_ref(), &t.auth) => s.saved_secret(id, SecretSlot::Ssh)?,
+                    _ => None,
+                };
+                Some(s.tunnels.route(None, TunnelSpec::new(&t.host, t.port, &t.user, &t.auth, secret))?)
+            }
+            None => None,
+        };
+        let session = Session::open(&ConnectParams::from_draft(&d, password, via), None, &s.timezone).await?;
         Ok(session.server)
     }
 
@@ -874,7 +903,14 @@ impl Engine {
         if let Some(instance) = instance {
             instance.close();
         }
+        s.tunnels.forget(id);
         Ok(())
+    }
+
+    /// Adds a host key a dial reported as `HostKeyUnknown` to the app's known_hosts. Only a key
+    /// the engine observed can be trusted, once, within ten minutes.
+    pub fn ssh_trust_host_key(&self, key: HostKeyId) -> Result<(), String> {
+        self.shared.tunnels.trust(key)
     }
 
     pub async fn catalog(&self, db: DatabaseRef) -> Result<Arc<Catalog>, CatalogError> {
@@ -1523,6 +1559,7 @@ mod tests {
             data_dir: dir.path().join("nested"),
             keys: Arc::new(MemoryKeyStore::default()),
             agent_path: AgentPath::Fixed("".into()),
+            user_known_hosts: None,
         })
         .await
         .unwrap();
@@ -1626,7 +1663,7 @@ mod tests {
     #[tokio::test]
     async fn passwordless_save_clear_and_delete_never_touch_the_keychain() {
         let dir = tempfile::tempdir().unwrap();
-        let engine = Engine::open(EngineConfig { data_dir: dir.path().to_owned(), keys: Arc::new(NoKeychain), agent_path: AgentPath::Fixed("".into()) }).await.unwrap();
+        let engine = Engine::open(EngineConfig { data_dir: dir.path().to_owned(), keys: Arc::new(NoKeychain), agent_path: AgentPath::Fixed("".into()), user_known_hosts: None }).await.unwrap();
         let saved = engine.save_connection(ConnectionDraft { password: PasswordInput::Clear, ..draft("dev") }).await.unwrap();
         let kept = engine
             .save_connection(ConnectionDraft { id: Some(saved.id), password: PasswordInput::Keep, ..draft("dev") })
@@ -1642,7 +1679,7 @@ mod tests {
     async fn connections_settings_and_workspace_persist_across_open() {
         let dir = tempfile::tempdir().unwrap();
         let keys = Arc::new(MemoryKeyStore::default());
-        let cfg = || EngineConfig { data_dir: dir.path().to_owned(), keys: keys.clone(), agent_path: AgentPath::Fixed("".into()) };
+        let cfg = || EngineConfig { data_dir: dir.path().to_owned(), keys: keys.clone(), agent_path: AgentPath::Fixed("".into()), user_known_hosts: None };
         let password = |engine: &Engine, id| engine.shared.saved_secret(id, SecretSlot::Database).unwrap();
         let saved = {
             let engine = Engine::open(cfg()).await.unwrap();
@@ -1726,7 +1763,7 @@ mod tests {
     #[tokio::test]
     async fn an_invalid_tunnel_is_rejected_before_any_secret_is_sealed() {
         let dir = tempfile::tempdir().unwrap();
-        let engine = Engine::open(EngineConfig { data_dir: dir.path().to_owned(), keys: Arc::new(NoKeychain), agent_path: AgentPath::Fixed("".into()) }).await.unwrap();
+        let engine = Engine::open(EngineConfig { data_dir: dir.path().to_owned(), keys: Arc::new(NoKeychain), agent_path: AgentPath::Fixed("".into()), user_known_hosts: None }).await.unwrap();
         let tunnel = SshTunnelDraft { host: "bastion".into(), port: 22, user: "tunnel".into(), auth: SshAuth::Password, secret: PasswordInput::Set("pw".into()) };
         for bad in [
             SshTunnelDraft { host: " ".into(), ..tunnel.clone() },

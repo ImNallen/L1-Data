@@ -26,6 +26,7 @@ impl Harness {
             data_dir: dir.path().into(),
             keys: Arc::new(MemoryKeyStore::default()),
             agent_path: AgentPath::Fixed("".into()),
+            user_known_hosts: None,
         }).await.unwrap();
         let connection = engine.save_connection(ConnectionDraft {
             database_kind: DatabaseKind::SqlServer,

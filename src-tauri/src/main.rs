@@ -83,7 +83,7 @@ fn engine_config(app: &tauri::App) -> Result<EngineConfig, Box<dyn Error>> {
         Some("memory") => Arc::new(MemoryKeyStore::default()),
         _ => Arc::new(KeyringKeyStore),
     };
-    Ok(EngineConfig { data_dir, keys, agent_path: AgentPath::LoginShell })
+    Ok(EngineConfig { data_dir, keys, agent_path: AgentPath::LoginShell, user_known_hosts: engine::openssh_known_hosts() })
 }
 
 // Tauri's default macOS menu binds Cmd+W to Close Window, which would swallow the key before the webview's

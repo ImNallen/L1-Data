@@ -17,7 +17,7 @@ struct Harness {
 impl Harness {
     async fn open(mode: TxnMode) -> Self {
         let dir = tempfile::tempdir().unwrap();
-        let engine = Engine::open(EngineConfig { data_dir: dir.path().into(), keys: Arc::new(MemoryKeyStore::default()), agent_path: AgentPath::Fixed("".into()) }).await.unwrap();
+        let engine = Engine::open(EngineConfig { data_dir: dir.path().into(), keys: Arc::new(MemoryKeyStore::default()), agent_path: AgentPath::Fixed("".into()), user_known_hosts: None }).await.unwrap();
         let events = engine.subscribe();
         let config = engine
             .save_connection(ConnectionDraft {

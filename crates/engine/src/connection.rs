@@ -8,6 +8,7 @@ use std::time::Duration;
 
 use crate::model::*;
 use crate::session::Session;
+use crate::tunnel::SshRoute;
 use crate::view::{self, ConnectionView, Known};
 
 pub const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
@@ -23,11 +24,12 @@ pub struct ConnectParams {
     pub password: Option<String>,
     pub ssl_mode: SslMode,
     pub ca_cert_path: Option<String>,
+    pub via: Option<SshRoute>,
 }
 
 impl ConnectParams {
     /// The one place that chooses which database a session targets.
-    pub fn for_database(c: &ConnectionConfig, database: &str, password: Option<String>) -> Self {
+    pub fn for_database(c: &ConnectionConfig, database: &str, password: Option<String>, via: Option<SshRoute>) -> Self {
         Self {
             database_kind: c.database_kind,
             host: c.host.clone(),
@@ -37,10 +39,11 @@ impl ConnectParams {
             password,
             ssl_mode: c.ssl_mode,
             ca_cert_path: c.ca_cert_path.clone(),
+            via,
         }
     }
 
-    pub fn from_draft(d: &ConnectionDraft, password: Option<String>) -> Self {
+    pub fn from_draft(d: &ConnectionDraft, password: Option<String>, via: Option<SshRoute>) -> Self {
         Self {
             database_kind: d.database_kind,
             host: d.host.clone(),
@@ -50,9 +53,9 @@ impl ConnectParams {
             password,
             ssl_mode: d.ssl_mode,
             ca_cert_path: d.ca_cert_path.clone(),
+            via,
         }
     }
-
 }
 
 pub fn draft_from_url(url: &str, name: &str) -> Result<ConnectionDraft, String> {

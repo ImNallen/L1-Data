@@ -10,10 +10,13 @@ use std::future::poll_fn;
 use std::time::Duration;
 
 use postgres_native_tls::MakeTlsConnector;
+use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::sync::{mpsc, watch};
 use tokio_postgres::error::DbError;
-use tokio_postgres::{AsyncMessage, CancelToken, Client, SimpleQueryMessage};
+use tokio_postgres::tls::MakeTlsConnect;
+use tokio_postgres::{AsyncMessage, CancelToken, Client, Connection, SimpleQueryMessage};
 
+use super::stream::DbStream;
 use crate::connection::{ConnectParams, CONNECT_TIMEOUT, KEEPALIVE_IDLE};
 use crate::model::*;
 use crate::text::quote_ident;
@@ -23,8 +26,7 @@ pub(super) struct PgSession {
     pub backend_pid: i32,
     pub server: ServerInfo,
     pub search_path: Option<String>,
-    cancel: CancelToken,
-    tls: MakeTlsConnector,
+    cancel: PgCancel,
     notices: mpsc::UnboundedReceiver<DbError>,
     closed: watch::Receiver<Option<String>>,
     retired: Option<String>,
@@ -34,35 +36,68 @@ pub(super) struct PgSession {
 pub(super) struct PgCancel {
     token: CancelToken,
     tls: MakeTlsConnector,
+    /// A tunneled session's cancel goes through a fresh channel of its tunnel, since the token has
+    /// no socket to dial. Kept without the password, which a cancel request does not send.
+    tunnel: Option<ConnectParams>,
 }
 
 impl PgCancel {
     pub async fn cancel(&self) {
-        if let Err(e) = self.token.cancel_query(self.tls.clone()).await {
-            eprintln!("cancel request failed: {}", error_text(&e));
+        let sent = match &self.tunnel {
+            None => self.token.cancel_query(self.tls.clone()).await.map_err(|e| error_text(&e)),
+            Some(p) => self.cancel_through(p).await,
+        };
+        if let Err(e) = sent {
+            eprintln!("cancel request failed: {e}");
         }
     }
+
+    async fn cancel_through(&self, p: &ConnectParams) -> Result<(), String> {
+        let stream = p.dial().await.map_err(|e| crate::connection::connect_error_text(&e))?;
+        let tls = MakeTlsConnect::<DbStream>::make_tls_connect(&mut self.tls.clone(), &p.host).map_err(|e| e.to_string())?;
+        self.token.cancel_query_raw(stream, tls).await.map_err(|e| error_text(&e))
+    }
+}
+
+fn drive<S, T>(mut connection: Connection<S, T>) -> (mpsc::UnboundedReceiver<DbError>, watch::Receiver<Option<String>>)
+where
+    S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+    T: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+{
+    let (notice_tx, notices) = mpsc::unbounded_channel();
+    let (closed_tx, closed) = watch::channel(None);
+    tokio::spawn(async move {
+        let reason = loop {
+            match poll_fn(|cx| connection.poll_message(cx)).await {
+                Some(Ok(AsyncMessage::Notice(n))) => {
+                    let _ = notice_tx.send(n);
+                }
+                Some(Ok(_)) => {}
+                Some(Err(e)) => break error_text(&e),
+                None => break "connection closed".to_owned(),
+            }
+        };
+        let _ = closed_tx.send(Some(reason));
+    });
+    (notices, closed)
 }
 
 impl PgSession {
     pub async fn open(p: &ConnectParams, schema: Option<&str>, timezone: &str) -> Result<PgSession, ConnectError> {
         let tls = p.tls()?;
-        let (client, mut connection) = p.pg_config().connect(tls.clone()).await.map_err(connect_error)?;
-        let (notice_tx, notices) = mpsc::unbounded_channel();
-        let (closed_tx, closed) = watch::channel(None);
-        tokio::spawn(async move {
-            let reason = loop {
-                match poll_fn(|cx| connection.poll_message(cx)).await {
-                    Some(Ok(AsyncMessage::Notice(n))) => {
-                        let _ = notice_tx.send(n);
-                    }
-                    Some(Ok(_)) => {}
-                    Some(Err(e)) => break error_text(&e),
-                    None => break "connection closed".to_owned(),
-                }
-            };
-            let _ = closed_tx.send(Some(reason));
-        });
+        let (client, (notices, closed)) = if p.via.is_none() {
+            let (client, connection) = p.pg_config().connect(tls.clone()).await.map_err(connect_error)?;
+            (client, drive(connection))
+        } else {
+            let stream = p.dial().await?;
+            let connector = MakeTlsConnect::<DbStream>::make_tls_connect(&mut tls.clone(), &p.host).map_err(|e| ConnectError::Tls { message: e.to_string() })?;
+            // `connect_raw` ignores the config's connect_timeout.
+            let login = tokio::time::timeout(CONNECT_TIMEOUT, p.pg_config().connect_raw(stream, connector)).await.map_err(|_| ConnectError::Network {
+                message: format!("{}:{} did not finish the PostgreSQL login within {} s", p.host, p.port, CONNECT_TIMEOUT.as_secs()),
+            })?;
+            let (client, connection) = login.map_err(connect_error)?;
+            (client, drive(connection))
+        };
 
         // An OS zone Postgres does not know is not worth failing the connection over.
         let _ = client.batch_execute(&format!("SET TimeZone = '{}'", timezone.replace('\'', "''"))).await;
@@ -71,8 +106,7 @@ impl PgSession {
             backend_pid: server.1,
             server: server.0,
             search_path: None,
-            cancel: client.cancel_token(),
-            tls,
+            cancel: PgCancel { token: client.cancel_token(), tls, tunnel: p.via.is_some().then(|| ConnectParams { password: None, ..p.clone() }) },
             notices,
             closed,
             retired: None,
@@ -91,7 +125,7 @@ impl PgSession {
     }
 
     pub fn cancel_handle(&self) -> PgCancel {
-        PgCancel { token: self.cancel.clone(), tls: self.tls.clone() }
+        self.cancel.clone()
     }
 
     pub fn drain_notices(&mut self) -> Vec<DbError> {

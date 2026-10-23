@@ -58,6 +58,7 @@ impl Harness {
             data_dir: dir.path().into(),
             keys: Arc::new(MemoryKeyStore::default()),
             agent_path: AgentPath::Fixed("".into()),
+            user_known_hosts: None,
         }).await.unwrap();
         let (host, port) = address();
         let connection = engine.save_connection(ConnectionDraft {

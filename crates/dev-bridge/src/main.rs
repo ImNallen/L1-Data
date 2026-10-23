@@ -89,6 +89,7 @@ async fn main() {
         data_dir,
         keys: Arc::new(MemoryKeyStore::default()),
         agent_path: AgentPath::LoginShell,
+        user_known_hosts: engine::openssh_known_hosts(),
     })
     .await
     .expect("open engine");

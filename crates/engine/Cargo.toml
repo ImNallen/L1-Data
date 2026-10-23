@@ -9,6 +9,7 @@ autobins = false
 pg-tests = []
 mssql-tests = []
 claude-smoke = []
+ssh-tests = []
 
 [[bin]]
 name = "fake-claude"
@@ -28,6 +29,7 @@ native-tls = "0.2"
 postgres-native-tls = "0.5"
 percent-encoding = "2"
 rusqlite = { version = "0.40", features = ["bundled", "functions"] }
+russh = { version = "=0.64.1", default-features = false, features = ["aws-lc-rs", "rsa"] }
 serde.workspace = true
 serde_json.workspace = true
 specta.workspace = true
@@ -36,6 +38,7 @@ tokio = { workspace = true, features = ["io-util", "process", "time"] }
 tokio-postgres = "0.7.18"
 uuid.workspace = true
 url = "2"
+zeroize = "1"
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_System_Threading"] }

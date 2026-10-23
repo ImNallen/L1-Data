@@ -1,5 +1,6 @@
 mod mssql;
 mod postgres;
+mod stream;
 
 use crate::connection::{ConnectParams, DatabaseInfo};
 use crate::model::*;

@@ -89,6 +89,7 @@ mod tests {
             password: Some(std::env::var("L1_DATA_TEST_MSSQL_PASSWORD").unwrap_or_else(|_| "L1Data_dev_Str0ng".into())),
             ssl_mode: SslMode::Require,
             ca_cert_path: None,
+            via: None,
         };
         let mut session = Session::open(&params, None, "UTC").await.unwrap();
         let table = format!("l1_typed_count_{}", uuid::Uuid::new_v4().simple());
