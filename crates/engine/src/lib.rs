@@ -577,14 +577,15 @@ impl Shared {
 
     /// Consoles of `id` with an open transaction, with `has_writes` probed on their idle sessions.
     /// The probe takes the session out like a run does, so the lock is not held across the query.
+    /// The probes run together, each for at most `PROBE_TIMEOUT`, so a stalled network delays the
+    /// check once rather than forever. A probe with no answer counts as writes.
     async fn open_transactions(self: &Arc<Self>, consoles: &[Arc<Console>]) -> Vec<OpenTxn> {
-        let mut open = Vec::new();
-        for console in consoles {
+        let probes = consoles.iter().map(|console| async move {
             let run_id = self.next_run_id();
             let taken = {
                 let mut inner = console.inner.lock().await;
                 if inner.txn == TxnState::Idle {
-                    continue;
+                    return None;
                 }
                 let taken = console.take_session(&mut inner, run_id, ConsoleWork::Probe);
                 if taken.is_some() { console.publish(&mut inner, self); }
@@ -593,7 +594,7 @@ impl Shared {
             let has_writes = match taken {
                 None => true,
                 Some((mut session, _stop)) => {
-                    let has_writes = session.has_writes().await;
+                    let has_writes = tokio::time::timeout(PROBE_TIMEOUT, session.has_writes()).await.unwrap_or(true);
                     let lost = session.closed_reason();
                     let edited = console
                         .edit(self, run_id, |inner| {
@@ -605,9 +606,9 @@ impl Shared {
                     has_writes
                 }
             };
-            open.push(OpenTxn { tab_id: console.tab, has_writes });
-        }
-        open
+            Some(OpenTxn { tab_id: console.tab, has_writes })
+        });
+        futures_util::future::join_all(probes).await.into_iter().flatten().collect()
     }
 
     async fn console_txn_command(self: &Arc<Self>, tab: TabId, commit: bool) -> Result<(), TxnError> {
