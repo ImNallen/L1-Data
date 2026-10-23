@@ -127,6 +127,8 @@ routes! { e;
     result_page(result_ref: ResultRef, start: u32, len: u32) => e.result_page(result_ref, start, len);
     result_cell(result_ref: ResultRef, row: u32, col: u16) => e.result_cell(result_ref, row, col);
     result_export_csv(result_ref: ResultRef, path: String) => e.export_csv(result_ref, PathBuf::from(path)).await;
+    file_open(path: String) => e.file_open(path).await;
+    file_save(target: SaveTarget, text: String) => e.file_save(target, text).await;
     history_list(query: HistoryQuery) => ok(e.history(query));
     history_browse(query: HistoryBrowseQuery) => e.history_browse(query);
     history_group(query: HistoryGroupQuery) => e.history_group(query);

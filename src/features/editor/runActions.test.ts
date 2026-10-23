@@ -391,6 +391,7 @@ it.each([
     id, title: "orders", text,
     console: { connectionId: "c1", database: "shop", schema: null, mode: "AutoCommit" },
     table: { schema: "public", table: "orders", page: 2, query },
+    file: null,
   };
   const ws = useWorkspace.getState();
   seedEditor(id, text);

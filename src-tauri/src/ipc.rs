@@ -170,6 +170,18 @@ pub async fn result_export_csv(engine: State<'_, Arc<Engine>>, result_ref: Resul
 
 #[tauri::command]
 #[specta::specta]
+pub async fn file_open(engine: State<'_, Arc<Engine>>, path: String) -> Result<FileOpened, FileReadError> {
+    engine.file_open(path).await
+}
+
+#[tauri::command]
+#[specta::specta]
+pub async fn file_save(engine: State<'_, Arc<Engine>>, target: SaveTarget, text: String) -> Result<FileSaved, FileWriteError> {
+    engine.file_save(target, text).await
+}
+
+#[tauri::command]
+#[specta::specta]
 pub fn history_list(engine: State<'_, Arc<Engine>>, query: HistoryQuery) -> HistoryPage {
     engine.history(query)
 }

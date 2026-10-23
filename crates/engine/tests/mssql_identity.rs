@@ -38,6 +38,7 @@ fn saved(connection_id: ConnectionId, database: &str, table: bool) -> TabSnapsho
         text: Some(if table { "SELECT * FROM [dbo].[orders]" } else { "SELECT DB_NAME() AS identity_home" }.into()),
         console: ConsoleConfigSnapshot { connection_id: Some(connection_id), database: Some(database.into()), schema: None, mode: TxnMode::AutoCommit },
         table: table.then(|| TableSnapshot { schema: "dbo".into(), table: "orders".into(), page: 0, query: TableQuery::default() }),
+        file: None,
     }
 }
 

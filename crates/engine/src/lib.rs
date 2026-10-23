@@ -2,6 +2,7 @@ mod assistant;
 mod catalog;
 mod connection;
 mod console;
+mod files;
 mod history;
 pub mod model;
 mod provider;
@@ -1483,6 +1484,14 @@ impl Engine {
         .map_err(|e| ExportError::Io { message: e.to_string() })
     }
 
+    pub async fn file_open(&self, path: String) -> Result<FileOpened, FileReadError> {
+        self.shared.runtime.spawn_blocking(move || files::open(&path)).await.unwrap_or_else(|e| Err(FileReadError::Io { message: e.to_string() }))
+    }
+
+    pub async fn file_save(&self, target: SaveTarget, text: String) -> Result<FileSaved, FileWriteError> {
+        self.shared.runtime.spawn_blocking(move || files::save(target, &text)).await.unwrap_or_else(|e| Err(FileWriteError::Io { message: e.to_string() }))
+    }
+
     pub fn history(&self, q: HistoryQuery) -> HistoryPage {
         self.shared.store.history(&q).unwrap_or_else(|e| {
             eprintln!("history query failed: {e}");
@@ -1679,6 +1688,22 @@ mod tests {
         engine.shared.store.put_chat(new, &record("new", 20)).unwrap();
         let state = |id, title: &str, updated_at_ms| ChatState { id, rev: 0, title: title.into(), updated_at_ms, options: options.clone(), status: ChatStatus::Idle, entry_count: 4 };
         assert_eq!(engine.boot().chats, vec![state(new, "new", 20), state(old, "old", 10)]);
+    }
+
+    #[tokio::test]
+    async fn a_file_opens_and_saves_through_the_engine() {
+        let (engine, dir) = engine().await;
+        let path = dir.path().join("q.sql");
+        std::fs::write(&path, "select 1;\r\n").unwrap();
+        let opened = engine.file_open(path.to_string_lossy().into_owned()).await.unwrap();
+        assert_eq!((opened.name.as_str(), opened.text.as_str()), ("q.sql", "select 1;\n"));
+        let saved = engine.file_save(SaveTarget::Bound { binding: opened.binding, overwrite: None }, "select 2;\n".into()).await.unwrap();
+        assert_eq!(std::fs::read(&path).unwrap(), b"select 2;\r\n");
+        let reopened = engine.file_open(saved.binding.path.clone()).await.unwrap();
+        assert_eq!((reopened.text.as_str(), reopened.binding), ("select 2;\n", saved.binding));
+        let missing = engine.file_open(dir.path().join("missing.sql").to_string_lossy().into_owned()).await;
+        assert!(matches!(missing, Err(FileReadError::NotFound)), "{missing:?}");
+        engine.shutdown().await;
     }
 
     const PLAINTEXT: &str = "plaintext-hunter2";
@@ -1918,7 +1943,7 @@ mod tests {
         let tab = TabId(uuid::Uuid::new_v4());
         engine.save_workspace(Workspace {
             tabs: vec![TabSnapshot {
-                id: tab, title: "Saved Manual".into(), text: Some("UPDATE dbo.target SET n=2".into()), table: None,
+                id: tab, title: "Saved Manual".into(), text: Some("UPDATE dbo.target SET n=2".into()), table: None, file: None,
                 console: ConsoleConfigSnapshot { connection_id: Some(connection.id), database: Some("shop".into()), schema: None, mode: TxnMode::Manual },
             }], active: Some(tab), ..Workspace::default()
         });

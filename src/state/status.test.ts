@@ -185,8 +185,9 @@ describe("workspace snapshot", () => {
           page: 3,
           query: { orderBy: "total DESC", filters: [{ column: "status", op: "Eq", value: "paid" }], where: "total > 10" },
         },
+        file: null,
       },
-      { id: "a", title: "Untitled-2.sql", text: "-- text of a", console: { connectionId: "c", database: "reporting", schema: null, mode: "Manual" }, table: null },
+      { id: "a", title: "Untitled-2.sql", text: "-- text of a", console: { connectionId: "c", database: "reporting", schema: null, mode: "Manual" }, table: null, file: null },
     ]);
     expect(snap.tabs.map((t) => tabFromSnapshot(t, configs))).toEqual([tabs[1], tabs[0]]);
     expect(snap.layout).toEqual(state.layout);
@@ -200,6 +201,7 @@ describe("workspace snapshot", () => {
       text: null,
       console: { connectionId: "c", database: "shop", schema: null, mode: "AutoCommit" as const },
       table: { schema: "public", table: "orders", page: 2, query: { orderBy: "", filters: [], where: "" } },
+      file: null,
     };
     expect(tabFromSnapshot(saved, configs)).toEqual({
       id: "b",
@@ -211,8 +213,8 @@ describe("workspace snapshot", () => {
 
   it("restores a tab saved before tabs carried a database onto the connection's configured database", () => {
     const saved: Workspace["tabs"] = [
-      { id: "a", title: "q.sql", text: "select 1", console: { connectionId: "c", database: null, schema: "lab", mode: "AutoCommit" }, table: null },
-      { id: "d", title: "free.sql", text: "", console: { connectionId: null, database: null, schema: null, mode: "Manual" }, table: null },
+      { id: "a", title: "q.sql", text: "select 1", console: { connectionId: "c", database: null, schema: "lab", mode: "AutoCommit" }, table: null, file: null },
+      { id: "d", title: "free.sql", text: "", console: { connectionId: null, database: null, schema: null, mode: "Manual" }, table: null, file: null },
     ];
     expect(saved.map((t) => tabFromSnapshot(t, configs))).toEqual([
       { id: "a", title: "q.sql", console: { db: { connectionId: "c", database: "shop" }, mode: "AutoCommit" }, table: null },
@@ -227,6 +229,7 @@ describe("workspace snapshot", () => {
       text: "select * from orders",
       console: { connectionId: "gone", database: "shop", schema: null, mode: "Manual" as const },
       table: { schema: "public", table: "orders", page: 0, query: { orderBy: "", filters: [], where: "" } },
+      file: null,
     };
     expect(tabFromSnapshot(saved, configs)).toEqual({ id: "b", title: "orders", console: { db: null, mode: "Manual" }, table: null });
   });

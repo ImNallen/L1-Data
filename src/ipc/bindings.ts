@@ -33,6 +33,8 @@ export const commands = {
 	resultPage: (resultRef: ResultRef, start: number, len: number) => typedError<RowPage, ResultError>(__TAURI_INVOKE("result_page", { resultRef, start, len })),
 	resultCell: (resultRef: ResultRef, row: number, col: number) => typedError<string | null, ResultError>(__TAURI_INVOKE("result_cell", { resultRef, row, col })),
 	resultExportCsv: (resultRef: ResultRef, path: string) => typedError<ExportSummary, ExportError>(__TAURI_INVOKE("result_export_csv", { resultRef, path })),
+	fileOpen: (path: string) => typedError<FileOpened, FileReadError>(__TAURI_INVOKE("file_open", { path })),
+	fileSave: (target: SaveTarget, text: string) => typedError<FileSaved, FileWriteError>(__TAURI_INVOKE("file_save", { target, text })),
 	historyList: (query: HistoryQuery) => __TAURI_INVOKE<HistoryPage>("history_list", { query }),
 	historyBrowse: (query: HistoryBrowseQuery) => typedError<HistoryBrowsePage, HistoryError>(__TAURI_INVOKE("history_browse", { query })),
 	historyGroup: (query: HistoryGroupQuery) => typedError<HistoryGroupPage, HistoryError>(__TAURI_INVOKE("history_group", { query })),
@@ -495,6 +497,58 @@ export type ExportSummary = {
 	truncated: boolean,
 };
 
+/**  Made only by the engine (`file_open`, `file_save`); the frontend stores it whole and hands it back whole. */
+export type FileBinding = {
+	/**  The canonical folder joined with the file's own name: `..` and folder symlinks collapse, a symlink keeps its name. */
+	path: string,
+	stamp: FileStamp,
+	format: FileFormat,
+};
+
+/**
+ *  How the file's bytes differ from the LF, BOM-less text the editor holds. A save writes them back, with every
+ *  line break as CRLF when the file's first break was.
+ */
+export type FileFormat = {
+	bom: boolean,
+	crlf: boolean,
+};
+
+export type FileOpened = {
+	binding: FileBinding,
+	name: string,
+	text: string,
+};
+
+export type FileReadError = { kind: "NotFound" } | { kind: "NotAFile" } | { kind: "PermissionDenied" } | 
+/**  `offset` counts from the start of the file, BOM included. */
+{ kind: "NotUtf8"; offset: number } | { kind: "TooLarge"; bytes: number; limit: number } | { kind: "Io"; message: string };
+
+export type FileSaved = {
+	binding: FileBinding,
+	name: string,
+};
+
+export type FileSnapshot = {
+	binding: FileBinding,
+	/**  The tab's `text` differed from the file when this snapshot was taken. */
+	dirty: boolean,
+};
+
+/**
+ *  Opaque outside `files.rs`, which makes it from the file's bytes; everything else only compares two for
+ *  equality. A stamp this build does not make never equals a fresh one, so the file reads as changed.
+ */
+export type FileStamp = string;
+
+export type FileWriteError = 
+/**  The file changed on disk; nothing was written. `disk` is the stamp of what is there now. */
+{ kind: "Changed"; disk: FileStamp } | 
+/**  The folder the file goes in does not exist. */
+{ kind: "NotFound" } | { kind: "NotAFile" } | { kind: "PermissionDenied" } | 
+/**  `path` is the other tab's, which may name the file differently: a symlink, a hard link, another case. */
+{ kind: "OpenInAnotherTab"; path: string } | { kind: "Io"; message: string };
+
 export type FilterOp = "Eq" | "Ne" | "Lt" | "Le" | "Gt" | "Ge" | "Contains" | "StartsWith" | "IsNull" | "NotNull";
 
 export type FkAction = "NoAction" | "Restrict" | "Cascade" | "SetNull" | "SetDefault";
@@ -925,6 +979,18 @@ export type RunTarget = { kind: "cursor"; offset: DocOffset } | { kind: "selecti
 
 export type SaveError = { kind: "Invalid"; message: string } | { kind: "Keychain"; message: string } | { kind: "Store"; message: string };
 
+export type SaveTarget = 
+/**
+ *  Refused with `Changed` when the file's bytes no longer match `binding.stamp`, unless they match
+ *  `overwrite`, the `disk` stamp of the `Changed` the user agreed to overwrite.
+ */
+{ kind: "Bound"; binding: FileBinding; overwrite: FileStamp | null } | 
+/**
+ *  A path from the save dialog, which already asked before replacing a file. No stamp check. Refused with
+ *  `OpenInAnotherTab` when it is the same file as one of `taken`, the paths the other tabs are bound to.
+ */
+{ kind: "New"; path: string; format: FileFormat | null; taken: string[] };
+
 export type SchemaCount = { kind: "Unknown" } | { kind: "Probing" } | { kind: "Known"; count: number } | 
 /**  The probe session failed; `message` is the server's or the transport's text. */
 { kind: "Unavailable"; message: string };
@@ -1094,6 +1160,8 @@ export type TabSnapshot = {
 	text: string | null,
 	console: ConsoleConfigSnapshot,
 	table: TableSnapshot | null,
+	/**  `None` for a scratch tab. A file tab's `text` is its buffer, saved or not. */
+	file: FileSnapshot | null,
 };
 
 /**  Staged edits to one table, applied together by `table_apply`. Rows to update or delete are found by primary key. */

@@ -119,6 +119,7 @@ export function workspaceSnapshot(s: Pick<WorkspaceData, "tabs" | "order" | "act
         text: textOf(t.id),
         console: { connectionId: db?.connectionId ?? null, database: db?.database ?? null, schema: null, mode },
         table: t.table && { schema: t.table.schema, table: t.table.table, page: t.table.page, query: t.table.query },
+        file: null,
       },
     ];
   });
