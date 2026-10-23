@@ -37,10 +37,11 @@ export function verifySignature(publicKey, signature, data) {
   const algorithm = sig.subarray(0, 2).toString('latin1');
   const message = algorithm === 'ED' ? createHash('blake2b512').update(data).digest() : data;
   if (!verify(null, message, key, sig.subarray(10))) throw new Error('signature does not match the file');
-  const trusted = Buffer.from(trustedLine.replace(/^trusted comment: /, ''));
-  if (!verify(null, Buffer.concat([sig.subarray(10), trusted]), key, Buffer.from(globalLine, 'base64'))) {
+  const trusted = trustedLine.replace(/^trusted comment: /, '');
+  if (!verify(null, Buffer.concat([sig.subarray(10), Buffer.from(trusted)]), key, Buffer.from(globalLine, 'base64'))) {
     throw new Error('trusted comment signature does not match');
   }
+  return Object.fromEntries(trusted.split('\t').map(field => [field.slice(0, field.indexOf(':')), field.slice(field.indexOf(':') + 1)]));
 }
 
 const sha256 = bytes => `sha256:${createHash('sha256').update(bytes).digest('hex')}`;
@@ -61,10 +62,14 @@ export function buildManifest({ repository, tag, version, notes, pubDate, public
     if (bundle.platforms.length === 0) continue;
     const signature = files[`${name}.sig`]?.toString('utf8').trim();
     if (!signature) throw new Error(`${name} has no ${name}.sig`);
+    let trusted;
     try {
-      verifySignature(publicKey, signature, bytes);
+      trusted = verifySignature(publicKey, signature, bytes);
     } catch (error) {
       throw new Error(`${name}: ${error.message}`);
+    }
+    if (trusted.version !== version) {
+      throw new Error(`${name}: signature binds ${trusted.version ? `version ${trusted.version}` : 'no app version'}, not ${version}`);
     }
     for (const key of bundle.platforms) platforms[key] = { signature, url: downloadUrl(name) };
   }

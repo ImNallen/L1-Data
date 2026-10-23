@@ -10,11 +10,12 @@ import { buildManifest, stagePlan, verifySignature } from './updater-manifest.mj
 
 const script = fileURLToPath(new URL('./updater-manifest.mjs', import.meta.url));
 
-// Made with `tauri signer generate` and `tauri signer sign` over `payload`, so they check this verifier against Tauri's signer.
 const payload = Buffer.from('L1 Data updater bundle fixture\n');
-const publicKey = 'dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDU5NjYwMkQxRjc0RTg1OEQKUldTTmhVNzMwUUptV2FqTzYwM0FVRzRjOFdEdEdLd1NCbUMxclJKY1NJTm9LNEx3TGMwTG9nWnUK';
-const signature = 'dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVTTmhVNzMwUUptV2Q4c3ZMQ2k4ODFaY2RoK1hGZTVpWThta3JBNTY5L0doRzBCRnhHTGl0OXRNdTgyYzZ2Q0QyQkpIcUxKTlVrcGVVTklFZzVGWlYyeHlKY0hwTHNWU2dFPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzkyNzU0MTMxCWZpbGU6cGF5bG9hZC5iaW4KU0NTemVZS2tCVC9sREJxc3RaRTFaVk4wM1A1WWxDOWlaRDF1Qy9hWUFKME5XUFV2N2ZFc09Vb1I2MGw3Y3JqYWpGSCtjc2tFazNZQWxvZmdGWVBaQ2c9PQo=';
-const otherKeySignature = 'dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVRbGJxRUcrM1RweUNTekU0Qkd6YWx6ejNQOHpDdlRHSTR6WVZsVHNWQlZFZkhyYlF6Slp6NXZjVnk4RVcxdnQvMVd2R1llNHMwOXNFZERHcHZZQjJKWEhJYUE3U1RUakEwPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzkyNzU0MTMxCWZpbGU6cGF5bG9hZC5iaW4KbW5MMERzUWtsa3lVUXNFUzkybGhpRUQwY28yY2NxakZpa3hqS2Z0MWM3bkg4anNDZnptRHE0UDhyZy9RVkVraDZ0akJBNy9QTnpUTzRnR0JDeU5FQnc9PQo=';
+const tauriPublicKey = 'dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDU5NjYwMkQxRjc0RTg1OEQKUldTTmhVNzMwUUptV2FqTzYwM0FVRzRjOFdEdEdLd1NCbUMxclJKY1NJTm9LNEx3TGMwTG9nWnUK';
+const tauriSignature = 'dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVTTmhVNzMwUUptV1VzVnJrd0F6WE1LdG5nU1FUcldFWFFGcGxJSDFOazY5dVdyVzVZUWRMU3dNWHJIbk9YUnVIWUVLZWxNUG5rc0lFeFdyMjA2U2JjaXY5ZTJUa0RKMGdNPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzkyNzU0NTgyCWZpbGU6cGF5bG9hZC5iaW4JdmVyc2lvbjowLjEuNS1uaWdodGx5LjIwMjYxMDIzLjQyCkxIZDM3QWlLNUNza3BoanVSR24rVmk1WFVkTWNLdTlTMXk3QlJDaVZXSS9HaUJnWVZCY0JlUnFVZVJMdHN5bHpKYXVjc3ovdXNHNzEyYzc3NFFxa0FBPT0K';
+const tauriUnboundSignature = 'dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVTTmhVNzMwUUptV2Q4c3ZMQ2k4ODFaY2RoK1hGZTVpWThta3JBNTY5L0doRzBCRnhHTGl0OXRNdTgyYzZ2Q0QyQkpIcUxKTlVrcGVVTklFZzVGWlYyeHlKY0hwTHNWU2dFPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzkyNzU0MTMxCWZpbGU6cGF5bG9hZC5iaW4KU0NTemVZS2tCVC9sREJxc3RaRTFaVk4wM1A1WWxDOWlaRDF1Qy9hWUFKME5XUFV2N2ZFc09Vb1I2MGw3Y3JqYWpGSCtjc2tFazNZQWxvZmdGWVBaQ2c9PQo=';
+const tauriOtherVersionSignature = 'dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVTTmhVNzMwUUptV1p2TUpwWHdWbkJVOHVyQmZOcEFsOWZiY3hWQVRQMm0xdERvSXBta3B5bU5zaysyTTJkMU82QjJhMEVPSU5jMVVPZUxJbS82S3NzSGpRRTZ2WDJZdlFJPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzkyNzU0NTg4CWZpbGU6cGF5bG9hZC5iaW4JdmVyc2lvbjowLjEuNAp6MUJOaTBuSnQ4RlBLSk1iVGxNTnJSSFpJY21ORGNINXJNaEFwRHVNbmQ5S3ZxUllIOEtmdjhHeXBDcmt2WXFadE9VMG5RL0NmVmwwdnc0TWVnandEZz09Cg==';
+const tauriOtherKeySignature = 'dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVRbGJxRUcrM1RweUJKNkRMUUUrVlN1YTg5QUZxTHVNRlVHdnZtYTdOak15MmFURmtaL3EzNHJxVEFqMEZXbDBTNU41TkRMa3FGS1JYK3RWc0RQMmQ3SFNPZERKM1ZpUndrPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzkyNzU0NTgyCWZpbGU6cGF5bG9hZC5iaW4JdmVyc2lvbjowLjEuNS1uaWdodGx5LjIwMjYxMDIzLjQyCm8xdDNRRTVXOW1QM1BHOVRWWXN3WUNLRENYN2NFNkI5cWt5VHl3V3lzcHZRQXhmcUs0TFlJZzUrZnlpdkdkUS9yUUxxRncxTVFQUVZ1anE5UEh4NkJBPT0K';
 
 const version = '0.1.5-nightly.20261023.42';
 const tag = `v${version}`;
@@ -23,20 +24,20 @@ const sha256 = bytes => `sha256:${createHash('sha256').update(bytes).digest('hex
 
 const files = () => ({
   [`L1-Data_${version}_universal.app.tar.gz`]: payload,
-  [`L1-Data_${version}_universal.app.tar.gz.sig`]: Buffer.from(`${signature}\n`),
+  [`L1-Data_${version}_universal.app.tar.gz.sig`]: Buffer.from(`${tauriSignature}\n`),
   [`L1-Data_${version}_universal.dmg`]: Buffer.from('dmg'),
   [`L1-Data_${version}_amd64.AppImage`]: payload,
-  [`L1-Data_${version}_amd64.AppImage.sig`]: Buffer.from(signature),
+  [`L1-Data_${version}_amd64.AppImage.sig`]: Buffer.from(tauriSignature),
   [`L1-Data_${version}_amd64.deb`]: Buffer.from('deb'),
   [`L1-Data_${version}_x64-setup.exe`]: payload,
-  [`L1-Data_${version}_x64-setup.exe.sig`]: Buffer.from(signature),
+  [`L1-Data_${version}_x64-setup.exe.sig`]: Buffer.from(tauriSignature),
 });
 
 const uploaded = (input = files()) =>
   Object.entries(input).map(([name, bytes]) => ({ name, state: 'uploaded', size: bytes.length, digest: sha256(bytes) }));
 
 const build = (overrides = {}) => buildManifest({
-  repository: 'ImNallen/L1Data', tag, version, notes: 'notes', pubDate: '2026-10-23T08:30:00.000Z', publicKey, files: files(), assets: uploaded(), ...overrides,
+  repository: 'ImNallen/L1Data', tag, version, notes: 'notes', pubDate: '2026-10-23T08:30:00.000Z', publicKey: tauriPublicKey, files: files(), assets: uploaded(), ...overrides,
 });
 
 test('stages each tauri bundle under a versioned name, with signatures for updater bundles', () => {
@@ -67,15 +68,17 @@ test('staging refuses a missing or ambiguous bundle', () => {
 });
 
 test('verifies a Tauri signature and names the key when another key signed', () => {
-  verifySignature(publicKey, signature, payload);
-  assert.throws(() => verifySignature(publicKey, signature, Buffer.from('tampered')), { message: 'signature does not match the file' });
-  assert.throws(() => verifySignature(publicKey, otherKeySignature, payload), {
+  const comment = Buffer.from(tauriSignature, 'base64').toString('utf8').split('\n')[0];
+  assert.equal(comment, 'untrusted comment: signature from tauri secret key');
+  assert.equal(verifySignature(tauriPublicKey, tauriSignature, payload).version, version);
+  assert.throws(() => verifySignature(tauriPublicKey, tauriSignature, Buffer.from('tampered')), { message: 'signature does not match the file' });
+  assert.throws(() => verifySignature(tauriPublicKey, tauriOtherKeySignature, payload), {
     message: 'signed by key C8E974FB06A16E25, but the updater trusts key 596602D1F74E858D',
   });
 });
 
 test('builds the feed with one universal macOS download for both darwin keys', () => {
-  const sig = { signature };
+  const sig = { signature: tauriSignature };
   assert.deepEqual(build(), {
     version,
     notes: 'notes',
@@ -108,9 +111,19 @@ test('refuses an updater bundle with a missing or foreign signature', () => {
   assert.throws(() => build({ files: unsigned }), {
     message: `L1-Data_${version}_amd64.AppImage has no L1-Data_${version}_amd64.AppImage.sig`,
   });
-  const foreign = { ...files(), [`L1-Data_${version}_x64-setup.exe.sig`]: Buffer.from(otherKeySignature) };
+  const foreign = { ...files(), [`L1-Data_${version}_x64-setup.exe.sig`]: Buffer.from(tauriOtherKeySignature) };
   assert.throws(() => build({ files: foreign }), {
     message: `L1-Data_${version}_x64-setup.exe: signed by key C8E974FB06A16E25, but the updater trusts key 596602D1F74E858D`,
+  });
+});
+
+test('refuses an updater signature that does not bind the stamped version', () => {
+  const sig = `L1-Data_${version}_universal.app.tar.gz.sig`;
+  assert.throws(() => build({ files: { ...files(), [sig]: Buffer.from(tauriUnboundSignature) } }), {
+    message: `L1-Data_${version}_universal.app.tar.gz: signature binds no app version, not ${version}`,
+  });
+  assert.throws(() => build({ files: { ...files(), [sig]: Buffer.from(tauriOtherVersionSignature) } }), {
+    message: `L1-Data_${version}_universal.app.tar.gz: signature binds version 0.1.4, not ${version}`,
   });
 });
 
@@ -120,9 +133,9 @@ test('CLI stages tauri output and writes a dry-run feed from it', async t => {
   const built = join(root, 'bundle');
   await mkdir(built);
   const tauriNames = {
-    'L1 Data.app.tar.gz': payload, 'L1 Data.app.tar.gz.sig': Buffer.from(signature), 'L1 Data_universal.dmg': Buffer.from('dmg'),
-    'L1 Data_amd64.AppImage': payload, 'L1 Data_amd64.AppImage.sig': Buffer.from(signature), 'L1 Data_amd64.deb': Buffer.from('deb'),
-    'L1 Data_x64-setup.exe': payload, 'L1 Data_x64-setup.exe.sig': Buffer.from(signature),
+    'L1 Data.app.tar.gz': payload, 'L1 Data.app.tar.gz.sig': Buffer.from(tauriSignature), 'L1 Data_universal.dmg': Buffer.from('dmg'),
+    'L1 Data_amd64.AppImage': payload, 'L1 Data_amd64.AppImage.sig': Buffer.from(tauriSignature), 'L1 Data_amd64.deb': Buffer.from('deb'),
+    'L1 Data_x64-setup.exe': payload, 'L1 Data_x64-setup.exe.sig': Buffer.from(tauriSignature),
   };
   for (const [name, bytes] of Object.entries(tauriNames)) await writeFile(join(built, name), bytes);
   const run = (args, env = {}) => spawnSync(process.execPath, [script, ...args], { encoding: 'utf8', env: { ...process.env, ...env } });
@@ -135,7 +148,7 @@ test('CLI stages tauri output and writes a dry-run feed from it', async t => {
   assert.deepEqual((await readdir(assets)).sort(), Object.keys(files()).sort());
 
   const out = join(root, 'latest.json');
-  const env = { GITHUB_REPOSITORY: 'ImNallen/L1Data', UPDATER_PUBKEY: publicKey };
+  const env = { GITHUB_REPOSITORY: 'ImNallen/L1Data', UPDATER_PUBKEY: tauriPublicKey };
   const missingKey = run(['manifest', assets, tag, version, '--dry-run', out], { ...env, UPDATER_PUBKEY: '' });
   assert.equal(missingKey.status, 1);
   assert.equal(missingKey.stderr, 'UPDATER_PUBKEY must hold the updater public key\n');
