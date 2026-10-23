@@ -62,7 +62,7 @@ it("resolves restored home query and table targets and saves their canonical ide
   const current = useWorkspace.getState();
   expect(current.order.map((id) => current.tabs[id]?.console.db?.database)).toEqual(["shop", "shop", "shop", "Shop", "reporting", "SHOP"]);
   expect(current.tabs[tabs[1]!.id]?.table).toEqual(tabs[1]!.table);
-  expect(workspaceSnapshot(current, () => "saved text").tabs.map((tab) => tab.console.database)).toEqual(["shop", "shop", "shop", "Shop", "reporting", "SHOP"]);
+  expect(workspaceSnapshot(current, { textOf: () => "saved text", isDirty: () => false }).tabs.map((tab) => tab.console.database)).toEqual(["shop", "shop", "shop", "Shop", "reporting", "SHOP"]);
   expect(current.configs[config.id]?.database).toBe("SHOP");
   expect(useLive.getState().connections[config.id]).toEqual(state);
   ws.resolveDatabases(useLive.getState().connections);
@@ -75,7 +75,7 @@ it("keeps a saved-config edit separate from the old connected home until reconne
   ws.upsertConfig(config);
   const query = openSqlTab();
   const table = saved("shop", true);
-  ws.addTab({ id: table.id, title: "orders", console: { db: { connectionId: config.id, database: "shop" }, mode: "AutoCommit" }, table: table.table });
+  ws.addTab({ id: table.id, title: "orders", console: { db: { connectionId: config.id, database: "shop" }, mode: "AutoCommit" }, table: table.table, file: null });
   ws.upsertConfig({ ...config, database: "reporting" });
   ws.resolveDatabases(useLive.getState().connections);
   expect(useWorkspace.getState().tabs[query]?.console.db?.database).toBe("reporting");

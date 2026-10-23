@@ -282,6 +282,7 @@ export function openSqlTab(opts: { db?: DatabaseRef | null; text?: string; title
     title: opts.title ?? nextUntitled(Object.values(ws().tabs)),
     console: { db, mode: "AutoCommit" },
     table: null,
+    file: null,
   });
   return id;
 }
@@ -312,6 +313,7 @@ export async function openTableTab(ref: RelationRef): Promise<void> {
     title: ref.relation,
     console: { db: ref.db, mode: "AutoCommit" },
     table: { schema: ref.schema, table: ref.relation, page: 0, query: EMPTY_QUERY },
+    file: null,
   });
 }
 

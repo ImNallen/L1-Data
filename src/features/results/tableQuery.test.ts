@@ -7,7 +7,7 @@ import { useWorkspace, type TableTab } from "../../state/workspace";
 import { dropEditor, seedEditor, textOf } from "../editor/editorStates";
 import { cycleTableOrder, filterForValue } from "./tableQuery";
 
-const tab: TableTab = { id: "table", title: "odd table", console: { db: { connectionId: "ms", database: "shop" }, mode: "AutoCommit" }, table: { schema: "dbo", table: "odd table", page: 0, query: { orderBy: "[odd name]", where: "", filters: [] } } };
+const tab: TableTab = { id: "table", title: "odd table", console: { db: { connectionId: "ms", database: "shop" }, mode: "AutoCommit" }, table: { schema: "dbo", table: "odd table", page: 0, query: { orderBy: "[odd name]", where: "", filters: [] } }, file: null };
 afterEach(() => {
   dropEditor(tab.id);
   dropRowCaches(tab.id);

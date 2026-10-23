@@ -1,6 +1,6 @@
-import { describe, expect, it } from "vitest";
-import type { ConnectionConfig } from "../ipc/bindings";
-import { EMPTY_QUERY, useWorkspace } from "./workspace";
+import { afterEach, describe, expect, it } from "vitest";
+import type { ConnectionConfig, FileSaved } from "../ipc/bindings";
+import { EMPTY_QUERY, tabFromSnapshot, useWorkspace, workspaceSnapshot } from "./workspace";
 
 const config = (id: string): ConnectionConfig => ({
   id,
@@ -20,8 +20,8 @@ const config = (id: string): ConnectionConfig => ({
 describe("workspace.upsertConfig", () => {
   it("binds tabs that have no connection and leaves bound tabs alone", () => {
     const ws = useWorkspace.getState();
-    ws.addTab({ id: "free", title: "Untitled-1.sql", console: { db: null, mode: "AutoCommit" }, table: null });
-    ws.addTab({ id: "bound", title: "Untitled-2.sql", console: { db: { connectionId: "old", database: "reporting" }, mode: "Manual" }, table: null });
+    ws.addTab({ id: "free", title: "Untitled-1.sql", console: { db: null, mode: "AutoCommit" }, table: null, file: null });
+    ws.addTab({ id: "bound", title: "Untitled-2.sql", console: { db: { connectionId: "old", database: "reporting" }, mode: "Manual" }, table: null, file: null });
     ws.upsertConfig(config("new"));
     const tabs = useWorkspace.getState().tabs;
     expect(tabs.free?.console.db).toEqual({ connectionId: "new", database: "shop" });
@@ -32,7 +32,7 @@ describe("workspace.upsertConfig", () => {
     const ws = useWorkspace.getState();
     ws.upsertConfig(config("edited"));
     const tab = (id: string, title: string, database: string, connectionId = "edited") =>
-      ws.addTab({ id, title, console: { db: { connectionId, database }, mode: "AutoCommit" }, table: null });
+      ws.addTab({ id, title, console: { db: { connectionId, database }, mode: "AutoCommit" }, table: null, file: null });
     tab("home", "a.sql", "shop");
     tab("elsewhere", "b.sql", "reporting");
     tab("otherConn", "c.sql", "shop", "other");
@@ -41,6 +41,7 @@ describe("workspace.upsertConfig", () => {
       title: "orders",
       console: { db: { connectionId: "edited", database: "shop" }, mode: "AutoCommit" },
       table: { schema: "public", table: "orders", page: 0, query: EMPTY_QUERY },
+      file: null,
     });
     ws.upsertConfig({ ...config("edited"), database: "shop_v2" });
     const target = (id: string) => useWorkspace.getState().tabs[id]!.console.db;
@@ -50,5 +51,27 @@ describe("workspace.upsertConfig", () => {
     expect(target("orders")).toEqual({ connectionId: "edited", database: "shop" });
     ws.upsertConfig({ ...config("edited"), database: "shop_v2", name: "renamed" });
     expect(target("home")).toEqual({ connectionId: "edited", database: "shop_v2" });
+  });
+});
+
+describe("file tabs", () => {
+  afterEach(() => useWorkspace.setState(useWorkspace.getInitialState(), true));
+  const saved: FileSaved = { binding: { path: "/q/report.sql", stamp: "s1", format: { bom: true, crlf: true } }, name: "report.sql" };
+  const scratch = () => useWorkspace.getState().addTab({ id: "t", title: "Untitled-1.sql", console: { db: null, mode: "AutoCommit" }, table: null, file: null });
+
+  it("names a tab after the file it binds to, and refuses to rename it", () => {
+    scratch();
+    const ws = useWorkspace.getState();
+    ws.bindFile("t", saved);
+    ws.renameTab("t", "mine");
+    expect(useWorkspace.getState().tabs.t).toMatchObject({ title: "report.sql", file: { binding: saved.binding, health: "ok" } });
+  });
+
+  it("saves a file tab's binding with the dirty bit read from the same buffer as its text, and restores it", () => {
+    scratch();
+    useWorkspace.getState().bindFile("t", saved);
+    const snap = workspaceSnapshot(useWorkspace.getState(), { textOf: () => "select 1;", isDirty: (id) => id === "t" });
+    expect(snap.tabs[0]).toMatchObject({ title: "report.sql", text: "select 1;", file: { binding: saved.binding, dirty: true } });
+    expect(tabFromSnapshot(snap.tabs[0]!, {}).file).toEqual({ binding: saved.binding, health: "ok" });
   });
 });

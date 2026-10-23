@@ -8,7 +8,10 @@ import type {
   DetailError,
   DisconnectError,
   ExportError,
+  FileReadError,
+  FileWriteError,
   RunError,
+  SaveTarget,
   SendError,
   SshError,
   TxnError,
@@ -167,6 +170,53 @@ export function disconnectErrorText(e: DisconnectError): string {
 
 export function exportErrorText(e: ExportError): string {
   return e.kind === "Gone" ? "This result is gone. Run the query again to export it." : e.message;
+}
+
+const megabytes = (bytes: number) => `${Number((bytes / (1024 * 1024)).toFixed(1))} MB`;
+
+export function fileReadErrorText(e: FileReadError, path: string): string {
+  switch (e.kind) {
+    case "NotFound":
+      return `${path} no longer exists.`;
+    case "NotAFile":
+      return `${path} is a folder or a device, not a file.`;
+    case "PermissionDenied":
+      return `You don't have permission to read ${path}.`;
+    case "NotUtf8":
+      return `${path} isn't UTF-8 text (byte ${e.offset.toLocaleString("en-US")}). L1 Data opens UTF-8 files only.`;
+    case "TooLarge":
+      return `${path} is ${megabytes(e.bytes)}. L1 Data opens files up to ${megabytes(e.limit)}.`;
+    case "Io":
+      return `Couldn't open ${path}: ${e.message}`;
+    default: {
+      const unreachable: never = e;
+      return unreachable;
+    }
+  }
+}
+
+/** A save may fail for want of permission to read the file, to check it for outside changes, or to write its folder. */
+export function fileWriteErrorText(e: FileWriteError, target: SaveTarget): string {
+  const bound = target.kind === "Bound";
+  const path = bound ? target.binding.path : target.path;
+  switch (e.kind) {
+    case "Changed":
+      return `${path} changed on disk.`;
+    case "NotFound":
+      return bound ? `The folder for ${path} no longer exists. Use Save As to pick another place.` : `The folder for ${path} doesn't exist.`;
+    case "NotAFile":
+      return `${path} is a folder or a device, not a file.`;
+    case "PermissionDenied":
+      return bound ? `You don't have permission to save ${path}. Use Save As to save a copy elsewhere.` : `You don't have permission to save ${path}.`;
+    case "OpenInAnotherTab":
+      return `${e.path} is open in another tab. Close that tab before you save over it.`;
+    case "Io":
+      return `Couldn't save ${path}: ${e.message}`;
+    default: {
+      const unreachable: never = e;
+      return unreachable;
+    }
+  }
 }
 
 export function catalogErrorText(e: CatalogError): string {

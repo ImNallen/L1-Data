@@ -1,11 +1,31 @@
-import { IconTable, IconX } from "@tabler/icons-react";
-import { useState } from "react";
+import { IconFileOff, IconTable, IconX } from "@tabler/icons-react";
+import { useState, useSyncExternalStore } from "react";
 import { closeTab } from "../features/editor/closeTab";
+import { isDirty, onBuffersChanged } from "../features/editor/editorStates";
 import type { TabId } from "../ipc/bindings";
 import { useLive } from "../state/live";
 import { hasUncommittedWork } from "../state/status";
-import { useWorkspace } from "../state/workspace";
+import { useWorkspace, type Tab } from "../state/workspace";
 import { cx } from "../ui/primitives";
+
+function fileTooltip(tab: Tab): string | undefined {
+  if (!tab.file) return undefined;
+  const { path } = tab.file.binding;
+  switch (tab.file.health) {
+    case "ok":
+      return path;
+    case "missing":
+      return `${path} was moved or deleted. Saving writes it again.`;
+    case "changed":
+      return `${path} changed on disk. Saving asks before overwriting it.`;
+    case "unreadable":
+      return `L1 Data couldn't read ${path} again. Saving asks before overwriting it.`;
+    default: {
+      const unreachable: never = tab.file.health;
+      return unreachable;
+    }
+  }
+}
 
 function TabItem({ id }: { id: TabId }) {
   const tab = useWorkspace((s) => s.tabs[id]);
@@ -13,8 +33,10 @@ function TabItem({ id }: { id: TabId }) {
   const setActive = useWorkspace((s) => s.setActive);
   const renameTab = useWorkspace((s) => s.renameTab);
   const dirty = useLive((s) => hasUncommittedWork(s.consoles[id]));
+  const unsaved = useSyncExternalStore(onBuffersChanged, () => isDirty(id));
   const [editing, setEditing] = useState(false);
   if (!tab) return null;
+  const missing = tab.file?.health === "missing";
 
   return (
     <div
@@ -28,7 +50,8 @@ function TabItem({ id }: { id: TabId }) {
           void closeTab(id);
         } else setActive(id);
       }}
-      onDoubleClick={() => setEditing(true)}
+      onDoubleClick={() => !tab.file && setEditing(true)}
+      title={fileTooltip(tab)}
       className={cx(
         "group relative flex h-7 max-w-[240px] min-w-0 shrink-0 cursor-default items-center gap-2 rounded-md pr-1 pl-2.5",
         active ? "bg-pill text-fg" : "text-dim hover:bg-hover hover:text-muted",
@@ -56,7 +79,11 @@ function TabItem({ id }: { id: TabId }) {
           className="w-36 bg-transparent text-ui-13.5 text-fg outline-none"
         />
       ) : (
-        <span className="truncate text-ui-13.5">{tab.title}</span>
+        <span className={cx("truncate text-ui-13.5", missing && "line-through")}>{tab.title}</span>
+      )}
+      {missing && <IconFileOff data-testid={`tab-file-missing-${id}`} aria-label="File missing" size={13} className="-ml-1 shrink-0 text-amber" />}
+      {unsaved && (
+        <span data-testid={`tab-unsaved-${id}`} aria-label="Unsaved changes" className="-ml-1 size-2 shrink-0 rounded-full border-[1.5px] border-focus" />
       )}
       <span className="relative grid size-5 shrink-0 place-items-center">
         {dirty && (

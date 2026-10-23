@@ -1,6 +1,17 @@
 import { expect, it } from "vitest";
-import type { ApproveError, ChatError, SendError, UpdateFailure } from "./bindings";
-import { applyErrorText, approveErrorText, chatErrorText, configureErrorText, connectErrorText, runErrorText, sendErrorText, updateErrorText, updateFailureText } from "./errors";
+import type { ApproveError, ChatError, FileWriteError, SaveTarget, SendError, UpdateFailure } from "./bindings";
+import {
+  applyErrorText,
+  approveErrorText,
+  chatErrorText,
+  configureErrorText,
+  connectErrorText,
+  fileWriteErrorText,
+  runErrorText,
+  sendErrorText,
+  updateErrorText,
+  updateFailureText,
+} from "./errors";
 
 it("keeps the engine's actionable capability refusal intact", () => {
   const what = "SQL Server Manual mode is unavailable. Select Auto-commit and use explicit transaction statements.";
@@ -77,4 +88,16 @@ it("says what went wrong with an update, and nothing for a click the update alre
   ]);
   expect(updateErrorText({ kind: "Stale" })).toBeNull();
   expect(updateErrorText({ kind: "Busy" })).toBe("Wait for the update to finish downloading or installing before you switch tracks.");
+});
+
+it("points a failed save at Save As, and a failed Save As elsewhere", () => {
+  const binding = { path: "/q/a.sql", stamp: "s1", format: { bom: false, crlf: false } };
+  const save: SaveTarget = { kind: "Bound", binding, overwrite: null };
+  const saveAs: SaveTarget = { kind: "New", path: "/q/a.sql", format: null, taken: [] };
+  const errors: FileWriteError[] = [{ kind: "NotFound" }, { kind: "PermissionDenied" }];
+  expect(errors.map((e) => fileWriteErrorText(e, save))).toEqual([
+    "The folder for /q/a.sql no longer exists. Use Save As to pick another place.",
+    "You don't have permission to save /q/a.sql. Use Save As to save a copy elsewhere.",
+  ]);
+  expect(errors.map((e) => fileWriteErrorText(e, saveAs))).toEqual(["The folder for /q/a.sql doesn't exist.", "You don't have permission to save /q/a.sql."]);
 });

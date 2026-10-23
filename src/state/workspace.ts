@@ -4,6 +4,8 @@ import type {
   ConnectionId,
   ConnectionState,
   DatabaseRef,
+  FileBinding,
+  FileSaved,
   Layout,
   Settings,
   TabId,
@@ -22,7 +24,16 @@ export type ConsoleTarget = { db: DatabaseRef | null; mode: TxnMode };
 
 /** The table a tab opened from the sidebar browses, in the tab's console database. */
 export type TableBrowse = { schema: string; table: string; page: number; query: TableQuery; exactRowCount?: number };
-export type Tab = { id: TabId; title: string; console: ConsoleTarget; table: TableBrowse | null };
+/**
+ * What the last read or write found about a tab's file. Not saved: boot reads every file again.
+ * `changed`: the file changed on disk while the tab held edits, so the next save asks before overwriting.
+ * `unreadable`: the file is there, but reading it failed.
+ */
+export type FileHealth = "ok" | "missing" | "changed" | "unreadable";
+export type TabFile = { binding: FileBinding; health: FileHealth };
+
+/** A tab with a `file` is titled with the file's name: `bindFile` sets both, and `renameTab` refuses a file tab. */
+export type Tab = { id: TabId; title: string; console: ConsoleTarget; table: TableBrowse | null; file: TabFile | null };
 /** A tab bound to a table. Its console always names a database. */
 export type TableTab = Tab & { table: TableBrowse; console: ConsoleTarget & { db: DatabaseRef } };
 
@@ -104,10 +115,13 @@ export function tabFromSnapshot(t: TabSnapshot, configs: Record<ConnectionId, Co
   const config = t.console.connectionId ? configs[t.console.connectionId] : undefined;
   const db = config ? (t.console.database == null ? homeDb(config) : { connectionId: config.id, database: t.console.database }) : null;
   const table = db && t.table && { schema: t.table.schema, table: t.table.table, page: t.table.page, query: t.table.query };
-  return { id: t.id, title: t.title, console: { db, mode: t.console.mode }, table };
+  return { id: t.id, title: t.title, console: { db, mode: t.console.mode }, table, file: t.file && { binding: t.file.binding, health: "ok" } };
 }
 
-export function workspaceSnapshot(s: Pick<WorkspaceData, "tabs" | "order" | "active" | "layout">, textOf: (id: TabId) => string): Workspace {
+export type Buffers = { textOf(id: TabId): string; isDirty(id: TabId): boolean };
+
+/** A file tab's `dirty` is read from the same buffer as its `text`, so the two always describe one state. */
+export function workspaceSnapshot(s: Pick<WorkspaceData, "tabs" | "order" | "active" | "layout">, buffers: Buffers): Workspace {
   const tabs = s.order.flatMap((id): TabSnapshot[] => {
     const t = s.tabs[id];
     if (!t) return [];
@@ -116,10 +130,10 @@ export function workspaceSnapshot(s: Pick<WorkspaceData, "tabs" | "order" | "act
       {
         id: t.id,
         title: t.title,
-        text: textOf(t.id),
+        text: buffers.textOf(t.id),
         console: { connectionId: db?.connectionId ?? null, database: db?.database ?? null, schema: null, mode },
         table: t.table && { schema: t.table.schema, table: t.table.table, page: t.table.page, query: t.table.query },
-        file: null,
+        file: t.file && { binding: t.file.binding, dirty: buffers.isDirty(t.id) },
       },
     ];
   });
@@ -135,6 +149,10 @@ export function nextUntitled(tabs: Iterable<Tab>): string {
   return `Untitled-${max + 1}.sql`;
 }
 
+export function tabWithFile(tabs: Record<TabId, Tab>, path: string): Tab | undefined {
+  return Object.values(tabs).find((t) => t.file?.binding.path === path);
+}
+
 export function tabTarget(tab: Tab | undefined): DatabaseRef | null {
   return tab?.console.db ?? null;
 }
@@ -146,6 +164,8 @@ type WorkspaceActions = {
   closeTab(id: TabId): void;
   setActive(id: TabId): void;
   renameTab(id: TabId, title: string): void;
+  bindFile(id: TabId, file: FileSaved): void;
+  setFileHealth(id: TabId, health: FileHealth): void;
   patchConsole(id: TabId, patch: Partial<ConsoleTarget>): void;
   setTablePage(id: TabId, page: number, exactRowCount?: number): void;
   setTableQuery(id: TabId, query: TableQuery): void;
@@ -230,7 +250,17 @@ export const useWorkspace = create<WorkspaceData & WorkspaceActions>()((set, get
   renameTab: (id, title) =>
     set((s) => {
       const t = s.tabs[id];
-      return t ? { tabs: { ...s.tabs, [id]: { ...t, title } } } : {};
+      return t && !t.file ? { tabs: { ...s.tabs, [id]: { ...t, title } } } : {};
+    }),
+  bindFile: (id, file) =>
+    set((s) => {
+      const t = s.tabs[id];
+      return t ? { tabs: { ...s.tabs, [id]: { ...t, title: file.name, file: { binding: file.binding, health: "ok" } } } } : {};
+    }),
+  setFileHealth: (id, health) =>
+    set((s) => {
+      const t = s.tabs[id];
+      return t?.file && t.file.health !== health ? { tabs: { ...s.tabs, [id]: { ...t, file: { ...t.file, health } } } } : {};
     }),
   patchConsole: (id, patch) =>
     set((s) => {

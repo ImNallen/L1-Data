@@ -1,11 +1,11 @@
 import { mockIPC } from "@tauri-apps/api/mocks";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
-import type { ConsoleState, DisconnectError } from "../../ipc/bindings";
+import type { ConsoleState, DisconnectError, FileSaved, FileWriteError } from "../../ipc/bindings";
 import { useLive } from "../../state/live";
 import { setCell, useTableEdits } from "../../state/tableEdits";
 import { useWorkspace } from "../../state/workspace";
 import { closeTab } from "./closeTab";
-import { dropEditor } from "./editorStates";
+import { dropEditor, insertAtCursor, seedEditor } from "./editorStates";
 import { openSqlTab } from "./runActions";
 
 const ws = () => useWorkspace.getState();
@@ -17,12 +17,29 @@ const question = () => {
 
 let closes: boolean[];
 let openTransaction: boolean;
+let saves: string[];
+let saveFails: boolean;
+let started: string[];
+let saveGate: Promise<void>;
 
 beforeEach(() => {
   vi.stubGlobal("window", { crypto });
   closes = [];
   openTransaction = false;
+  saves = [];
+  saveFails = false;
+  started = [];
+  saveGate = Promise.resolve();
   mockIPC((cmd, args) => {
+    if (cmd === "file_save") {
+      const text = (args as { text: string }).text;
+      started.push(text);
+      return saveGate.then(() => {
+        if (saveFails) throw { kind: "PermissionDenied" } satisfies FileWriteError;
+        saves.push(text);
+        return { binding: { path: "/q/a.sql", stamp: "s2", format: { bom: false, crlf: false } }, name: "a.sql" } satisfies FileSaved;
+      });
+    }
     if (cmd !== "console_close") return null;
     const force = (args as { force: boolean }).force;
     closes.push(force);
@@ -69,7 +86,7 @@ it("asks to discard staged edits, then to roll back, and closes only after both"
   openTransaction = true;
   stageEdit(id);
   const closing = closeTab(id);
-  expect(question()).toBe("Close tab with unsaved changes?");
+  await vi.waitFor(() => expect(question()).toBe("Close tab with unsaved changes?"));
   ws().answer("btn");
   await vi.waitFor(() => expect(question()).toBe("Close tab with an open transaction?"));
   expect(ws().order).toEqual([id]);
@@ -93,7 +110,83 @@ it("keeps the tab and its staged edits when the discard question is cancelled", 
   const id = tabWithConsole();
   stageEdit(id);
   const closing = closeTab(id);
+  await vi.waitFor(() => expect(question()).toBe("Close tab with unsaved changes?"));
   ws().close();
   await closing;
   expect([ws().order, closes, Object.keys(useTableEdits.getState().byTab)]).toEqual([[id], [], [id]]);
+});
+
+function dirtyFileTab(): string {
+  const id = tabWithConsole();
+  seedEditor(id, "select 1;", "seeded");
+  ws().bindFile(id, { binding: { path: "/q/a.sql", stamp: "s1", format: { bom: false, crlf: false } }, name: "a.sql" });
+  insertAtCursor(id, "-- edited ");
+  return id;
+}
+
+it("asks to save a file tab whose text differs from its file, and Don't Save closes it without writing", async () => {
+  const id = dirtyFileTab();
+  const closing = closeTab(id);
+  await vi.waitFor(() => expect(question()).toBe("Save changes to a.sql?"));
+  expect(ws().overlay).toMatchObject({ testId: "ask", choices: [{ id: "discard", label: "Don't Save" }, { id: "save", label: "Save" }] });
+  ws().answer("discard");
+  await closing;
+  expect([ws().order, saves]).toEqual([[], []]);
+});
+
+it("keeps a dirty file tab open when the save question is cancelled", async () => {
+  const id = dirtyFileTab();
+  const closing = closeTab(id);
+  await vi.waitFor(() => expect(question()).toBe("Save changes to a.sql?"));
+  ws().close();
+  await closing;
+  expect([ws().order, saves, closes]).toEqual([[id], [], []]);
+});
+
+it("saves, then asks to roll back, then closes", async () => {
+  const id = dirtyFileTab();
+  openTransaction = true;
+  const closing = closeTab(id);
+  await vi.waitFor(() => expect(question()).toBe("Save changes to a.sql?"));
+  ws().answer("save");
+  await vi.waitFor(() => expect(question()).toBe("Close tab with an open transaction?"));
+  expect(saves).toEqual(["-- edited select 1;"]);
+  ws().answer("btn");
+  await closing;
+  expect([ws().order, closes]).toEqual([[], [false, true]]);
+});
+
+it("asks again when the text changes while the close-time save is under way", async () => {
+  const id = dirtyFileTab();
+  let release = () => {};
+  saveGate = new Promise((r) => (release = r));
+  const closing = closeTab(id);
+  await vi.waitFor(() => expect(question()).toBe("Save changes to a.sql?"));
+  ws().answer("save");
+  await vi.waitFor(() => expect(started).toHaveLength(1));
+  insertAtCursor(id, "-- later ");
+  release();
+  await vi.waitFor(() => expect(question()).toBe("Save changes to a.sql?"));
+  expect([ws().order, saves]).toEqual([[id], ["-- edited select 1;"]]);
+  ws().answer("save");
+  await closing;
+  expect([ws().order, saves]).toEqual([[], ["-- edited select 1;", "-- edited -- later select 1;"]]);
+});
+
+it("keeps the tab open when its save fails", async () => {
+  const id = dirtyFileTab();
+  saveFails = true;
+  const closing = closeTab(id);
+  await vi.waitFor(() => expect(question()).toBe("Save changes to a.sql?"));
+  ws().answer("save");
+  await closing;
+  expect([ws().order, closes, ws().toast?.text]).toEqual([[id], [], "You don't have permission to save /q/a.sql. Use Save As to save a copy elsewhere."]);
+});
+
+it("closes a file tab that matches its file without asking", async () => {
+  const id = openSqlTab();
+  seedEditor(id, "select 1;", "seeded");
+  ws().bindFile(id, { binding: { path: "/q/a.sql", stamp: "s1", format: { bom: false, crlf: false } }, name: "a.sql" });
+  await closeTab(id);
+  expect([ws().order, question()]).toEqual([[], null]);
 });

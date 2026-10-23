@@ -15,7 +15,7 @@ afterEach(() => {
   useLive.setState(useLive.getInitialState(), true);
 });
 
-const TAB: Tab = { id: "tab-1", title: "orders_by_region.sql", console: { db: { connectionId: "c1", database: "shop" }, mode: "AutoCommit" }, table: null };
+const TAB: Tab = { id: "tab-1", title: "orders_by_region.sql", console: { db: { connectionId: "c1", database: "shop" }, mode: "AutoCommit" }, table: null, file: null };
 
 const DOC = "-- 🦀 crab\nselect 1;\nselect 2;";
 

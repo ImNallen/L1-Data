@@ -57,6 +57,7 @@ it("opens the results when a table opens, new or already in a tab", async () => 
       title: "orders",
       console: { db: { connectionId: "c1", database: "shop" }, mode: "AutoCommit" },
       table: { schema: "public", table: "orders", page: 0, query: { orderBy: "", filters: [], where: "" } },
+      file: null,
     },
     true,
   ]);
@@ -307,7 +308,7 @@ function openScript(text: string, edit: () => unknown) {
     return edit();
   });
   seedEditor("script", text);
-  useWorkspace.getState().addTab({ id: "script", title: "Untitled", console: { db: null, mode: "AutoCommit" }, table: null });
+  useWorkspace.getState().addTab({ id: "script", title: "Untitled", console: { db: null, mode: "AutoCommit" }, table: null, file: null });
   return sent;
 }
 
@@ -361,7 +362,7 @@ it("loads a table tab's page on first show, and never runs edited text unasked",
   const table = { schema: "public", table: "orders", page: 2, query };
   for (const [id, text] of [["browsing", "SELECT * FROM public.orders"], ["edited", "SELECT * FROM public.orders WHERE status = 'pending'"]] as const) {
     seedEditor(id, text);
-    useWorkspace.getState().addTab({ id, title: "orders", console: { db: { connectionId: "c1", database: "shop" }, mode: "AutoCommit" }, table });
+    useWorkspace.getState().addTab({ id, title: "orders", console: { db: { connectionId: "c1", database: "shop" }, mode: "AutoCommit" }, table, file: null });
   }
   await loadTableOnce("edited");
   await loadTableOnce("browsing");
@@ -401,7 +402,7 @@ it.each([
   expect(runs).toEqual([{ tabId: id, request: { kind: "tablePage", schema: "public", table: "orders", page: 2, query } }]);
   const tab = useWorkspace.getState().tabs[id];
   expect(tab && isBrowsing(tab)).toBe(true);
-  expect(workspaceSnapshot(useWorkspace.getState(), textOf).tabs).toEqual([saved]);
+  expect(workspaceSnapshot(useWorkspace.getState(), { textOf, isDirty: () => false }).tabs).toEqual([saved]);
 });
 
 it.each([
@@ -417,7 +418,7 @@ it.each([
   });
   const id = crypto.randomUUID();
   seedEditor(id, text);
-  useWorkspace.getState().addTab({ id, title: "orders", console: { db: orders.db, mode: "AutoCommit" }, table: { schema: "public", table: "orders", page: 2, query: { orderBy: "id DESC", filters: [], where: "" } } });
+  useWorkspace.getState().addTab({ id, title: "orders", console: { db: orders.db, mode: "AutoCommit" }, table: { schema: "public", table: "orders", page: 2, query: { orderBy: "id DESC", filters: [], where: "" } }, file: null });
   await loadTableOnce(id);
   const tab = useWorkspace.getState().tabs[id];
   expect(tab && isBrowsing(tab)).toBe(false);
@@ -430,7 +431,7 @@ it("compares engine-supplied strings without interpreting their punctuation", as
   mockIPC((cmd) => cmd === "table_script" ? { text: "engine template", acceptedTexts: ["engine template", "another engine form"] } satisfies TableScript : null);
   const id = crypto.randomUUID();
   seedEditor(id, "\n another engine form\t");
-  useWorkspace.getState().addTab({ id, title: "orders", console: { db, mode: "AutoCommit" }, table: { schema: "public", table: "orders", page: 0, query: { orderBy: "", filters: [], where: "" } } });
+  useWorkspace.getState().addTab({ id, title: "orders", console: { db, mode: "AutoCommit" }, table: { schema: "public", table: "orders", page: 0, query: { orderBy: "", filters: [], where: "" } }, file: null });
   await browseTemplate(db, "public", "orders");
   const tab = useWorkspace.getState().tabs[id];
   expect(tab && isBrowsing(tab)).toBe(true);

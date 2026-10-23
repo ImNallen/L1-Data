@@ -1,5 +1,8 @@
-import { afterEach, expect, it } from "vitest";
-import { useWorkspace } from "../state/workspace";
+import { mockIPC } from "@tauri-apps/api/mocks";
+import { afterEach, expect, it, vi } from "vitest";
+import { dropEditor, seedEditor } from "../features/editor/editorStates";
+import { setCell, useTableEdits } from "../state/tableEdits";
+import { ask, EMPTY_QUERY, useWorkspace } from "../state/workspace";
 import { commandForKey, handleGlobalKey } from "./commands";
 
 type Mods = Partial<Record<"metaKey" | "ctrlKey" | "shiftKey" | "altKey", boolean>>;
@@ -7,7 +10,62 @@ const chord = (key: string, mods: Mods) => ({ key, metaKey: false, ctrlKey: fals
 const press = (key: string, mods: Mods = { metaKey: true }) => commandForKey(chord(key, mods), true);
 const pressOff = (key: string, mods: Mods) => commandForKey(chord(key, mods), false);
 
-afterEach(() => useWorkspace.setState(useWorkspace.getInitialState(), true));
+afterEach(() => {
+  vi.unstubAllGlobals();
+  for (const id of useWorkspace.getState().order) dropEditor(id);
+  useWorkspace.setState(useWorkspace.getInitialState(), true);
+  useTableEdits.setState(useTableEdits.getInitialState(), true);
+});
+
+function recordIpc(): string[] {
+  const cmds: string[] = [];
+  vi.stubGlobal("window", { crypto });
+  mockIPC((cmd) => {
+    cmds.push(cmd);
+    return cmd === "table_apply" ? { committed: true } : null;
+  });
+  return cmds;
+}
+
+it("asks for a path on ⌘⇧S even with staged edits, while ⌘S submits them and then saves", async () => {
+  const cmds = recordIpc();
+  seedEditor("orders", "SELECT * FROM public.orders");
+  useWorkspace.getState().addTab({ id: "orders", title: "orders", console: { db: { connectionId: "c", database: "shop" }, mode: "AutoCommit" }, table: { schema: "public", table: "orders", page: 0, query: EMPTY_QUERY }, file: null });
+  useTableEdits.getState().edit("orders", (e) => setCell(e, [{ column: "id", value: "1" }], "total", "9", "1"));
+  const saveAs = keydown("s", { ctrlKey: true, shiftKey: true }, false);
+  await vi.waitFor(() => expect(cmds).toEqual(["plugin:dialog|save"]));
+  expect(saveAs.prevented).toBe(true);
+  keydown("s", { ctrlKey: true }, false);
+  await vi.waitFor(() => expect(cmds).toContain("table_apply"));
+  expect(cmds.filter((c) => c === "plugin:dialog|save")).toHaveLength(1);
+  keydown("s", { ctrlKey: true }, false);
+  await vi.waitFor(() => expect(cmds.filter((c) => c === "plugin:dialog|save")).toHaveLength(2));
+});
+
+it("opens no file dialog while a question is up, and leaves the question for its answer", async () => {
+  const cmds = recordIpc();
+  const answer = ask({ title: "Overwrite?", body: "", choices: [{ id: "overwrite", label: "Overwrite", variant: "danger" }] });
+  press("o")?.run();
+  await new Promise((r) => setTimeout(r, 0));
+  expect([cmds, useWorkspace.getState().overlay.kind]).toEqual([[], "ask"]);
+  useWorkspace.getState().answer("overwrite");
+  expect(await answer).toBe("overwrite");
+  useWorkspace.getState().openSettings();
+  press("o")?.run();
+  await vi.waitFor(() => expect(cmds).toEqual(["plugin:dialog|open"]));
+  expect(useWorkspace.getState().screen).toEqual({ kind: "workspace" });
+});
+
+it("does not save while a dialog is up", async () => {
+  const cmds = recordIpc();
+  seedEditor("t1", "select 1;");
+  useWorkspace.getState().addTab({ id: "t1", title: "a.sql", console: { db: null, mode: "AutoCommit" }, table: null, file: null });
+  useWorkspace.getState().open({ kind: "history" });
+  press("s")?.run();
+  press("s", { metaKey: true, shiftKey: true })?.run();
+  await new Promise((r) => setTimeout(r, 0));
+  expect(cmds).toEqual([]);
+});
 
 it("maps each shortcut to its command", () => {
   expect(["t", "n", "p", ",", "w"].map((k) => press(k)?.id)).toEqual(["new-query", "new-connection", "search", "settings", "close-tab"]);
@@ -34,6 +92,16 @@ it("leaves a chord a focused control already handled, and claims the ones it run
   expect([useWorkspace.getState().overlay, handled.prevented]).toEqual([{ kind: "none" }, false]);
   const ran = keydown("n", { ctrlKey: true }, false);
   expect([useWorkspace.getState().overlay, ran.prevented]).toEqual([{ kind: "connection", editing: null }, true]);
+});
+
+it("maps the file shortcuts, with Shift telling Save As from Save", () => {
+  expect([press("o")?.id, press("s")?.id, press("s", { metaKey: true, shiftKey: true })?.id, press("S", { metaKey: true, shiftKey: true })?.id]).toEqual([
+    "open-file",
+    "save",
+    "save-as",
+    "save-as",
+  ]);
+  expect(press("s", { metaKey: true, altKey: true })).toBeUndefined();
 });
 
 it("ignores plain keys and shifted or alt chords", () => {
@@ -88,7 +156,7 @@ it("leaves settings for the workspace before a shortcut opens an overlay there",
 });
 
 it("closes settings, not the active tab, on the close-tab shortcut", () => {
-  useWorkspace.getState().addTab({ id: "t1", title: "a.sql", console: { db: null, mode: "AutoCommit" }, table: null });
+  useWorkspace.getState().addTab({ id: "t1", title: "a.sql", console: { db: null, mode: "AutoCommit" }, table: null, file: null });
   useWorkspace.getState().openSettings();
   press("w")?.run();
   expect([useWorkspace.getState().screen, useWorkspace.getState().order]).toEqual([{ kind: "workspace" }, ["t1"]]);

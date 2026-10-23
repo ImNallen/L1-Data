@@ -30,7 +30,6 @@ import { NO_EDITS, markDeleted, removeNewRows, resetNewCell, rowKey, setCell, se
 import { useWorkspace } from "../../state/workspace";
 import { fontStack } from "../../themes/fonts";
 import { ContextMenuArea, ContextMenuItem, cx } from "../../ui/primitives";
-import { submitEdits } from "../editor/runActions";
 import { groupDigits, isNumeric, toTsv } from "./format";
 import type { SortKey } from "./tableQuery";
 
@@ -460,10 +459,7 @@ export function ResultGrid({
 
   const onKeyDown = (e: KeyboardEvent) => {
     const mod = e.metaKey || e.ctrlKey;
-    if (editable && mod && e.key.toLowerCase() === "s") {
-      e.preventDefault();
-      void submitEdits(tabId);
-    } else if (editable && mod && e.key === "Backspace" && selection) {
+    if (editable && mod && e.key === "Backspace" && selection) {
       e.preventDefault();
       if (!e.repeat) void deleteSelectedRows();
     } else if (editable && selection && (e.key === "Enter" || e.key === "F2")) {

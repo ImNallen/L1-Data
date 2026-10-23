@@ -1,5 +1,7 @@
 import { closeTab } from "../features/editor/closeTab";
-import { openSqlTab } from "../features/editor/runActions";
+import { openFiles, saveTab, type SaveMode } from "../features/editor/fileActions";
+import { openSqlTab, submitEdits } from "../features/editor/runActions";
+import { pendingCount, useTableEdits } from "../state/tableEdits";
 import { useWorkspace, type Overlay } from "../state/workspace";
 import { isMac } from "./hostedWindow";
 
@@ -18,6 +20,7 @@ const open = (overlay: Overlay) => inWorkspace(() => ws().open(overlay));
 
 export const START_COMMANDS: Command[] = [
   { id: "new-query", label: "New query tab", key: "t", run: inWorkspace(() => openSqlTab()) },
+  { id: "open-file", label: "Open file…", key: "o", run: () => void openFiles() },
   { id: "new-connection", label: "New connection", key: "n", run: open({ kind: "connection", editing: null }) },
   { id: "search", label: "Search", key: "p", run: () => ws().focusSearch() },
   { id: "settings", label: "Settings", key: ",", run: () => (ws().screen.kind === "settings" ? ws().closeSettings() : ws().openSettings()) },
@@ -34,7 +37,22 @@ const CLOSE_TAB: Command = {
   },
 };
 
-const KEYMAP = [...START_COMMANDS, CLOSE_TAB];
+/**
+ * A save acts on the workspace screen with no dialog up, so a save dialog never stacks on another one. With staged
+ * table edits in the active tab, ⌘S submits them wherever focus is.
+ */
+const saveActive = (mode: SaveMode) => () => {
+  const { screen, overlay, active } = ws();
+  if (screen.kind !== "workspace" || overlay.kind !== "none" || !active) return;
+  const edits = useTableEdits.getState().byTab[active];
+  if (mode === "save" && edits && pendingCount(edits) > 0) void submitEdits(active);
+  else void saveTab(active, mode);
+};
+
+const SAVE: Command = { id: "save", label: "Save", key: "s", run: saveActive("save") };
+const SAVE_AS: Command = { id: "save-as", label: "Save as…", key: "s", shift: true, run: saveActive("saveAs") };
+
+const KEYMAP = [...START_COMMANDS, CLOSE_TAB, SAVE, SAVE_AS];
 
 /** On macOS a command takes ⌘ alone, because the editor owns the Ctrl chords there (Ctrl-T transposes, Ctrl-P moves up). */
 export function commandForKey(e: Pick<KeyboardEvent, "key" | "metaKey" | "ctrlKey" | "shiftKey" | "altKey">, mac = MAC): Command | undefined {
