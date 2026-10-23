@@ -67,12 +67,12 @@ impl HostKeys {
         }
     }
 
-    /// Revoked when a file revokes the key, Changed when a file holds another key of its
-    /// algorithm for the server, even if the other file trusts it, else Trusted when a file holds
-    /// it. A file that exists but cannot be read fails the check.
+    /// Revoked when a file revokes the key, else Trusted when a file holds it, as OpenSSH does for
+    /// a host name shared by several servers. Changed when a file holds only other keys of its
+    /// algorithm for the server. A file that exists but cannot be read fails the check.
     fn verdict(&self, host: &str, port: u16, key: &PublicKey) -> Result<Verdict, String> {
         let blob = key.public_key_base64();
-        let mut trusted = false;
+        let (mut trusted, mut changed) = (false, None);
         for path in self.user.iter().chain([&self.app]) {
             let unreadable = |e: &dyn std::fmt::Display| format!("cannot read {}: {e}", path.display());
             let text = match std::fs::read_to_string(path) {
@@ -88,13 +88,18 @@ impl HostKeys {
                 if known.algorithm() != key.algorithm() {
                     continue;
                 }
-                if known.key_data() != key.key_data() {
-                    return Ok(Verdict::Changed(at(file_line(&text, counted))));
+                if known.key_data() == key.key_data() {
+                    trusted = true;
+                } else {
+                    changed.get_or_insert_with(|| at(file_line(&text, counted)));
                 }
-                trusted = true;
             }
         }
-        Ok(if trusted { Verdict::Trusted } else { Verdict::Unknown })
+        Ok(match (trusted, changed) {
+            (true, _) => Verdict::Trusted,
+            (false, Some(known_at)) => Verdict::Changed(known_at),
+            (false, None) => Verdict::Unknown,
+        })
     }
 
     fn hold(&self, host: &str, port: u16, key: &PublicKey) -> HostKeyId {

@@ -315,8 +315,16 @@ async fn only_the_newest_thirty_two_unknown_keys_wait_for_trust() {
 }
 
 #[tokio::test]
-async fn a_changed_host_key_fails_at_its_line_even_when_the_other_file_trusts_it() {
+async fn a_host_listed_with_several_keys_is_trusted_when_one_matches() {
     let rig = Rig::trusted(Login::Password).await;
+    let other = public("keys/id_ed25519").to_openssh().unwrap();
+    std::fs::write(rig.user_known_hosts(), format!("[127.0.0.1]:{} {other}\n", rig.bastion.port)).unwrap();
+    rig.echo(&rig.password("tunnel")).await;
+}
+
+#[tokio::test]
+async fn a_changed_host_key_fails_at_its_line() {
+    let rig = Rig::new(Login::Password).await;
     let other = public("keys/id_ed25519").to_openssh().unwrap();
     std::fs::write(rig.user_known_hosts(), format!("# comment\n\n[127.0.0.1]:{} {other}\n", rig.bastion.port)).unwrap();
     let error = rig.refusal(rig.password("tunnel")).await;
