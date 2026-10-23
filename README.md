@@ -117,7 +117,7 @@ cargo test -p engine --features mssql-tests   # engine against SQL Server; needs
 cargo test -p engine --features ssh-tests   # engine through an SSH bastion; needs pnpm db:up and pnpm db:ssh:up
 python3 dev/mssql-tls-smoke.py   # public Engine VerifyFull CA/name checks against a disposable SQL Server
 pnpm typecheck
-pnpm test                # vitest
+pnpm test                # vitest, then the release scripts' node tests
 pnpm build               # production frontend bundle
 pnpm self-check          # boots the engine inside the Tauri binary, connects to the Docker database, prints JSON, exits
 cargo build -p dev-bridge && dev/bridge-smoke.sh   # drives the bridge over HTTP against the Docker database
