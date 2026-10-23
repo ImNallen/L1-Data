@@ -14,6 +14,7 @@ fn main() {
             data_dir: PathBuf::from(&args[1]),
             keys: Arc::new(MemoryKeyStore::default()),
             agent_path: AgentPath::Fixed("".into()),
+            user_known_hosts: None,
         })
         .await
         .unwrap();
@@ -34,6 +35,7 @@ fn main() {
                 },
                 ca_cert_path: None,
                 color: None,
+                ssh: None,
             })
             .await;
         println!("{}", serde_json::to_string(&result).unwrap());
