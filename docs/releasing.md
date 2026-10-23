@@ -13,7 +13,7 @@ Every run starts with the `plan` job. `scripts/release-plan.mjs` decides whether
 
 Releases run one at a time. A run that starts while another runs waits in the queue and is never canceled. To resume a failed release, rerun its failed jobs. The `publish` job continues from the draft or the published release that the run already made.
 
-The checked-in version in `src-tauri/tauri.conf.json` stays where it is. The build stamps the planned version with a `--config` override, so no release commits a version bump.
+The checked-in version in `src-tauri/tauri.conf.json` stays where it is. The build stamps the planned version with a `--config` override, so no release commits a version bump. The same override turns on updater artifacts and sets `plugins.updater.pubkey` to `UPDATER_PUBKEY`, because Tauri refuses to sign updater artifacts without it.
 
 ## Publish a nightly
 

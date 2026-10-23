@@ -166,7 +166,8 @@ jobs:
 
       - name: Stamp the version
         run: |
-          jq -n --arg version "$VERSION" '{version: $version, bundle: {createUpdaterArtifacts: true}}' > release.conf.json
+          jq -n --arg version "$VERSION" --arg pubkey "$UPDATER_PUBKEY" \
+            '{version: $version, bundle: {createUpdaterArtifacts: true}, plugins: {updater: {pubkey: $pubkey}}}' > release.conf.json
 
       - name: Choose macOS signing
         id: signing
