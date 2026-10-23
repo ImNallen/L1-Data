@@ -260,6 +260,30 @@ pub async fn usage_limits(app: AppHandle) -> LimitsReport {
 
 #[tauri::command]
 #[specta::specta]
+pub fn update_check(engine: State<'_, Arc<Engine>>) {
+    engine.update_check()
+}
+
+#[tauri::command]
+#[specta::specta]
+pub fn update_download(engine: State<'_, Arc<Engine>>, version: String) -> Result<(), UpdateError> {
+    engine.update_download(version)
+}
+
+#[tauri::command]
+#[specta::specta]
+pub async fn update_install(app: AppHandle, version: String, accepted: Option<RestartImpact>) -> Result<InstallReply, UpdateError> {
+    app.state::<Arc<Engine>>().update_install(version, accepted).await
+}
+
+#[tauri::command]
+#[specta::specta]
+pub fn update_set_track(engine: State<'_, Arc<Engine>>, track: UpdateTrack) -> Result<(), UpdateError> {
+    engine.update_set_track(track)
+}
+
+#[tauri::command]
+#[specta::specta]
 pub fn table_script(engine: State<'_, Arc<Engine>>, db: DatabaseRef, schema: String, table: String) -> Result<TableScript, String> {
     engine.table_script(db, &schema, &table)
 }

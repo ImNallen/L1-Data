@@ -47,6 +47,16 @@ export const commands = {
 	assistantDelete: (chatId: ChatId) => __TAURI_INVOKE<void>("assistant_delete", { chatId }),
 	providerRefresh: () => __TAURI_INVOKE<void>("provider_refresh"),
 	usageLimits: () => __TAURI_INVOKE<LimitsReport>("usage_limits"),
+	updateCheck: () => __TAURI_INVOKE<void>("update_check"),
+	updateDownload: (version: string) => typedError<null, UpdateError>(__TAURI_INVOKE("update_download", { version })),
+	updateInstall: (version: string, accepted: {
+	/**  Tabs with a run, count, commit, rollback, or staged-edit apply in flight. */
+	running: TabId[],
+	transactions: OpenTxn[],
+	/**  Chats with a running assistant turn. */
+	chats: ChatId[],
+} | null) => typedError<InstallReply, UpdateError>(__TAURI_INVOKE("update_install", { version, accepted })),
+	updateSetTrack: (track: UpdateTrack) => typedError<null, UpdateError>(__TAURI_INVOKE("update_set_track", { track })),
 };
 
 /* Types */
@@ -626,6 +636,10 @@ export type IndexInfo = {
 	predicate: string | null,
 };
 
+export type InstallReply = 
+/**  Nothing was installed. Show `impact`, then call again with it as the acceptance. */
+{ kind: "Confirm"; impact: RestartImpact } | { kind: "Restarting" };
+
 /**
  *  Every database of the instance, with the state of its catalog. The connection snapshot is the
  *  single source of catalog versions.
@@ -832,6 +846,18 @@ export type RelationDetail = {
 export type ReplyBlock = { kind: "Markdown"; text: string } | 
 /**  A fenced SQL block. `relations` and `vetted` are filled when the fence closes. */
 { kind: "Sql"; sql: string; relations: string[]; vetted: boolean; complete: boolean };
+
+/**
+ *  Everything a restart would end, as of the call. The frontend sends it back as what the user
+ *  accepted, and the engine installs only if that still covers what a restart would end.
+ */
+export type RestartImpact = {
+	/**  Tabs with a run, count, commit, rollback, or staged-edit apply in flight. */
+	running: TabId[],
+	transactions: OpenTxn[],
+	/**  Chats with a running assistant turn. */
+	chats: ChatId[],
+};
 
 export type ResultError = { kind: "Gone" } | { kind: "OutOfRange" };
 
@@ -1179,6 +1205,12 @@ export type TypeCategory =
 "Integer" | 
 /**  numeric, real, double precision, money. */
 "Numeric" | "Text" | "Bool" | "Temporal" | "Json" | "Binary" | "Uuid" | "Network" | "Array" | "Enum" | "Composite" | "Range" | "Other";
+
+export type UpdateError = 
+/**  The update is not in the state the action names. The live snapshot already shows where it is. */
+{ kind: "Stale" } | 
+/**  A track switch while a download or an install runs. */
+{ kind: "Busy" };
 
 export type UpdateFailure = { kind: "Offline" } | { kind: "BadSignature" } | 
 /**  A mounted disk image or a translocated app cannot replace itself. */
