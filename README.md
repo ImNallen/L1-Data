@@ -160,4 +160,4 @@ The `claude-smoke` test needs the `claude` CLI installed and signed in, and the 
 - `crates/dev-bridge` serves the same engine over HTTP for browser-driven UI work.
 - `src` is the React frontend. `src/ipc/bindings.ts` is generated, so do not edit it.
 - `dev` holds the Docker database, its seed, and the bridge smoke, screenshot, and icon scripts.
-- `docs` holds the architecture doc and the README images.
+- `docs` holds the architecture doc, [docs/releasing.md](docs/releasing.md) on publishing Stable and Nightly releases, and the README images.
