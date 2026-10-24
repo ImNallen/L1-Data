@@ -11,7 +11,7 @@ import {
   XIcon,
 } from "lucide-react";
 import { useEffect, useId, useRef, useState, type ReactNode } from "react";
-import { commands, type ConnectionConfig, type ConnectionDraft, type ConnectionId, type SslMode } from "../../ipc/bindings";
+import { commands, type ConnectionConfig, type ConnectionDraft, type ConnectionId, type Environment, type SslMode } from "../../ipc/bindings";
 import { connectErrorText } from "../../ipc/errors";
 import { DATABASE_LABEL } from "../../state/databaseKind";
 import { useLive } from "../../state/live";
@@ -41,6 +41,13 @@ const SSL_MODES: { value: SslMode; label: string; hint: string }[] = [
   { value: "Require", label: "Require", hint: "Always uses TLS, without checking its certificate." },
   { value: "VerifyCa", label: "Verify CA", hint: "Always uses TLS and checks the certificate chain, but not the host name." },
   { value: "VerifyFull", label: "Verify full", hint: "Always uses TLS and checks the certificate chain and the host name." },
+];
+
+const ENVIRONMENTS: { value: Environment | null; label: string }[] = [
+  { value: null, label: "Not set" },
+  { value: "Local", label: "Local" },
+  { value: "Staging", label: "Staging" },
+  { value: "Production", label: "Production" },
 ];
 
 const SSH_AUTHS: { value: SshAuthKind; label: string }[] = [
@@ -328,7 +335,7 @@ function ConnectionForm({
     password: toPasswordInput(password),
     color: fields.color,
     ssh: toSshDraft(fields, sshSecret),
-    environment: existing?.environment ?? null,
+    environment: fields.environment,
   });
 
   const test = async () => {
@@ -431,6 +438,32 @@ function ConnectionForm({
               <option key={kind} value={kind}>{label}</option>
             ))}
           </select>
+        </FormRow>
+        <FormRow
+          label="Environment"
+          htmlFor={`${ids}-environment`}
+          hint="Staging and Production show beside the connection in the top bar. On Production, a run that writes asks first."
+        >
+          <div className="relative">
+            <select
+              id={`${ids}-environment`}
+              data-testid="conn-environment"
+              className={cx(inputClass, "appearance-none pr-8")}
+              value={fields.environment ?? ""}
+              onChange={(e) => {
+                const choice = ENVIRONMENTS.find((env) => (env.value ?? "") === e.target.value);
+                // The environment never changes how the connection dials, so a Test result still holds.
+                if (choice) setFields((f) => ({ ...f, environment: choice.value }));
+              }}
+            >
+              {ENVIRONMENTS.map((env) => (
+                <option key={env.label} value={env.value ?? ""}>
+                  {env.label}
+                </option>
+              ))}
+            </select>
+            <ChevronsUpDownIcon size={14} className="pointer-events-none absolute top-1/2 right-2.5 -translate-y-1/2 text-dim" />
+          </div>
         </FormRow>
         {!existing && (
           <FormRow
