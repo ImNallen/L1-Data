@@ -37,6 +37,7 @@ fn main() {
                 ca_cert_path: None,
                 color: None,
                 ssh: None,
+                environment: None,
             })
             .await;
         println!("{}", serde_json::to_string(&result).unwrap());
