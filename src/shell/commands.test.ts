@@ -63,13 +63,32 @@ it("does not save while a dialog is up", async () => {
   useWorkspace.getState().open({ kind: "history" });
   press("s")?.run();
   press("s", { metaKey: true, shiftKey: true })?.run();
+  press("e", { metaKey: true, shiftKey: true })?.run();
   await new Promise((r) => setTimeout(r, 0));
   expect(cmds).toEqual([]);
 });
 
 it("maps each shortcut to its command", () => {
-  expect(["t", "n", "p", ",", "w"].map((k) => press(k)?.id)).toEqual(["new-query", "new-connection", "search", "settings", "close-tab"]);
+  expect(["t", "n", "p", ",", "w", "e"].map((k) => press(k)?.id)).toEqual(["new-query", "new-connection", "search", "settings", "close-tab", "saved-queries"]);
   expect(press("T")?.id).toBe("new-query");
+  expect([press("e", { metaKey: true, shiftKey: true })?.id, pressOff("E", { ctrlKey: true, shiftKey: true })?.id]).toEqual(["save-query", "save-query"]);
+});
+
+it("toggles Saved queries on its shortcut, leaving settings for the workspace first", () => {
+  useWorkspace.getState().openSettings("queries");
+  press("e")?.run();
+  expect([useWorkspace.getState().screen, useWorkspace.getState().overlay]).toEqual([{ kind: "workspace" }, { kind: "saved", entry: { kind: "browse" } }]);
+  press("e")?.run();
+  expect(useWorkspace.getState().overlay).toEqual({ kind: "none" });
+});
+
+it("saves the active tab's statement on ⌘⇧E", async () => {
+  vi.stubGlobal("window", { crypto });
+  mockIPC((cmd) => (cmd === "saved_query_save" ? { id: 1, alreadySaved: false, queries: { rev: 2, items: [] } } : null));
+  seedEditor("t1", "select 1;");
+  useWorkspace.getState().addTab({ id: "t1", title: "a.sql", console: { db: null, mode: "AutoCommit" }, table: null, file: null });
+  press("e", { metaKey: true, shiftKey: true })?.run();
+  await vi.waitFor(() => expect(useWorkspace.getState().overlay).toEqual({ kind: "saved", entry: { kind: "name", id: 1 } }));
 });
 
 it("takes Cmd alone on macOS and leaves the Ctrl chords to the editor", () => {

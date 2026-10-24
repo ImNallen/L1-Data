@@ -87,7 +87,7 @@ export function isBrowsing(tab: Tab): tab is TableTab {
   return isTableTab(tab) && tableScripts.get(tableScriptKey(tab.console.db, tab.table.schema, tab.table.table))?.acceptedTexts.includes(textOf(tab.id).trim()) === true;
 }
 
-function textTarget(tab: Tab): { db: DatabaseRef | null; databaseKind: DatabaseKind } {
+export function textTarget(tab: Tab): { db: DatabaseRef | null; databaseKind: DatabaseKind } {
   const db = tabTarget(tab);
   return { db, databaseKind: databaseKindFor(db, ws().configs) };
 }
@@ -97,7 +97,7 @@ function sameTextTarget(id: TabId, target: ReturnType<typeof textTarget>): boole
   return tab !== undefined && sameDb(tabTarget(tab), target.db) && textTarget(tab).databaseKind === target.databaseKind;
 }
 
-function selectionTarget(state: EditorState): RunTarget {
+export function selectionTarget(state: EditorState): RunTarget {
   const sel = state.selection.main;
   return sel.empty ? { kind: "cursor", offset: sel.head } : { kind: "selection", from: sel.from, to: sel.to };
 }
