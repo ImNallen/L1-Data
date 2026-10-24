@@ -2,11 +2,11 @@ import * as Menu from "@radix-ui/react-dropdown-menu";
 import { ChevronDownIcon, ListIndentIncreaseIcon, PlayIcon, SquareIcon } from "lucide-react";
 import { ConnectionColorDot } from "../features/connections/connectionColors";
 import { cancelActive, endTransaction, formatActive, runOrChoose, setTabMode, setTabTarget } from "../features/editor/runActions";
-import type { TransactionLoss, TxnMode } from "../ipc/bindings";
+import type { ConnectionState, DatabaseRef, Environment, TransactionLoss, TxnMode } from "../ipc/bindings";
 import { homeDb } from "../state/dbKey";
-import { useLive } from "../state/live";
+import { instanceOf, useLive } from "../state/live";
 import { canCancel, connectionTone, hasUncommittedWork, isBusy } from "../state/status";
-import { tabTarget, useWorkspace } from "../state/workspace";
+import { tabTarget, useWorkspace, type Tab } from "../state/workspace";
 import { Button, Kbd, MenuContent, MenuItem, MenuLabel, StatusDot, cx } from "../ui/primitives";
 import { SidebarToggle, WindowEdgeActions, windowEdgeInset, windowLeadingInset } from "./WindowEdgeActions";
 import type { HostedWindow } from "./hostedWindow";
@@ -18,11 +18,52 @@ const LOSS_LABEL: Record<TransactionLoss, { label: string; title: string } | nul
   Unknown: { label: "session reset", title: "Session reset. Earlier commits remain committed; the last transaction outcome may be unknown." },
 };
 
+/** Local and an unset environment draw nothing, so a chip always means a shared server. A 6% fill keeps the label at
+ * 4.5:1 in L1 Light. */
+const ENVIRONMENT_CHIP: Record<Environment, string | null> = {
+  Local: null,
+  Staging: "bg-amber/6 text-amber",
+  Production: "bg-danger/6 text-danger",
+};
+
+const TARGET_TRIGGER = "flex h-7 min-w-0 items-center gap-1 rounded-md px-1 text-ui-14 hover:bg-hover data-[state=open]:bg-hover";
+
+/** The databases the tree shows, and the tab's own even when the tree hides it or the connection is down. */
+export function databaseChoices(db: DatabaseRef, state: ConnectionState | undefined): string[] {
+  const shown = instanceOf(state)?.databases.filter((d) => d.shown).map((d) => d.name) ?? [];
+  return shown.includes(db.database) ? shown : [db.database, ...shown];
+}
+
+function Separator() {
+  return <span className="mx-1.5 shrink-0 text-ui-14 text-faint">/</span>;
+}
+
+function DatabaseMenu({ tab, db }: { tab: Tab; db: DatabaseRef }) {
+  const state = useLive((s) => s.connections[db.connectionId]);
+  return (
+    <Menu.Root modal={false}>
+      <Menu.Trigger data-testid="tab-database" title={db.database} className={cx(TARGET_TRIGGER, "text-fg")}>
+        <span className="truncate">{db.database}</span>
+        <ChevronDownIcon size={12} className="shrink-0 text-dim" />
+      </Menu.Trigger>
+      <MenuContent>
+        <MenuLabel>Database for this tab</MenuLabel>
+        {databaseChoices(db, state).map((name) => (
+          <MenuItem key={name} testId={`tab-database-${name}`} checked={name === db.database} onSelect={() => void setTabTarget(tab.id, { connectionId: db.connectionId, database: name })}>
+            {name}
+          </MenuItem>
+        ))}
+      </MenuContent>
+    </Menu.Root>
+  );
+}
+
 export function TopBar({ hosted }: { hosted: HostedWindow | null }) {
   const tab = useWorkspace((s) => (s.active ? s.tabs[s.active] : undefined));
   const configs = useWorkspace((s) => s.configs);
   const layout = useWorkspace((s) => s.layout);
-  const connectionId = tabTarget(tab)?.connectionId ?? null;
+  const db = tabTarget(tab);
+  const connectionId = db?.connectionId ?? null;
   const liveConsole = useLive((s) => (tab ? s.consoles[tab.id] : undefined));
   const connections = useLive((s) => s.connections);
   const config = connectionId ? configs[connectionId] : undefined;
@@ -32,23 +73,32 @@ export function TopBar({ hosted }: { hosted: HostedWindow | null }) {
   const txnDepth = liveConsole?.txnDepth;
   const sqlServer = config?.databaseKind === "SqlServer";
   const loss = liveConsole?.session.kind === "Lost" ? LOSS_LABEL[liveConsole.session.transaction] : null;
+  const environment = config?.environment ?? null;
+  const chip = environment && ENVIRONMENT_CHIP[environment];
 
+  // Each segment after the connection sits in a zero-basis box that gets only the room left over, so the tab title
+  // truncates first, then the database, and the connection name last. The boxes clip their own separators, so an
+  // empty one takes no room from the connection.
   return (
     <header
       data-tauri-drag-region="deep"
       className={cx(
-        "flex h-[52px] shrink-0 items-center gap-2",
+        "@container flex h-[52px] shrink-0 items-center gap-2 border-b-2",
+        environment === "Production" ? "border-danger" : "border-transparent",
         windowEdgeInset(hosted),
         layout.sidebar ? "pl-4" : windowLeadingInset(hosted),
       )}
+      data-testid="top-bar"
+      data-environment={environment ?? undefined}
     >
       {!layout.sidebar && <SidebarToggle />}
-      <div className="flex min-w-0 flex-1 items-center gap-2">
+      <div className="flex min-w-0 flex-1 items-center">
         {tab ? (
           <Menu.Root modal={false}>
-            <Menu.Trigger data-testid="tab-connection" className="flex min-w-0 items-center gap-1.5 rounded px-0.5 text-ui-14 text-dim outline-none hover:text-fg">
-              <ConnectionColorDot color={config?.color ?? null} />
+            <Menu.Trigger data-testid="tab-connection" title={config?.name} className={cx(TARGET_TRIGGER, "-ml-1", config ? "text-fg" : "text-dim")}>
+              <ConnectionColorDot color={config?.color ?? null} className="mr-0.5" />
               <span className="truncate">{config?.name ?? "No connection"}</span>
+              <ChevronDownIcon size={12} className="shrink-0 text-dim" />
             </Menu.Trigger>
             <MenuContent>
               <MenuLabel>Connection for this tab</MenuLabel>
@@ -67,11 +117,24 @@ export function TopBar({ hosted }: { hosted: HostedWindow | null }) {
             <span className="truncate">{config?.name ?? ""}</span>
           </span>
         )}
+        {chip && (
+          <span data-testid="env-chip" className={cx("ml-1.5 inline-flex h-[18px] shrink-0 items-center rounded-sm px-1.5 text-ui-11.5 leading-none font-medium", chip)}>
+            {environment}
+          </span>
+        )}
         {tab && (
-          <>
-            <span className="text-ui-14 text-faint">/</span>
-            <span className="truncate text-ui-14 font-medium text-fg">{tab.title}</span>
-          </>
+          <div className="flex min-w-0 flex-1 items-center overflow-hidden">
+            {db && config && (
+              <>
+                <Separator />
+                <DatabaseMenu tab={tab} db={db} />
+              </>
+            )}
+            <div className="flex min-w-0 flex-1 items-center overflow-hidden">
+              <Separator />
+              <span data-testid="tab-title" className="truncate text-ui-14 text-muted">{tab.title}</span>
+            </div>
+          </div>
         )}
       </div>
 
@@ -84,7 +147,7 @@ export function TopBar({ hosted }: { hosted: HostedWindow | null }) {
           >
             {MODE_LABEL[tab.console.mode]}
             {txn && txn !== "Idle" && (
-              <span className={txn === "Aborted" ? "text-danger" : "text-fg"}> · {txn === "Aborted" ? "aborted" : "in transaction"}{txnDepth !== null && txnDepth !== undefined && txnDepth > 1 ? ` (${txnDepth})` : ""}</span>
+              <span className={txn === "Aborted" ? "text-danger" : "text-amber"}> · {txn === "Aborted" ? "aborted" : "in transaction"}{txnDepth !== null && txnDepth !== undefined && txnDepth > 1 ? ` (${txnDepth})` : ""}</span>
             )}
             {loss && <span className="text-danger"> · {loss.label}</span>}
             <ChevronDownIcon size={13} />
@@ -112,7 +175,8 @@ export function TopBar({ hosted }: { hosted: HostedWindow | null }) {
       )}
 
       {tab && (
-        <Button data-testid="format-btn" title="Format the selection or the marked statement (⌘⌥L)" onClick={() => void formatActive()}>
+        // Below 640px the run target needs the room, and ⌘⌥L still formats.
+        <Button data-testid="format-btn" title="Format the selection or the marked statement (⌘⌥L)" className="@max-[640px]:hidden" onClick={() => void formatActive()}>
           <ListIndentIncreaseIcon size={14} className="text-muted" />
           Format
         </Button>

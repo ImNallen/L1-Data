@@ -338,7 +338,7 @@ it("gives a table tab the connection menu and the transaction mode menu a query 
   const html = renderToStaticMarkup(<TopBar hosted={null} />);
   expect(html).toMatch(/<button[^>]*aria-haspopup="menu"[^>]*data-testid="tab-connection"[^>]*><span class="truncate">dev</);
   expect(html).toMatch(/<button[^>]*aria-haspopup="menu"[^>]*data-testid="tx-mode"[^>]*>Manual</);
-  expect(html).toMatch(/text-fg">orders</);
+  expect(html).toMatch(/data-testid="tab-title"[^>]*>orders</);
 });
 
 it("marks the tab's connection with its color in the top bar", () => {
