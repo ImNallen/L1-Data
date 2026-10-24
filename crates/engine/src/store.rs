@@ -22,7 +22,7 @@ pub enum StoreError {
 
 pub const HISTORY_KEEP: i64 = 10_000;
 
-const MIGRATIONS: [&str; 7] = [
+const MIGRATIONS: [&str; 8] = [
     "
     CREATE TABLE connections (id TEXT PRIMARY KEY, json TEXT NOT NULL);
     CREATE TABLE history (
@@ -54,6 +54,16 @@ const MIGRATIONS: [&str; 7] = [
 ",
     "ALTER TABLE history ADD COLUMN database_kind TEXT NOT NULL DEFAULT 'Postgres';",
     "CREATE TABLE ssh_secrets (connection_id TEXT PRIMARY KEY, nonce BLOB NOT NULL, ciphertext BLOB NOT NULL);",
+    "
+    CREATE TABLE saved_queries (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        name TEXT NOT NULL,
+        sql TEXT NOT NULL,
+        database_kind TEXT NOT NULL,
+        created_ms INTEGER NOT NULL,
+        used_ms INTEGER NOT NULL
+    );
+",
 ];
 
 pub struct Store {
@@ -63,6 +73,7 @@ pub struct Store {
 struct StoreState {
     conn: Connection,
     history_revision: u64,
+    saved_revision: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -120,7 +131,7 @@ impl Store {
             tx.pragma_update(None, "user_version", (i + 1) as i64)?;
             tx.commit()?;
         }
-        Ok(Self { state: Mutex::new(StoreState { conn, history_revision: 0 }) })
+        Ok(Self { state: Mutex::new(StoreState { conn, history_revision: 0, saved_revision: 1 }) })
     }
 
     fn with<T>(&self, f: impl FnOnce(&Connection) -> Result<T, StoreError>) -> Result<T, StoreError> {
@@ -130,8 +141,14 @@ impl Store {
 
     pub(crate) fn with_history<T>(&self, f: impl FnOnce(&Connection, &mut u64) -> Result<T, StoreError>) -> Result<T, StoreError> {
         let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
-        let StoreState { conn, history_revision } = &mut *state;
+        let StoreState { conn, history_revision, .. } = &mut *state;
         f(conn, history_revision)
+    }
+
+    pub(crate) fn with_saved<T>(&self, f: impl FnOnce(&Connection, &mut u64) -> T) -> T {
+        let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        let StoreState { conn, saved_revision, .. } = &mut *state;
+        f(conn, saved_revision)
     }
 
     pub fn connections(&self) -> Result<Vec<ConnectionConfig>, StoreError> {
@@ -603,6 +620,30 @@ mod tests {
         let version: i64 = s.with(|c| Ok(c.query_row("PRAGMA user_version", [], |r| r.get(0))?)).unwrap();
         assert_eq!(version, MIGRATIONS.len() as i64);
         assert_eq!(s.chats(10).unwrap(), vec![(chat_id(1), first)]);
+        assert_eq!(s.kv_get::<serde_json::Value>("workspace").unwrap(), Some(serde_json::json!({})));
+    }
+
+    #[test]
+    fn migration_8_adds_saved_queries_to_a_version_7_store() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("t.sqlite3");
+        {
+            let c = Connection::open(&path).unwrap();
+            for sql in &MIGRATIONS[..7] {
+                c.execute_batch(sql).unwrap();
+            }
+            c.pragma_update(None, "user_version", 7).unwrap();
+            c.execute("INSERT INTO kv (key, json) VALUES ('workspace', '{}')", []).unwrap();
+        }
+        let s = Store::open(&path).unwrap();
+        assert_eq!(crate::saved::snapshot(&s).unwrap().items, []);
+        s.with_saved(|c, _| c.execute("INSERT INTO saved_queries (name, sql, database_kind, created_ms, used_ms) VALUES ('one', 'select 1', 'Postgres', 1, 1)", []))
+            .unwrap();
+        drop(s);
+        let s = Store::open(&path).unwrap();
+        let version: i64 = s.with(|c| Ok(c.query_row("PRAGMA user_version", [], |r| r.get(0))?)).unwrap();
+        assert_eq!(version, 8);
+        assert_eq!(crate::saved::snapshot(&s).unwrap().items.iter().map(|q| q.name.as_str()).collect::<Vec<_>>(), ["one"]);
         assert_eq!(s.kv_get::<serde_json::Value>("workspace").unwrap(), Some(serde_json::json!({})));
     }
 

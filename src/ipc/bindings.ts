@@ -39,6 +39,10 @@ export const commands = {
 	historyBrowse: (query: HistoryBrowseQuery) => typedError<HistoryBrowsePage, HistoryError>(__TAURI_INVOKE("history_browse", { query })),
 	historyGroup: (query: HistoryGroupQuery) => typedError<HistoryGroupPage, HistoryError>(__TAURI_INVOKE("history_group", { query })),
 	historyClear: () => __TAURI_INVOKE<void>("history_clear"),
+	savedQuerySave: (text: string, target: RunTarget, databaseKind: DatabaseKind) => typedError<SaveQueryReply, SavedQueryError>(__TAURI_INVOKE("saved_query_save", { text, target, databaseKind })),
+	savedQueryUpdate: (id: SavedQueryId, edit: SavedQueryEdit) => typedError<SavedQueries, SavedQueryError>(__TAURI_INVOKE("saved_query_update", { id, edit })),
+	savedQueryDelete: (id: SavedQueryId) => typedError<SavedQueries, SavedQueryError>(__TAURI_INVOKE("saved_query_delete", { id })),
+	savedQueryUsed: (id: SavedQueryId) => typedError<SavedQueries, SavedQueryError>(__TAURI_INVOKE("saved_query_used", { id })),
 	workspaceSave: (workspace: Workspace) => __TAURI_INVOKE<void>("workspace_save", { workspace }),
 	settingsSet: (settings: Settings) => __TAURI_INVOKE<void>("settings_set", { settings }),
 	assistantOpen: (chatId: ChatId) => typedError<ChatView, ChatError>(__TAURI_INVOKE("assistant_open", { chatId })),
@@ -99,7 +103,9 @@ export type AppEvent = {
 	kind: "ChatEntryChanged",
 } & EntrySnapshot | {
 	kind: "UpdateChanged",
-} & UpdateState;
+} & UpdateState | {
+	kind: "SavedQueriesChanged",
+} & SavedQueries;
 
 export type Appearance = "light" | "dark";
 
@@ -150,6 +156,7 @@ export type BootSnapshot = {
 	/**  Stored chats, newest first, at most 200. */
 	chats: ChatState[],
 	updates: UpdateState,
+	savedQueries: SavedQueries,
 };
 
 export type Catalog = {
@@ -1048,6 +1055,16 @@ export type RunTarget = { kind: "cursor"; offset: DocOffset } | { kind: "selecti
 
 export type SaveError = { kind: "Invalid"; message: string } | { kind: "Keychain"; message: string } | { kind: "Store"; message: string };
 
+export type SaveQueryReply = {
+	id: SavedQueryId,
+	/**
+	 *  The same text in the same dialect was already saved. `id` is that entry, and nothing was
+	 *  written.
+	 */
+	alreadySaved: boolean,
+	queries: SavedQueries,
+};
+
 export type SaveTarget = 
 /**
  *  Refused with `Changed` when the file's bytes no longer match `binding.stamp`, unless they match
@@ -1059,6 +1076,48 @@ export type SaveTarget =
  *  `OpenInAnotherTab` when it is the same file as one of `taken`, the paths the other tabs are bound to.
  */
 { kind: "New"; path: string; format: FileFormat | null; taken: string[] };
+
+/**
+ *  Every readable saved query, most recently used first. `rev` rises with every write that
+ *  changes a row.
+ */
+export type SavedQueries = {
+	rev: number,
+	items: SavedQuery[],
+};
+
+export type SavedQuery = {
+	id: SavedQueryId,
+	name: string,
+	sql: string,
+	databaseKind: DatabaseKind,
+	/**  Derived on read, never stored: the SQL after its leading comments, cut to 180 characters. */
+	excerpt: string,
+	createdAtMs: number,
+	/**
+	 *  Set at creation and by `saved_query_used`. An edit leaves it alone, so an edit never
+	 *  reorders the list.
+	 */
+	usedAtMs: number,
+};
+
+export type SavedQueryEdit = {
+	/**  Blank means "name it from the SQL", the default a new query gets. */
+	name: string,
+	sql: string,
+};
+
+export type SavedQueryError = 
+/**  The cursor is on no statement, or the selection or the edited SQL is blank. */
+{ kind: "NothingToSave" } | { kind: "TooLong"; limitBytes: number } | 
+/**  An edit of an id that no longer exists. Delete and use never return it. */
+{ kind: "NotFound" } | { kind: "Store"; message: string };
+
+/**
+ *  Rowid of `saved_queries`. AUTOINCREMENT, so a deleted id is never reissued and a late click on
+ *  a deleted entry cannot act on a newer one.
+ */
+export type SavedQueryId = number;
 
 export type SchemaCount = { kind: "Unknown" } | { kind: "Probing" } | { kind: "Known"; count: number } | 
 /**  The probe session failed; `message` is the server's or the transport's text. */

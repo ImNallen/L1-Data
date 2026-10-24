@@ -7,6 +7,7 @@ import type {
   FileBinding,
   FileSaved,
   Layout,
+  SavedQueryId,
   Settings,
   TabId,
   TableQuery,
@@ -49,9 +50,12 @@ export function isFiltered(q: TableQuery): boolean {
 
 export type RelationRef = { db: DatabaseRef; schema: string; relation: string };
 
+export type SavedEntry = { kind: "browse" } | { kind: "name"; id: SavedQueryId } | { kind: "existing"; id: SavedQueryId };
+
 export type Overlay =
   | { kind: "none" }
   | { kind: "history" }
+  | { kind: "saved"; entry: SavedEntry }
   | { kind: "connection"; editing: ConnectionId | null }
   | { kind: "cell"; title: string; value: string | null }
   | ({ kind: "ask"; seq: number; settle: (choice: string | null) => void } & Required<Question<string>>);

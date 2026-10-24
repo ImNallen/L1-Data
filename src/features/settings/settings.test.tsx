@@ -616,7 +616,7 @@ it("puts the refresh in the page header only while no settings search is set", (
   expect(has(render(settingsOpen("providers")), "usage-refresh")).toBe(false);
 });
 
-it("puts the Usage button between Settings and Query history in the sidebar's bottom bar", () => {
+it("orders the sidebar's bottom bar Settings, Usage, Query history, then Saved queries", () => {
   const html = render({ screen: { kind: "workspace" } });
-  expect(testIds(html, "open-")).toEqual(["open-settings", "open-usage", "open-history"]);
+  expect(testIds(html, "open-")).toEqual(["open-settings", "open-usage", "open-history", "open-saved-queries"]);
 });

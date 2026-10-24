@@ -271,6 +271,7 @@ it("lists the start commands with their shortcuts when no tab is open", () => {
     ["Open file…", "⌘O"],
     ["New connection", "⌘N"],
     ["Search", "⌘P"],
+    ["Saved queries", "⌘E"],
     ["Settings", "⌘,"],
   ]);
   expect(html).not.toContain("No open tabs.");

@@ -1,11 +1,11 @@
-import { ChartNoAxesColumnIcon, ClockIcon, PlusIcon, SlidersHorizontalIcon } from "lucide-react";
+import { BookmarkIcon, ChartNoAxesColumnIcon, ClockIcon, PlusIcon, SlidersHorizontalIcon } from "lucide-react";
 import { useMemo } from "react";
 import { useCatalog } from "../../state/catalog";
 import { useLive } from "../../state/live";
 import { useWorkspace, type Screen } from "../../state/workspace";
 import { cx, IconButton } from "../../ui/primitives";
 import { parseQuery } from "../../ui/textMatch";
-import type { HostedWindow } from "../../shell/hostedWindow";
+import { isMac, type HostedWindow } from "../../shell/hostedWindow";
 import { SidebarToggle, windowLeadingInset } from "../../shell/WindowEdgeActions";
 import { openTableTab } from "../editor/runActions";
 import { SettingsSidebarBody } from "../settings/SettingsSidebarBody";
@@ -102,6 +102,14 @@ function WorkspaceSidebarBody() {
           onClick={() => open({ kind: "history" })}
         >
           <ClockIcon size={16} />
+        </IconButton>
+        <IconButton
+          data-testid="open-saved-queries"
+          aria-label="Saved queries"
+          title={`Saved queries (${isMac(navigator.userAgent) ? "⌘E" : "Ctrl+E"})`}
+          onClick={() => open({ kind: "saved", entry: { kind: "browse" } })}
+        >
+          <BookmarkIcon size={16} />
         </IconButton>
         <UpdateButton />
       </div>

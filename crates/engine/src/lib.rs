@@ -8,6 +8,7 @@ mod history;
 pub mod model;
 mod provider;
 mod results;
+mod saved;
 mod secrets;
 mod session;
 mod sql;
@@ -768,7 +769,11 @@ impl Engine {
             .into_iter()
             .map(|(id, r)| live_chats.remove(&id).unwrap_or_else(|| ChatState { id, rev: 0, title: r.title, updated_at_ms: r.updated_at_ms, options: r.options, status: ChatStatus::Idle, entry_count: r.entry_count }))
             .collect();
-        BootSnapshot { connections, live, consoles, workspace, settings: s.settings(), providers: s.provider_states(), chats, updates: s.updates.state() }
+        let saved_queries = saved::snapshot(&s.store).unwrap_or_else(|e| {
+            eprintln!("saved queries load failed: {e}");
+            SavedQueries { rev: 0, items: Vec::new() }
+        });
+        BootSnapshot { connections, live, consoles, workspace, settings: s.settings(), providers: s.provider_states(), chats, updates: s.updates.state(), saved_queries }
     }
 
     pub async fn save_connection(&self, d: ConnectionDraft) -> Result<ConnectionConfig, SaveError> {
@@ -1512,6 +1517,22 @@ impl Engine {
         if let Err(e) = self.shared.store.clear_history() {
             eprintln!("history clear failed: {e}");
         }
+    }
+
+    pub fn saved_query_save(&self, text: &str, target: RunTarget, database_kind: DatabaseKind) -> Result<SaveQueryReply, SavedQueryError> {
+        saved::save(&self.shared, text, target, database_kind)
+    }
+
+    pub fn saved_query_update(&self, id: SavedQueryId, edit: SavedQueryEdit) -> Result<SavedQueries, SavedQueryError> {
+        saved::update(&self.shared, id, edit)
+    }
+
+    pub fn saved_query_delete(&self, id: SavedQueryId) -> Result<SavedQueries, SavedQueryError> {
+        saved::delete(&self.shared, id)
+    }
+
+    pub fn saved_query_used(&self, id: SavedQueryId) -> Result<SavedQueries, SavedQueryError> {
+        saved::used(&self.shared, id)
     }
 
     pub fn save_workspace(&self, mut w: Workspace) {

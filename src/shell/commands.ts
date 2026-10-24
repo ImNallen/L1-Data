@@ -1,6 +1,7 @@
 import { closeTab } from "../features/editor/closeTab";
 import { openFiles, saveTab, type SaveMode } from "../features/editor/fileActions";
 import { openSqlTab, submitEdits } from "../features/editor/runActions";
+import { saveActiveQuery } from "../features/saved/savedActions";
 import { pendingCount, useTableEdits } from "../state/tableEdits";
 import { useWorkspace, type Overlay } from "../state/workspace";
 import { isMac } from "./hostedWindow";
@@ -18,11 +19,18 @@ const inWorkspace = (run: () => void) => () => {
 
 const open = (overlay: Overlay) => inWorkspace(() => ws().open(overlay));
 
+function toggleSaved() {
+  const wasOpen = ws().overlay.kind === "saved";
+  ws().closeSettings();
+  if (!wasOpen) ws().open({ kind: "saved", entry: { kind: "browse" } });
+}
+
 export const START_COMMANDS: Command[] = [
   { id: "new-query", label: "New query tab", key: "t", run: inWorkspace(() => openSqlTab()) },
   { id: "open-file", label: "Open file…", key: "o", run: () => void openFiles() },
   { id: "new-connection", label: "New connection", key: "n", run: open({ kind: "connection", editing: null }) },
   { id: "search", label: "Search", key: "p", run: () => ws().focusSearch() },
+  { id: "saved-queries", label: "Saved queries", key: "e", run: toggleSaved },
   { id: "settings", label: "Settings", key: ",", run: () => (ws().screen.kind === "settings" ? ws().closeSettings() : ws().openSettings()) },
 ];
 
@@ -52,7 +60,9 @@ const saveActive = (mode: SaveMode) => () => {
 const SAVE: Command = { id: "save", label: "Save", key: "s", run: saveActive("save") };
 const SAVE_AS: Command = { id: "save-as", label: "Save as…", key: "s", shift: true, run: saveActive("saveAs") };
 
-const KEYMAP = [...START_COMMANDS, CLOSE_TAB, SAVE, SAVE_AS];
+const SAVE_QUERY: Command = { id: "save-query", label: "Save query", key: "e", shift: true, run: () => void saveActiveQuery() };
+
+const KEYMAP = [...START_COMMANDS, CLOSE_TAB, SAVE, SAVE_AS, SAVE_QUERY];
 
 /** On macOS a command takes ⌘ alone, because the editor owns the Ctrl chords there (Ctrl-T transposes, Ctrl-P moves up). */
 export function commandForKey(e: Pick<KeyboardEvent, "key" | "metaKey" | "ctrlKey" | "shiftKey" | "altKey">, mac = MAC): Command | undefined {

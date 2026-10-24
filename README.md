@@ -42,6 +42,7 @@ L1 Data is a desktop IDE for PostgreSQL and Microsoft SQL Server, built with Tau
 - An error shows the available server diagnostics, including PostgreSQL SQLSTATE, and the editor underlines a reported error location.
 - The **Output** button at the right end of the results header opens a timestamped log of everything the tab ran: each statement, its server messages such as `RAISE NOTICE` and warnings, and its result line. **Commit**, **Rollback**, and table edits are logged too. When a statement returns no rows, the log fills the results pane. The button turns amber when the latest run raised a warning.
 - **Query history** groups identical SQL per connection and database. Search SQL, connection names, databases, or errors, then filter by **All**, **Failed**, or **Writes**. Select a query to preview its SQL and paged run timeline. Copy it, open or run it in a new tab on its saved database, or insert it into the active tab.
+- **Saved queries** keeps the queries you use often. History pruning and **Clear history** never remove them. `⌘⇧E` saves the selection, or the marked statement, and asks for a name. A blank name uses the query's first comment, else its first 72 characters. **Save query** in query history saves the query you are previewing. Saving the same SQL again opens the entry you already have, marked **Already saved**. The bookmark button at the bottom of the sidebar, or `⌘E`, opens the list with the most recently used query first. Type to filter by name or SQL. `Enter` inserts the query at the active tab's cursor, or opens it in a new tab when no query tab is open. `⌘↵` opens it in a new tab, on the active tab's database when the dialects match, else on a connection of the query's dialect, else with no connection. `⌘C` copies it. **Edit** renames the query or changes its SQL, and **Delete** asks before it removes the query. A saved query holds up to 64 KB of SQL.
 
 ### Results and table data
 
@@ -96,6 +97,8 @@ L1 Data is a desktop IDE for PostgreSQL and Microsoft SQL Server, built with Tau
 | `⌘↵` | Run the selection, or the marked statement under the cursor |
 | `⌘⇧↵` | Choose which statement to run, or all of them |
 | `⌘⌥L` | Format the marked statement, or the statements the selection touches |
+| `⌘E` | Open or close Saved queries |
+| `⌘⇧E` | Save the selection, or the marked statement, to Saved queries |
 | `Esc` | Cancel the running query |
 | `Enter` | Edit the selected cell in an editable table, or show its full value elsewhere |
 | `F2` | Edit the selected cell |
@@ -104,6 +107,8 @@ L1 Data is a desktop IDE for PostgreSQL and Microsoft SQL Server, built with Tau
 | `⌘A` | Select all cells |
 
 In query history, `↑` and `↓` select a query, `Enter` opens it in a new tab, `⌘↵` runs it in a new tab, and `Alt+Enter` inserts it at the active tab's cursor. `⌘C` copies the query unless text is selected in the search field. `Esc` closes history. **Clear history** asks for confirmation.
+
+In Saved queries, `↑` and `↓` select a query, `Enter` inserts it at the active tab's cursor, `⌘↵` opens it in a new tab, and `⌘C` copies it unless text is selected in the search field. While you edit a query, `Enter` in the name field, or `⌘S` or `⌘↵` in the SQL, saves the edit. `Esc` leaves an edit or a confirmation first, and asks before it drops changed text. `Esc` from the list closes Saved queries.
 
 On macOS, **Close Window** moves to `⇧⌘W` so that `⌘W` closes a tab. On macOS the global shortcuts take `⌘` only. `Ctrl` chords there stay with the editor.
 

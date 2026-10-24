@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
-import type { AppEvent, BootSnapshot, ChatState, ChatStatus, ConnectionState, ConsoleState, DatabaseState, EntrySnapshot, OutputEntry, ProviderState, UpdateState, UpdateStatus } from "../ipc/bindings";
-import { applyEvent, emptyLive, hydrateChatLive, hydrateLive, OUTPUT_LIMIT, seedTranscriptLive, wantedCatalogs, type LiveData } from "./live";
+import type { AppEvent, BootSnapshot, ChatState, ChatStatus, ConnectionState, ConsoleState, DatabaseState, EntrySnapshot, OutputEntry, ProviderState, SavedQueries, UpdateState, UpdateStatus } from "../ipc/bindings";
+import { applyEvent, emptyLive, hydrateChatLive, hydrateLive, hydrateSavedLive, OUTPUT_LIMIT, seedTranscriptLive, wantedCatalogs, type LiveData } from "./live";
 
 const CONN = "c0000000-0000-4000-8000-000000000001";
 const TAB = "t0000000-0000-4000-8000-000000000001";
@@ -37,6 +37,20 @@ function providerAt(rev: number, checking: boolean): ProviderState {
 }
 
 const applyAll = (s: LiveData, events: AppEvent[]) => events.reduce(applyEvent, s);
+
+function savedAt(rev: number, names: string[]): SavedQueries {
+  return { rev, items: names.map((name, i) => ({ id: i + 1, name, sql: `select ${i}`, databaseKind: "Postgres", excerpt: `select ${i}`, createdAtMs: 1, usedAtMs: 1 })) };
+}
+
+function bootWith(savedQueries: SavedQueries): BootSnapshot {
+  return {
+    connections: [], live: [], consoles: [], providers: [], chats: [],
+    workspace: { tabs: [], active: null, layout: { sidebar: true, results: true, rightPanel: null, resultsHeight: 320, sidebarWidth: 256, rightPanelWidth: 341, assistantChat: null } },
+    settings: { maxRows: 1, maxResultBytes: 1, tablePageSize: 1, stopOnError: true, colorScheme: "System", lightTheme: "l1-light", darkTheme: "l1-dark", customThemes: [], interfaceFont: { family: "Inter", size: 13 }, codeFont: { family: "JetBrains Mono", size: 13 }, density: "Standard", panelMotionMs: 150, tintConnections: false, providers: [], providerHealthCheckSecs: 300 },
+    updates: updateAt(0, { kind: "Idle" }),
+    savedQueries,
+  };
+}
 
 function updateAt(rev: number, status: UpdateStatus): UpdateState {
   return { rev, track: "Stable", currentVersion: "0.1.0", status, checkedAtMs: null };
@@ -77,6 +91,7 @@ describe("live.apply", () => {
       providers: [],
       chats: [],
       updates: updateAt(0, { kind: "Idle" }),
+      savedQueries: savedAt(1, []),
     };
     const s = hydrateLive(early, boot);
     expect(s.connections[CONN]?.status.kind).toBe("Connected");
@@ -99,6 +114,7 @@ describe("live.apply", () => {
       providers: [providerAt(1, true)],
       chats: [chatAt(0), chatAt(0, { kind: "Idle" }, OTHER_CHAT)],
       updates: updateAt(0, { kind: "Idle" }),
+      savedQueries: savedAt(1, []),
     });
     expect(boot.providers).toEqual({ Claude: providerAt(1, true) });
     expect(boot.chats).toEqual({ [CHAT]: chatAt(5, RUNNING), [OTHER_CHAT]: chatAt(0, { kind: "Idle" }, OTHER_CHAT) });
@@ -111,6 +127,18 @@ describe("live.apply", () => {
       { kind: "ProviderChanged", ...providerAt(1, true) },
     ]);
     expect(s.providers).toEqual({ Claude: providerAt(2, false) });
+  });
+
+  it("keeps the saved queries with the higher rev across boot, events, and replies in any order", () => {
+    const one = savedAt(2, ["Active sessions"]);
+    const two = savedAt(3, ["Active sessions", "Locks"]);
+    const raced = applyEvent(emptyLive, { kind: "SavedQueriesChanged", ...two });
+    expect(hydrateLive(raced, bootWith(savedAt(1, []))).savedQueries).toEqual(two);
+    expect(hydrateLive(emptyLive, bootWith(savedAt(1, []))).savedQueries).toEqual(savedAt(1, []));
+    const replyFirst = applyEvent(hydrateSavedLive(emptyLive, two), { kind: "SavedQueriesChanged", ...one });
+    const eventFirst = hydrateSavedLive(applyEvent(emptyLive, { kind: "SavedQueriesChanged", ...one }), two);
+    expect([replyFirst.savedQueries, eventFirst.savedQueries]).toEqual([two, two]);
+    expect(hydrateSavedLive(replyFirst, two)).toBe(replyFirst);
   });
 
   it("keeps the update snapshot with the higher rev", () => {

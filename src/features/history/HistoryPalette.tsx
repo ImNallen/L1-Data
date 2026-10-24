@@ -1,17 +1,19 @@
 import * as Dialog from "@radix-ui/react-dialog";
-import { CheckIcon, ClockIcon, CopyIcon, PlayIcon } from "lucide-react";
+import { BookmarkPlusIcon, CheckIcon, ClockIcon, CopyIcon, PlayIcon } from "lucide-react";
 import { Fragment, useEffect, useRef, useState, type KeyboardEvent } from "react";
 import { commands, type HistoryFilter, type HistoryOutcome } from "../../ipc/bindings";
 import { isMac } from "../../shell/hostedWindow";
 import { sameDb } from "../../state/dbKey";
 import { useLive } from "../../state/live";
 import { confirm, tabTarget, useWorkspace } from "../../state/workspace";
+import { day } from "../../ui/day";
 import { Button, cx, DialogBackdrop, Kbd, DatabaseBadge, StatusDot } from "../../ui/primitives";
 import { focusEditor } from "../editor/editorStates";
+import { SqlText } from "../editor/SqlText";
 import { formatElapsed, pluralRows } from "../results/format";
+import { saveHistoryQuery } from "../saved/savedActions";
 import { insertHistoryQuery, openHistoryQuery } from "./historyActions";
 import { historyKey, type HistoryAction } from "./historyList";
-import { HistorySql } from "./HistorySql";
 import { useHistory } from "./useHistory";
 
 function outcomeText(o: HistoryOutcome): string {
@@ -29,18 +31,10 @@ function OutcomeDot({ outcome }: { outcome: HistoryOutcome }) {
   return <StatusDot tone={outcome.kind === "Error" ? "error" : "live"} />;
 }
 
-function day(at: number, now: Date): string {
-  const date = new Date(at);
-  if (date.toDateString() === now.toDateString()) return "Today";
-  const yesterday = new Date(now);
-  yesterday.setDate(now.getDate() - 1);
-  if (date.toDateString() === yesterday.toDateString()) return "Yesterday";
-  return date.toLocaleDateString(undefined, { month: "short", day: "numeric", ...(date.getFullYear() !== now.getFullYear() ? { year: "numeric" } : {}) });
-}
 const time = (at: number) => new Date(at).toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit" });
 
 async function clearHistory() {
-  if (!(await confirm({ title: "Clear query history?", body: "This removes every saved query from history.", confirmLabel: "Clear history" }))) return;
+  if (!(await confirm({ title: "Clear query history?", body: "This removes every query from history. Saved queries are kept.", confirmLabel: "Clear history" }))) return;
   try {
     await commands.historyClear();
     useLive.setState({ historyTail: [] });
@@ -137,7 +131,7 @@ function HistoryBrowser({ close, restoreEditorFocus }: { close: () => void; rest
       </div>
       {error && <div role="alert" className="flex shrink-0 items-center justify-between gap-3 border-b border-control px-4 py-2 text-ui-12 text-danger"><span className="truncate">{error}</span><Button data-testid="history-retry" variant="ghost" onClick={history.reload}>Try again</Button></div>}
       <div className="grid min-h-0 flex-1 grid-cols-[35%_minmax(0,1fr)]">
-        <div ref={listRef} id="history-list" role="listbox" aria-label="Saved queries" aria-activedescendant={selected ? `history-group-${selected.id}` : undefined} aria-busy={!list} data-testid="history-list" tabIndex={0}
+        <div ref={listRef} id="history-list" role="listbox" aria-label="Query history" aria-activedescendant={selected ? `history-group-${selected.id}` : undefined} aria-busy={!list} data-testid="history-list" tabIndex={0}
           onScroll={(e) => { const el = e.currentTarget; if (el.scrollHeight - el.scrollTop - el.clientHeight < 160) history.loadOlder(); }}
           className="min-w-0 overflow-x-hidden overflow-y-auto border-r border-control p-1.5 outline-none focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-focus">
           {!list && <p role="status" className="px-3 py-8 text-center text-ui-13 text-dim">{error ? "History unavailable" : "Loading history…"}</p>}
@@ -179,7 +173,7 @@ function HistoryBrowser({ close, restoreEditorFocus }: { close: () => void; rest
               <div className="mt-1.5 flex min-w-0 items-center gap-1.5 text-ui-11 text-dim"><DatabaseBadge databaseKind={selected.databaseKind} /><span className="truncate" title={`${selected.representative.connectionName} / ${selected.database}`}>{selected.representative.connectionName} / {selected.database}</span><span className="shrink-0">· {day(selected.representative.atMs, now)} {time(selected.representative.atMs)}</span></div>
             </div>
             <div className="relative min-h-0 flex-1 overflow-hidden rounded-lg border border-control bg-bg">
-              {detail ? <HistorySql text={detail.sql} databaseKind={detail.databaseKind} /> : <p role="status" className="p-4 text-ui-12 text-dim">Loading SQL…</p>}
+              {detail ? <SqlText mode="view" text={detail.sql} databaseKind={detail.databaseKind} label="Query SQL" testId="history-sql" /> : <p role="status" className="p-4 text-ui-12 text-dim">Loading SQL…</p>}
               <button type="button" data-testid="history-copy" disabled={!detail} onClick={() => void copy()} className="absolute top-2 right-2 flex h-6 items-center gap-1.5 rounded-md bg-raised px-2 text-ui-11 text-muted shadow-sm outline-none hover:text-fg focus-visible:ring-1 focus-visible:ring-focus disabled:opacity-40">
                 {copied ? <CheckIcon size={13} /> : <CopyIcon size={13} />}{copied ? "Copied" : "Copy"}<Kbd className="bg-pill text-dim">{mod}C</Kbd>
               </button>
@@ -202,6 +196,7 @@ function HistoryBrowser({ close, restoreEditorFocus }: { close: () => void; rest
               <Button variant="primary" data-testid="history-open" disabled={!detail} onClick={() => act("open")}>Open in new tab<Kbd className="bg-white/15">↵</Kbd></Button>
               <Button data-testid="history-run-again" disabled={!detail} onClick={() => act("run")}><PlayIcon fill="currentColor" size={12} className="text-run-icon" />Run again<Kbd className="bg-pill text-dim">{mod}↵</Kbd></Button>
               <Button variant="ghost" data-testid="history-insert" disabled={!detail || !insertEnabled} title={insertEnabled ? "Insert into the active tab" : "Open a tab to insert this query"} onClick={() => act("insert")}>Insert at cursor<Kbd className="bg-pill text-dim">Alt+↵</Kbd></Button>
+              <Button variant="ghost" data-testid="history-save" disabled={!detail} title="Keep this query in Saved queries" onClick={() => detail && void saveHistoryQuery(detail.sql, detail.databaseKind)}><BookmarkPlusIcon size={14} />Save query</Button>
             </div>
           </>}
         </section>

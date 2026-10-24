@@ -11,6 +11,7 @@ import type {
   FileReadError,
   FileWriteError,
   RunError,
+  SavedQueryError,
   SaveTarget,
   SendError,
   SshError,
@@ -238,6 +239,23 @@ export function fileWriteErrorText(e: FileWriteError, target: SaveTarget): strin
       return `${e.path} is open in another tab. Close that tab before you save over it.`;
     case "Io":
       return `Couldn't save ${path}: ${e.message}`;
+    default: {
+      const unreachable: never = e;
+      return unreachable;
+    }
+  }
+}
+
+export function savedQueryErrorText(e: SavedQueryError): string {
+  switch (e.kind) {
+    case "NothingToSave":
+      return "There is no SQL to save. Select some, or put the cursor in a statement.";
+    case "TooLong":
+      return `A saved query holds up to ${e.limitBytes / 1024} KB of SQL. Save a longer script as a .sql file.`;
+    case "NotFound":
+      return "That saved query was deleted.";
+    case "Store":
+      return `Couldn't save the query: ${e.message}`;
     default: {
       const unreachable: never = e;
       return unreachable;

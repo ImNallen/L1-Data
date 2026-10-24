@@ -118,12 +118,12 @@ export async function confirmDeleteChat(chat: ChatState): Promise<void> {
 }
 
 export function runInNewTab(sql: string, db: DatabaseRef | null): void {
-  openSqlTab({ db, text: sql });
+  openSqlTab({ db: db ?? undefined, text: sql });
   runActive({ kind: "all" });
 }
 
 export function openInNewTab(sql: string, db: DatabaseRef | null): void {
-  openSqlTab({ db, text: sql });
+  openSqlTab({ db: db ?? undefined, text: sql });
 }
 
 export function insertSql(sql: string): void {
