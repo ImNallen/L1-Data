@@ -374,6 +374,7 @@ export function ResultGrid({
   };
 
   const [editingCell, setEditingCell] = useState<(Cell & { draft: string; initial: string; stored: CellValue }) | null>(null);
+  const lastEnded = useRef<typeof editingCell>(null);
   const opening = useRef(0);
   const refused = () => useWorkspace.getState().notify("A submit is running. Try again when it finishes.");
   const canWrite = (col: number) => editable && editing?.writableColumns.has(columns[col]?.name ?? "") === true;
@@ -410,7 +411,9 @@ export function ResultGrid({
     if (id && value !== DEFAULT && !edit((e) => setCell(e, id, name, value, stored))) refused();
   };
   const finishEdit = (save: boolean) => {
-    if (editingCell && save && editingCell.draft !== editingCell.initial) writeCell(editingCell.row, editingCell.col, editingCell.draft, editingCell.stored);
+    if (!editingCell || lastEnded.current === editingCell) return;
+    lastEnded.current = editingCell;
+    if (save && editingCell.draft !== editingCell.initial) writeCell(editingCell.row, editingCell.col, editingCell.draft, editingCell.stored);
     setEditingCell(null);
     scroller.current?.focus();
   };
