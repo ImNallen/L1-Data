@@ -32,7 +32,7 @@ export const commands = {
 	consoleClose: (tabId: TabId, force: boolean) => typedError<null, DisconnectError>(__TAURI_INVOKE("console_close", { tabId, force })),
 	resultPage: (resultRef: ResultRef, start: number, len: number) => typedError<RowPage, ResultError>(__TAURI_INVOKE("result_page", { resultRef, start, len })),
 	resultCell: (resultRef: ResultRef, row: number, col: number) => typedError<string | null, ResultError>(__TAURI_INVOKE("result_cell", { resultRef, row, col })),
-	resultExportCsv: (resultRef: ResultRef, path: string) => typedError<ExportSummary, ExportError>(__TAURI_INVOKE("result_export_csv", { resultRef, path })),
+	resultExport: (resultRef: ResultRef, format: ExportFormat, scope: ExportScope, path: string) => typedError<ExportSummary, ExportError>(__TAURI_INVOKE("result_export", { resultRef, format, scope, path })),
 	fileOpen: (path: string) => typedError<FileOpened, FileReadError>(__TAURI_INVOKE("file_open", { path })),
 	fileSave: (target: SaveTarget, text: string) => typedError<FileSaved, FileWriteError>(__TAURI_INVOKE("file_save", { target, text })),
 	historyList: (query: HistoryQuery) => __TAURI_INVOKE<HistoryPage>("history_list", { query }),
@@ -67,6 +67,19 @@ export type AgentError = { kind: "NotFound"; binary: string } | { kind: "SignedO
 { kind: "Exited"; code: number | null; detail: string } | 
 /**  An API failure, a rate limit, an overload. */
 { kind: "Provider"; message: string };
+
+export type AllRows = 
+/**  A table page: every row of the table under the page's filters and order. */
+{ kind: "Table" } | 
+/**  A read statement, run again exactly as the run sent it. */
+{ kind: "Statement" } | 
+/**
+ *  A PostgreSQL read that calls functions or operators L1 Data cannot vouch for. `READ ONLY` stops
+ *  writes, but not a call that acts outside the transaction, so the user confirms before it runs again.
+ */
+{ kind: "Confirm"; calls: string[] } | 
+/**  The statement may write, change the transaction, or reach another server, so it never runs twice. */
+{ kind: "Refused"; reason: string };
 
 export type AppEvent = {
 	kind: "ConnectionChanged",
@@ -372,11 +385,15 @@ export type ConsoleState = {
 	config: ConsoleConfigView,
 	session: SessionState,
 	work: ConsoleWork | null,
+	/**  `Some` exactly while `work` is `Some(Export)`: both derive from the one value the session slot holds. */
+	export: ExportProgress | null,
 	txn: TxnState,
 	run: RunState,
 };
 
-export type ConsoleWork = "Run" | "Count" | "Transaction" | "Edit" | "Probe";
+export type ConsoleWork = "Run" | "Count" | "Transaction" | "Edit" | "Probe" | 
+/**  An `All` export streams the result's source again. Cancellable like a run. */
+"Export";
 
 export type CountError = { kind: "NotConnected" } | { kind: "Failed"; message: string };
 
@@ -489,11 +506,61 @@ export type EntrySnapshot = {
 
 export type ExecutionUnitKind = "Statement" | "Batch";
 
-export type ExportError = { kind: "Gone" } | { kind: "Io"; message: string };
+/**  Every variant leaves the file at the chosen path as it was. */
+export type ExportError = 
+/**  A newer run replaced the result, or its tab closed. */
+{ kind: "Gone" } | 
+/**  The file could not be created, written, synced, or moved into place. */
+{ kind: "Io"; message: string } | 
+/**  `All` for a result whose `allRows` is `Refused`. */
+{ kind: "NotRerunnable" } | 
+/**  The tab's session is held by a run, a count, a transaction command, an edit, or another export. */
+{ kind: "Busy" } | 
+/**  The tab now targets another connection or database than the one the rows came from. */
+{ kind: "TargetChanged" } | 
+/**  The tab's transaction failed; only a rollback runs until it ends. */
+{ kind: "TransactionAborted" } | { kind: "Connect"; error: ConnectError } | 
+/**  The source failed on the server when it ran again. */
+{ kind: "Query"; error: QueryError } | 
+/**  The source returned other columns, or fewer result sets, than when it first ran. */
+{ kind: "ShapeChanged" } | 
+/**  Esc stopped the export before the file was in place. */
+{ kind: "Cancelled" };
+
+export type ExportFormat = 
+/**  RFC 4180 with CRLF and a header row, NULL as an empty field, as `COPY … CSV` writes it. */
+"Csv" | 
+/**  An array of objects keyed by column name, one per line. Values are typed by `TypeCategory`. */
+"Json" | 
+/**  A GitHub table. */
+"Markdown" | 
+/**  One `INSERT` per row, quoted for the result's dialect. */
+"SqlInsert";
+
+export type ExportProgress = {
+	result: ResultRef,
+	format: ExportFormat,
+	/**  Rows encoded so far. */
+	rows: number,
+	/**  Bytes handed to the file so far. */
+	bytes: number,
+	/**
+	 *  Writing failed while SQL Server is still sending. The export reads to the end so the session and
+	 *  its transaction survive; the file is not written. Esc stops it at once and resets the session.
+	 */
+	writeError: string | null,
+};
+
+export type ExportScope = 
+/**  The rows the engine holds for the result, capped by the row and size limits. */
+"Loaded" | 
+/**  Every row: the result's source runs again on its tab's session and streams to the file. */
+"All";
 
 export type ExportSummary = {
 	rows: number,
 	bytes: number,
+	/**  The loaded rows stopped at the row or size limit. Always false for `All`. */
 	truncated: boolean,
 };
 
@@ -930,6 +997,8 @@ export type ResultMeta = {
 	rowsSeen: number,
 	truncated: TruncateReason | null,
 	elapsedMs: number,
+	/**  What `ExportScope::All` would run for this result. Decided once, when the result was created. */
+	allRows: AllRows,
 };
 
 export type ResultRef = {

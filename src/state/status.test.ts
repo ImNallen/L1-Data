@@ -12,6 +12,7 @@ const meta = (index: number, rowCount: number, extra: Partial<ResultMeta> = {}):
   rowsSeen: rowCount,
   truncated: null,
   elapsedMs: 38,
+  allRows: { kind: "Statement" },
   ...extra,
 });
 const stmt = (index: number, status: StatementRun["status"], outputs: RunOutput[] = []): StatementRun => ({ index, range: { from: 0, to: 1 }, status, outputs });
@@ -26,7 +27,7 @@ const finished = (statements: StatementRun[], outcome: "Ok" | "Failed" | "Cancel
 });
 
 function consoleWith(mode: "AutoCommit" | "Manual", txn: ConsoleState["txn"]): ConsoleState {
-  return { tabId: "t", rev: 1, config: { connectionId: "c", database: "shop", schema: null, mode }, session: { kind: "None" }, txnDepth: null, work: null, txn, run: { kind: "Idle" } };
+  return { tabId: "t", rev: 1, config: { connectionId: "c", database: "shop", schema: null, mode }, session: { kind: "None" }, txnDepth: null, work: null, export: null, txn, run: { kind: "Idle" } };
 }
 
 describe("hasUncommittedWork", () => {
@@ -248,7 +249,7 @@ it("keeps every result ordinal from one failed batch, including empty and partia
     { kind: "Command", tag: "UPDATE", affectedRows: null, elapsedMs: 1 },
     { kind: "Rows", result: meta(1, 2, { databaseKind: "SqlServer" }), state: "Failed" },
   ])], "Failed");
-  expect(rowResults(run).map((r) => [r.index, r.meta.rowCount, r.done])).toEqual([[0, 0, true], [1, 2, true]]);
+  expect(rowResults(run).map((r) => [r.index, r.meta.rowCount, r.state])).toEqual([[0, 0, "Complete"], [1, 2, "Failed"]]);
   expect(shownResult(run, 0)?.meta.rowCount).toBe(0);
   expect(resultView(run, 1, true)).toMatchObject({ kind: "rows", result: { index: 1 } });
   expect(runSummary(run, 1, 0)).toEqual({ tone: "error", text: failure.message });

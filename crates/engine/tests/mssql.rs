@@ -144,7 +144,7 @@ async fn catalogs_details_browse_counts_and_exact_text_use_sql_server() {
     let text_index = result.columns.iter().position(|c| c.name == "text_value").unwrap();
     assert!(rows[0][text_index].as_ref().unwrap().chars().count() < 3000);
     let path = h._dir.path().join("exact.csv");
-    h.engine.export_csv(result.r#ref, path.clone()).await.unwrap();
+    h.engine.result_export(result.r#ref, ExportFormat::Csv, ExportScope::Loaded, path.display().to_string()).await.unwrap();
     let csv = std::fs::read_to_string(path).unwrap();
     assert!(csv.contains("12345678901234567890.123456789012"));
     assert!(csv.contains(&"😀".repeat(3000)));
@@ -423,4 +423,152 @@ async fn ddl_committed_before_a_later_batch_error_refreshes_the_catalog() {
     .await;
     h.ok(&format!("DROP TABLE dbo.[{table}]")).await;
     assert!(refreshed.is_ok(), "The catalog stayed stale after the batch committed DDL before its error");
+}
+
+impl Harness {
+    fn console(&self) -> ConsoleState {
+        self.engine.boot().consoles.into_iter().find(|c| c.tab_id == self.tab).expect("console")
+    }
+
+    async fn export(&self, meta: &ResultMeta, format: ExportFormat, scope: ExportScope, name: &str) -> (ExportSummary, String) {
+        let path = self._dir.path().join(name);
+        let summary = self.engine.result_export(meta.r#ref, format, scope, path.display().to_string()).await.unwrap();
+        (summary, std::fs::read_to_string(path).unwrap())
+    }
+}
+
+#[tokio::test]
+async fn all_rows_exports_the_chosen_result_set_of_a_batch_and_keeps_the_session() {
+    let mut h = Harness::open(TxnMode::AutoCommit).await;
+    h.engine.set_settings(Settings { max_rows: 5, ..h.engine.settings() });
+    let state = h
+        .ok("SELECT N'first' AS head; SELECT TOP (40) ROW_NUMBER() OVER (ORDER BY (SELECT NULL)) AS n FROM sys.all_objects ORDER BY n; SELECT N'last' AS tail")
+        .await;
+    let sets = Harness::rowsets(&state);
+    assert_eq!(sets.len(), 3);
+    assert_eq!((sets[1].row_count, sets[1].rows_seen, &sets[1].all_rows), (5, 40, &AllRows::Statement));
+    let pid = match state.session { SessionState::Open { backend_pid } => backend_pid, other => panic!("{other:?}") };
+
+    let (summary, csv) = h.export(sets[1], ExportFormat::Csv, ExportScope::All, "middle.csv").await;
+    let expected: String = std::iter::once("n".to_owned()).chain((1..=40).map(|n| n.to_string())).map(|l| l + "\r\n").collect();
+    assert_eq!((summary.rows, csv), (40, expected), "only the second result set, every row");
+    let (_, tail) = h.export(sets[2], ExportFormat::Json, ExportScope::All, "tail.json").await;
+    assert_eq!(tail, "[\n  {\"tail\":\"last\"}\n]\n");
+    let after = h.console();
+    assert_eq!((after.work, after.export, after.txn), (None, None, TxnState::Idle));
+    assert!(matches!(after.session, SessionState::Open { backend_pid } if backend_pid == pid), "the export ran on the tab's own session and kept it");
+}
+
+#[tokio::test]
+async fn all_rows_refuses_a_batch_that_controls_a_transaction() {
+    let mut h = Harness::open(TxnMode::AutoCommit).await;
+    let state = h.ok("BEGIN TRANSACTION; SELECT 1 AS x; COMMIT").await;
+    let meta = Harness::rowsets(&state)[0].clone();
+    assert!(matches!(&meta.all_rows, AllRows::Refused { reason } if reason.contains("transaction")), "{:?}", meta.all_rows);
+    let path = h._dir.path().join("never.csv");
+    assert!(matches!(h.engine.result_export(meta.r#ref, ExportFormat::Csv, ExportScope::All, path.display().to_string()).await, Err(ExportError::NotRerunnable)));
+    assert!(!path.exists());
+}
+
+#[tokio::test]
+async fn sql_server_inserts_round_trip_every_value_under_another_dateformat() {
+    let mut h = Harness::open(TxnMode::AutoCommit).await;
+    let source = format!("l1_export_src_{}", uuid::Uuid::new_v4().simple());
+    let copy = format!("l1_export_copy_{}", uuid::Uuid::new_v4().simple());
+    let columns = "id int, big bigint, exact decimal(38,12), flag bit, label nvarchar(50), ascii varchar(20), old datetime, small smalldatetime, day date, \
+                   tick time(7), modern datetime2(7), moment datetimeoffset(7), uid uniqueidentifier, bytes varbinary(16), ratio float, single real";
+    h.ok(&format!("CREATE TABLE dbo.[{source}] ({columns}); CREATE TABLE dbo.[{copy}] ({columns})")).await;
+    let outcome = AssertUnwindSafe(async {
+        h.ok(&format!(
+            "INSERT INTO dbo.[{source}] VALUES \
+             (1, 9223372036854775807, 12345678901234567890123456.789012345678, 1, N'O''Brien 😀 | x', 'plain', '2024-01-02T03:04:05.123', '2024-01-02T03:04:00', '2024-01-02', \
+              '03:04:05.1234567', '2024-01-02T03:04:05.1234567', '2024-01-02T03:04:05.1234567+02:00', 'abcd1234-5678-90ab-cdef-1234567890ab', 0x0001FEFF, 1e300, 1.5), \
+             (2, -1, -0.000000000001, 0, N'', '', NULL, NULL, NULL, NULL, NULL, NULL, NULL, 0x, -2.5e-300, NULL), \
+             (3, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL)"
+        ))
+        .await;
+        let state = h.ok(&format!("SELECT * FROM dbo.[{source}] ORDER BY id")).await;
+        let meta = Harness::rowsets(&state)[0].clone();
+        let (summary, script) = h.export(&meta, ExportFormat::SqlInsert, ExportScope::All, "values.sql").await;
+        assert_eq!(summary.rows, 3);
+        assert!(script.starts_with("INSERT INTO target_table ([id], [big], "), "{script}");
+        h.ok("SET DATEFORMAT dmy").await;
+        h.ok(&script.replace("target_table", &format!("dbo.[{copy}]"))).await;
+        let differ = |a: &str, b: &str| format!("SELECT COUNT_BIG(*) FROM (SELECT * FROM dbo.[{a}] EXCEPT SELECT * FROM dbo.[{b}]) d");
+        let state = h.ok(&format!("{}; {}; SELECT COUNT_BIG(*) FROM dbo.[{copy}]", differ(&source, &copy), differ(&copy, &source))).await;
+        let counts: Vec<_> = Harness::rowsets(&state).iter().map(|s| h.rows(s)[0][0].clone()).collect();
+        assert_eq!(counts, [Some("0".into()), Some("0".into()), Some("3".into())], "the script rebuilds every row exactly");
+    })
+    .catch_unwind()
+    .await;
+    h.ok(&format!("DROP TABLE dbo.[{source}]; DROP TABLE dbo.[{copy}]")).await;
+    if let Err(panic) = outcome {
+        std::panic::resume_unwind(panic);
+    }
+}
+
+#[tokio::test]
+async fn esc_during_a_sql_server_all_rows_export_resets_the_session_and_leaves_the_file() {
+    let mut h = Harness::open(TxnMode::AutoCommit).await;
+    let state = h.ok("SELECT 1 AS n UNION ALL SELECT 2; WAITFOR DELAY '00:00:02'; SELECT 3 AS done").await;
+    let meta = Harness::rowsets(&state)[0].clone();
+    let out = h._dir.path().join("out");
+    std::fs::create_dir(&out).unwrap();
+    let path = out.join("n.csv");
+    std::fs::write(&path, "old").unwrap();
+    let export = {
+        let (engine, path) = (h.engine.clone(), path.display().to_string());
+        tokio::spawn(async move { engine.result_export(meta.r#ref, ExportFormat::Csv, ExportScope::All, path).await })
+    };
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while h.console().work != Some(ConsoleWork::Export) {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("the export takes the session");
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    h.engine.console_cancel(h.tab).await;
+
+    assert!(matches!(export.await.unwrap(), Err(ExportError::Cancelled)));
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), "old");
+    assert_eq!(std::fs::read_dir(&out).unwrap().count(), 1, "no temp file left beside it");
+    let after = h.console();
+    assert_eq!((after.work, after.export), (None, None));
+    assert!(matches!(&after.session, SessionState::Lost { reason, .. } if reason.contains("Cancelled")), "{:?}", after.session);
+    h.ok("SELECT 1").await;
+}
+
+#[tokio::test]
+async fn insert_exports_replay_identity_and_leave_out_computed_and_rowversion_columns() {
+    let mut h = Harness::open(TxnMode::AutoCommit).await;
+    let source = format!("l1_export_ident_{}", uuid::Uuid::new_v4().simple());
+    let copy = format!("l1_export_ident_copy_{}", uuid::Uuid::new_v4().simple());
+    let columns = "id int IDENTITY PRIMARY KEY, label nvarchar(20) NOT NULL, doubled AS (LEN(label) * 2), ver rowversion";
+    h.ok(&format!("CREATE TABLE dbo.[{source}] ({columns}); CREATE TABLE dbo.[{copy}] ({columns})")).await;
+    let outcome = AssertUnwindSafe(async {
+        h.ok(&format!("INSERT INTO dbo.[{source}] (label) VALUES (N'a'), (N'bb'), (N'ccc'); DELETE FROM dbo.[{source}] WHERE id = 2")).await;
+        h.engine.refresh_catalog(h.db()).await.unwrap();
+        let page = h.engine.console_run(h.tab, RunRequest::TablePage { schema: "dbo".into(), table: source.clone(), page: 0, query: TableQuery::default() }).await.unwrap();
+        let state = h.finish(page.run_id).await;
+        let meta = Harness::rowsets(&state)[0].clone();
+        let (summary, script) = h.export(&meta, ExportFormat::SqlInsert, ExportScope::All, "ident.sql").await;
+        assert_eq!(summary.rows, 2);
+        let table = format!("[dbo].[{source}]");
+        assert_eq!(
+            script,
+            format!("SET IDENTITY_INSERT {table} ON;\nINSERT INTO {table} ([id], [label]) VALUES (1, N'a');\nINSERT INTO {table} ([id], [label]) VALUES (3, N'ccc');\nSET IDENTITY_INSERT {table} OFF;\n")
+        );
+        h.ok(&script.replace(&table, &format!("dbo.[{copy}]"))).await;
+        let differ = |a: &str, b: &str| format!("SELECT COUNT_BIG(*) FROM (SELECT id, label, doubled FROM dbo.[{a}] EXCEPT SELECT id, label, doubled FROM dbo.[{b}]) d");
+        let state = h.ok(&format!("{}; {}; SELECT COUNT_BIG(*) FROM dbo.[{copy}]", differ(&source, &copy), differ(&copy, &source))).await;
+        let counts: Vec<_> = Harness::rowsets(&state).iter().map(|s| h.rows(s)[0][0].clone()).collect();
+        assert_eq!(counts, [Some("0".into()), Some("0".into()), Some("2".into())], "the script rebuilds every row with its identity value");
+    })
+    .catch_unwind()
+    .await;
+    h.ok(&format!("DROP TABLE dbo.[{source}]; DROP TABLE dbo.[{copy}]")).await;
+    if let Err(panic) = outcome {
+        std::panic::resume_unwind(panic);
+    }
 }

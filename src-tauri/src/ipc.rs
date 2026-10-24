@@ -1,4 +1,3 @@
-use std::path::PathBuf;
 use std::sync::Arc;
 
 use engine::Engine;
@@ -164,8 +163,8 @@ pub fn result_cell(engine: State<'_, Arc<Engine>>, result_ref: ResultRef, row: u
 
 #[tauri::command]
 #[specta::specta]
-pub async fn result_export_csv(engine: State<'_, Arc<Engine>>, result_ref: ResultRef, path: String) -> Result<ExportSummary, ExportError> {
-    engine.export_csv(result_ref, PathBuf::from(path)).await
+pub async fn result_export(engine: State<'_, Arc<Engine>>, result_ref: ResultRef, format: ExportFormat, scope: ExportScope, path: String) -> Result<ExportSummary, ExportError> {
+    engine.result_export(result_ref, format, scope, path).await
 }
 
 #[tauri::command]

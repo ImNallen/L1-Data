@@ -107,7 +107,7 @@ async function openWithConsole(mode: "AutoCommit" | "Manual" = "AutoCommit") {
     config: { connectionId: "c1", database: "shop", schema: null, mode },
     session: { kind: "None" },
     txn: "Idle",
-    txnDepth: null, work: null,
+    txnDepth: null, work: null, export: null,
     run: { kind: "Idle" },
   };
   useLive.setState({ consoles: { [id]: console } });

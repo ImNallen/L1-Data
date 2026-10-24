@@ -1,7 +1,6 @@
-use std::io::{self, Write};
-use std::sync::RwLock;
+use std::sync::{Arc, RwLock};
 
-use crate::model::{ColumnMeta, DatabaseKind, DatabaseRef, ResultMeta, ResultRef, RowPage, TruncateReason};
+use crate::model::{AllRows, ColumnMeta, DatabaseKind, DatabaseRef, ResultMeta, ResultRef, RowPage, TruncateReason};
 
 pub const CELL_CHAR_LIMIT: usize = 2_000;
 pub const PAGE_LEN_MAX: u32 = 2_000;
@@ -13,7 +12,46 @@ pub struct ResultSet {
     pub r#ref: ResultRef,
     pub db: DatabaseRef,
     pub columns: Vec<ColumnMeta>,
+    /// What produced these rows. Set when the result is created and never changed, and dropped
+    /// with the result at the next run or tab close, so no other structure keeps SQL per result.
+    pub origin: Origin,
     data: RwLock<Arena>,
+}
+
+pub struct Origin {
+    pub rerun: Rerun,
+    /// This result's position among the result sets its SQL returns. A SQL Server batch can
+    /// return several; a PostgreSQL statement returns one.
+    pub nth: u16,
+    pub schema: Option<String>,
+    pub page: bool,
+}
+
+#[derive(Clone)]
+pub enum Rerun {
+    Ready(Arc<str>),
+    Unvetted { sql: Arc<str>, calls: Arc<[String]> },
+    Refused(&'static str),
+}
+
+impl Rerun {
+    pub fn sql(&self) -> Option<&Arc<str>> {
+        match self {
+            Rerun::Ready(sql) | Rerun::Unvetted { sql, .. } => Some(sql),
+            Rerun::Refused(_) => None,
+        }
+    }
+}
+
+impl Origin {
+    pub fn all_rows(&self) -> AllRows {
+        match &self.rerun {
+            Rerun::Ready(_) if self.page => AllRows::Table,
+            Rerun::Ready(_) => AllRows::Statement,
+            Rerun::Unvetted { calls, .. } => AllRows::Confirm { calls: calls.to_vec() },
+            Rerun::Refused(reason) => AllRows::Refused { reason: (*reason).to_owned() },
+        }
+    }
 }
 
 struct Arena {
@@ -31,13 +69,14 @@ pub struct Caps {
 }
 
 impl ResultSet {
-    pub fn new(r#ref: ResultRef, db: DatabaseRef, database_kind: DatabaseKind, columns: Vec<ColumnMeta>) -> Self {
+    pub fn new(r#ref: ResultRef, db: DatabaseRef, database_kind: DatabaseKind, columns: Vec<ColumnMeta>, origin: Origin) -> Self {
         let ncols = columns.len();
         Self {
             database_kind,
             r#ref,
             db,
             columns,
+            origin,
             data: RwLock::new(Arena {
                 text: String::new(),
                 cells: Vec::new(),
@@ -93,6 +132,7 @@ impl ResultSet {
             rows_seen: a.rows_seen,
             truncated: a.truncated,
             elapsed_ms: a.elapsed_ms,
+            all_rows: self.origin.all_rows(),
         }
     }
 
@@ -131,27 +171,17 @@ impl ResultSet {
         Some(a.cell(row as usize, col as usize).map(str::to_owned))
     }
 
-    pub fn write_csv(&self, out: &mut impl Write) -> io::Result<CsvSummary> {
+    pub fn each_row<E>(&self, mut f: impl FnMut(&[Option<&str>]) -> Result<(), E>) -> Result<(u64, bool), E> {
         let a = self.data.read().unwrap();
-        let mut w = CountingWriter { inner: out, bytes: 0 };
-        write_record(&mut w, self.columns.iter().map(|c| Some(c.name.as_str())))?;
         let rows = a.row_count();
+        let mut cells = Vec::with_capacity(a.ncols);
         for r in 0..rows as usize {
-            write_record(&mut w, (0..a.ncols).map(|c| a.cell(r, c)))?;
+            cells.clear();
+            cells.extend((0..a.ncols).map(|c| a.cell(r, c)));
+            f(&cells)?;
         }
-        w.flush()?;
-        Ok(CsvSummary {
-            rows: rows as u64,
-            bytes: w.bytes,
-            truncated: a.truncated.is_some(),
-        })
+        Ok((u64::from(rows), a.truncated.is_some()))
     }
-}
-
-pub struct CsvSummary {
-    pub rows: u64,
-    pub bytes: u64,
-    pub truncated: bool,
 }
 
 impl Arena {
@@ -162,41 +192,6 @@ impl Arena {
     fn cell(&self, row: usize, col: usize) -> Option<&str> {
         let (start, len) = self.cells[row * self.ncols + col];
         (len != NULL).then(|| &self.text[start as usize..(start + len) as usize])
-    }
-}
-
-fn write_record<'a>(w: &mut impl Write, cells: impl Iterator<Item = Option<&'a str>>) -> io::Result<()> {
-    for (i, cell) in cells.enumerate() {
-        if i > 0 {
-            w.write_all(b",")?;
-        }
-        match cell {
-            None => {}
-            Some(s) if s.is_empty() || s.contains(['"', ',', '\r', '\n']) => {
-                w.write_all(b"\"")?;
-                w.write_all(s.replace('"', "\"\"").as_bytes())?;
-                w.write_all(b"\"")?;
-            }
-            Some(s) => w.write_all(s.as_bytes())?,
-        }
-    }
-    w.write_all(b"\r\n")
-}
-
-struct CountingWriter<'a, W: Write> {
-    inner: &'a mut W,
-    bytes: u64,
-}
-
-impl<W: Write> Write for CountingWriter<'_, W> {
-    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
-        let n = self.inner.write(buf)?;
-        self.bytes += n as u64;
-        Ok(n)
-    }
-
-    fn flush(&mut self) -> io::Result<()> {
-        self.inner.flush()
     }
 }
 
@@ -214,7 +209,8 @@ mod tests {
             })
             .collect();
         let db = DatabaseRef { connection_id: ConnectionId(uuid::Uuid::nil()), database: "shop".into() };
-        ResultSet::new(ResultRef { tab_id: TabId(uuid::Uuid::nil()), run_id: RunId(1), index: 0 }, db, DatabaseKind::Postgres, columns)
+        let origin = Origin { rerun: Rerun::Ready("select".into()), nth: 0, schema: None, page: false };
+        ResultSet::new(ResultRef { tab_id: TabId(uuid::Uuid::nil()), run_id: RunId(1), index: 0 }, db, DatabaseKind::Postgres, columns, origin)
     }
 
     const NO_CAPS: Caps = Caps { max_rows: u32::MAX, max_bytes: u64::MAX };
@@ -270,17 +266,5 @@ mod tests {
         let meta = rs.meta();
         assert_eq!((meta.row_count, meta.rows_seen, meta.truncated), (1, 3, Some(TruncateReason::ByteLimit)));
         assert_eq!(rs.cell(0, 0), Some(Some("abc".into())));
-    }
-
-    #[test]
-    fn csv_quotes_like_copy_csv() {
-        let rs = set(3);
-        rs.push_row([Some("plain"), None, Some("")].into_iter(), &NO_CAPS);
-        rs.push_row([Some("a,b"), Some("say \"hi\""), Some("line\nbreak")].into_iter(), &NO_CAPS);
-        let mut out = Vec::new();
-        let summary = rs.write_csv(&mut out).unwrap();
-        let csv = String::from_utf8(out).unwrap();
-        assert_eq!(csv, "c0,c1,c2\r\nplain,,\"\"\r\n\"a,b\",\"say \"\"hi\"\"\",\"line\nbreak\"\r\n");
-        assert_eq!((summary.rows, summary.bytes, summary.truncated), (2, csv.len() as u64, false));
     }
 }

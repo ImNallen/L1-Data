@@ -286,6 +286,28 @@ impl Harness {
         }
     }
 
+    async fn export(&self, meta: &ResultMeta, format: ExportFormat, scope: ExportScope, name: &str) -> (ExportSummary, String) {
+        let path = self.dir.path().join(name);
+        let summary = self.engine.result_export(meta.r#ref, format, scope, path.display().to_string()).await.unwrap();
+        (summary, std::fs::read_to_string(path).unwrap())
+    }
+
+    async fn wait_console(&self, tab: TabId, done: impl Fn(&ConsoleState) -> bool) -> ConsoleState {
+        let started = Instant::now();
+        loop {
+            let state = self.console(tab);
+            if done(&state) {
+                return state;
+            }
+            assert!(started.elapsed() < Duration::from_secs(30), "console never reached the expected state: {state:?}");
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    }
+
+    fn history_len(&self) -> usize {
+        self.engine.history(HistoryQuery { text: None, connection_id: None, before_id: None, limit: 500 }).entries.len()
+    }
+
     async fn oracle(&self) -> tokio_postgres::Client {
         let (client, connection) = tokio_postgres::connect(&url(), NoTls).await.unwrap();
         tokio::spawn(connection);
@@ -797,7 +819,7 @@ async fn csv_export_matches_copy_csv() {
     let state = h.run_ok(tab, sql).await;
     let meta = Harness::result(&state, 0);
     let path = h.dir.path().join("zoo.csv");
-    let summary = h.engine.export_csv(meta.r#ref, path.clone()).await.unwrap();
+    let summary = h.engine.result_export(meta.r#ref, ExportFormat::Csv, ExportScope::Loaded, path.display().to_string()).await.unwrap();
     let ours = std::fs::read_to_string(&path).unwrap();
     assert_eq!(summary.rows, 2);
     assert_eq!(summary.bytes, ours.len() as u64);
@@ -808,7 +830,227 @@ async fn csv_export_matches_copy_csv() {
     let chunks: Vec<bytes::Bytes> = stream.try_collect().await.unwrap();
     let theirs = String::from_utf8(chunks.concat()).unwrap();
     assert_eq!(ours.replace("\r\n", "\n"), theirs);
-    assert!(matches!(h.engine.export_csv(ResultRef { index: 9, ..meta.r#ref }, path).await, Err(ExportError::Gone)));
+    assert!(matches!(h.engine.result_export(ResultRef { index: 9, ..meta.r#ref }, ExportFormat::Csv, ExportScope::Loaded, path.display().to_string()).await, Err(ExportError::Gone)));
+}
+
+#[tokio::test]
+async fn loaded_exports_type_json_draw_markdown_and_round_trip_inserts() {
+    let mut h = Harness::start().await;
+    let tab = h.sql_tab(TxnMode::AutoCommit).await;
+    let state = h.run_ok(tab, "select * from lab.type_zoo order by id").await;
+    let meta = Harness::result(&state, 0);
+
+    let (summary, json) = h.export(&meta, ExportFormat::Json, ExportScope::Loaded, "zoo.json").await;
+    assert_eq!((summary.rows, summary.bytes, summary.truncated), (2, json.len() as u64, false));
+    for exact in [r#""i8":9007199254740993"#, r#""n":12345678901234567890.123456789"#, r#""f8":"-Infinity""#, r#""f4":"NaN""#] {
+        assert!(json.contains(exact), "{exact} in {json}");
+    }
+    let rows: Vec<serde_json::Value> = serde_json::from_str(&json).unwrap();
+    assert_eq!((&rows[0]["b"], &rows[0]["jb"], &rows[0]["arr_t"]), (&serde_json::json!(true), &serde_json::json!({ "b": [1, 2, 3] }), &serde_json::json!(r#"{a,"b c"}"#)));
+    assert_eq!((&rows[1]["b"], &rows[1]["j"], &rows[1]["t"]), (&serde_json::Value::Null, &serde_json::Value::Null, &serde_json::json!("")));
+
+    let (_, md) = h.export(&meta, ExportFormat::Markdown, ExportScope::Loaded, "zoo.md").await;
+    let lines: Vec<&str> = md.lines().collect();
+    assert_eq!(lines.len(), 4);
+    assert!(lines[0].starts_with("| id | b | i2 | i8 | f4 |"), "{}", lines[0]);
+    assert!(lines[1].starts_with("| ---: | --- | ---: | ---: | ---: |"), "{}", lines[1]);
+    assert!(lines[3].starts_with("| 2 | NULL | NULL | NULL | NaN | -Infinity | NULL |  |"), "{}", lines[3]);
+
+    let (_, script) = h.export(&meta, ExportFormat::SqlInsert, ExportScope::Loaded, "zoo.sql").await;
+    assert!(script.lines().all(|l| l.starts_with(r#"INSERT INTO "lab"."type_zoo" ("id", "b", "i2", "#)), "{script}");
+    let copy = unique("zoo_copy");
+    let oracle = h.oracle().await;
+    oracle.batch_execute(&format!("create table lab.{copy} (like lab.type_zoo)")).await.unwrap();
+    let loaded = oracle.batch_execute(&script.replace(r#""lab"."type_zoo""#, &format!("lab.{copy}"))).await;
+    let text = async |table: &str| -> Vec<String> {
+        oracle.query(&format!("select t::text from lab.{table} t order by id"), &[]).await.unwrap().iter().map(|r| r.get(0)).collect()
+    };
+    let (copied, original) = (text(&copy).await, text("type_zoo").await);
+    oracle.batch_execute(&format!("drop table lab.{copy}")).await.unwrap();
+    loaded.unwrap();
+    assert_eq!(copied, original, "the INSERT script rebuilds every awkward value");
+
+    let state = h.run_ok(tab, "select o.id as order_id, 'x' as label from public.orders o order by o.id limit 1").await;
+    let (_, placeholder) = h.export(&Harness::result(&state, 0), ExportFormat::SqlInsert, ExportScope::Loaded, "computed.sql").await;
+    assert_eq!(placeholder, "INSERT INTO target_table (\"order_id\", \"label\") VALUES (1, 'x');\n", "a computed column has no single source table");
+    let state = h.run_ok(tab, "select id as order_id from public.orders order by id limit 1").await;
+    let (_, aliased) = h.export(&Harness::result(&state, 0), ExportFormat::SqlInsert, ExportScope::Loaded, "aliased.sql").await;
+    assert_eq!(aliased, "INSERT INTO \"public\".\"orders\" (\"id\") OVERRIDING SYSTEM VALUE VALUES (1);\n", "the table's own column name, not the alias");
+}
+
+#[tokio::test]
+async fn all_rows_streams_past_the_cap_inside_an_open_transaction_and_leaves_it_writable() {
+    let mut h = Harness::start().await;
+    h.engine.set_settings(Settings { max_rows: 1_000, ..h.engine.settings() });
+    let probe = unique("t_writable");
+    let oracle = h.oracle().await;
+    oracle.batch_execute(&format!("create table public.{probe} (id int)")).await.unwrap();
+    let tab = h.sql_tab(TxnMode::Manual).await;
+    h.run_ok(tab, "create temp table t as select g, 'row ' || g as label from generate_series(1, 300000) g").await;
+    let state = h.run_ok(tab, "select g, label, g % 2 = 0 as even from t order by g").await;
+    let meta = Harness::result(&state, 0);
+    assert_eq!((meta.truncated, &meta.all_rows, state.txn), (Some(TruncateReason::RowLimit), &AllRows::Statement, TxnState::Active));
+    let history = h.history_len();
+
+    let (summary, json) = h.export(&meta, ExportFormat::Json, ExportScope::All, "all.json").await;
+
+    assert_eq!((summary.rows, summary.bytes, summary.truncated), (300_000, json.len() as u64, false));
+    let rows: Vec<serde_json::Value> = serde_json::from_str(&json).unwrap();
+    assert_eq!(rows.len(), 300_000);
+    assert_eq!(rows[299_999], serde_json::json!({ "g": 300000, "label": "row 300000", "even": true }));
+    assert_eq!(h.page(&meta, 0, 1)[0][0].as_deref(), Some("1"), "the grid's result survives");
+    assert_eq!(h.history_len(), history, "an export records no history");
+    let after = h.console(tab);
+    assert_eq!((after.txn, after.work, after.export), (TxnState::Active, None, None));
+    // A read-only transaction may still write temp tables, so only a permanent table shows the
+    // read-only savepoint was undone.
+    h.run_ok(tab, &format!("insert into public.{probe} values (1)")).await;
+    h.engine.console_rollback(tab).await.unwrap();
+    oracle.batch_execute(&format!("drop table public.{probe}")).await.unwrap();
+    h.drain();
+    let exported: Vec<String> = h.log(tab).into_iter().filter(|l| l.starts_with("Exported ")).collect();
+    assert_eq!(exported.len(), 1, "one Output line records the export");
+    assert!(exported[0].starts_with("Exported 300,000 rows as JSON to "), "{}", exported[0]);
+}
+
+#[tokio::test]
+async fn esc_during_all_rows_leaves_the_target_untouched_and_the_session_alive() {
+    let mut h = Harness::start().await;
+    h.engine.set_settings(Settings { max_rows: 100, ..h.engine.settings() });
+    let tab = h.sql_tab(TxnMode::AutoCommit).await;
+    let state = h.run_ok(tab, "select g, pg_sleep(0.001) from generate_series(1, 2000) g").await;
+    let meta = Harness::result(&state, 0);
+    assert_eq!(meta.all_rows, AllRows::Confirm { calls: vec!["pg_sleep".into()] }, "pg_sleep is not on the vetted list");
+    let out = h.dir.path().join("out");
+    std::fs::create_dir(&out).unwrap();
+    let path = out.join("big.csv");
+    std::fs::write(&path, "old").unwrap();
+    let export = {
+        let (engine, path) = (h.engine.clone(), path.display().to_string());
+        tokio::spawn(async move { engine.result_export(meta.r#ref, ExportFormat::Csv, ExportScope::All, path).await })
+    };
+    let during = h.wait_console(tab, |s| s.export.as_ref().is_some_and(|p| p.rows > 0)).await;
+    assert_eq!((during.work, during.export.as_ref().map(|p| (p.result, p.format))), (Some(ConsoleWork::Export), Some((meta.r#ref, ExportFormat::Csv))));
+    assert!(matches!(h.engine.console_run(tab, RunRequest::Script { text: "select 1".into(), target: RunTarget::All }).await, Err(RunError::Busy)), "the export holds the session");
+    h.engine.console_cancel(tab).await;
+
+    assert!(matches!(export.await.unwrap(), Err(ExportError::Cancelled)));
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), "old");
+    assert_eq!(std::fs::read_dir(&out).unwrap().count(), 1, "no temp file left beside it");
+    let after = h.console(tab);
+    assert_eq!((after.work, after.export, after.txn), (None, None, TxnState::Idle));
+    assert!(matches!(after.session, SessionState::Open { .. }));
+    assert_eq!(h.scalar(tab, "select 1").await, "1", "the session survived the cancel");
+}
+
+#[tokio::test]
+async fn all_rows_refuses_a_write_and_a_nextval_rerun_fails_without_advancing() {
+    let mut h = Harness::start().await;
+    let tab = h.sql_tab(TxnMode::AutoCommit).await;
+    h.run_ok(tab, "create temp table w (id int)").await;
+    let state = h.run_ok(tab, "insert into w values (1), (2) returning id").await;
+    let meta = Harness::result(&state, 0);
+    assert_eq!(meta.all_rows, AllRows::Refused { reason: "The statement may write, so it does not run again.".into() });
+    let path = h.dir.path().join("never.csv");
+    assert!(matches!(h.engine.result_export(meta.r#ref, ExportFormat::Csv, ExportScope::All, path.display().to_string()).await, Err(ExportError::NotRerunnable)));
+    assert!(!path.exists());
+    assert_eq!(h.scalar(tab, "select count(*) from w").await, "2", "the insert did not run again");
+
+    let seq = unique("s_export");
+    let oracle = h.oracle().await;
+    oracle.batch_execute(&format!("create sequence public.{seq}")).await.unwrap();
+    let state = h.run_ok(tab, &format!("select nextval('public.{seq}') as n from generate_series(1, 3)")).await;
+    let meta = Harness::result(&state, 0);
+    assert_eq!(meta.all_rows, AllRows::Confirm { calls: vec!["nextval".into()] });
+    let failed = h.engine.result_export(meta.r#ref, ExportFormat::Json, ExportScope::All, path.display().to_string()).await;
+    let next = h.scalar(tab, &format!("select nextval('public.{seq}')")).await;
+    oracle.batch_execute(&format!("drop sequence public.{seq}")).await.unwrap();
+    assert!(matches!(&failed, Err(ExportError::Query { error }) if error.sqlstate.as_deref() == Some("25006")), "{failed:?}");
+    assert_eq!(next, "4", "the read-only re-run did not advance the sequence");
+    assert!(!path.exists());
+    assert_eq!(h.console(tab).txn, TxnState::Idle);
+}
+
+#[tokio::test]
+async fn a_table_tabs_all_rows_is_the_whole_filtered_table_in_page_order() {
+    let mut h = Harness::start().await;
+    h.engine.set_settings(Settings { table_page_size: 10, ..h.engine.settings() });
+    let tab = h.sql_tab(TxnMode::AutoCommit).await;
+    let query = TableQuery { r#where: "status <> 'cancelled'".into(), order_by: "total DESC".into(), ..Default::default() };
+    let accepted = h.engine.console_run(tab, RunRequest::TablePage { schema: "public".into(), table: "orders".into(), page: 1, query }).await.unwrap();
+    let state = h.wait_finished(tab, accepted.run_id).await;
+    let meta = Harness::result(&state, 0);
+    assert_eq!((meta.row_count, meta.truncated, &meta.all_rows), (10, None, &AllRows::Table));
+
+    let (summary, csv) = h.export(&meta, ExportFormat::Csv, ExportScope::All, "orders.csv").await;
+    let expected: Vec<String> = h
+        .oracle()
+        .await
+        .query("select o.id from public.orders o where o.status <> 'cancelled' order by o.total desc, o.id", &[])
+        .await
+        .unwrap()
+        .iter()
+        .map(|r| r.get::<_, i64>(0).to_string())
+        .collect();
+    assert!(expected.len() > 10);
+    let ids: Vec<&str> = csv.lines().skip(1).map(|l| l.split(',').next().unwrap()).collect();
+    assert_eq!(summary.rows as usize, expected.len());
+    assert_eq!(ids, expected, "every filtered row, in the page's order with its key tiebreak");
+
+    let (_, script) = h.export(&meta, ExportFormat::SqlInsert, ExportScope::All, "orders.sql").await;
+    assert_eq!(script.lines().count(), expected.len());
+    assert!(script.lines().all(|l| l.starts_with(r#"INSERT INTO "public"."orders" ("id", "#)), "{}", script.lines().next().unwrap());
+    h.drain();
+    let log = h.log(tab);
+    assert_eq!(log.iter().filter(|l| l.starts_with("0> ")).count(), 1, "only the page run logs a statement: {log:?}");
+    assert_eq!(log.iter().filter(|l| l.starts_with("Exported ")).count(), 2, "{log:?}");
+}
+
+#[tokio::test]
+async fn insert_exports_replay_identity_and_generated_columns_into_an_empty_copy() {
+    let mut h = Harness::start().await;
+    let tab = h.sql_tab(TxnMode::AutoCommit).await;
+    let (table, copy) = (unique("t_ident"), unique("t_ident_copy"));
+    let oracle = h.oracle().await;
+    oracle
+        .batch_execute(&format!(
+            "create table public.{table} (id bigint generated always as identity primary key, label text not null, \
+             width int generated always as (length(label)) stored, seq int generated by default as identity); \
+             insert into public.{table} (label) values ('a'), ('bb'), ('ccc'); \
+             create table public.{copy} (like public.{table} including identity including generated)"
+        ))
+        .await
+        .unwrap();
+    let state = h.run_ok(tab, &format!("select * from public.{table} order by id")).await;
+    let meta = Harness::result(&state, 0);
+    h.engine.refresh_catalog(h.db()).await.unwrap();
+
+    let (_, script) = h.export(&meta, ExportFormat::SqlInsert, ExportScope::All, "ident.sql").await;
+    let loaded = oracle.batch_execute(&script.replace(&format!(r#""public"."{table}""#), &format!("public.{copy}"))).await;
+    let text = async |t: &str| -> Vec<String> { oracle.query(&format!("select t::text from public.{t} t order by id"), &[]).await.unwrap().iter().map(|r| r.get(0)).collect() };
+    let (copied, original) = (text(&copy).await, text(&table).await);
+    oracle.batch_execute(&format!("drop table public.{table}; drop table public.{copy}")).await.unwrap();
+    assert_eq!(script.lines().next(), Some(format!(r#"INSERT INTO "public"."{table}" ("id", "label", "seq") OVERRIDING SYSTEM VALUE VALUES (1, 'a', 1);"#).as_str()), "{script}");
+    loaded.unwrap();
+    assert_eq!(copied, original, "the script rebuilds every row, keeping the identity values");
+}
+
+#[tokio::test]
+async fn all_rows_refuses_a_rerun_whose_column_types_changed() {
+    let mut h = Harness::start().await;
+    let tab = h.sql_tab(TxnMode::AutoCommit).await;
+    let table = unique("t_retype");
+    let oracle = h.oracle().await;
+    oracle.batch_execute(&format!("create table public.{table} (id int, n int); insert into public.{table} values (1, 123)")).await.unwrap();
+    let state = h.run_ok(tab, &format!("select id, n from public.{table}")).await;
+    let meta = Harness::result(&state, 0);
+    oracle.batch_execute(&format!("alter table public.{table} alter column n type text")).await.unwrap();
+
+    let path = h.dir.path().join("retyped.json");
+    let exported = h.engine.result_export(meta.r#ref, ExportFormat::Json, ExportScope::All, path.display().to_string()).await;
+    oracle.batch_execute(&format!("drop table public.{table}")).await.unwrap();
+    assert!(matches!(exported, Err(ExportError::ShapeChanged)), "{exported:?}");
+    assert!(!path.exists(), "no file when the column types changed");
 }
 
 #[tokio::test]

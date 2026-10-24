@@ -537,6 +537,8 @@ pub enum ConsoleWork {
     Transaction,
     Edit,
     Probe,
+    /// An `All` export streams the result's source again. Cancellable like a run.
+    Export,
 }
 
 #[derive(Debug, Clone, Serialize, Type)]
@@ -548,8 +550,24 @@ pub struct ConsoleState {
     pub config: ConsoleConfigView,
     pub session: SessionState,
     pub work: Option<ConsoleWork>,
+    /// `Some` exactly while `work` is `Some(Export)`: both derive from the one value the session slot holds.
+    pub export: Option<ExportProgress>,
     pub txn: TxnState,
     pub run: RunState,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct ExportProgress {
+    pub result: ResultRef,
+    pub format: ExportFormat,
+    /// Rows encoded so far.
+    pub rows: u64,
+    /// Bytes handed to the file so far.
+    pub bytes: u64,
+    /// Writing failed while SQL Server is still sending. The export reads to the end so the session and
+    /// its transaction survive; the file is not written. Esc stops it at once and resets the session.
+    pub write_error: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Type)]
@@ -774,6 +792,22 @@ pub struct ResultMeta {
     pub rows_seen: u64,
     pub truncated: Option<TruncateReason>,
     pub elapsed_ms: u32,
+    /// What `ExportScope::All` would run for this result. Decided once, when the result was created.
+    pub all_rows: AllRows,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Type)]
+#[serde(tag = "kind", rename_all_fields = "camelCase")]
+pub enum AllRows {
+    /// A table page: every row of the table under the page's filters and order.
+    Table,
+    /// A read statement, run again exactly as the run sent it.
+    Statement,
+    /// A PostgreSQL read that calls functions or operators L1 Data cannot vouch for. `READ ONLY` stops
+    /// writes, but not a call that acts outside the transaction, so the user confirms before it runs again.
+    Confirm { calls: Vec<String> },
+    /// The statement may write, change the transaction, or reach another server, so it never runs twice.
+    Refused { reason: String },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Type)]
@@ -845,11 +879,32 @@ pub struct QueryError {
     pub position: Option<DocOffset>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Type)]
+pub enum ExportFormat {
+    /// RFC 4180 with CRLF and a header row, NULL as an empty field, as `COPY … CSV` writes it.
+    Csv,
+    /// An array of objects keyed by column name, one per line. Values are typed by `TypeCategory`.
+    Json,
+    /// A GitHub table.
+    Markdown,
+    /// One `INSERT` per row, quoted for the result's dialect.
+    SqlInsert,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Type)]
+pub enum ExportScope {
+    /// The rows the engine holds for the result, capped by the row and size limits.
+    Loaded,
+    /// Every row: the result's source runs again on its tab's session and streams to the file.
+    All,
+}
+
 #[derive(Debug, Clone, Serialize, Type)]
 #[serde(rename_all = "camelCase")]
 pub struct ExportSummary {
     pub rows: u64,
     pub bytes: u64,
+    /// The loaded rows stopped at the row or size limit. Always false for `All`.
     pub truncated: bool,
 }
 
@@ -1705,11 +1760,29 @@ pub enum CountError {
     Failed { message: String },
 }
 
+/// Every variant leaves the file at the chosen path as it was.
 #[derive(Debug, Clone, Serialize, Type)]
 #[serde(tag = "kind", rename_all_fields = "camelCase")]
 pub enum ExportError {
+    /// A newer run replaced the result, or its tab closed.
     Gone,
+    /// The file could not be created, written, synced, or moved into place.
     Io { message: String },
+    /// `All` for a result whose `allRows` is `Refused`.
+    NotRerunnable,
+    /// The tab's session is held by a run, a count, a transaction command, an edit, or another export.
+    Busy,
+    /// The tab now targets another connection or database than the one the rows came from.
+    TargetChanged,
+    /// The tab's transaction failed; only a rollback runs until it ends.
+    TransactionAborted,
+    Connect { error: ConnectError },
+    /// The source failed on the server when it ran again.
+    Query { error: QueryError },
+    /// The source returned other columns, or fewer result sets, than when it first ran.
+    ShapeChanged,
+    /// Esc stopped the export before the file was in place.
+    Cancelled,
 }
 
 #[derive(Debug, Clone, Serialize, Type)]

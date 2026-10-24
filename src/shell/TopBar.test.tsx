@@ -24,6 +24,7 @@ function lostSession(transaction: TransactionLoss): string {
     txn: "Idle",
     txnDepth: null,
     work: null,
+    export: null,
     run: { kind: "Idle" },
   };
   Object.assign(workspace, { tabs: { [tab.id]: tab }, active: tab.id });
@@ -80,6 +81,14 @@ it("shows Counting and Cancel with Esc while retaining the finished run", () => 
   expect(html).toMatch(/data-testid="commit-btn"[^>]*disabled/);
   expect(html).toMatch(/data-testid="rollback-btn"[^>]*disabled/);
   expect(live.consoles.t1?.run.kind).toBe("Finished");
+});
+
+it("offers Cancel with Esc while an export streams", () => {
+  const html = workingConsole("Export");
+  expect(html).toContain('data-testid="cancel-btn"');
+  expect(html).toContain("Esc");
+  expect(html).not.toContain('data-testid="run-btn"');
+  expect(html).toMatch(/data-testid="commit-btn"[^>]*disabled/);
 });
 
 it.each(["Transaction", "Edit", "Probe"] satisfies ConsoleWork[])("keeps %s ownership busy without offering Cancel", (work) => {

@@ -2,6 +2,7 @@ mod assistant;
 mod catalog;
 mod connection;
 mod console;
+mod export;
 mod files;
 mod history;
 pub mod model;
@@ -28,7 +29,7 @@ use std::time::Duration;
 use tokio::sync::broadcast;
 
 use connection::{CatalogSlot, ConnEntry, ConnSlot, ConnectParams, DbSlot, Instance, Wanted};
-use console::{Console, Owed, PlannedStmt, RunPlan, SessionSlot};
+use console::{Console, Owed, PlannedStmt, RunPlan, SessionSlot, Work};
 use model::*;
 use provider::ProbeDepth;
 use secrets::{SecretSlot, Vault};
@@ -510,6 +511,21 @@ impl Shared {
         self.ensure_catalog(&instance, &slot).await
     }
 
+    async fn relation_detail(self: &Arc<Self>, db: &DatabaseRef, oid: u32) -> Result<RelationDetail, DetailError> {
+        let (instance, slot) = self.slot(db).map_err(|error| DetailError::Catalog { error })?;
+        // A `Failed` slot still serves its last catalog; reloading here would retry on every expand.
+        let version = match slot.last() {
+            Some(catalog) => catalog.version,
+            None => self.ensure_catalog(&instance, &slot).await.map_err(|error| DetailError::Catalog { error })?.version,
+        };
+        let mut meta = slot.meta.lock().await;
+        let session = self.session_in(&instance, &slot, &mut meta).await.map_err(|e| DetailError::Failed { message: connection::connect_error_text(&e) })?;
+        session.detail(slot.db.clone(), oid, version)
+            .await
+            .map_err(|e| DetailError::Failed { message: e.message })?
+            .ok_or(DetailError::Gone)
+    }
+
     async fn connect(self: &Arc<Self>, id: ConnectionId) -> Result<ServerInfo, ConnectError> {
         loop {
             let connecting = match self.connections.read().unwrap().get(&id).map(|e| &e.slot) {
@@ -588,7 +604,7 @@ impl Shared {
                 if inner.txn == TxnState::Idle {
                     return None;
                 }
-                let taken = console.take_session(&mut inner, run_id, ConsoleWork::Probe);
+                let taken = console.take_session(&mut inner, run_id, Work::Probe);
                 if taken.is_some() { console.publish(&mut inner, self); }
                 taken
             };
@@ -624,7 +640,7 @@ impl Shared {
                 SessionSlot::Idle(_) => {}
             }
             let aborted = inner.txn == TxnState::Aborted;
-            let (session, _stop) = console.take_session(&mut inner, run_id, ConsoleWork::Transaction).expect("slot is idle");
+            let (session, _stop) = console.take_session(&mut inner, run_id, Work::Transaction).expect("slot is idle");
             console.publish(&mut inner, self);
             (session, aborted)
         };
@@ -1124,7 +1140,7 @@ impl Engine {
                 inner.session = SessionSlot::Idle(session);
             }
         }
-        let (session, stop) = console.take_session(&mut inner, run_id, ConsoleWork::Count).ok_or_else(|| failed("The count tab is busy."))?;
+        let (session, stop) = console.take_session(&mut inner, run_id, Work::Count).ok_or_else(|| failed("The count tab is busy."))?;
         console.publish(&mut inner, s);
         drop(inner);
 
@@ -1136,18 +1152,7 @@ impl Engine {
     /// Defaults, keys, indexes, and triggers of one relation, read on the database's metadata
     /// session when the tree opens the relation. The engine keeps no copy.
     pub async fn relation_detail(&self, db: DatabaseRef, oid: u32) -> Result<RelationDetail, DetailError> {
-        let (instance, slot) = self.shared.slot(&db).map_err(|error| DetailError::Catalog { error })?;
-        // A `Failed` slot still serves its last catalog; reloading here would retry on every expand.
-        let version = match slot.last() {
-            Some(catalog) => catalog.version,
-            None => self.shared.ensure_catalog(&instance, &slot).await.map_err(|error| DetailError::Catalog { error })?.version,
-        };
-        let mut meta = slot.meta.lock().await;
-        let session = self.shared.session_in(&instance, &slot, &mut meta).await.map_err(|e| DetailError::Failed { message: connection::connect_error_text(&e) })?;
-        session.detail(slot.db.clone(), oid, version)
-            .await
-            .map_err(|e| DetailError::Failed { message: e.message })?
-            .ok_or(DetailError::Gone)
+        self.shared.relation_detail(&db, oid).await
     }
 
     /// A connection, database, or mode change needs an idle tab with no open transaction. A
@@ -1212,18 +1217,21 @@ impl Engine {
             return Err(RunError::NotConfigured);
         }
 
-        let mut table_relation = None;
+        let mut page = None;
         let (text, spans) = match r {
             RunRequest::Script { text, target } => {
                 let target = text::OffsetMap::new(&text).target(target);
                 let spans = text::pick(&text, target, connection.database_kind).map_err(|what| RunError::Unsupported { what })?;
                 (text, spans)
             }
-            RunRequest::TablePage { schema, table, page, query } => {
+            RunRequest::TablePage { schema, table, page: index, query } => {
                 let catalog = self.catalog(config.db()).await.map_err(|_| RunError::NotConfigured)?;
-                table_relation = catalog.relation(&schema, &table).cloned();
+                let relation = catalog.relation(&schema, &table).cloned();
                 let size = s.settings().table_page_size.max(1);
-                let text = text::table_browse(connection.database_kind, &schema, &table, table_relation.as_ref(), &query, size, u64::from(page) * u64::from(size)).map_err(|_| RunError::BadFilter)?;
+                let window = Some((size, u64::from(index) * u64::from(size)));
+                let text = text::table_browse(connection.database_kind, &schema, &table, relation.as_ref(), &query, window).map_err(|_| RunError::BadFilter)?;
+                let all = text::table_browse(connection.database_kind, &schema, &table, relation.as_ref(), &query, None).map_err(|_| RunError::BadFilter)?;
+                page = Some(console::TablePage { rerun: export::rerun(connection.database_kind, &all, true), relation });
                 let spans = text::pick(&text, sql::ByteTarget::All, connection.database_kind).map_err(|_| RunError::BadFilter)?;
                 if spans.len() != 1 {
                     return Err(RunError::BadFilter);
@@ -1275,7 +1283,7 @@ impl Engine {
                 SessionSlot::Busy { .. } => return Err(RunError::Busy),
             }
         }
-        let Some((session, stop)) = console.take_session(&mut inner, run_id, ConsoleWork::Run) else { return Err(RunError::Busy) };
+        let Some((session, stop)) = console.take_session(&mut inner, run_id, Work::Run) else { return Err(RunError::Busy) };
         let txn = inner.txn;
         console.results.lock().unwrap().clear();
         inner.run = RunState::Running {
@@ -1290,7 +1298,7 @@ impl Engine {
         console.publish(&mut inner, s);
         drop(inner);
 
-        let plan = RunPlan { run_id, text, statements, txn, schema: config.schema.clone(), database: config.database.clone(), connection, table: table_relation };
+        let plan = RunPlan { run_id, text, statements, txn, schema: config.schema.clone(), database: config.database.clone(), connection, page };
         s.spawn(console::run_task(console.clone(), s.clone(), session, plan, stop));
         Ok(RunAccepted { run_id, statements: ranges })
     }
@@ -1372,7 +1380,7 @@ impl Engine {
                 return Err(ApplyError::TransactionAborted);
             }
             let txn = inner.txn;
-            let Some((session, stop)) = console.take_session(&mut inner, run_id, ConsoleWork::Edit) else { return Err(ApplyError::Busy) };
+            let Some((session, stop)) = console.take_session(&mut inner, run_id, Work::Edit) else { return Err(ApplyError::Busy) };
             console.publish(&mut inner, s);
             (session, txn, stop)
         };
@@ -1471,17 +1479,10 @@ impl Engine {
         set.cell(row, col).ok_or(ResultError::OutOfRange)
     }
 
-    pub async fn export_csv(&self, r: ResultRef, path: PathBuf) -> Result<ExportSummary, ExportError> {
-        let set = self.shared.result_set(r).ok_or(ExportError::Gone)?;
-        self.shared.runtime.spawn_blocking(move || {
-            let file = std::fs::File::create(&path)?;
-            let mut out = std::io::BufWriter::new(file);
-            let summary = set.write_csv(&mut out)?;
-            Ok::<_, std::io::Error>(ExportSummary { rows: summary.rows, bytes: summary.bytes, truncated: summary.truncated })
-        })
-        .await
-        .map_err(|e| ExportError::Io { message: e.to_string() })?
-        .map_err(|e| ExportError::Io { message: e.to_string() })
+    /// Writes one result to `path` as `format`. The file appears at `path` only when complete, and
+    /// every error leaves `path` as it was.
+    pub async fn result_export(&self, r: ResultRef, format: ExportFormat, scope: ExportScope, path: String) -> Result<ExportSummary, ExportError> {
+        export::export(&self.shared, r, format, scope, path).await
     }
 
     pub async fn file_open(&self, path: String) -> Result<FileOpened, FileReadError> {

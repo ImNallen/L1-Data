@@ -46,7 +46,7 @@ fn specta_builder() -> tauri_specta::Builder<tauri::Wry> {
             ipc::console_close,
             ipc::result_page,
             ipc::result_cell,
-            ipc::result_export_csv,
+            ipc::result_export,
             ipc::file_open,
             ipc::file_save,
             ipc::history_list,

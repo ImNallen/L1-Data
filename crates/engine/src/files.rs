@@ -1,7 +1,7 @@
 //! Text crossing IPC is LF-only with no BOM, which is what CodeMirror holds (it splits on `\r\n?|\n`).
 
 use std::fs::{self, File, Metadata, OpenOptions};
-use std::io::{self, Read, Write};
+use std::io::{self, BufWriter, Read, Write};
 use std::path::{Path, PathBuf};
 
 use sha2::{Digest, Sha256};
@@ -198,23 +198,69 @@ fn writable(_target: &Path, meta: &Metadata) -> bool {
     !meta.permissions().readonly()
 }
 
-/// The bytes go to a temp file in the target's own directory, so the rename stays on one filesystem and the
-/// target holds either its old bytes or the new ones. Any failure drops the temp file, which unlinks it.
 fn write_atomic(target: &Path, bytes: &[u8], existing: Option<&Metadata>) -> io::Result<()> {
-    let dir = target.parent().ok_or(io::ErrorKind::IsADirectory)?;
-    let mut tmp = temp_beside(dir, target, existing)?;
-    tmp.write_all(bytes)?;
-    if let Some(meta) = existing {
-        // Creation applied the umask, which may have cleared some of the target's bits.
-        tmp.as_file().set_permissions(meta.permissions())?;
+    let mut file = Replacement::beside(target.to_owned(), existing)?;
+    file.write_all(bytes)?;
+    file.commit().map(drop)
+}
+
+/// The bytes go to a temp file in the target's own directory, so the rename stays on one filesystem and the
+/// target holds either its old bytes or every new byte. Dropping it uncommitted unlinks the temp file.
+pub(crate) struct Replacement {
+    tmp: BufWriter<NamedTempFile>,
+    target: PathBuf,
+    permissions: Option<fs::Permissions>,
+    bytes: u64,
+}
+
+impl Replacement {
+    /// Follows links, so the rename replaces the link's target rather than the link.
+    pub(crate) fn begin(path: &str) -> io::Result<Self> {
+        let target = resolve_links(Path::new(&canonical(path)?))?;
+        let existing = match fs::metadata(&target) {
+            Ok(meta) => Some(meta),
+            Err(e) if e.kind() == io::ErrorKind::NotFound => None,
+            Err(e) => return Err(e),
+        };
+        if let Some(meta) = &existing {
+            if !meta.is_file() {
+                return Err(io::Error::new(io::ErrorKind::IsADirectory, "it is a folder or a device, not a file"));
+            }
+            if !writable(&target, meta) {
+                return Err(io::ErrorKind::PermissionDenied.into());
+            }
+        }
+        Self::beside(target, existing.as_ref())
     }
-    tmp.as_file().sync_all()?;
-    tmp.persist(target).map_err(|e| e.error)?;
-    #[cfg(unix)]
-    if let Err(e) = File::open(dir).and_then(|d| d.sync_all()) {
-        eprintln!("fsync of {} after a save failed: {e}", dir.display());
+
+    fn beside(target: PathBuf, existing: Option<&Metadata>) -> io::Result<Self> {
+        let dir = target.parent().ok_or(io::ErrorKind::IsADirectory)?;
+        let tmp = temp_beside(dir, &target, existing)?;
+        Ok(Self { tmp: BufWriter::new(tmp), target, permissions: existing.map(Metadata::permissions), bytes: 0 })
     }
-    Ok(())
+
+    pub(crate) fn write_all(&mut self, bytes: &[u8]) -> io::Result<()> {
+        self.tmp.write_all(bytes)?;
+        self.bytes += bytes.len() as u64;
+        Ok(())
+    }
+
+    pub(crate) fn commit(self) -> io::Result<u64> {
+        let tmp = self.tmp.into_inner().map_err(io::IntoInnerError::into_error)?;
+        if let Some(permissions) = self.permissions {
+            // Creation applied the umask, which may have cleared some of the target's bits.
+            tmp.as_file().set_permissions(permissions)?;
+        }
+        tmp.as_file().sync_all()?;
+        tmp.persist(&self.target).map_err(|e| e.error)?;
+        #[cfg(unix)]
+        if let Some(dir) = self.target.parent()
+            && let Err(e) = File::open(dir).and_then(|d| d.sync_all())
+        {
+            eprintln!("fsync of {} after replacing a file failed: {e}", dir.display());
+        }
+        Ok(self.bytes)
+    }
 }
 
 /// Created with the target's mode, so the new bytes are never readable by anyone the old ones were not. A new file

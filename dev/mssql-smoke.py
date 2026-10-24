@@ -239,7 +239,7 @@ def check(bridge, work, assistant=True):
         full = bridge.invoke("result_cell", resultRef=result["ref"], row=0, col=long_col)
         assert full == "😀" * 3000
         exported = work / "types.csv"
-        bridge.invoke("result_export_csv", resultRef=result["ref"], path=str(exported))
+        bridge.invoke("result_export", resultRef=result["ref"], format="Csv", scope="Loaded", path=str(exported))
         with exported.open(newline="") as stream:
             exported_row = next(csv.DictReader(stream))
         assert exported_row["precise"] == precise and exported_row["text_value"] == full
