@@ -51,13 +51,14 @@ export function insertSaved(q: SavedQuery): void {
   markUsed(q.id);
 }
 
-function targetFor(kind: DatabaseKind): DatabaseRef | undefined {
+function targetFor(kind: DatabaseKind): DatabaseRef | null {
   const s = ws();
   const active = tabTarget(s.active ? s.tabs[s.active] : undefined);
   if (active && databaseKindFor(active, s.configs) === kind) return active;
   const live = useLive.getState().connections;
-  const config = Object.values(s.configs).find((c) => c.databaseKind === kind && live[c.id]?.status.kind === "Connected");
-  return config && homeDb(config, live[config.id]);
+  const ofKind = Object.values(s.configs).filter((c) => c.databaseKind === kind);
+  const config = ofKind.find((c) => live[c.id]?.status.kind === "Connected") ?? ofKind[0];
+  return config ? homeDb(config, live[config.id]) : null;
 }
 
 export function openSaved(q: SavedQuery): void {

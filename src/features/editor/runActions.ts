@@ -274,7 +274,7 @@ function defaultTarget(): DatabaseRef | null {
 
 export function openSqlTab(opts: { db?: DatabaseRef | null; text?: string; title?: string } = {}): TabId {
   const id = crypto.randomUUID();
-  const target = opts.db ?? defaultTarget();
+  const target = opts.db === undefined ? defaultTarget() : opts.db;
   const db = target && resolveDb(target, useLive.getState().connections[target.connectionId]);
   seedEditor(id, opts.text ?? "");
   ws().addTab({

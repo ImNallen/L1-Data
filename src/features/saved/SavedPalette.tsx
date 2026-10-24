@@ -231,7 +231,7 @@ function SavedDialog({ entry, close, ref }: { entry: SavedEntry; close: () => vo
         <span><Kbd className="bg-pill">{mod}↵</Kbd> New tab</span>
         <span><Kbd className="bg-pill">{mod}C</Kbd> Copy</span>
         <span data-testid="saved-count" role="status" className="ml-auto shrink-0">{count}</span>
-        <button type="button" data-testid="saved-save-current" disabled={!insertable} title={insertable ? "Save the selection, or the statement at the cursor" : "Open a query tab to save from it"}
+        <button type="button" data-testid="saved-save-current" disabled={!insertable || !listKeysLive(pane)} title={insertable ? "Save the selection, or the statement at the cursor" : "Open a query tab to save from it"}
           onClick={() => { close(); void saveActiveQuery(); }}
           className="flex shrink-0 items-center gap-1.5 rounded px-1 py-1 text-dim outline-none hover:text-fg focus-visible:ring-1 focus-visible:ring-focus disabled:opacity-40">
           <BookmarkPlusIcon size={13} />Save current query<Kbd className="bg-pill">{mac ? "⌘⇧E" : "Ctrl+Shift+E"}</Kbd>

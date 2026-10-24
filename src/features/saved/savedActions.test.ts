@@ -119,3 +119,20 @@ it("opens a query in a new tab on the active tab's database when the dialects ma
   openSaved(query(2, "Locks", "select * from sys.dm_tran_locks", "SqlServer"));
   expect(useWorkspace.getState().tabs[useWorkspace.getState().active!]!.console.db).toEqual({ connectionId: ms.id, database: "master" });
 });
+
+it("never opens a query on a database of the other dialect", () => {
+  recordIpc(() => list(2));
+  const pg = connectionConfig("c-pg", "pg");
+  const idle = { ...connectionConfig("c-ms-idle", "ms idle"), databaseKind: "SqlServer" as const, database: "master" };
+  useWorkspace.setState({ configs: { [pg.id]: pg } });
+  openSqlTab({ db: { connectionId: pg.id, database: "shop" }, text: "" });
+  const active = () => useWorkspace.getState().tabs[useWorkspace.getState().active!]!;
+
+  openSaved(query(1, "Locks", "select * from sys.dm_tran_locks", "SqlServer"));
+  expect([active().title, active().console.db]).toEqual(["Locks", null]);
+
+  useWorkspace.setState({ configs: { [pg.id]: pg, [idle.id]: idle } });
+  openSqlTab({ db: { connectionId: pg.id, database: "shop" }, text: "" });
+  openSaved(query(1, "Locks", "select * from sys.dm_tran_locks", "SqlServer"));
+  expect(active().console.db).toEqual({ connectionId: idle.id, database: "master" });
+});
