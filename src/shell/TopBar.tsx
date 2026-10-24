@@ -168,7 +168,7 @@ export function TopBar({ hosted }: { hosted: HostedWindow | null }) {
       )}
 
       {tab && (
-        // The run target needs the room: below 900px Format keeps only its icon, below 520px it hides, and ⌘⌥L still formats.
+        // Format gives way to the run target in a narrow bar, and ⌘⌥L still formats.
         <Button data-testid="format-btn" title="Format the selection or the marked statement (⌘⌥L)" className="@max-[900px]:px-2.5 @max-[520px]:hidden" onClick={() => void formatActive()}>
           <ListIndentIncreaseIcon size={14} className="text-muted" />
           <span className="@max-[900px]:sr-only">Format</span>

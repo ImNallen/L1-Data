@@ -111,7 +111,7 @@ function Row({
 }) {
   const twoLines = second !== undefined;
   const toggle = expandable ? (onToggle ?? onClick) : undefined;
-  // Enter does what a double-click does, which a click starts. A row with no double-click opens or closes.
+  // Enter does what a double-click does, which a click starts.
   const activate = () => {
     if (!onDoubleClick) return toggle?.();
     onClick?.();

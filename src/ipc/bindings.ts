@@ -334,7 +334,6 @@ export type ConnectionConfig = {
 	 *  resolved and dialed by that server.
 	 */
 	ssh: SshTunnel | null,
-	/**  `None` is not set. */
 	environment: Environment | null,
 };
 

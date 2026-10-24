@@ -28,7 +28,7 @@ export function ConnectionColorDot({ color, className }: { color: string | null;
 }
 
 /** Local and an unset environment draw nothing, so a chip always means a shared server. A 6% fill keeps the label at
- * 4.5:1 in L1 Light. The tree's narrow rows use the short label. */
+ * 4.5:1 in L1 Light. */
 const ENVIRONMENT_CHIP: Record<Environment, { look: string; short: string } | null> = {
   Local: null,
   Staging: { look: "bg-amber/6 text-amber", short: "Staging" },

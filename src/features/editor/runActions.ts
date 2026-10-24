@@ -147,10 +147,7 @@ function deferPageForPendingWork(tabId: TabId, target: PageTarget | undefined): 
   return true;
 }
 
-/**
- * On a Production connection, asks before a run that writes. The engine picks the statements the run executes and
- * classifies them. The answer holds only for the target it named, so a target changed meanwhile drops the run.
- */
+/** The answer holds only for the target it named, so a target changed meanwhile drops the run. */
 async function writesConfirmed(tab: Tab, text: string, target: RunTarget): Promise<boolean> {
   const db = tabTarget(tab);
   const config = db ? ws().configs[db.connectionId] : undefined;

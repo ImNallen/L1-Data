@@ -465,7 +465,6 @@ pub fn pick(text: &str, target: ByteTarget, kind: DatabaseKind) -> Result<Vec<St
     match kind { DatabaseKind::Postgres => Ok(sql::pick(&sql::split_statements(text), text, target)), DatabaseKind::SqlServer => sql::tsql::pick(text, target) }
 }
 pub fn classify(text: &str, kind: DatabaseKind) -> StmtKind { match kind { DatabaseKind::Postgres => sql::classify(text), DatabaseKind::SqlServer => sql::tsql::classify(text) } }
-/// The writes History marks. A SQL Server batch that does not lex counts as a write.
 pub fn is_write(text: &str, kind: DatabaseKind) -> bool { match kind { DatabaseKind::Postgres => sql::history_is_write(text), DatabaseKind::SqlServer => sql::tsql::is_write(text) } }
 
 /// The statements, or SQL Server batches, that a `Script` run of `target` executes and that write. A target the run

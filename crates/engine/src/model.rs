@@ -86,7 +86,6 @@ pub struct ConnectionConfig {
     /// Sessions reach the database through this SSH server. `host` and `port` above are then
     /// resolved and dialed by that server.
     pub ssh: Option<SshTunnel>,
-    /// `None` is not set.
     pub environment: Option<Environment>,
 }
 
