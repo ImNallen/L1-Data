@@ -16,6 +16,7 @@ import type {
   OutputEntry,
   ProviderKind,
   ProviderState,
+  SavedQueries,
   TabId,
   UpdateState,
 } from "../ipc/bindings";
@@ -33,16 +34,18 @@ export type LiveData = {
   chats: Record<ChatId, ChatState>;
   transcripts: Record<ChatId, Record<number, EntrySnapshot>>;
   updates: UpdateState | null;
+  savedQueries: SavedQueries;
 };
 
 type LiveState = LiveData & {
   hydrate(b: BootSnapshot): void;
   hydrateChat(view: ChatView): void;
+  hydrateSaved(queries: SavedQueries): void;
   seedTranscript(id: ChatId): void;
   apply(e: AppEvent): void;
 };
 
-export const emptyLive: LiveData = { connections: {}, consoles: {}, output: {}, historyTail: [], providers: {}, chats: {}, transcripts: {}, updates: null };
+export const emptyLive: LiveData = { connections: {}, consoles: {}, output: {}, historyTail: [], providers: {}, chats: {}, transcripts: {}, updates: null, savedQueries: { rev: 0, items: [] } };
 
 function keepHigher<K extends PropertyKey, V extends { rev: number }, M extends Partial<Record<K, V>>>(map: M, key: K, next: V): M {
   const prev = map[key];
@@ -51,6 +54,10 @@ function keepHigher<K extends PropertyKey, V extends { rev: number }, M extends 
 
 function newerUpdate(prev: UpdateState | null, next: UpdateState): UpdateState {
   return prev && prev.rev >= next.rev ? prev : next;
+}
+
+function newerSaved(prev: SavedQueries, next: SavedQueries): SavedQueries {
+  return prev.rev >= next.rev ? prev : next;
 }
 
 function withChat(s: LiveData, chat: ChatState): LiveData {
@@ -136,6 +143,10 @@ export function applyEvent(s: LiveData, e: AppEvent): LiveData {
       const { kind: _, ...state } = e;
       return { ...s, updates: newerUpdate(s.updates, state) };
     }
+    case "SavedQueriesChanged": {
+      const { kind: _, ...queries } = e;
+      return hydrateSavedLive(s, queries);
+    }
     default: {
       const unreachable: never = e;
       return unreachable;
@@ -149,7 +160,12 @@ export function hydrateLive(s: LiveData, b: BootSnapshot): LiveData {
   for (const c of b.consoles) next = { ...next, consoles: keepHigher(next.consoles, c.tabId, c) };
   for (const p of b.providers) next = { ...next, providers: keepHigher(next.providers, p.provider, p) };
   for (const c of b.chats) next = withChat(next, c);
-  return { ...next, updates: newerUpdate(next.updates, b.updates) };
+  return { ...next, updates: newerUpdate(next.updates, b.updates), savedQueries: newerSaved(next.savedQueries, b.savedQueries) };
+}
+
+export function hydrateSavedLive(s: LiveData, queries: SavedQueries): LiveData {
+  const savedQueries = newerSaved(s.savedQueries, queries);
+  return savedQueries === s.savedQueries ? s : { ...s, savedQueries };
 }
 
 export function hydrateChatLive(s: LiveData, view: ChatView): LiveData {
@@ -167,6 +183,7 @@ export const useLive = create<LiveState>()((set) => ({
   ...emptyLive,
   hydrate: (b) => set((s) => hydrateLive(s, b)),
   hydrateChat: (view) => set((s) => hydrateChatLive(s, view)),
+  hydrateSaved: (queries) => set((s) => hydrateSavedLive(s, queries)),
   seedTranscript: (id) => set((s) => seedTranscriptLive(s, id)),
   apply: (e) => set((s) => applyEvent(s, e)),
 }));

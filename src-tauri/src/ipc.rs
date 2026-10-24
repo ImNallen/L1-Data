@@ -211,6 +211,30 @@ pub fn history_clear(engine: State<'_, Arc<Engine>>) {
 
 #[tauri::command]
 #[specta::specta]
+pub fn saved_query_save(engine: State<'_, Arc<Engine>>, text: String, target: RunTarget, database_kind: DatabaseKind) -> Result<SaveQueryReply, SavedQueryError> {
+    engine.saved_query_save(&text, target, database_kind)
+}
+
+#[tauri::command]
+#[specta::specta]
+pub fn saved_query_update(engine: State<'_, Arc<Engine>>, id: SavedQueryId, edit: SavedQueryEdit) -> Result<SavedQueries, SavedQueryError> {
+    engine.saved_query_update(id, edit)
+}
+
+#[tauri::command]
+#[specta::specta]
+pub fn saved_query_delete(engine: State<'_, Arc<Engine>>, id: SavedQueryId) -> Result<SavedQueries, SavedQueryError> {
+    engine.saved_query_delete(id)
+}
+
+#[tauri::command]
+#[specta::specta]
+pub fn saved_query_used(engine: State<'_, Arc<Engine>>, id: SavedQueryId) -> Result<SavedQueries, SavedQueryError> {
+    engine.saved_query_used(id)
+}
+
+#[tauri::command]
+#[specta::specta]
 pub fn workspace_save(engine: State<'_, Arc<Engine>>, workspace: Workspace) {
     engine.save_workspace(workspace)
 }

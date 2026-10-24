@@ -1081,6 +1081,64 @@ pub enum HistoryError {
     Unavailable { message: String },
 }
 
+/// Rowid of `saved_queries`. AUTOINCREMENT, so a deleted id is never reissued and a late click on
+/// a deleted entry cannot act on a newer one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Type)]
+pub struct SavedQueryId(pub i64);
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct SavedQuery {
+    pub id: SavedQueryId,
+    pub name: String,
+    pub sql: String,
+    pub database_kind: DatabaseKind,
+    /// Derived on read, never stored: the SQL after its leading comments, cut to 180 characters.
+    pub excerpt: String,
+    pub created_at_ms: i64,
+    /// Set at creation and by `saved_query_used`. An edit leaves it alone, so an edit never
+    /// reorders the list.
+    pub used_at_ms: i64,
+}
+
+/// Every readable saved query, most recently used first. `rev` rises with every write that
+/// changes a row.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct SavedQueries {
+    pub rev: u64,
+    pub items: Vec<SavedQuery>,
+}
+
+#[derive(Debug, Clone, Deserialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct SavedQueryEdit {
+    /// Blank means "name it from the SQL", the default a new query gets.
+    pub name: String,
+    pub sql: String,
+}
+
+#[derive(Debug, Clone, Serialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct SaveQueryReply {
+    pub id: SavedQueryId,
+    /// The same text in the same dialect was already saved. `id` is that entry, and nothing was
+    /// written.
+    pub already_saved: bool,
+    pub queries: SavedQueries,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Type)]
+#[serde(tag = "kind", rename_all_fields = "camelCase")]
+pub enum SavedQueryError {
+    /// The cursor is on no statement, or the selection or the edited SQL is blank.
+    NothingToSave,
+    TooLong { limit_bytes: u32 },
+    /// An edit of an id that no longer exists. Delete and use never return it.
+    NotFound,
+    Store { message: String },
+}
+
 /// Owned by the frontend, stored verbatim by the engine (single writer: the UI).
 #[derive(Debug, Clone, Default, Serialize, Deserialize, Type)]
 #[serde(rename_all = "camelCase")]
@@ -1468,6 +1526,7 @@ pub struct BootSnapshot {
     /// Stored chats, newest first, at most 200.
     pub chats: Vec<ChatState>,
     pub updates: UpdateState,
+    pub saved_queries: SavedQueries,
 }
 
 #[derive(Debug, Clone, Serialize, Type)]
@@ -1486,6 +1545,7 @@ pub enum AppEvent {
     /// Coalesced to at most 20/s per chat while a text block streams.
     ChatEntryChanged(EntrySnapshot),
     UpdateChanged(UpdateState),
+    SavedQueriesChanged(SavedQueries),
 }
 
 #[derive(Debug, Clone, Serialize, Type)]
