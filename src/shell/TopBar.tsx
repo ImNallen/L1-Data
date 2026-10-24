@@ -78,12 +78,13 @@ export function TopBar({ hosted }: { hosted: HostedWindow | null }) {
 
   // Each segment after the connection sits in a zero-basis box that gets only the room left over, so the tab title
   // truncates first, then the database, and the connection name last. The boxes clip their own separators, so an
-  // empty one takes no room from the connection.
+  // empty one takes no room from the connection. The top padding matches the bottom border, so the items stay level
+  // with the sidebar header and the traffic lights.
   return (
     <header
       data-tauri-drag-region="deep"
       className={cx(
-        "@container flex h-[52px] shrink-0 items-center gap-2 border-b-2",
+        "@container flex h-[52px] shrink-0 items-center gap-2 border-b-2 pt-[2px]",
         environment === "Production" ? "border-danger" : "border-transparent",
         windowEdgeInset(hosted),
         layout.sidebar ? "pl-4" : windowLeadingInset(hosted),
