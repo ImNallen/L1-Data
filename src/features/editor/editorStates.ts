@@ -212,6 +212,7 @@ function createState(text: string): EditorState {
       runTargetField,
       runTargetLayer,
       selectingClass,
+      EditorView.contentAttributes.of({ "aria-label": "SQL editor" }),
       editorTheme,
       editorHighlighting,
       functionCallStyle,
