@@ -1,8 +1,8 @@
 import * as Menu from "@radix-ui/react-dropdown-menu";
 import { ChevronDownIcon, ListIndentIncreaseIcon, PlayIcon, SquareIcon } from "lucide-react";
-import { ConnectionColorDot } from "../features/connections/connectionColors";
+import { ConnectionColorDot, EnvironmentChip } from "../features/connections/connectionColors";
 import { cancelActive, endTransaction, formatActive, runOrChoose, setTabMode, setTabTarget } from "../features/editor/runActions";
-import type { ConnectionState, DatabaseRef, Environment, TransactionLoss, TxnMode } from "../ipc/bindings";
+import type { ConnectionState, DatabaseRef, TransactionLoss, TxnMode } from "../ipc/bindings";
 import { homeDb } from "../state/dbKey";
 import { instanceOf, useLive } from "../state/live";
 import { canCancel, connectionTone, hasUncommittedWork, isBusy } from "../state/status";
@@ -16,14 +16,6 @@ const LOSS_LABEL: Record<TransactionLoss, { label: string; title: string } | nul
   None: null,
   RolledBack: { label: "rolled back", title: "Transaction rolled back: connection lost" },
   Unknown: { label: "session reset", title: "Session reset. Earlier commits remain committed; the last transaction outcome may be unknown." },
-};
-
-/** Local and an unset environment draw nothing, so a chip always means a shared server. A 6% fill keeps the label at
- * 4.5:1 in L1 Light. */
-const ENVIRONMENT_CHIP: Record<Environment, string | null> = {
-  Local: null,
-  Staging: "bg-amber/6 text-amber",
-  Production: "bg-danger/6 text-danger",
 };
 
 const TARGET_TRIGGER = "flex h-7 min-w-0 items-center gap-1 rounded-md px-1 text-ui-14 hover:bg-hover data-[state=open]:bg-hover";
@@ -74,7 +66,6 @@ export function TopBar({ hosted }: { hosted: HostedWindow | null }) {
   const sqlServer = config?.databaseKind === "SqlServer";
   const loss = liveConsole?.session.kind === "Lost" ? LOSS_LABEL[liveConsole.session.transaction] : null;
   const environment = config?.environment ?? null;
-  const chip = environment && ENVIRONMENT_CHIP[environment];
 
   // Each segment after the connection sits in a zero-basis box that gets only the room left over, so the tab title
   // truncates first, then the database, and the connection name last. The boxes clip their own separators, so an
@@ -118,11 +109,7 @@ export function TopBar({ hosted }: { hosted: HostedWindow | null }) {
             <span className="truncate">{config?.name ?? ""}</span>
           </span>
         )}
-        {chip && (
-          <span data-testid="env-chip" className={cx("ml-1.5 inline-flex h-[18px] shrink-0 items-center rounded-sm px-1.5 text-ui-11.5 leading-none font-medium", chip)}>
-            {environment}
-          </span>
-        )}
+        <EnvironmentChip environment={environment} className="ml-1.5" />
         {tab && (
           <div className="flex min-w-0 flex-1 items-center overflow-hidden">
             {db && config && (

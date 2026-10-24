@@ -137,3 +137,17 @@ it("walks the search results the same way, entered from the search box with Down
   expect(screen.queryByTestId("tree-node-prod/shop/public/orders")).toBeNull();
   expect(row("prod/shop/public").getAttribute("aria-expanded")).toBe("false");
 });
+
+it("marks a Production or Staging connection's row and leaves a Local one plain", () => {
+  useWorkspace.setState({
+    configs: {
+      p: { ...connectionConfig("p", "prod"), environment: "Production" },
+      s: { ...connectionConfig("s", "stage"), environment: "Staging" },
+      l: { ...connectionConfig("l", "local"), environment: "Local" },
+    },
+  });
+  render(<Sidebar hosted={null} />);
+  expect(screen.getByTestId("env-chip-prod").textContent).toBe("Production");
+  expect(screen.getByTestId("env-chip-stage").textContent).toBe("Staging");
+  expect(screen.queryByTestId("env-chip-local")).toBeNull();
+});
