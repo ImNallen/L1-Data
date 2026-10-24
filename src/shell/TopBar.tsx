@@ -32,11 +32,9 @@ function Separator() {
 
 function DatabaseMenu({ tab, db }: { tab: Tab; db: DatabaseRef }) {
   const state = useLive((s) => s.connections[db.connectionId]);
-  const environment = useWorkspace((s) => s.configs[db.connectionId]?.environment ?? null);
   return (
     <Menu.Root modal={false}>
       <Menu.Trigger data-testid="tab-database" title={db.database} className={cx(TARGET_TRIGGER, "text-fg")}>
-        <EnvironmentIcon environment={environment} className="mr-0.5" />
         <span className="truncate">{db.database}</span>
         <ChevronDownIcon size={12} className="shrink-0 text-dim" />
       </Menu.Trigger>
@@ -91,6 +89,7 @@ export function TopBar({ hosted }: { hosted: HostedWindow | null }) {
           <Menu.Root modal={false}>
             <Menu.Trigger data-testid="tab-connection" title={config?.name} className={cx(TARGET_TRIGGER, "-ml-1", config ? "text-fg" : "text-dim")}>
               <ConnectionColorDot color={config?.color ?? null} className="mr-0.5" />
+              <EnvironmentIcon environment={environment} className="mr-0.5" />
               <span className="truncate">{config?.name ?? "No connection"}</span>
               <ChevronDownIcon size={12} className="shrink-0 text-dim" />
             </Menu.Trigger>
