@@ -129,6 +129,20 @@ pub fn quote_literal(value: &str) -> String {
     format!("'{}'", value.replace('\'', "''"))
 }
 
+pub fn quote_ident_in(kind: DatabaseKind, name: &str) -> String {
+    match kind {
+        DatabaseKind::Postgres => quote_ident(name),
+        DatabaseKind::SqlServer => sql::tsql::quote_ident(name),
+    }
+}
+
+pub fn quote_literal_in(kind: DatabaseKind, value: &str) -> String {
+    match kind {
+        DatabaseKind::Postgres => quote_literal(value),
+        DatabaseKind::SqlServer => sql::tsql::quote_literal(value),
+    }
+}
+
 fn like_pattern(value: &str, prefix_only: bool) -> String {
     let escaped = value.replace('\\', "\\\\").replace('%', "\\%").replace('_', "\\_");
     quote_literal(&if prefix_only { format!("{escaped}%") } else { format!("%{escaped}%") })

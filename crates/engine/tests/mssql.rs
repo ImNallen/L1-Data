@@ -144,7 +144,7 @@ async fn catalogs_details_browse_counts_and_exact_text_use_sql_server() {
     let text_index = result.columns.iter().position(|c| c.name == "text_value").unwrap();
     assert!(rows[0][text_index].as_ref().unwrap().chars().count() < 3000);
     let path = h._dir.path().join("exact.csv");
-    h.engine.export_csv(result.r#ref, path.clone()).await.unwrap();
+    h.engine.result_export(result.r#ref, ExportFormat::Csv, ExportScope::Loaded, path.display().to_string()).await.unwrap();
     let csv = std::fs::read_to_string(path).unwrap();
     assert!(csv.contains("12345678901234567890.123456789012"));
     assert!(csv.contains(&"😀".repeat(3000)));

@@ -169,7 +169,18 @@ export function disconnectErrorText(e: DisconnectError): string {
 }
 
 export function exportErrorText(e: ExportError): string {
-  return e.kind === "Gone" ? "This result is gone. Run the query again to export it." : e.message;
+  switch (e.kind) {
+    case "Gone":
+      return "This result is gone. Run the query again to export it.";
+    case "Io":
+      return e.message;
+    case "NotRerunnable":
+      return "Only a read statement runs again to export every row.";
+    default: {
+      const unreachable: never = e;
+      return unreachable;
+    }
+  }
 }
 
 const megabytes = (bytes: number) => `${Number((bytes / (1024 * 1024)).toFixed(1))} MB`;

@@ -845,11 +845,32 @@ pub struct QueryError {
     pub position: Option<DocOffset>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Type)]
+pub enum ExportFormat {
+    /// RFC 4180 with CRLF and a header row, NULL as an empty field, as `COPY … CSV` writes it.
+    Csv,
+    /// An array of objects keyed by column name, one per line. Values are typed by `TypeCategory`.
+    Json,
+    /// A GitHub table.
+    Markdown,
+    /// One `INSERT` per row, quoted for the result's dialect.
+    SqlInsert,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Type)]
+pub enum ExportScope {
+    /// The rows the engine holds for the result, capped by the row and size limits.
+    Loaded,
+    /// Every row: the result's source runs again on its tab's session and streams to the file.
+    All,
+}
+
 #[derive(Debug, Clone, Serialize, Type)]
 #[serde(rename_all = "camelCase")]
 pub struct ExportSummary {
     pub rows: u64,
     pub bytes: u64,
+    /// The loaded rows stopped at the row or size limit. Always false for `All`.
     pub truncated: bool,
 }
 
@@ -1705,11 +1726,16 @@ pub enum CountError {
     Failed { message: String },
 }
 
+/// Every variant leaves the file at the chosen path as it was.
 #[derive(Debug, Clone, Serialize, Type)]
 #[serde(tag = "kind", rename_all_fields = "camelCase")]
 pub enum ExportError {
+    /// A newer run replaced the result, or its tab closed.
     Gone,
+    /// The file could not be created, written, synced, or moved into place.
     Io { message: String },
+    /// `All` for a result whose `allRows` is `Refused`.
+    NotRerunnable,
 }
 
 #[derive(Debug, Clone, Serialize, Type)]

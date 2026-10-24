@@ -1,6 +1,5 @@
 use std::any::Any;
 use std::panic::AssertUnwindSafe;
-use std::path::PathBuf;
 
 use engine::Engine;
 use engine::model::*;
@@ -126,7 +125,7 @@ routes! { e;
     console_close(tab_id: TabId, force: bool) => e.console_close(tab_id, force).await;
     result_page(result_ref: ResultRef, start: u32, len: u32) => e.result_page(result_ref, start, len);
     result_cell(result_ref: ResultRef, row: u32, col: u16) => e.result_cell(result_ref, row, col);
-    result_export_csv(result_ref: ResultRef, path: String) => e.export_csv(result_ref, PathBuf::from(path)).await;
+    result_export(result_ref: ResultRef, format: ExportFormat, scope: ExportScope, path: String) => e.result_export(result_ref, format, scope, path).await;
     file_open(path: String) => e.file_open(path).await;
     file_save(target: SaveTarget, text: String) => e.file_save(target, text).await;
     history_list(query: HistoryQuery) => ok(e.history(query));

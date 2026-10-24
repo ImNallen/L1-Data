@@ -32,7 +32,7 @@ export const commands = {
 	consoleClose: (tabId: TabId, force: boolean) => typedError<null, DisconnectError>(__TAURI_INVOKE("console_close", { tabId, force })),
 	resultPage: (resultRef: ResultRef, start: number, len: number) => typedError<RowPage, ResultError>(__TAURI_INVOKE("result_page", { resultRef, start, len })),
 	resultCell: (resultRef: ResultRef, row: number, col: number) => typedError<string | null, ResultError>(__TAURI_INVOKE("result_cell", { resultRef, row, col })),
-	resultExportCsv: (resultRef: ResultRef, path: string) => typedError<ExportSummary, ExportError>(__TAURI_INVOKE("result_export_csv", { resultRef, path })),
+	resultExport: (resultRef: ResultRef, format: ExportFormat, scope: ExportScope, path: string) => typedError<ExportSummary, ExportError>(__TAURI_INVOKE("result_export", { resultRef, format, scope, path })),
 	fileOpen: (path: string) => typedError<FileOpened, FileReadError>(__TAURI_INVOKE("file_open", { path })),
 	fileSave: (target: SaveTarget, text: string) => typedError<FileSaved, FileWriteError>(__TAURI_INVOKE("file_save", { target, text })),
 	historyList: (query: HistoryQuery) => __TAURI_INVOKE<HistoryPage>("history_list", { query }),
@@ -489,11 +489,35 @@ export type EntrySnapshot = {
 
 export type ExecutionUnitKind = "Statement" | "Batch";
 
-export type ExportError = { kind: "Gone" } | { kind: "Io"; message: string };
+/**  Every variant leaves the file at the chosen path as it was. */
+export type ExportError = 
+/**  A newer run replaced the result, or its tab closed. */
+{ kind: "Gone" } | 
+/**  The file could not be created, written, synced, or moved into place. */
+{ kind: "Io"; message: string } | 
+/**  `All` for a result whose `allRows` is `Refused`. */
+{ kind: "NotRerunnable" };
+
+export type ExportFormat = 
+/**  RFC 4180 with CRLF and a header row, NULL as an empty field, as `COPY … CSV` writes it. */
+"Csv" | 
+/**  An array of objects keyed by column name, one per line. Values are typed by `TypeCategory`. */
+"Json" | 
+/**  A GitHub table. */
+"Markdown" | 
+/**  One `INSERT` per row, quoted for the result's dialect. */
+"SqlInsert";
+
+export type ExportScope = 
+/**  The rows the engine holds for the result, capped by the row and size limits. */
+"Loaded" | 
+/**  Every row: the result's source runs again on its tab's session and streams to the file. */
+"All";
 
 export type ExportSummary = {
 	rows: number,
 	bytes: number,
+	/**  The loaded rows stopped at the row or size limit. Always false for `All`. */
 	truncated: boolean,
 };
 

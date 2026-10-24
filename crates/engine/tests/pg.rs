@@ -286,6 +286,12 @@ impl Harness {
         }
     }
 
+    async fn export(&self, meta: &ResultMeta, format: ExportFormat, scope: ExportScope, name: &str) -> (ExportSummary, String) {
+        let path = self.dir.path().join(name);
+        let summary = self.engine.result_export(meta.r#ref, format, scope, path.display().to_string()).await.unwrap();
+        (summary, std::fs::read_to_string(path).unwrap())
+    }
+
     async fn oracle(&self) -> tokio_postgres::Client {
         let (client, connection) = tokio_postgres::connect(&url(), NoTls).await.unwrap();
         tokio::spawn(connection);
@@ -797,7 +803,7 @@ async fn csv_export_matches_copy_csv() {
     let state = h.run_ok(tab, sql).await;
     let meta = Harness::result(&state, 0);
     let path = h.dir.path().join("zoo.csv");
-    let summary = h.engine.export_csv(meta.r#ref, path.clone()).await.unwrap();
+    let summary = h.engine.result_export(meta.r#ref, ExportFormat::Csv, ExportScope::Loaded, path.display().to_string()).await.unwrap();
     let ours = std::fs::read_to_string(&path).unwrap();
     assert_eq!(summary.rows, 2);
     assert_eq!(summary.bytes, ours.len() as u64);
@@ -808,7 +814,52 @@ async fn csv_export_matches_copy_csv() {
     let chunks: Vec<bytes::Bytes> = stream.try_collect().await.unwrap();
     let theirs = String::from_utf8(chunks.concat()).unwrap();
     assert_eq!(ours.replace("\r\n", "\n"), theirs);
-    assert!(matches!(h.engine.export_csv(ResultRef { index: 9, ..meta.r#ref }, path).await, Err(ExportError::Gone)));
+    assert!(matches!(h.engine.result_export(ResultRef { index: 9, ..meta.r#ref }, ExportFormat::Csv, ExportScope::Loaded, path.display().to_string()).await, Err(ExportError::Gone)));
+}
+
+#[tokio::test]
+async fn loaded_exports_type_json_draw_markdown_and_round_trip_inserts() {
+    let mut h = Harness::start().await;
+    let tab = h.sql_tab(TxnMode::AutoCommit).await;
+    let state = h.run_ok(tab, "select * from lab.type_zoo order by id").await;
+    let meta = Harness::result(&state, 0);
+
+    let (summary, json) = h.export(&meta, ExportFormat::Json, ExportScope::Loaded, "zoo.json").await;
+    assert_eq!((summary.rows, summary.bytes, summary.truncated), (2, json.len() as u64, false));
+    for exact in [r#""i8":9007199254740993"#, r#""n":12345678901234567890.123456789"#, r#""f8":"-Infinity""#, r#""f4":"NaN""#] {
+        assert!(json.contains(exact), "{exact} in {json}");
+    }
+    let rows: Vec<serde_json::Value> = serde_json::from_str(&json).unwrap();
+    assert_eq!((&rows[0]["b"], &rows[0]["jb"], &rows[0]["arr_t"]), (&serde_json::json!(true), &serde_json::json!({ "b": [1, 2, 3] }), &serde_json::json!(r#"{a,"b c"}"#)));
+    assert_eq!((&rows[1]["b"], &rows[1]["j"], &rows[1]["t"]), (&serde_json::Value::Null, &serde_json::Value::Null, &serde_json::json!("")));
+
+    let (_, md) = h.export(&meta, ExportFormat::Markdown, ExportScope::Loaded, "zoo.md").await;
+    let lines: Vec<&str> = md.lines().collect();
+    assert_eq!(lines.len(), 4);
+    assert!(lines[0].starts_with("| id | b | i2 | i8 | f4 |"), "{}", lines[0]);
+    assert!(lines[1].starts_with("| ---: | --- | ---: | ---: | ---: |"), "{}", lines[1]);
+    assert!(lines[3].starts_with("| 2 | NULL | NULL | NULL | NaN | -Infinity | NULL |  |"), "{}", lines[3]);
+
+    let (_, script) = h.export(&meta, ExportFormat::SqlInsert, ExportScope::Loaded, "zoo.sql").await;
+    assert!(script.lines().all(|l| l.starts_with(r#"INSERT INTO "lab"."type_zoo" ("id", "b", "i2", "#)), "{script}");
+    let copy = unique("zoo_copy");
+    let oracle = h.oracle().await;
+    oracle.batch_execute(&format!("create table lab.{copy} (like lab.type_zoo)")).await.unwrap();
+    let loaded = oracle.batch_execute(&script.replace(r#""lab"."type_zoo""#, &format!("lab.{copy}"))).await;
+    let text = async |table: &str| -> Vec<String> {
+        oracle.query(&format!("select t::text from lab.{table} t order by id"), &[]).await.unwrap().iter().map(|r| r.get(0)).collect()
+    };
+    let (copied, original) = (text(&copy).await, text("type_zoo").await);
+    oracle.batch_execute(&format!("drop table lab.{copy}")).await.unwrap();
+    loaded.unwrap();
+    assert_eq!(copied, original, "the INSERT script rebuilds every awkward value");
+
+    let state = h.run_ok(tab, "select o.id as order_id, 'x' as label from public.orders o order by o.id limit 1").await;
+    let (_, placeholder) = h.export(&Harness::result(&state, 0), ExportFormat::SqlInsert, ExportScope::Loaded, "computed.sql").await;
+    assert_eq!(placeholder, "INSERT INTO target_table (\"order_id\", \"label\") VALUES (1, 'x');\n", "a computed column has no single source table");
+    let state = h.run_ok(tab, "select id as order_id from public.orders order by id limit 1").await;
+    let (_, aliased) = h.export(&Harness::result(&state, 0), ExportFormat::SqlInsert, ExportScope::Loaded, "aliased.sql").await;
+    assert_eq!(aliased, "INSERT INTO \"public\".\"orders\" (\"id\") VALUES (1);\n", "the table's own column name, not the alias");
 }
 
 #[tokio::test]

@@ -1,19 +1,19 @@
 use super::tsql::quote_literal;
 use crate::model::ColumnInfo;
 
-fn base_type(column: &ColumnInfo) -> &str {
-    column.type_display.split('(').next().unwrap_or(&column.type_display)
+fn base_type(native: &str) -> &str {
+    native.split('(').next().unwrap_or(native)
 }
 
-fn input_sql(column: &ColumnInfo, value: &str) -> Result<String, String> {
+/// Date and time convert with an explicit style, so DATEFORMAT cannot change them.
+pub(crate) fn input_sql(native: &str, value: &str) -> Result<String, String> {
     let expression = quote_literal(value);
-    let native = column.type_display.as_str();
-    let base = base_type(column);
+    let base = base_type(native);
     let bound = native.strip_suffix(')').and_then(|s| s.split_once('(')).and_then(|(_, n)| n.parse::<usize>().ok());
     match base {
         "char" | "varchar" | "nchar" | "nvarchar" | "text" | "ntext" => {
             if matches!(base, "nchar" | "nvarchar") && bound.is_some_and(|n| value.encode_utf16().count() > n) {
-                return Err(format!("Text value exceeds the capacity of {} ({native})", column.name));
+                return Err(format!("Text value exceeds the capacity of {native}"));
             }
             Ok(expression)
         }
@@ -24,7 +24,7 @@ fn input_sql(column: &ColumnInfo, value: &str) -> Result<String, String> {
             }
             let bound = if matches!(base, "timestamp" | "rowversion") { Some(8) } else { bound };
             if bound.is_some_and(|n| hex.len() / 2 > n) {
-                return Err(format!("Binary value exceeds the capacity of {} ({native})", column.name));
+                return Err(format!("Binary value exceeds the capacity of {native}"));
             }
             Ok(format!("CONVERT(varbinary(max), {expression}, 1)"))
         }
@@ -38,15 +38,16 @@ fn input_sql(column: &ColumnInfo, value: &str) -> Result<String, String> {
 }
 
 pub(crate) fn comparison_sql(column: &ColumnInfo, expression: &str, value: &str) -> Result<(String, String), String> {
-    match base_type(column) {
+    let input = || input_sql(&column.type_display, value).map_err(|e| format!("{}: {e}", column.name));
+    match base_type(&column.type_display) {
         "text" | "ntext" | "xml" => Ok((format!("CONVERT(nvarchar(max), {expression})"), quote_literal(value))),
-        "image" => Ok((format!("CONVERT(varbinary(max), {expression})"), input_sql(column, value)?)),
-        _ => Ok((expression.into(), input_sql(column, value)?)),
+        "image" => Ok((format!("CONVERT(varbinary(max), {expression})"), input()?)),
+        _ => Ok((expression.into(), input()?)),
     }
 }
 
 pub(crate) fn display_sql(column: &ColumnInfo, expression: &str) -> Result<String, String> {
-    let display = match base_type(column) {
+    let display = match base_type(&column.type_display) {
         "binary" | "varbinary" | "image" | "timestamp" | "rowversion" => {
             format!("CONVERT(varchar(max), CONVERT(varbinary(max), {expression}), 1)")
         }

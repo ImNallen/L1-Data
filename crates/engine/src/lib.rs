@@ -2,6 +2,7 @@ mod assistant;
 mod catalog;
 mod connection;
 mod console;
+mod export;
 mod files;
 mod history;
 pub mod model;
@@ -1471,17 +1472,10 @@ impl Engine {
         set.cell(row, col).ok_or(ResultError::OutOfRange)
     }
 
-    pub async fn export_csv(&self, r: ResultRef, path: PathBuf) -> Result<ExportSummary, ExportError> {
-        let set = self.shared.result_set(r).ok_or(ExportError::Gone)?;
-        self.shared.runtime.spawn_blocking(move || {
-            let file = std::fs::File::create(&path)?;
-            let mut out = std::io::BufWriter::new(file);
-            let summary = set.write_csv(&mut out)?;
-            Ok::<_, std::io::Error>(ExportSummary { rows: summary.rows, bytes: summary.bytes, truncated: summary.truncated })
-        })
-        .await
-        .map_err(|e| ExportError::Io { message: e.to_string() })?
-        .map_err(|e| ExportError::Io { message: e.to_string() })
+    /// Writes one result to `path` as `format`. The file appears at `path` only when complete, and
+    /// every error leaves `path` as it was.
+    pub async fn result_export(&self, r: ResultRef, format: ExportFormat, scope: ExportScope, path: String) -> Result<ExportSummary, ExportError> {
+        export::export(&self.shared, r, format, scope, path).await
     }
 
     pub async fn file_open(&self, path: String) -> Result<FileOpened, FileReadError> {

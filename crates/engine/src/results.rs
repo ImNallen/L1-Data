@@ -1,4 +1,3 @@
-use std::io::{self, Write};
 use std::sync::RwLock;
 
 use crate::model::{ColumnMeta, DatabaseKind, DatabaseRef, ResultMeta, ResultRef, RowPage, TruncateReason};
@@ -131,27 +130,19 @@ impl ResultSet {
         Some(a.cell(row as usize, col as usize).map(str::to_owned))
     }
 
-    pub fn write_csv(&self, out: &mut impl Write) -> io::Result<CsvSummary> {
+    /// Calls `f` with each stored row's cells under one read lock, and returns the row count and
+    /// whether the result stopped at a limit.
+    pub fn each_row<E>(&self, mut f: impl FnMut(&[Option<&str>]) -> Result<(), E>) -> Result<(u64, bool), E> {
         let a = self.data.read().unwrap();
-        let mut w = CountingWriter { inner: out, bytes: 0 };
-        write_record(&mut w, self.columns.iter().map(|c| Some(c.name.as_str())))?;
         let rows = a.row_count();
+        let mut cells = Vec::with_capacity(a.ncols);
         for r in 0..rows as usize {
-            write_record(&mut w, (0..a.ncols).map(|c| a.cell(r, c)))?;
+            cells.clear();
+            cells.extend((0..a.ncols).map(|c| a.cell(r, c)));
+            f(&cells)?;
         }
-        w.flush()?;
-        Ok(CsvSummary {
-            rows: rows as u64,
-            bytes: w.bytes,
-            truncated: a.truncated.is_some(),
-        })
+        Ok((u64::from(rows), a.truncated.is_some()))
     }
-}
-
-pub struct CsvSummary {
-    pub rows: u64,
-    pub bytes: u64,
-    pub truncated: bool,
 }
 
 impl Arena {
@@ -162,41 +153,6 @@ impl Arena {
     fn cell(&self, row: usize, col: usize) -> Option<&str> {
         let (start, len) = self.cells[row * self.ncols + col];
         (len != NULL).then(|| &self.text[start as usize..(start + len) as usize])
-    }
-}
-
-fn write_record<'a>(w: &mut impl Write, cells: impl Iterator<Item = Option<&'a str>>) -> io::Result<()> {
-    for (i, cell) in cells.enumerate() {
-        if i > 0 {
-            w.write_all(b",")?;
-        }
-        match cell {
-            None => {}
-            Some(s) if s.is_empty() || s.contains(['"', ',', '\r', '\n']) => {
-                w.write_all(b"\"")?;
-                w.write_all(s.replace('"', "\"\"").as_bytes())?;
-                w.write_all(b"\"")?;
-            }
-            Some(s) => w.write_all(s.as_bytes())?,
-        }
-    }
-    w.write_all(b"\r\n")
-}
-
-struct CountingWriter<'a, W: Write> {
-    inner: &'a mut W,
-    bytes: u64,
-}
-
-impl<W: Write> Write for CountingWriter<'_, W> {
-    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
-        let n = self.inner.write(buf)?;
-        self.bytes += n as u64;
-        Ok(n)
-    }
-
-    fn flush(&mut self) -> io::Result<()> {
-        self.inner.flush()
     }
 }
 
@@ -270,17 +226,5 @@ mod tests {
         let meta = rs.meta();
         assert_eq!((meta.row_count, meta.rows_seen, meta.truncated), (1, 3, Some(TruncateReason::ByteLimit)));
         assert_eq!(rs.cell(0, 0), Some(Some("abc".into())));
-    }
-
-    #[test]
-    fn csv_quotes_like_copy_csv() {
-        let rs = set(3);
-        rs.push_row([Some("plain"), None, Some("")].into_iter(), &NO_CAPS);
-        rs.push_row([Some("a,b"), Some("say \"hi\""), Some("line\nbreak")].into_iter(), &NO_CAPS);
-        let mut out = Vec::new();
-        let summary = rs.write_csv(&mut out).unwrap();
-        let csv = String::from_utf8(out).unwrap();
-        assert_eq!(csv, "c0,c1,c2\r\nplain,,\"\"\r\n\"a,b\",\"say \"\"hi\"\"\",\"line\nbreak\"\r\n");
-        assert_eq!((summary.rows, summary.bytes, summary.truncated), (2, csv.len() as u64, false));
     }
 }
