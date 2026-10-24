@@ -13,6 +13,7 @@ export const connectionConfig = (id: string, name: string): ConnectionConfig => 
   hasPassword: false,
   color: null,
   ssh: null,
+  environment: null,
 });
 
 export const databaseState = (name: string, shown: boolean, shownSchemas: string[]): DatabaseState => ({

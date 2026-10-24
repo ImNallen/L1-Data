@@ -41,6 +41,7 @@ impl Harness {
                 ca_cert_path: None,
                 color: None,
                 ssh: None,
+                environment: None,
             },
         };
         let config = engine.save_connection(draft).await.unwrap();

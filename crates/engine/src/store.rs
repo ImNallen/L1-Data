@@ -475,6 +475,7 @@ mod tests {
             has_password: true,
             color: None,
             ssh: None,
+            environment: None,
         };
         {
             let s = Store::open(&path).unwrap();

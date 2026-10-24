@@ -15,6 +15,7 @@ const config: ConnectionConfig = {
   hasPassword: false,
   color: null,
   ssh: null,
+  environment: null,
 };
 
 const db = (name: string, over: Partial<DatabaseState> = {}): DatabaseState => ({

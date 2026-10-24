@@ -20,6 +20,7 @@ fn draft(database: &str) -> ConnectionDraft {
         ca_cert_path: None,
         color: None,
         ssh: None,
+        environment: None,
     }
 }
 

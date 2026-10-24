@@ -33,6 +33,7 @@ impl Harness {
                 ca_cert_path: None,
                 color: None,
                 ssh: None,
+                environment: None,
             })
             .await
             .unwrap();
@@ -307,6 +308,7 @@ async fn connection_kind_is_immutable_and_history_records_sql_server() {
         password: PasswordInput::Clear,
         color: None,
         ssh: None,
+        environment: None,
     };
     assert!(matches!(h.engine.save_connection(changed).await, Err(SaveError::Invalid { .. })));
     assert!(h.engine.boot().connections.iter().find(|c| c.id == h.connection).unwrap().has_password);

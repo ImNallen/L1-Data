@@ -320,6 +320,7 @@ function withTableTab(mode: TxnMode = "AutoCommit", color: string | null = null)
     hasPassword: true,
     color,
     ssh: null,
+    environment: null,
   };
   Object.assign(useWorkspace.getInitialState(), { tabs: { t2: tab }, active: "t2", configs: { c: config } });
 }

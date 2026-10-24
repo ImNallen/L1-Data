@@ -15,6 +15,7 @@ const saved: ConnectionConfig = {
   hasPassword: true,
   color: "red",
   ssh: null,
+  environment: null,
 };
 
 const savedFields = { databaseKind: "Postgres", caCertPath: "", name: "shop", host: "db.internal", port: "5433", database: "shop", user: "l1data", sslMode: "Require", color: "red", sshEnabled: false, sshHost: "", sshPort: "22", sshUser: "", sshAuth: "Password", sshKeyPath: "", sshAgentSocket: "" } as const;

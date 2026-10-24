@@ -333,6 +333,8 @@ export type ConnectionConfig = {
 	 *  resolved and dialed by that server.
 	 */
 	ssh: SshTunnel | null,
+	/**  `None` is not set. */
+	environment: Environment | null,
 };
 
 export type ConnectionDraft = {
@@ -349,6 +351,7 @@ export type ConnectionDraft = {
 	password: PasswordInput,
 	color: string | null,
 	ssh: SshTunnelDraft | null,
+	environment: Environment | null,
 };
 
 export type ConnectionId = string;
@@ -510,6 +513,9 @@ export type EntrySnapshot = {
 	turn: number,
 	entry: Entry,
 };
+
+/**  What the user says the connection points at. The UI marks `Production` and asks before a run on it writes. */
+export type Environment = "Local" | "Staging" | "Production";
 
 export type ExecutionUnitKind = "Statement" | "Batch";
 

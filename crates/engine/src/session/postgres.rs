@@ -260,6 +260,7 @@ pub fn draft_from_url(url: &str, name: &str) -> Result<ConnectionDraft, String> 
         password: password.map_or(PasswordInput::Clear, PasswordInput::Set),
         color: None,
         ssh: None,
+        environment: None,
     })
 }
 

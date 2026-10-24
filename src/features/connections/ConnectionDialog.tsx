@@ -328,6 +328,7 @@ function ConnectionForm({
     password: toPasswordInput(password),
     color: fields.color,
     ssh: toSshDraft(fields, sshSecret),
+    environment: existing?.environment ?? null,
   });
 
   const test = async () => {

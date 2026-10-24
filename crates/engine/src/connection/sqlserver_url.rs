@@ -71,6 +71,7 @@ pub(super) fn parse(input: &str, name: &str) -> Result<ConnectionDraft, String> 
         ca_cert_path: None,
         color: None,
         ssh: None,
+        environment: None,
     })
 }
 

@@ -91,6 +91,7 @@ fn postgres(ssh: SshTunnelDraft) -> ConnectionDraft {
         password: PasswordInput::Set("l1data".into()),
         color: None,
         ssh: Some(ssh),
+        environment: None,
     }
 }
 

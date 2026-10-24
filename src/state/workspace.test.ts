@@ -15,6 +15,7 @@ const config = (id: string): ConnectionConfig => ({
   hasPassword: true,
   color: null,
   ssh: null,
+  environment: null,
 });
 
 describe("workspace.upsertConfig", () => {
