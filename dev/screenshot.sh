@@ -51,7 +51,7 @@ def wait_for(what, check):
 		assert time.monotonic() < deadline, f"timed out waiting for {what}"
 		time.sleep(0.2)
 
-draft = {"id": None, "databaseKind": "Postgres", "name": "prod-postgres", "host": "localhost", "port": pg_port, "database": "shop", "user": "l1data", "sslMode": "Prefer", "caCertPath": None, "password": "Clear", "color": None}
+draft = {"id": None, "databaseKind": "Postgres", "name": "prod-postgres", "host": "localhost", "port": pg_port, "database": "shop", "user": "l1data", "sslMode": "Prefer", "caCertPath": None, "password": "Clear", "color": None, "environment": "Production"}
 conn = invoke("connection_save", draft=draft)["id"]
 
 settings = invoke("app_boot")["settings"]
