@@ -15,7 +15,13 @@ afterEach(() => {
   useLive.setState(useLive.getInitialState(), true);
 });
 
-const TAB: Tab = { id: "tab-1", title: "orders_by_region.sql", console: { db: { connectionId: "c1", database: "shop" }, mode: "AutoCommit" }, table: null, file: null };
+const TAB: Tab = {
+  id: "tab-1",
+  title: "orders_by_region.sql",
+  console: { db: { connectionId: "c1", database: "shop" }, mode: "AutoCommit" },
+  table: null,
+  file: null,
+};
 
 const DOC = "-- 🦀 crab\nselect 1;\nselect 2;";
 
@@ -70,8 +76,24 @@ function captureSend() {
 
 it("sends the active tab's text, cursor, and the result its grid shows when attach is on", async () => {
   const sent = captureSend();
-  const run: ConsoleState["run"] = { kind: "Finished", runId: 4, elapsedMs: 30, outcome: "Ok", statements: [{ index: 0, range: { from: 0, to: 9 }, status: { kind: "Finished" }, outputs: [{ kind: "Rows", result: rows(4), state: "Complete" }] }] };
-  showTab(DOC, { tabId: TAB.id, rev: 3, config: { connectionId: "c1", database: "shop", schema: null, mode: "AutoCommit" }, session: { kind: "None" }, txn: "Idle", txnDepth: null, work: null, export: null, run });
+  const run: ConsoleState["run"] = {
+    kind: "Finished",
+    runId: 4,
+    elapsedMs: 30,
+    outcome: "Ok",
+    statements: [{ index: 0, range: { from: 0, to: 9 }, status: { kind: "Finished" }, outputs: [{ kind: "Rows", result: rows(4), state: "Complete" }] }],
+  };
+  showTab(DOC, {
+    tabId: TAB.id,
+    rev: 3,
+    config: { connectionId: "c1", database: "shop", schema: null, mode: "AutoCommit" },
+    session: { kind: "None" },
+    txn: "Idle",
+    txnDepth: null,
+    work: null,
+    export: null,
+    run,
+  });
 
   expect(await sendMessage("chat-1", "Which regions grew?", true)).toBe(true);
   expect(await sendMessage("chat-1", "And without it?", false)).toBe(true);
@@ -80,14 +102,28 @@ it("sends the active tab's text, cursor, and the result its grid shows when atta
       chatId: "chat-1",
       request: {
         text: "Which regions grew?",
-        tab: { tabId: "tab-1", title: "orders_by_region.sql", db: { connectionId: "c1", database: "shop" }, text: DOC, target: { kind: "cursor", offset: 30 }, attach: { tabId: "tab-1", runId: 4, index: 0 } },
+        tab: {
+          tabId: "tab-1",
+          title: "orders_by_region.sql",
+          db: { connectionId: "c1", database: "shop" },
+          text: DOC,
+          target: { kind: "cursor", offset: 30 },
+          attach: { tabId: "tab-1", runId: 4, index: 0 },
+        },
       },
     },
     {
       chatId: "chat-1",
       request: {
         text: "And without it?",
-        tab: { tabId: "tab-1", title: "orders_by_region.sql", db: { connectionId: "c1", database: "shop" }, text: DOC, target: { kind: "cursor", offset: 30 }, attach: null },
+        tab: {
+          tabId: "tab-1",
+          title: "orders_by_region.sql",
+          db: { connectionId: "c1", database: "shop" },
+          text: DOC,
+          target: { kind: "cursor", offset: 30 },
+          attach: null,
+        },
       },
     },
   ]);
@@ -140,7 +176,10 @@ it("reopens a chat once per gap, even when the reopen leaves the gap open and a 
   });
   const stop = startAssistantSync();
   try {
-    useLive.setState({ chats: { [CHAT]: chatAt(5, { kind: "Running", turn: 0, startedAtMs: 1, phase: "Working" }, 1) }, transcripts: { [CHAT]: { 0: notice(0, 1, "first") } } });
+    useLive.setState({
+      chats: { [CHAT]: chatAt(5, { kind: "Running", turn: 0, startedAtMs: 1, phase: "Working" }, 1) },
+      transcripts: { [CHAT]: { 0: notice(0, 1, "first") } },
+    });
     useLive.getState().apply({ kind: "ChatChanged", ...chatAt(6, IDLE, 3) });
     await settle();
     useLive.getState().apply({ kind: "ChatChanged", ...chatAt(102, IDLE, 3) });
@@ -186,7 +225,13 @@ it("deletes a chat only after the user confirms, and says the provider keeps its
   expect(deleted).toEqual([{ chatId: CHAT }]);
 });
 
-const model = (...efforts: string[]): ModelOption => ({ id: "m", label: "M", description: "", recommended: false, efforts: efforts.map((id) => ({ id, label: id })) });
+const model = (...efforts: string[]): ModelOption => ({
+  id: "m",
+  label: "M",
+  description: "",
+  recommended: false,
+  efforts: efforts.map((id) => ({ id, label: id })),
+});
 
 it("keeps the effort across a model switch when the model lists it, else high, else the model's last level, else none", () => {
   expect([

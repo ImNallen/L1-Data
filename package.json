@@ -1,7 +1,7 @@
 {
   "name": "l1-data",
-  "private": true,
   "version": "0.1.0",
+  "private": true,
   "type": "module",
   "scripts": {
     "db:up": "docker compose -f dev/docker-compose.yml up -d --wait",

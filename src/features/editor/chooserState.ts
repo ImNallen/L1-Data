@@ -36,11 +36,12 @@ export function moveChoice(active: Choice, count: number, key: string): Choice |
 const LABEL_MAX = 60;
 
 export function statementLabel(text: string, range: DocRange): string {
-  const line = text
-    .slice(range.from, range.to)
-    .split("\n")
-    .map((l) => l.replace(/\s+/g, " ").trim())
-    .find((l) => l !== "") ?? "";
+  const line =
+    text
+      .slice(range.from, range.to)
+      .split("\n")
+      .map((l) => l.replace(/\s+/g, " ").trim())
+      .find((l) => l !== "") ?? "";
   return line.length > LABEL_MAX ? `${line.slice(0, LABEL_MAX - 1).trimEnd()}…` : line;
 }
 

@@ -54,7 +54,9 @@ export function UsageLimitsSetting() {
         </p>
       )}
       {report === null && !error && <LimitsSkeleton />}
-      {report?.sources.map((s) => <SourceBlock key={s.source} limits={s} now={now} />)}
+      {report?.sources.map((s) => (
+        <SourceBlock key={s.source} limits={s} now={now} />
+      ))}
       <p className="px-1 text-ui-12 text-dim">Limits come from each provider's own account and reset on its schedule.</p>
     </section>
   );

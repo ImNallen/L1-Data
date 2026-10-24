@@ -48,7 +48,11 @@ it("changes to SQL Server syntax before a catalog arrives while retaining the do
   configureSql("t1", undefined, "SqlServer");
   const state = editorStateOf("t1");
   const names: string[] = [];
-  syntaxTree(state).iterate({ enter: (node) => { if (node.from === 18) names.push(node.name); } });
+  syntaxTree(state).iterate({
+    enter: (node) => {
+      if (node.from === 18) names.push(node.name);
+    },
+  });
   expect(names).toContain("QuotedIdentifier");
   expect(state.doc.toString()).toBe("SELECT @name FROM [line items]");
   configureSql("t1", undefined, "Postgres");

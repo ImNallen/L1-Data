@@ -12,7 +12,16 @@ const ratio = (x = "", y = "") => {
 
 it("derives a light and a dark variant for each of the five seeded families", () => {
   expect(derived.map((v) => v.id)).toEqual([
-    "grove-light", "grove-dark", "ocean-light", "ocean-dark", "ember-light", "ember-dark", "iris-light", "iris-dark", "rose-light", "rose-dark",
+    "grove-light",
+    "grove-dark",
+    "ocean-light",
+    "ocean-dark",
+    "ember-light",
+    "ember-dark",
+    "iris-light",
+    "iris-dark",
+    "rose-light",
+    "rose-dark",
   ]);
 });
 

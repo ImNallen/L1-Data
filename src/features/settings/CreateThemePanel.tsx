@@ -67,7 +67,13 @@ export function CreateThemePanel({ initial, onClose }: { initial: ThemeDraft; on
   const name = draft.name.trim();
 
   useEffect(() => {
-    previewTheme({ id: "draft", name: draft.name, appearance: draft.appearance, swatch: { background: draft.colors.background, accent: draft.colors.accent }, palette });
+    previewTheme({
+      id: "draft",
+      name: draft.name,
+      appearance: draft.appearance,
+      swatch: { background: draft.colors.background, accent: draft.colors.accent },
+      palette,
+    });
     // oxlint-disable-next-line react-hooks/exhaustive-deps -- `palette` derives from `draft`
   }, [draft]);
   useEffect(() => () => previewTheme(null), []);
@@ -139,10 +145,7 @@ export function CreateThemePanel({ initial, onClose }: { initial: ThemeDraft; on
                 aria-checked={draft.appearance === a}
                 data-testid={`theme-appearance-${a}`}
                 onClick={() => setAppearance(a)}
-                className={cx(
-                  "h-7 rounded-md px-3 text-ui-12.5 transition-colors",
-                  draft.appearance === a ? "bg-control text-fg" : "text-muted hover:text-fg",
-                )}
+                className={cx("h-7 rounded-md px-3 text-ui-12.5 transition-colors", draft.appearance === a ? "bg-control text-fg" : "text-muted hover:text-fg")}
               >
                 {APPEARANCE_LABEL[a]}
               </button>
@@ -175,7 +178,13 @@ export function CreateThemePanel({ initial, onClose }: { initial: ThemeDraft; on
         <Button variant="ghost" onClick={onClose}>
           Cancel
         </Button>
-        <Button variant="primary" data-testid="create-theme-save" disabled={!name} title={name ? undefined : "Name the theme first"} onClick={() => void create()}>
+        <Button
+          variant="primary"
+          data-testid="create-theme-save"
+          disabled={!name}
+          title={name ? undefined : "Name the theme first"}
+          onClick={() => void create()}
+        >
           <SwatchBookIcon size={14} />
           Create theme
         </Button>

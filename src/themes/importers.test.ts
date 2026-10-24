@@ -74,7 +74,10 @@ it("maps a VS Code theme onto L1 tokens, flattening translucent surfaces onto th
 it("takes the appearance from the manifest's uiTheme, then the theme's type, then the background", () => {
   const theme = asVsCodeTheme({ colors: { "editor.background": "#1e1e1e" } });
   expect(theme && [vsCodeThemeToDraft(theme, "x", "vs").appearance, vsCodeThemeToDraft(theme, "x").appearance]).toEqual(["light", "dark"]);
-  expect(parseThemeFile('{ "type": "light", "colors": { "editor.background": "#000000" } }')).toMatchObject({ ok: true, family: { variants: [{ appearance: "light" }] } });
+  expect(parseThemeFile('{ "type": "light", "colors": { "editor.background": "#000000" } }')).toMatchObject({
+    ok: true,
+    family: { variants: [{ appearance: "light" }] },
+  });
   expect(parseThemeFile('{ "colors": { "editor.background": "#fdf6e3" } }', "solarized-light.json")).toMatchObject({
     ok: true,
     family: { name: "solarized-light", variants: [{ name: "solarized-light", appearance: "light", colors: { background: "#fdf6e3", accent: "#346bf1" } }] },
@@ -111,13 +114,15 @@ it("reads an L1 theme, dropping unknown keys and flattening alpha on opaque toke
     ok: true,
     family: {
       name: "Aurora",
-      variants: [{ name: "Aurora", appearance: "light", colors: { background: "#ffffff", accent: "#7c3aed", sidebar: "#7f7f7f", codeSearchMatch: "#ffcc0040" } }],
+      variants: [
+        { name: "Aurora", appearance: "light", colors: { background: "#ffffff", accent: "#7c3aed", sidebar: "#7f7f7f", codeSearchMatch: "#ffcc0040" } },
+      ],
     },
   });
 });
 
 it.each([
-  ["{ \"colors\": { ", "Invalid JSON on line 1: CloseBraceExpected."],
+  ['{ "colors": { ', "Invalid JSON on line 1: CloseBraceExpected."],
   ['{\n  "version": 1,\n  "name": }', "Invalid JSON on line 3: ValueExpected."],
   ["[1, 2]", "Not a theme: expected an L1 theme or a VS Code color theme."],
   ['{ "hello": "world" }', "Not a theme: expected an L1 theme or a VS Code color theme."],

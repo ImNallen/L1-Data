@@ -1,5 +1,18 @@
 {
   "$schema": "./node_modules/oxfmt/configuration_schema.json",
   "printWidth": 160,
-  "ignorePatterns": ["/.audit/", "/.github/", "/crates/", "/dev/", "/docs/", "/src-tauri/", "/vendor/", "/Cargo.lock", "/Cargo.toml", "/pnpm-lock.yaml", "/src/ipc/bindings.ts", "*.md"]
+  "ignorePatterns": [
+    "/.audit/",
+    "/.github/",
+    "/crates/",
+    "/dev/",
+    "/docs/",
+    "/src-tauri/",
+    "/vendor/",
+    "/Cargo.lock",
+    "/Cargo.toml",
+    "/pnpm-lock.yaml",
+    "/src/ipc/bindings.ts",
+    "*.md"
+  ]
 }

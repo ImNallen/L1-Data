@@ -33,13 +33,16 @@ export function useTableOrder(tab: TableTab | null): TableSortKey[] {
   const key = JSON.stringify([db, schema, table, catalogVersion, orderBy]);
   useEffect(() => {
     let stale = false;
-    if (db && schema !== undefined && table !== undefined && orderBy !== undefined) void commands.tableOrder(db, schema, table, orderBy, { kind: "Inspect" }).then((res) => {
-      if (!stale && res.status === "ok") setView({ key, value: res.data });
-    });
-    return () => { stale = true; };
+    if (db && schema !== undefined && table !== undefined && orderBy !== undefined)
+      void commands.tableOrder(db, schema, table, orderBy, { kind: "Inspect" }).then((res) => {
+        if (!stale && res.status === "ok") setView({ key, value: res.data });
+      });
+    return () => {
+      stale = true;
+    };
     // oxlint-disable-next-line react-hooks/exhaustive-deps -- `key` encodes every input, and `db` is a new object on every render
   }, [key]);
-  return view?.key === key ? view.value.keys ?? [] : [];
+  return view?.key === key ? (view.value.keys ?? []) : [];
 }
 
 type OrderQueue = { query: TableQuery; tail: Promise<void> };
@@ -49,10 +52,28 @@ export function cycleTableOrder(tab: TableTab, column: string, additive: boolean
   const queue = orderQueues.get(tab.id) ?? { query: tab.table.query, tail: Promise.resolve() };
   const write = queue.tail.then(async () => {
     const current = useWorkspace.getState().tabs[tab.id];
-    if (!isTableTab(current) || !sameDb(current.console.db, tab.console.db) || current.table.schema !== tab.table.schema || current.table.table !== tab.table.table || current.table.query !== queue.query) return;
-    const res = await commands.tableOrder(current.console.db, current.table.schema, current.table.table, queue.query.orderBy, { kind: "Cycle", column, additive });
+    if (
+      !isTableTab(current) ||
+      !sameDb(current.console.db, tab.console.db) ||
+      current.table.schema !== tab.table.schema ||
+      current.table.table !== tab.table.table ||
+      current.table.query !== queue.query
+    )
+      return;
+    const res = await commands.tableOrder(current.console.db, current.table.schema, current.table.table, queue.query.orderBy, {
+      kind: "Cycle",
+      column,
+      additive,
+    });
     const latest = useWorkspace.getState().tabs[tab.id];
-    if (!isTableTab(latest) || !sameDb(latest.console.db, current.console.db) || latest.table.schema !== current.table.schema || latest.table.table !== current.table.table || latest.table.query !== queue.query) return;
+    if (
+      !isTableTab(latest) ||
+      !sameDb(latest.console.db, current.console.db) ||
+      latest.table.schema !== current.table.schema ||
+      latest.table.table !== current.table.table ||
+      latest.table.query !== queue.query
+    )
+      return;
     if (res.status === "error") return useWorkspace.getState().notify(res.error);
     if (res.data.sql !== queue.query.orderBy) {
       queue.query = { ...queue.query, orderBy: res.data.sql };
@@ -62,7 +83,9 @@ export function cycleTableOrder(tab: TableTab, column: string, additive: boolean
   const tail = write.catch(() => {});
   queue.tail = tail;
   orderQueues.set(tab.id, queue);
-  void tail.then(() => { if (orderQueues.get(tab.id)?.tail === tail) orderQueues.delete(tab.id); });
+  void tail.then(() => {
+    if (orderQueues.get(tab.id)?.tail === tail) orderQueues.delete(tab.id);
+  });
   return write;
 }
 
@@ -81,7 +104,6 @@ export const useFilterDrafts = create<{
   remove(tab: TabId, id: number): void;
 }>((set) => ({
   drafts: {},
-  add: (tab, column) =>
-    set((s) => ({ drafts: { ...s.drafts, [tab]: [...(s.drafts[tab] ?? []), { id: nextDraftId++, column, op: "Eq", value: "" }] } })),
+  add: (tab, column) => set((s) => ({ drafts: { ...s.drafts, [tab]: [...(s.drafts[tab] ?? []), { id: nextDraftId++, column, op: "Eq", value: "" }] } })),
   remove: (tab, id) => set((s) => ({ drafts: { ...s.drafts, [tab]: (s.drafts[tab] ?? []).filter((d) => d.id !== id) } })),
 }));

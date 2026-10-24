@@ -8,7 +8,12 @@ import { ResultsPane } from "./ResultsPane";
 
 const db = { connectionId: "c1", database: "shop" };
 const tab = (id: string): Tab => ({ id, title: "Query", console: { db, mode: "AutoCommit" }, table: null, file: null });
-const update: StatementRun = { index: 0, range: { from: 0, to: 1 }, status: { kind: "Finished" }, outputs: [{ kind: "Command", tag: "UPDATE 3", elapsedMs: 4, affectedRows: 3 }] };
+const update: StatementRun = {
+  index: 0,
+  range: { from: 0, to: 1 },
+  status: { kind: "Finished" },
+  outputs: [{ kind: "Command", tag: "UPDATE 3", elapsedMs: 4, affectedRows: 3 }],
+};
 const error = { severity: "ERROR", sqlstate: "42P01", message: 'relation "nope" does not exist', detail: null, hint: null, context: null, position: 14 };
 const failed: StatementRun = { index: 0, range: { from: 0, to: 1 }, status: { kind: "Failed", error }, outputs: [] };
 

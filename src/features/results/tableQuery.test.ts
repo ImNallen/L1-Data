@@ -7,7 +7,13 @@ import { useWorkspace, type TableTab } from "../../state/workspace";
 import { dropEditor, seedEditor, textOf } from "../editor/editorStates";
 import { cycleTableOrder, filterForValue } from "./tableQuery";
 
-const tab: TableTab = { id: "table", title: "odd table", console: { db: { connectionId: "ms", database: "shop" }, mode: "AutoCommit" }, table: { schema: "dbo", table: "odd table", page: 0, query: { orderBy: "[odd name]", where: "", filters: [] } }, file: null };
+const tab: TableTab = {
+  id: "table",
+  title: "odd table",
+  console: { db: { connectionId: "ms", database: "shop" }, mode: "AutoCommit" },
+  table: { schema: "dbo", table: "odd table", page: 0, query: { orderBy: "[odd name]", where: "", filters: [] } },
+  file: null,
+};
 afterEach(() => {
   dropEditor(tab.id);
   dropRowCaches(tab.id);
@@ -28,11 +34,16 @@ it("cycles header ordering through the engine and stores its SQL unchanged", asy
   useWorkspace.getState().addTab(tab);
   const requests: unknown[] = [];
   mockIPC((cmd, args) => {
-    if (cmd === "table_order") { requests.push(args); return { sql: "[odd name] DESC", keys: [{ column: "odd name", desc: true }] }; }
+    if (cmd === "table_order") {
+      requests.push(args);
+      return { sql: "[odd name] DESC", keys: [{ column: "odd name", desc: true }] };
+    }
     return null;
   });
   await cycleTableOrder(tab, "odd name", true);
-  expect(requests).toEqual([{ db: tab.console.db, schema: "dbo", table: "odd table", orderBy: "[odd name]", edit: { kind: "Cycle", column: "odd name", additive: true } }]);
+  expect(requests).toEqual([
+    { db: tab.console.db, schema: "dbo", table: "odd table", orderBy: "[odd name]", edit: { kind: "Cycle", column: "odd name", additive: true } },
+  ]);
   expect(useWorkspace.getState().tabs.table?.table?.query.orderBy).toBe("[odd name] DESC");
 });
 
@@ -49,7 +60,6 @@ it("drops a sort reply after the user changes an advanced order expression", asy
   await cycleTableOrder(tab, "odd name", false);
   expect(useWorkspace.getState().tabs.table?.table?.query.orderBy).toBe("lower([odd name])");
 });
-
 
 it("keeps rapid additive sorts in order using the previous engine reply", async () => {
   vi.stubGlobal("window", { crypto });
@@ -80,13 +90,28 @@ it("keeps the query, editor and displayed rows when the engine refuses an additi
     ref: { tabId: raw.id, runId: 7, index: 0 },
     db: raw.console.db,
     columns: [{ name: "id", type: { display: "int", category: "Integer" }, source: null }],
-    rowCount: 2, rowsSeen: 2, truncated: null, elapsedMs: 1, allRows: { kind: "Table" },
+    rowCount: 2,
+    rowsSeen: 2,
+    truncated: null,
+    elapsedMs: 1,
+    allRows: { kind: "Table" },
   } satisfies ResultMeta;
   const console: ConsoleState = {
-    tabId: raw.id, rev: 3,
+    tabId: raw.id,
+    rev: 3,
     config: { connectionId: "ms", database: "shop", schema: "dbo", mode: "AutoCommit" },
-    session: { kind: "Open", backendPid: 1 }, txn: "Idle", txnDepth: 0, work: null, export: null,
-    run: { kind: "Finished", runId: 7, elapsedMs: 1, outcome: "Ok", statements: [{ index: 0, range: { from: 0, to: 30 }, status: { kind: "Finished" }, outputs: [{ kind: "Rows", result, state: "Complete" }] }] },
+    session: { kind: "Open", backendPid: 1 },
+    txn: "Idle",
+    txnDepth: 0,
+    work: null,
+    export: null,
+    run: {
+      kind: "Finished",
+      runId: 7,
+      elapsedMs: 1,
+      outcome: "Ok",
+      statements: [{ index: 0, range: { from: 0, to: 30 }, status: { kind: "Finished" }, outputs: [{ kind: "Rows", result, state: "Complete" }] }],
+    },
   };
   useLive.getState().apply({ kind: "ConsoleChanged", ...console });
   useWorkspace.setState({ activeResult: { [raw.id]: 0 } });

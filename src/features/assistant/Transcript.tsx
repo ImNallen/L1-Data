@@ -21,7 +21,17 @@ function UserMessage({ seq, entry }: { seq: number; entry: UserEntry }) {
   );
 }
 
-const Item = memo(function Item({ chatId, snap, db, databaseKind }: { chatId: ChatId; snap: EntrySnapshot; db: DatabaseRef | null; databaseKind: DatabaseKind }) {
+const Item = memo(function Item({
+  chatId,
+  snap,
+  db,
+  databaseKind,
+}: {
+  chatId: ChatId;
+  snap: EntrySnapshot;
+  db: DatabaseRef | null;
+  databaseKind: DatabaseKind;
+}) {
   const { entry, seq } = snap;
   switch (entry.kind) {
     case "Text":
@@ -42,7 +52,21 @@ const Item = memo(function Item({ chatId, snap, db, databaseKind }: { chatId: Ch
   }
 });
 
-function EndBody({ chatId, end, user, last, idle, voice }: { chatId: ChatId; end: EndEntry; user: UserEntry | null; last: boolean; idle: boolean; voice: ProviderVoice }) {
+function EndBody({
+  chatId,
+  end,
+  user,
+  last,
+  idle,
+  voice,
+}: {
+  chatId: ChatId;
+  end: EndEntry;
+  user: UserEntry | null;
+  last: boolean;
+  idle: boolean;
+  voice: ProviderVoice;
+}) {
   const { outcome } = end;
   switch (outcome.kind) {
     case "Completed":
@@ -103,7 +127,11 @@ function Turn({ chat, view, last, voice }: { chat: ChatState; view: TurnView; la
       ))}
       {waiting && <p className="animate-pulse text-ui-12.5 text-dim">{phase === "Starting" ? `Starting ${voice.name}…` : "Thinking…"}</p>}
       {view.end && (
-        <div data-testid={`chat-end-${view.end.seq}`} data-outcome={view.end.entry.outcome.kind} className="flex flex-wrap items-center gap-x-2 gap-y-1.5 empty:hidden">
+        <div
+          data-testid={`chat-end-${view.end.seq}`}
+          data-outcome={view.end.entry.outcome.kind}
+          className="flex flex-wrap items-center gap-x-2 gap-y-1.5 empty:hidden"
+        >
           <EndBody chatId={chat.id} end={view.end.entry} user={view.user?.entry ?? null} last={last} idle={status.kind === "Idle"} voice={voice} />
         </div>
       )}

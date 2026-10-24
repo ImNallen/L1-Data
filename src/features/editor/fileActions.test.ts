@@ -82,7 +82,10 @@ it("judges a restored tab's fresh read by one table", () => {
   expect(judgeFile(binding("s1"), "select 1; -- edited", true, read("select 1;", "s1"))).toEqual({ kind: "same", text: "select 1;" });
   expect(judgeFile(binding("s1"), "select 1;", false, read("select 2;", "s2")).kind).toBe("reload");
   expect(judgeFile(binding("s1"), "select 1; -- edited", true, read("select 2;", "s2")).kind).toBe("diverged");
-  expect([false, true].map((dirty) => judgeFile(binding("s1"), "x", dirty, { status: "error", error: { kind: "NotFound" } }).kind)).toEqual(["missing", "missing"]);
+  expect([false, true].map((dirty) => judgeFile(binding("s1"), "x", dirty, { status: "error", error: { kind: "NotFound" } }).kind)).toEqual([
+    "missing",
+    "missing",
+  ]);
   expect(judgeFile(binding("s1"), "x", false, { status: "error", error: { kind: "NotUtf8", offset: 0 } }).kind).toBe("unreadable");
 });
 
@@ -122,7 +125,12 @@ it("saves the workspace with the text before it writes that same text to the fil
   const order = calls.map((c) => c.cmd);
   expect(order).toEqual(["workspace_save", "file_save"]);
   const stored = (calls[0]!.args.workspace as Workspace).tabs[0]!.text;
-  expect([stored, fileSaves()[0]!.text, disk.get("/q/a.sql")?.text, isDirty(id)]).toEqual(["-- edited select 1;", "-- edited select 1;", "-- edited select 1;", false]);
+  expect([stored, fileSaves()[0]!.text, disk.get("/q/a.sql")?.text, isDirty(id)]).toEqual([
+    "-- edited select 1;",
+    "-- edited select 1;",
+    "-- edited select 1;",
+    false,
+  ]);
 });
 
 it("keeps a tab dirty when it was typed in while its save was out", async () => {
@@ -223,7 +231,12 @@ it("saves a scratch tab through the save dialog and binds the tab to the new fil
   expect(await saveTab("s")).toBe(true);
   expect(calls.find((c) => c.cmd === "plugin:dialog|save")?.args.options).toMatchObject({ defaultPath: "Untitled-1.sql" });
   expect(fileSaves()[0]?.target).toEqual({ kind: "New", path: "/q/new.sql", format: null, taken: [] });
-  expect([ws().tabs.s?.title, ws().tabs.s?.file?.binding.path, isDirty("s"), disk.get("/q/new.sql")?.text]).toEqual(["new.sql", "/q/new.sql", false, "select 3;"]);
+  expect([ws().tabs.s?.title, ws().tabs.s?.file?.binding.path, isDirty("s"), disk.get("/q/new.sql")?.text]).toEqual([
+    "new.sql",
+    "/q/new.sql",
+    false,
+    "select 3;",
+  ]);
 });
 
 it("names the other tabs' files on Save As, so the engine refuses one of them, and keeps the tab's own file", async () => {

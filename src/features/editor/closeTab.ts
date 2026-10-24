@@ -77,7 +77,11 @@ async function closeConsole(id: TabId): Promise<boolean> {
     ws().notify(disconnectErrorText(res.error));
     return false;
   }
-  const rollBack = await confirm({ title: "Close tab with an open transaction?", body: "Closing rolls back the uncommitted work in this tab.", confirmLabel: "Roll back and close" });
+  const rollBack = await confirm({
+    title: "Close tab with an open transaction?",
+    body: "Closing rolls back the uncommitted work in this tab.",
+    confirmLabel: "Roll back and close",
+  });
   if (!rollBack || !exists(id)) return false;
   await commands.consoleClose(id, true);
   return true;

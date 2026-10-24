@@ -73,12 +73,15 @@ function WorkspaceSidebarBody() {
 
   return (
     <>
-      <SidebarSearch testId="sidebar-search" query={query} count={filter?.count ?? 0} onQueryChange={setTreeQuery} onEnter={openFirst} onArrowDown={() => focusFirstRow(tree.current)}>
-        <IconButton
-          data-testid="new-connection"
-          aria-label="New connection"
-          onClick={() => open({ kind: "connection", editing: null })}
-        >
+      <SidebarSearch
+        testId="sidebar-search"
+        query={query}
+        count={filter?.count ?? 0}
+        onQueryChange={setTreeQuery}
+        onEnter={openFirst}
+        onArrowDown={() => focusFirstRow(tree.current)}
+      >
+        <IconButton data-testid="new-connection" aria-label="New connection" onClick={() => open({ kind: "connection", editing: null })}>
           <PlusIcon size={17} />
         </IconButton>
       </SidebarSearch>
@@ -86,23 +89,13 @@ function WorkspaceSidebarBody() {
       <ConnectionTree ref={tree} filter={filter} query={query} />
 
       <div className="mx-2 flex shrink-0 items-center gap-1 py-2">
-        <IconButton
-          data-testid="open-settings"
-          aria-label="Settings"
-          title="Settings"
-          onClick={() => openSettings()}
-        >
+        <IconButton data-testid="open-settings" aria-label="Settings" title="Settings" onClick={() => openSettings()}>
           <SlidersHorizontalIcon size={16} />
         </IconButton>
         <IconButton data-testid="open-usage" aria-label="Usage" title="Usage" onClick={() => openSettings("usage")}>
           <ChartNoAxesColumnIcon size={16} />
         </IconButton>
-        <IconButton
-          data-testid="open-history"
-          aria-label="Query history"
-          title="Query history"
-          onClick={() => open({ kind: "history" })}
-        >
+        <IconButton data-testid="open-history" aria-label="Query history" title="Query history" onClick={() => open({ kind: "history" })}>
           <ClockIcon size={16} />
         </IconButton>
         <IconButton

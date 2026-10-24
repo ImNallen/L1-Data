@@ -45,7 +45,17 @@ type LiveState = LiveData & {
   apply(e: AppEvent): void;
 };
 
-export const emptyLive: LiveData = { connections: {}, consoles: {}, output: {}, historyTail: [], providers: {}, chats: {}, transcripts: {}, updates: null, savedQueries: { rev: 0, items: [] } };
+export const emptyLive: LiveData = {
+  connections: {},
+  consoles: {},
+  output: {},
+  historyTail: [],
+  providers: {},
+  chats: {},
+  transcripts: {},
+  updates: null,
+  savedQueries: { rev: 0, items: [] },
+};
 
 function keepHigher<K extends PropertyKey, V extends { rev: number }, M extends Partial<Record<K, V>>>(map: M, key: K, next: V): M {
   const prev = map[key];

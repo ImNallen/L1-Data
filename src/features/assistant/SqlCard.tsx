@@ -8,7 +8,21 @@ import { SqlHighlight } from "./SqlHighlight";
 
 const ACTION = "h-7 px-2.5 text-ui-12.5";
 
-export function SqlCard({ sql, relations, vetted, complete, db, databaseKind = "Postgres" }: { sql: string; relations: string[]; vetted: boolean; complete: boolean; db: DatabaseRef | null; databaseKind?: DatabaseKind }) {
+export function SqlCard({
+  sql,
+  relations,
+  vetted,
+  complete,
+  db,
+  databaseKind = "Postgres",
+}: {
+  sql: string;
+  relations: string[];
+  vetted: boolean;
+  complete: boolean;
+  db: DatabaseRef | null;
+  databaseKind?: DatabaseKind;
+}) {
   const [copied, setCopied] = useState(false);
   useEffect(() => {
     if (!copied) return;
@@ -33,14 +47,27 @@ export function SqlCard({ sql, relations, vetted, complete, db, databaseKind = "
           </span>
         )}
         <div className="flex-1" />
-        <IconButton data-testid="sql-card-copy" aria-label="Copy SQL" title={copied ? "Copied" : "Copy SQL"} className="size-6" disabled={!complete} onClick={() => void copy()}>
+        <IconButton
+          data-testid="sql-card-copy"
+          aria-label="Copy SQL"
+          title={copied ? "Copied" : "Copy SQL"}
+          className="size-6"
+          disabled={!complete}
+          onClick={() => void copy()}
+        >
           {copied ? <CheckIcon size={13} /> : <CopyIcon size={13} />}
         </IconButton>
       </div>
       <SqlHighlight sql={sql} databaseKind={databaseKind} className="px-3 py-2.5" />
       <div className="flex flex-wrap items-center gap-1 border-t border-border px-2 py-1.5">
         {complete && !vetted ? (
-          <Button data-testid="sql-open-new-tab" title="L1 Data cannot verify this as read-only, so it opens without running" className={ACTION} disabled={!complete} onClick={() => openInNewTab(sql, db)}>
+          <Button
+            data-testid="sql-open-new-tab"
+            title="L1 Data cannot verify this as read-only, so it opens without running"
+            className={ACTION}
+            disabled={!complete}
+            onClick={() => openInNewTab(sql, db)}
+          >
             Open in new tab
           </Button>
         ) : (

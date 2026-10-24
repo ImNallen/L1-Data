@@ -1,5 +1,19 @@
 import { expect, it } from "vitest";
-import { addRow, markDeleted, NO_EDITS, pendingCount, removeNewRows, resetNewCell, rowKey, setCell, setNewCell, toChanges, toggleDeletes, useTableEdits, type RowId } from "./tableEdits";
+import {
+  addRow,
+  markDeleted,
+  NO_EDITS,
+  pendingCount,
+  removeNewRows,
+  resetNewCell,
+  rowKey,
+  setCell,
+  setNewCell,
+  toChanges,
+  toggleDeletes,
+  useTableEdits,
+  type RowId,
+} from "./tableEdits";
 
 const row = (value: string | null): RowId => [{ column: "id", value }];
 
@@ -14,7 +28,12 @@ it("turns pending edits into engine changes keyed by primary key", () => {
   expect(changes).toEqual({
     schema: "public",
     table: "customers",
-    inserts: [[{ column: "name", value: "d" }, { column: "note", value: null }]],
+    inserts: [
+      [
+        { column: "name", value: "d" },
+        { column: "note", value: null },
+      ],
+    ],
     updates: [{ key: [{ column: "id", value: "2" }], set: [{ column: "name", value: "b2" }] }],
     deletes: [[{ column: "id", value: "1" }]],
   });
@@ -51,7 +70,10 @@ it("marks a mixed selection deleted before it unmarks anything", () => {
 });
 
 it("keys composite primary keys in column order and removes new rows by id", () => {
-  const key = [{ column: "order_id", value: "7" }, { column: "sku", value: "A-1" }];
+  const key = [
+    { column: "order_id", value: "7" },
+    { column: "sku", value: "A-1" },
+  ];
   const e = toggleDeletes(removeNewRows(addRow(addRow(NO_EDITS, 1), 2), [1]), [key]);
   expect(e.inserts.map((r) => r.id)).toEqual([2]);
   expect(toChanges(e, "s", "t").changes.deletes).toEqual([
@@ -97,7 +119,9 @@ it("keeps equal key values under different primary-key names separate", () => {
   const edits = markDeleted(updated, [alternate], true);
   expect(pendingCount(edits)).toBe(2);
   expect(toChanges(edits, "public", "t").changes).toEqual({
-    schema: "public", table: "t", inserts: [],
+    schema: "public",
+    table: "t",
+    inserts: [],
     updates: [{ key: row("1"), set: [{ column: "note", value: "edited" }] }],
     deletes: [alternate],
   });
@@ -119,7 +143,13 @@ it.each(["update", "delete"])("captures an immutable named original key for a st
 it("keeps the stored identity when the user edits a primary-key value", () => {
   const renamed = setCell(NO_EDITS, row("1"), "id", "2", "1");
   const edits = setCell(renamed, row("1"), "note", "edited", "original");
-  expect(toChanges(edits, "public", "t").changes.updates).toEqual([{
-    key: row("1"), set: [{ column: "id", value: "2" }, { column: "note", value: "edited" }],
-  }]);
+  expect(toChanges(edits, "public", "t").changes.updates).toEqual([
+    {
+      key: row("1"),
+      set: [
+        { column: "id", value: "2" },
+        { column: "note", value: "edited" },
+      ],
+    },
+  ]);
 });

@@ -41,10 +41,9 @@ export function keyText(k: KeyInfo, schema: string): RowText {
     case "Foreign": {
       const { refSchema, refTable, refColumns, onDelete, onUpdate } = k.kind;
       const target = refSchema === schema ? refTable : `${refSchema}.${refTable}`;
-      const actions = [
-        FK_ACTIONS[onDelete] && `on delete ${FK_ACTIONS[onDelete]}`,
-        FK_ACTIONS[onUpdate] && `on update ${FK_ACTIONS[onUpdate]}`,
-      ].filter(Boolean);
+      const actions = [FK_ACTIONS[onDelete] && `on delete ${FK_ACTIONS[onDelete]}`, FK_ACTIONS[onUpdate] && `on update ${FK_ACTIONS[onUpdate]}`].filter(
+        Boolean,
+      );
       const tail = actions.length ? ` · ${actions.join(", ")}` : "";
       return { trailing: "foreign", second: `${list(k.columns)} → ${target}${list(refColumns)}${tail}` };
     }
@@ -65,6 +64,6 @@ export function triggerText(t: TriggerInfo): RowText {
   const traits = [TIMING[t.timing], !t.perRow && "statement", !t.enabled && "disabled"].filter(Boolean);
   return {
     trailing: traits.join(" · "),
-    second: `${t.events.map((e) => e.toUpperCase()).join(", ")} · ${t.implementation.kind === "Function" ? `${t.implementation.name}()` : t.implementation.definition ?? "SQL module definition unavailable"}`,
+    second: `${t.events.map((e) => e.toUpperCase()).join(", ")} · ${t.implementation.kind === "Function" ? `${t.implementation.name}()` : (t.implementation.definition ?? "SQL module definition unavailable")}`,
   };
 }

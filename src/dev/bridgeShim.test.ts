@@ -20,9 +20,7 @@ describe("settleBridgeReply", () => {
   });
 
   it("throws a real Error for bridge failures so typedError rethrows them", () => {
-    expect(() => settleBridgeReply(404, { message: "unknown command `nope`" })).toThrow(
-      new Error("dev-bridge: unknown command `nope`"),
-    );
+    expect(() => settleBridgeReply(404, { message: "unknown command `nope`" })).toThrow(new Error("dev-bridge: unknown command `nope`"));
     expect(() => settleBridgeReply(500, "oops")).toThrow(new Error("dev-bridge: HTTP 500"));
   });
 });

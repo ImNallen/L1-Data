@@ -13,12 +13,26 @@ const serve = (routes: Record<string, () => Response>) => {
   return requested;
 };
 
-const ext: VsxExtension = { id: "acme.night", displayName: "Night", publisher: "acme", description: "", downloadCount: 0, download: "https://cdn.test/night.vsix" };
+const ext: VsxExtension = {
+  id: "acme.night",
+  displayName: "Night",
+  publisher: "acme",
+  description: "",
+  downloadCount: 0,
+  download: "https://cdn.test/night.vsix",
+};
 
 it("searches the Themes category by downloads and keeps only well-formed extensions", async () => {
   const body = {
     extensions: [
-      { namespace: "dracula-theme", name: "theme-dracula", displayName: "Dracula Theme Official", description: "Dark", downloadCount: 435372, files: { download: "https://x/d.vsix" } },
+      {
+        namespace: "dracula-theme",
+        name: "theme-dracula",
+        displayName: "Dracula Theme Official",
+        description: "Dark",
+        downloadCount: 435372,
+        files: { download: "https://x/d.vsix" },
+      },
       { namespace: "broken", name: "no-files" },
     ],
   };
@@ -26,7 +40,14 @@ it("searches the Themes category by downloads and keeps only well-formed extensi
     "https://open-vsx.org/api/-/search?query=tokyo+night&category=Themes&size=20&sortBy=downloadCount&sortOrder=desc": () => Response.json(body),
   });
   expect(await searchThemes("tokyo night")).toEqual([
-    { id: "dracula-theme.theme-dracula", displayName: "Dracula Theme Official", publisher: "dracula-theme", description: "Dark", downloadCount: 435372, download: "https://x/d.vsix" },
+    {
+      id: "dracula-theme.theme-dracula",
+      displayName: "Dracula Theme Official",
+      publisher: "dracula-theme",
+      description: "Dark",
+      downloadCount: 435372,
+      download: "https://x/d.vsix",
+    },
   ]);
   expect(requested).toHaveLength(1);
 });

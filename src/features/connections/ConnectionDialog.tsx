@@ -1,15 +1,5 @@
 import * as Dialog from "@radix-ui/react-dialog";
-import {
-  CheckIcon,
-  ChevronsUpDownIcon,
-  CircleAlertIcon,
-  EyeIcon,
-  EyeOffIcon,
-  KeyIcon,
-  LockIcon,
-  PlusIcon,
-  XIcon,
-} from "lucide-react";
+import { CheckIcon, ChevronsUpDownIcon, CircleAlertIcon, EyeIcon, EyeOffIcon, KeyIcon, LockIcon, PlusIcon, XIcon } from "lucide-react";
 import { useEffect, useId, useRef, useState, type ReactNode } from "react";
 import { commands, type ConnectionConfig, type ConnectionDraft, type ConnectionId, type Environment, type SslMode } from "../../ipc/bindings";
 import { connectErrorText } from "../../ipc/errors";
@@ -56,7 +46,12 @@ const SSH_AUTHS: { value: SshAuthKind; label: string }[] = [
   { value: "Agent", label: "SSH agent" },
 ];
 
-type Probe = { kind: "idle" } | { kind: "testing" } | { kind: "ok"; version: string } | { kind: "error"; message: string } | { kind: "hostKey"; key: UnknownHostKey };
+type Probe =
+  | { kind: "idle" }
+  | { kind: "testing" }
+  | { kind: "ok"; version: string }
+  | { kind: "error"; message: string }
+  | { kind: "hostKey"; key: UnknownHostKey };
 
 function serverText(c: ConnectionConfig): string {
   const server = `${c.host}:${c.port}/${c.database}`;
@@ -158,7 +153,19 @@ function FormRow({ label, htmlFor, labelId, hint, children }: { label: string; h
   );
 }
 
-function SecretInput({ testId, label, value, placeholder, onChange }: { testId: string; label: string; value: string; placeholder: string; onChange: (value: string) => void }) {
+function SecretInput({
+  testId,
+  label,
+  value,
+  placeholder,
+  onChange,
+}: {
+  testId: string;
+  label: string;
+  value: string;
+  placeholder: string;
+  onChange: (value: string) => void;
+}) {
   const [reveal, setReveal] = useState(false);
   const noun = label.toLowerCase();
   return (
@@ -291,8 +298,10 @@ function ConnectionForm({
     resetProbe();
     setFields((f) => ({ ...f, ...patch }));
   };
-  const set = (key: "name" | "host" | "port" | "database" | "user" | "sshHost" | "sshPort" | "sshUser" | "sshKeyPath" | "sshAgentSocket") => (e: React.ChangeEvent<HTMLInputElement>) =>
-    update({ [key]: e.target.value });
+  const set =
+    (key: "name" | "host" | "port" | "database" | "user" | "sshHost" | "sshPort" | "sshUser" | "sshKeyPath" | "sshAgentSocket") =>
+    (e: React.ChangeEvent<HTMLInputElement>) =>
+      update({ [key]: e.target.value });
   const editSshSecret = (edit: PasswordEdit) => {
     resetProbe();
     setSshSecret(edit);
@@ -312,7 +321,15 @@ function ConnectionForm({
     }
     const d = res.data;
     setUrlError(null);
-    update({ databaseKind: d.databaseKind, caCertPath: d.caCertPath ?? "", host: d.host, port: String(d.port), database: d.database, user: d.user, sslMode: d.sslMode });
+    update({
+      databaseKind: d.databaseKind,
+      caCertPath: d.caCertPath ?? "",
+      host: d.host,
+      port: String(d.port),
+      database: d.database,
+      user: d.user,
+      sslMode: d.sslMode,
+    });
     setPassword(typeof d.password === "object" ? { kind: "set", value: d.password.Set } : initialPassword(existing));
   };
   // A half-typed URL fails to parse, so its error waits for a blur or until it reads like a URL or a key=value string.
@@ -435,7 +452,9 @@ function ConnectionForm({
             }}
           >
             {Object.entries(DATABASE_LABEL).map(([kind, label]) => (
-              <option key={kind} value={kind}>{label}</option>
+              <option key={kind} value={kind}>
+                {label}
+              </option>
             ))}
           </select>
         </FormRow>
@@ -505,7 +524,9 @@ function ConnectionForm({
           htmlFor={`${ids}-user`}
           hint={
             <>
-              {fields.databaseKind === "SqlServer" && <span className="block">SQL login over TCP. Windows and Microsoft Entra authentication are not supported.</span>}
+              {fields.databaseKind === "SqlServer" && (
+                <span className="block">SQL login over TCP. Windows and Microsoft Entra authentication are not supported.</span>
+              )}
               {existing?.hasPassword && (
                 <ClearSecretButton
                   testId="conn-password-clear"
@@ -557,7 +578,13 @@ function ConnectionForm({
         </FormRow>
         {fields.databaseKind === "Postgres" && (
           <FormRow label="CA certificate" htmlFor={`${ids}-ca`} hint="Optional path to a PEM certificate file.">
-            <input id={`${ids}-ca`} data-testid="conn-ca-cert" className={inputClass} value={fields.caCertPath} onChange={(e) => update({ caCertPath: e.target.value })} />
+            <input
+              id={`${ids}-ca`}
+              data-testid="conn-ca-cert"
+              className={inputClass}
+              value={fields.caCertPath}
+              onChange={(e) => update({ caCertPath: e.target.value })}
+            />
           </FormRow>
         )}
         <FormRow
@@ -570,10 +597,24 @@ function ConnectionForm({
             {fields.sshEnabled ? (
               <>
                 <div className="ml-1 min-w-0 flex-1">
-                  <input id={`${ids}-ssh-host`} data-testid="conn-ssh-host" className={inputClass} value={fields.sshHost} onChange={set("sshHost")} placeholder="bastion.example.com" />
+                  <input
+                    id={`${ids}-ssh-host`}
+                    data-testid="conn-ssh-host"
+                    className={inputClass}
+                    value={fields.sshHost}
+                    onChange={set("sshHost")}
+                    placeholder="bastion.example.com"
+                  />
                 </div>
                 <div className="w-24 shrink-0">
-                  <input data-testid="conn-ssh-port" aria-label="SSH port" className={inputClass} value={fields.sshPort} onChange={set("sshPort")} inputMode="numeric" />
+                  <input
+                    data-testid="conn-ssh-port"
+                    aria-label="SSH port"
+                    className={inputClass}
+                    value={fields.sshPort}
+                    onChange={set("sshPort")}
+                    inputMode="numeric"
+                  />
                 </div>
               </>
             ) : (
@@ -585,7 +626,14 @@ function ConnectionForm({
           <>
             <FormRow label="SSH sign in" htmlFor={`${ids}-ssh-user`}>
               <div className="flex gap-2">
-                <input id={`${ids}-ssh-user`} data-testid="conn-ssh-user" className={inputClass} value={fields.sshUser} onChange={set("sshUser")} placeholder="user" />
+                <input
+                  id={`${ids}-ssh-user`}
+                  data-testid="conn-ssh-user"
+                  className={inputClass}
+                  value={fields.sshUser}
+                  onChange={set("sshUser")}
+                  placeholder="user"
+                />
                 <div className="relative w-full">
                   <select
                     data-testid="conn-ssh-auth"
@@ -627,7 +675,14 @@ function ConnectionForm({
               >
                 <div className="flex gap-2">
                   <div className="min-w-0 flex-1">
-                    <input id={`${ids}-ssh-key`} data-testid="conn-ssh-key" className={inputClass} value={fields.sshKeyPath} onChange={set("sshKeyPath")} placeholder="~/.ssh/id_ed25519" />
+                    <input
+                      id={`${ids}-ssh-key`}
+                      data-testid="conn-ssh-key"
+                      className={inputClass}
+                      value={fields.sshKeyPath}
+                      onChange={set("sshKeyPath")}
+                      placeholder="~/.ssh/id_ed25519"
+                    />
                   </div>
                   <div className="w-40 shrink-0">{sshSecretInput("passphrase")}</div>
                 </div>
@@ -677,7 +732,9 @@ function ConnectionForm({
           {probe.kind === "ok" && (
             <span className="flex items-center gap-1.5 text-fg">
               <CheckIcon size={14} className="shrink-0 text-green" />
-              <span className="truncate">Connected to {DATABASE_LABEL[fields.databaseKind]} {probe.version}</span>
+              <span className="truncate">
+                Connected to {DATABASE_LABEL[fields.databaseKind]} {probe.version}
+              </span>
             </span>
           )}
           {probe.kind === "error" && <ErrorLine message={probe.message} />}
@@ -703,9 +760,7 @@ function HostKeyCard({ hostKey, onTrust }: { hostKey: UnknownHostKey; onTrust: (
         <div className="truncate text-fg">
           {hostKey.host}:{hostKey.port} offered an unknown host key
         </div>
-        <div className="selectable mt-1 font-mono text-ui-11 break-all text-dim">
-          {fingerprint}
-        </div>
+        <div className="selectable mt-1 font-mono text-ui-11 break-all text-dim">{fingerprint}</div>
       </div>
       <Button data-testid="ssh-trust" onClick={onTrust}>
         Trust and test again

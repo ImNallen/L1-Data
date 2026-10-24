@@ -47,7 +47,10 @@ it("asks before the restart, sends back what it showed, and asks again when more
 
   runUpdateAction({ kind: "install", version: "0.2.0" });
   await vi.waitFor(() => confirmShown());
-  expect(confirmShown()).toMatchObject({ title: "Restart to install L1 Data 0.2.0?", body: "Restarting ends the open transaction in “orders.sql”. L1 Data will close and reopen." });
+  expect(confirmShown()).toMatchObject({
+    title: "Restart to install L1 Data 0.2.0?",
+    body: "Restarting ends the open transaction in “orders.sql”. L1 Data will close and reopen.",
+  });
 
   confirm();
   await vi.waitFor(() => expect(confirmShown().body).toContain("rolls back the uncommitted changes in “orders.sql”"));
@@ -85,7 +88,9 @@ it("names the tabs with unsubmitted table edits, and asks again when another tab
   confirm();
   await vi.waitFor(() => expect(accepted).toHaveLength(2));
   await vi.waitFor(() => confirmShown());
-  expect(confirmShown().body).toBe("Restarting discards the changes in “public.orders” and “public.customers” that haven't been submitted. L1 Data will close and reopen.");
+  expect(confirmShown().body).toBe(
+    "Restarting discards the changes in “public.orders” and “public.customers” that haven't been submitted. L1 Data will close and reopen.",
+  );
 
   confirm();
   await vi.waitFor(() => expect(accepted).toHaveLength(3));

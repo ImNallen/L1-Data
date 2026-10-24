@@ -44,5 +44,9 @@ it("colors SQL with the editor's token classes and draws a keyword-named call as
     "text-amber:10",
     "text-dim:-- top",
   ]);
-  expect(sqlSpans("select 1;\n").map((s) => s.text).join("")).toBe("select 1;\n");
+  expect(
+    sqlSpans("select 1;\n")
+      .map((s) => s.text)
+      .join(""),
+  ).toBe("select 1;\n");
 });

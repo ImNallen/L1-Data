@@ -1,5 +1,19 @@
 import { describe, expect, it } from "vitest";
-import type { AppEvent, BootSnapshot, ChatState, ChatStatus, ConnectionState, ConsoleState, DatabaseState, EntrySnapshot, OutputEntry, ProviderState, SavedQueries, UpdateState, UpdateStatus } from "../ipc/bindings";
+import type {
+  AppEvent,
+  BootSnapshot,
+  ChatState,
+  ChatStatus,
+  ConnectionState,
+  ConsoleState,
+  DatabaseState,
+  EntrySnapshot,
+  OutputEntry,
+  ProviderState,
+  SavedQueries,
+  UpdateState,
+  UpdateStatus,
+} from "../ipc/bindings";
 import { applyEvent, emptyLive, hydrateChatLive, hydrateLive, hydrateSavedLive, OUTPUT_LIMIT, seedTranscriptLive, wantedCatalogs, type LiveData } from "./live";
 
 const CONN = "c0000000-0000-4000-8000-000000000001";
@@ -12,7 +26,9 @@ function consoleAt(rev: number, txn: ConsoleState["txn"] = "Idle"): ConsoleState
     config: { connectionId: CONN, database: "shop", schema: "public", mode: "Manual" },
     session: { kind: "None" },
     txn,
-    txnDepth: null, work: null, export: null,
+    txnDepth: null,
+    work: null,
+    export: null,
     run: { kind: "Idle" },
   };
 }
@@ -24,7 +40,15 @@ const OTHER_CHAT = "a0000000-0000-4000-8000-000000000002";
 const RUNNING: ChatStatus = { kind: "Running", turn: 0, startedAtMs: 5, phase: "Working" };
 
 function chatAt(rev: number, status: ChatStatus = { kind: "Idle" }, id = CHAT): ChatState {
-  return { id, rev, title: "Top customers", updatedAtMs: 1000, options: { provider: "Claude", model: "opus", effort: "high", permission: "AskFirst" }, status, entryCount: 2 };
+  return {
+    id,
+    rev,
+    title: "Top customers",
+    updatedAtMs: 1000,
+    options: { provider: "Claude", model: "opus", effort: "high", permission: "AskFirst" },
+    status,
+    entryCount: 2,
+  };
 }
 
 function entryAt(seq: number, rev: number, text: string, chatId = CHAT): EntrySnapshot {
@@ -32,21 +56,55 @@ function entryAt(seq: number, rev: number, text: string, chatId = CHAT): EntrySn
 }
 
 function providerAt(rev: number, checking: boolean): ProviderState {
-  const info = { defaultName: "Claude", defaultBinary: "claude", configEnv: "CLAUDE_CONFIG_DIR", configDirDefault: "~/.claude", signInCommand: "claude auth login", ownedFlags: [] };
+  const info = {
+    defaultName: "Claude",
+    defaultBinary: "claude",
+    configEnv: "CLAUDE_CONFIG_DIR",
+    configDirDefault: "~/.claude",
+    signInCommand: "claude auth login",
+    ownedFlags: [],
+  };
   return { provider: "Claude", rev, info, ignoredFlags: [], checking, checkedAtMs: null, outcome: null };
 }
 
 const applyAll = (s: LiveData, events: AppEvent[]) => events.reduce(applyEvent, s);
 
 function savedAt(rev: number, names: string[]): SavedQueries {
-  return { rev, items: names.map((name, i) => ({ id: i + 1, name, sql: `select ${i}`, databaseKind: "Postgres", excerpt: `select ${i}`, createdAtMs: 1, usedAtMs: 1 })) };
+  return {
+    rev,
+    items: names.map((name, i) => ({ id: i + 1, name, sql: `select ${i}`, databaseKind: "Postgres", excerpt: `select ${i}`, createdAtMs: 1, usedAtMs: 1 })),
+  };
 }
 
 function bootWith(savedQueries: SavedQueries): BootSnapshot {
   return {
-    connections: [], live: [], consoles: [], providers: [], chats: [],
-    workspace: { tabs: [], active: null, layout: { sidebar: true, results: true, rightPanel: null, resultsHeight: 320, sidebarWidth: 256, rightPanelWidth: 341, assistantChat: null } },
-    settings: { maxRows: 1, maxResultBytes: 1, tablePageSize: 1, stopOnError: true, colorScheme: "System", lightTheme: "l1-light", darkTheme: "l1-dark", customThemes: [], interfaceFont: { family: "Inter", size: 13 }, codeFont: { family: "JetBrains Mono", size: 13 }, density: "Standard", panelMotionMs: 150, tintConnections: false, providers: [], providerHealthCheckSecs: 300 },
+    connections: [],
+    live: [],
+    consoles: [],
+    providers: [],
+    chats: [],
+    workspace: {
+      tabs: [],
+      active: null,
+      layout: { sidebar: true, results: true, rightPanel: null, resultsHeight: 320, sidebarWidth: 256, rightPanelWidth: 341, assistantChat: null },
+    },
+    settings: {
+      maxRows: 1,
+      maxResultBytes: 1,
+      tablePageSize: 1,
+      stopOnError: true,
+      colorScheme: "System",
+      lightTheme: "l1-light",
+      darkTheme: "l1-dark",
+      customThemes: [],
+      interfaceFont: { family: "Inter", size: 13 },
+      codeFont: { family: "JetBrains Mono", size: 13 },
+      density: "Standard",
+      panelMotionMs: 150,
+      tintConnections: false,
+      providers: [],
+      providerHealthCheckSecs: 300,
+    },
     updates: updateAt(0, { kind: "Idle" }),
     savedQueries,
   };
@@ -80,14 +138,38 @@ describe("live.apply", () => {
       kind: "ConnectionChanged",
       id: CONN,
       rev: 9,
-      status: { kind: "Connected", server: { version: "16.4", versionNum: 160004, encoding: "UTF8" }, instance: { configuredDatabase: "shop", home: "shop", showSystemDatabases: false, databases: [] } },
+      status: {
+        kind: "Connected",
+        server: { version: "16.4", versionNum: 160004, encoding: "UTF8" },
+        instance: { configuredDatabase: "shop", home: "shop", showSystemDatabases: false, databases: [] },
+      },
     });
     const boot: BootSnapshot = {
       connections: [],
       live: [{ id: CONN, rev: 4, status: { kind: "Connecting" } }],
       consoles: [consoleAt(1)],
-      workspace: { tabs: [], active: null, layout: { sidebar: true, results: true, rightPanel: null, resultsHeight: 320, sidebarWidth: 256, rightPanelWidth: 341, assistantChat: null } },
-      settings: { maxRows: 1, maxResultBytes: 1, tablePageSize: 1, stopOnError: true, colorScheme: "System", lightTheme: "l1-light", darkTheme: "l1-dark", customThemes: [], interfaceFont: { family: "Inter", size: 13 }, codeFont: { family: "JetBrains Mono", size: 13 }, density: "Standard", panelMotionMs: 150, tintConnections: false, providers: [], providerHealthCheckSecs: 300 },
+      workspace: {
+        tabs: [],
+        active: null,
+        layout: { sidebar: true, results: true, rightPanel: null, resultsHeight: 320, sidebarWidth: 256, rightPanelWidth: 341, assistantChat: null },
+      },
+      settings: {
+        maxRows: 1,
+        maxResultBytes: 1,
+        tablePageSize: 1,
+        stopOnError: true,
+        colorScheme: "System",
+        lightTheme: "l1-light",
+        darkTheme: "l1-dark",
+        customThemes: [],
+        interfaceFont: { family: "Inter", size: 13 },
+        codeFont: { family: "JetBrains Mono", size: 13 },
+        density: "Standard",
+        panelMotionMs: 150,
+        tintConnections: false,
+        providers: [],
+        providerHealthCheckSecs: 300,
+      },
       providers: [],
       chats: [],
       updates: updateAt(0, { kind: "Idle" }),
@@ -109,8 +191,28 @@ describe("live.apply", () => {
       connections: [],
       live: [],
       consoles: [],
-      workspace: { tabs: [], active: null, layout: { sidebar: true, results: true, rightPanel: null, resultsHeight: 320, sidebarWidth: 256, rightPanelWidth: 341, assistantChat: CHAT } },
-      settings: { maxRows: 1, maxResultBytes: 1, tablePageSize: 1, stopOnError: true, colorScheme: "System", lightTheme: "l1-light", darkTheme: "l1-dark", customThemes: [], interfaceFont: { family: "Inter", size: 13 }, codeFont: { family: "JetBrains Mono", size: 13 }, density: "Standard", panelMotionMs: 150, tintConnections: false, providers: [], providerHealthCheckSecs: 300 },
+      workspace: {
+        tabs: [],
+        active: null,
+        layout: { sidebar: true, results: true, rightPanel: null, resultsHeight: 320, sidebarWidth: 256, rightPanelWidth: 341, assistantChat: CHAT },
+      },
+      settings: {
+        maxRows: 1,
+        maxResultBytes: 1,
+        tablePageSize: 1,
+        stopOnError: true,
+        colorScheme: "System",
+        lightTheme: "l1-light",
+        darkTheme: "l1-dark",
+        customThemes: [],
+        interfaceFont: { family: "Inter", size: 13 },
+        codeFont: { family: "JetBrains Mono", size: 13 },
+        density: "Standard",
+        panelMotionMs: 150,
+        tintConnections: false,
+        providers: [],
+        providerHealthCheckSecs: 300,
+      },
       providers: [providerAt(1, true)],
       chats: [chatAt(0), chatAt(0, { kind: "Idle" }, OTHER_CHAT)],
       updates: updateAt(0, { kind: "Idle" }),
@@ -186,7 +288,10 @@ describe("live.apply", () => {
   it("seeding leaves a held transcript as it is and holds nothing for a deleted chat", () => {
     const held = hydrateChatLive(emptyLive, { state: chatAt(1), entries: [entryAt(0, 1, "first")] });
     const deleted = applyEvent(emptyLive, { kind: "ChatChanged", ...chatAt(7, { kind: "Deleted" }) });
-    expect([seedTranscriptLive(held, CHAT).transcripts, seedTranscriptLive(deleted, CHAT).transcripts]).toEqual([{ [CHAT]: { 0: entryAt(0, 1, "first") } }, {}]);
+    expect([seedTranscriptLive(held, CHAT).transcripts, seedTranscriptLive(deleted, CHAT).transcripts]).toEqual([
+      { [CHAT]: { 0: entryAt(0, 1, "first") } },
+      {},
+    ]);
   });
 
   it("a deleted chat drops its transcript, and nothing older brings it back", () => {
@@ -203,7 +308,16 @@ describe("live.apply", () => {
   });
 
   it("wants the Ready catalogs of connected instances and the last good one behind a failed reload", () => {
-    const db = (name: string, catalog: DatabaseState["catalog"]): DatabaseState => ({ name, system: false, access: "Ok", shown: name === "shop", showSystemSchemas: false, shownSchemas: [], schemaCount: { kind: "Unknown" }, catalog });
+    const db = (name: string, catalog: DatabaseState["catalog"]): DatabaseState => ({
+      name,
+      system: false,
+      access: "Ok",
+      shown: name === "shop",
+      showSystemSchemas: false,
+      shownSchemas: [],
+      schemaCount: { kind: "Unknown" },
+      catalog,
+    });
     const server = { version: "16.4", versionNum: 160004, encoding: "UTF8" };
     const connections: Record<string, ConnectionState> = {
       [CONN]: {
@@ -226,7 +340,15 @@ describe("live.apply", () => {
           },
         },
       },
-      other: { id: "other", rev: 1, status: { kind: "Connected", server, instance: { configuredDatabase: "x", home: "x", showSystemDatabases: false, databases: [db("x", { kind: "Ready", version: 2 })] } } },
+      other: {
+        id: "other",
+        rev: 1,
+        status: {
+          kind: "Connected",
+          server,
+          instance: { configuredDatabase: "x", home: "x", showSystemDatabases: false, databases: [db("x", { kind: "Ready", version: 2 })] },
+        },
+      },
       down: { id: "down", rev: 9, status: { kind: "Lost", reason: "gone" } },
     };
     expect([...wantedCatalogs(connections).entries()]).toEqual([
@@ -247,7 +369,16 @@ describe("live.apply", () => {
   });
 
   it("prepends appended history entries", () => {
-    const base = { databaseKind: "Postgres" as const, atMs: 0, connectionId: CONN, connectionName: "p", database: "shop", sql: "select 1", elapsedMs: 1, outcome: { kind: "Cancelled" as const } };
+    const base = {
+      databaseKind: "Postgres" as const,
+      atMs: 0,
+      connectionId: CONN,
+      connectionName: "p",
+      database: "shop",
+      sql: "select 1",
+      elapsedMs: 1,
+      outcome: { kind: "Cancelled" as const },
+    };
     let s = applyEvent(emptyLive, { kind: "HistoryAppended", id: 1, ...base });
     s = applyEvent(s, { kind: "HistoryAppended", id: 2, ...base });
     expect(s.historyTail.map((h) => h.id)).toEqual([2, 1]);

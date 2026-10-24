@@ -26,5 +26,10 @@ it("answers Cancel and warns when nothing is queued", () => {
 
 it("leaves every other command to the bridge", () => {
   const d = createDialogShim();
-  expect([d.handles("plugin:dialog|open"), d.handles("plugin:dialog|save"), d.handles("file_open"), d.handles("plugin:dialog|message")]).toEqual([true, true, false, false]);
+  expect([d.handles("plugin:dialog|open"), d.handles("plugin:dialog|save"), d.handles("file_open"), d.handles("plugin:dialog|message")]).toEqual([
+    true,
+    true,
+    false,
+    false,
+  ]);
 });

@@ -32,7 +32,12 @@ export function SqlText(props: SqlTextProps) {
         ? [EditorState.readOnly.of(true), EditorView.editable.of(false)]
         : [
             history(),
-            Prec.highest(keymap.of([{ key: "Mod-Enter", run: submit }, { key: "Mod-s", run: submit }])),
+            Prec.highest(
+              keymap.of([
+                { key: "Mod-Enter", run: submit },
+                { key: "Mod-s", run: submit },
+              ]),
+            ),
             keymap.of([...defaultKeymap, ...historyKeymap]),
             EditorView.updateListener.of((u) => {
               const p = latest.current;
@@ -46,8 +51,13 @@ export function SqlText(props: SqlTextProps) {
         extensions: [
           behavior,
           EditorView.contentAttributes.of({ "aria-label": label, tabindex: "0" }),
-          lineNumbers(), drawSelection(), EditorView.lineWrapping,
-          sql({ dialect: SQL_DIALECT[databaseKind] }), editorTheme, editorHighlighting, functionCallStyle,
+          lineNumbers(),
+          drawSelection(),
+          EditorView.lineWrapping,
+          sql({ dialect: SQL_DIALECT[databaseKind] }),
+          editorTheme,
+          editorHighlighting,
+          functionCallStyle,
         ],
       }),
     });

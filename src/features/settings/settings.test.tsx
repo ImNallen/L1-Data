@@ -37,7 +37,11 @@ function render(patch: Partial<WorkspaceData>, live: Partial<LiveData> = {}) {
 }
 
 const breadcrumb = (html: string) =>
-  /data-testid="settings-breadcrumb"[^>]*>(.*?)<\/h1>/.exec(html)?.[1]?.replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim();
+  /data-testid="settings-breadcrumb"[^>]*>(.*?)<\/h1>/
+    .exec(html)?.[1]
+    ?.replace(/<[^>]+>/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
 
 const settingsOpen = (section: SettingsSectionId = "appearance", query = "") => ({ screen: { kind: "settings", section, query } }) as const;
 
@@ -111,7 +115,9 @@ it("shows the running version and the engine's track in About, and locks the tra
   expect(idle).toMatch(/<select[^>]*data-testid="update-track"(?![^>]*disabled="")[^>]*>/);
   expect(idle).toMatch(/<button[^>]*data-testid="update-action"[^>]*>Check for updates<\/button>/);
   expect(idle).toContain('data-testid="update-status" class="mt-1.5 text-ui-12 text-dim">Not checked yet.<');
-  const downloading = render(settingsOpen("about"), { updates: updates({ kind: "Downloading", version: "0.1.1-nightly.20261024.6", downgrade: false, percent: 40 }) });
+  const downloading = render(settingsOpen("about"), {
+    updates: updates({ kind: "Downloading", version: "0.1.1-nightly.20261024.6", downgrade: false, percent: 40 }),
+  });
   expect(downloading).toMatch(/<select[^>]*data-testid="update-track"[^>]*disabled=""/);
   expect(downloading).toMatch(/<button[^>]*data-testid="update-action"[^>]*disabled=""[^>]*>Downloading…<\/button>/);
 });
@@ -127,7 +133,11 @@ it("covers the window while an update installs, and only then", () => {
   const status = (s: UpdateStatus): Partial<LiveData> => ({ updates: { rev: 1, track: "Stable", currentVersion: "0.1.0", status: s, checkedAtMs: null } });
   const installing = render({ screen: { kind: "workspace" } }, status({ kind: "Installing", version: "0.2.0" }));
   expect(installing).toMatch(/<div[^>]*data-testid="update-installing"[^>]*>.*Installing L1 Data 0\.2\.0… L1 Data will restart\.<\/div><\/div>/);
-  for (const s of [{ kind: "Downloaded", version: "0.2.0", downgrade: false }, { kind: "Failed", failure: { kind: "BadSignature" } }, { kind: "Idle" }] satisfies UpdateStatus[]) {
+  for (const s of [
+    { kind: "Downloaded", version: "0.2.0", downgrade: false },
+    { kind: "Failed", failure: { kind: "BadSignature" } },
+    { kind: "Idle" },
+  ] satisfies UpdateStatus[]) {
     expect(render({ screen: { kind: "workspace" } }, status(s))).not.toContain('data-testid="update-installing"');
   }
 });
@@ -181,7 +191,11 @@ it("lists every setting in registry order for an empty query", () => {
   ]);
 });
 
-const text = (html: string | undefined) => html?.replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim();
+const text = (html: string | undefined) =>
+  html
+    ?.replace(/<[^>]+>/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
 const summary = (html: string) => text(/data-testid="settings-search-summary"[^>]*>(.*?)<\/p>/.exec(html)?.[1]);
 const navEntries = (html: string) =>
   [...html.matchAll(/<button type="button" data-testid="settings-section-(\w+)"( aria-current="page")?[^>]*>(.*?)<\/button>/g)].map(([, id, current, body]) => [
@@ -262,7 +276,10 @@ it("offers every theme variant in a light radio group and a dark one, with the s
     variants: [{ id: "custom-dusk", name: "Dusk", appearance: "dark", colors: { background: "#1b1824", accent: "#e0a040" } }],
   };
   const html = render({ ...settingsOpen(), settings: { ...initial.settings, lightTheme: "ocean-light", darkTheme: "custom-dusk", customThemes: [custom] } });
-  const checked = (name: string) => radios(html, name).filter(([, on]) => on).map(([id]) => id);
+  const checked = (name: string) =>
+    radios(html, name)
+      .filter(([, on]) => on)
+      .map(([id]) => id);
   expect(radios(html, "lightTheme").map(([id]) => id)).toEqual(["l1-light", "grove-light", "ocean-light", "ember-light", "iris-light", "rose-light"]);
   expect(radios(html, "darkTheme").map(([id]) => id)).toEqual(["l1-dark", "grove-dark", "ocean-dark", "ember-dark", "iris-dark", "rose-dark", "custom-dusk"]);
   expect([checked("lightTheme"), checked("darkTheme")]).toEqual([["ocean-light"], ["custom-dusk"]]);
@@ -300,7 +317,19 @@ const layout = (html: string) =>
   [...html.matchAll(/data-setting="(\w+)"|<h2 id="[^"]*" class="mb-2[^"]*">([^<]+)</g)].map(([, setting, card]) => setting ?? `# ${card}`);
 
 it("draws each section's settings in registry order, a run of one group in one card", () => {
-  expect(layout(render(settingsOpen()))).toEqual(["colorScheme", "themes", "# Layout", "density", "# Motion", "panelMotion", "# Sidebar", "tintConnections", "# Typography", "interfaceFont", "codeFont"]);
+  expect(layout(render(settingsOpen()))).toEqual([
+    "colorScheme",
+    "themes",
+    "# Layout",
+    "density",
+    "# Motion",
+    "panelMotion",
+    "# Sidebar",
+    "tintConnections",
+    "# Typography",
+    "interfaceFont",
+    "codeFont",
+  ]);
   expect(layout(render(settingsOpen("queries")))).toEqual(["# Results", "maxRows", "tablePageSize", "# Scripts", "stopOnError"]);
 });
 
@@ -418,7 +447,8 @@ it("deletes a whole family and resets a slot that held any of its variants", asy
   expect(saved.at(-1)).toEqual({ ...initial.settings, lightTheme: "l1-light", darkTheme: "l1-dark", customThemes: [] });
 });
 
-const selectValue = (html: string, testId: string) => new RegExp(`data-testid="${testId}"[^>]*>(.*?)</select>`).exec(html)?.[1]?.match(/<option[^>]*selected=""[^>]*>([^<]*)</)?.[1];
+const selectValue = (html: string, testId: string) =>
+  new RegExp(`data-testid="${testId}"[^>]*>(.*?)</select>`).exec(html)?.[1]?.match(/<option[^>]*selected=""[^>]*>([^<]*)</)?.[1];
 
 it("shows the saved density, fonts, panel speed, and connection tint in the appearance cards", () => {
   const settings: Settings = {
@@ -462,7 +492,10 @@ it("changes only the size of the chosen font and keeps its family", async () => 
   stop();
   expect(saved.map((s) => [s.codeFont, s.interfaceFont])).toEqual([
     [{ family: "JetBrains Mono", size: 16 }, initial.settings.interfaceFont],
-    [{ family: "JetBrains Mono", size: 16 }, { family: "System", size: 13 }],
+    [
+      { family: "JetBrains Mono", size: 16 },
+      { family: "System", size: 13 },
+    ],
   ]);
 });
 
@@ -502,8 +535,13 @@ const attr = (tag: string, name: string) => new RegExp(`${name}="([^"]*)"`).exec
 
 it("shows each provider's version, sign-in, and switch, and the picked provider's runtime fields with hints from the engine", () => {
   vi.useFakeTimers({ now: Date.UTC(2026, 9, 16, 12, 0, 0) });
-  const providers = [{ provider: "Claude", enabled: true, displayName: "Claude", binaryPath: "", configDir: "/opt/claude-work", launchArgs: "--model opus --verbose" }] as const;
-  const html = render({ ...settingsOpen("providers"), settings: { ...initial.settings, providers: [...providers], providerHealthCheckSecs: 300 } }, { providers: { Claude: CLAUDE } });
+  const providers = [
+    { provider: "Claude", enabled: true, displayName: "Claude", binaryPath: "", configDir: "/opt/claude-work", launchArgs: "--model opus --verbose" },
+  ] as const;
+  const html = render(
+    { ...settingsOpen("providers"), settings: { ...initial.settings, providers: [...providers], providerHealthCheckSecs: 300 } },
+    { providers: { Claude: CLAUDE } },
+  );
   expect(breadcrumb(html)).toBe("Settings / Providers");
   expect([byTestId(html, "provider-version-Claude"), byTestId(html, "provider-status-Claude"), byTestId(html, "providers-checked")]).toEqual([
     "v2.1.301",
@@ -516,7 +554,12 @@ it("shows each provider's version, sign-in, and switch, and the picked provider'
   expect(text(html)).toContain("Where Claude keeps its login and settings. Sets CLAUDE_CONFIG_DIR.");
   expect(text(html)).toContain("Extra command-line arguments passed to claude when a chat starts.");
   expect(byTestId(html, "provider-launch-args-ignored")).toBe("Ignored: --verbose");
-  expect(["provider-display-name", "provider-binary-path", "provider-config-dir", "provider-launch-args"].map((id) => [attr(inputTag(html, id), "value"), attr(inputTag(html, id), "placeholder")])).toEqual([
+  expect(
+    ["provider-display-name", "provider-binary-path", "provider-config-dir", "provider-launch-args"].map((id) => [
+      attr(inputTag(html, id), "value"),
+      attr(inputTag(html, id), "placeholder"),
+    ]),
+  ).toEqual([
     ["Claude", "Claude"],
     ["", "claude"],
     ["/opt/claude-work", "~/.claude"],
@@ -527,7 +570,9 @@ it("shows each provider's version, sign-in, and switch, and the picked provider'
 });
 
 it("says Checking while a probe runs and keeps the last outcome on the provider's row", () => {
-  const html = render(settingsOpen("providers"), { providers: { Claude: { ...CLAUDE, checking: true, outcome: { kind: "NotFound", binary: "claude on PATH" } } } });
+  const html = render(settingsOpen("providers"), {
+    providers: { Claude: { ...CLAUDE, checking: true, outcome: { kind: "NotFound", binary: "claude on PATH" } } },
+  });
   expect([byTestId(html, "providers-checked"), byTestId(html, "provider-status-Claude")]).toEqual(["Checking…", "Not found"]);
   expect(html).not.toContain('data-testid="provider-version-Claude"');
   expect(resetTag(html)).toContain('disabled=""');

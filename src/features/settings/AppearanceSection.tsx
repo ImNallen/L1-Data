@@ -73,7 +73,11 @@ function Orb({ variant, checked, size }: { variant: ThemeVariant; checked: boole
   const { background, accent } = variant.swatch;
   const Icon = ORB_ICON[variant.appearance];
   return (
-    <label title={variant.name} data-testid={`theme-orb-${variant.id}`} className={cx("relative grid cursor-pointer place-items-center rounded-full", size.label)}>
+    <label
+      title={variant.name}
+      data-testid={`theme-orb-${variant.id}`}
+      className={cx("relative grid cursor-pointer place-items-center rounded-full", size.label)}
+    >
       <input
         type="radio"
         name={THEME_SLOT[variant.appearance]}
@@ -124,7 +128,11 @@ function ThemeCard({ family, picks, appearance, onDuplicate }: CardProps) {
       </div>
       <div className="absolute top-1.5 right-1.5 flex opacity-0 transition-opacity group-focus-within:opacity-100 group-hover:opacity-100">
         {shown && (
-          <IconButton aria-label={`Duplicate ${shown.name}`} title="Duplicate into a new theme" onClick={() => onDuplicate(draftOf(shown, `${shown.name} copy`))}>
+          <IconButton
+            aria-label={`Duplicate ${shown.name}`}
+            title="Duplicate into a new theme"
+            onClick={() => onDuplicate(draftOf(shown, `${shown.name} copy`))}
+          >
             <CopyIcon size={14} />
           </IconButton>
         )}
@@ -178,7 +186,11 @@ export function ColorSchemeSetting() {
 
 export function ThemesSetting() {
   const settings = useWorkspace((s) => s.settings);
-  const systemDark = useSyncExternalStore(subscribeSystem, () => window.matchMedia(DARK_QUERY).matches, () => true);
+  const systemDark = useSyncExternalStore(
+    subscribeSystem,
+    () => window.matchMedia(DARK_QUERY).matches,
+    () => true,
+  );
   const current = resolveTheme(settings, systemDark);
   const [draft, setDraft] = useState<{ key: number; draft: ThemeDraft } | null>(null);
   const [adding, setAdding] = useState(false);
@@ -195,11 +207,7 @@ export function ThemesSetting() {
           <p className="mt-0.5 text-ui-12 text-dim">Pick one theme for light mode and one for dark.</p>
         </div>
         <div className="flex gap-2">
-          <Button
-            data-testid="create-theme"
-            className="h-7 px-2.5 text-ui-12.5"
-            onClick={() => edit(draftOf(current, ""))}
-          >
+          <Button data-testid="create-theme" className="h-7 px-2.5 text-ui-12.5" onClick={() => edit(draftOf(current, ""))}>
             <SwatchBookIcon size={14} />
             Create theme
           </Button>

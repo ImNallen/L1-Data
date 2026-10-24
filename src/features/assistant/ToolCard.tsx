@@ -8,7 +8,10 @@ import { SqlHighlight } from "./SqlHighlight";
 
 type RowsResult = Extract<ToolResult, { kind: "Rows" }>;
 
-const TOOL_ICONS = { DescribeTables: TableIcon, SearchCatalog: DatabaseSearchIcon, RunQuery: PlayIcon, Other: WrenchIcon } satisfies Record<ToolUse["kind"], unknown>;
+const TOOL_ICONS = { DescribeTables: TableIcon, SearchCatalog: DatabaseSearchIcon, RunQuery: PlayIcon, Other: WrenchIcon } satisfies Record<
+  ToolUse["kind"],
+  unknown
+>;
 
 const PREVIEW_ROWS = 8;
 
@@ -55,7 +58,21 @@ function RowsPreview({ rows, sql, db }: { rows: RowsResult; sql: string | null; 
   );
 }
 
-function ApprovalCard({ chatId, testId, tool, approval, reason, databaseKind }: { chatId: ChatId; testId: string; tool: ToolUse; approval: ApprovalId; reason: ApprovalReason; databaseKind: DatabaseKind }) {
+function ApprovalCard({
+  chatId,
+  testId,
+  tool,
+  approval,
+  reason,
+  databaseKind,
+}: {
+  chatId: ChatId;
+  testId: string;
+  tool: ToolUse;
+  approval: ApprovalId;
+  reason: ApprovalReason;
+  databaseKind: DatabaseKind;
+}) {
   const [answered, setAnswered] = useState(false);
   const answer = (decision: Decision) => {
     setAnswered(true);
@@ -91,10 +108,25 @@ function StatusIcon({ tool, status }: { tool: ToolUse; status: ToolStatus }): Re
   return <Icon size={13} />;
 }
 
-export const ToolCard = memo(function ToolCard({ chatId, seq, tool, status, db, databaseKind }: { chatId: ChatId; seq: number; tool: ToolUse; status: ToolStatus; db: DatabaseRef | null; databaseKind: DatabaseKind }) {
+export const ToolCard = memo(function ToolCard({
+  chatId,
+  seq,
+  tool,
+  status,
+  db,
+  databaseKind,
+}: {
+  chatId: ChatId;
+  seq: number;
+  tool: ToolUse;
+  status: ToolStatus;
+  db: DatabaseRef | null;
+  databaseKind: DatabaseKind;
+}) {
   const [open, setOpen] = useState(false);
   const testId = `chat-tool-${seq}`;
-  if (status.kind === "AwaitingApproval") return <ApprovalCard chatId={chatId} testId={testId} tool={tool} approval={status.approval} reason={status.reason} databaseKind={databaseKind} />;
+  if (status.kind === "AwaitingApproval")
+    return <ApprovalCard chatId={chatId} testId={testId} tool={tool} approval={status.approval} reason={status.reason} databaseKind={databaseKind} />;
   const rows = status.kind === "Done" && status.result.kind === "Rows" ? status.result : null;
   const line = toolLine(tool, status);
   return (

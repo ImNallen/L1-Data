@@ -30,7 +30,13 @@ function recordIpc(): string[] {
 it("asks for a path on ⌘⇧S even with staged edits, while ⌘S submits them and then saves", async () => {
   const cmds = recordIpc();
   seedEditor("orders", "SELECT * FROM public.orders");
-  useWorkspace.getState().addTab({ id: "orders", title: "orders", console: { db: { connectionId: "c", database: "shop" }, mode: "AutoCommit" }, table: { schema: "public", table: "orders", page: 0, query: EMPTY_QUERY }, file: null });
+  useWorkspace.getState().addTab({
+    id: "orders",
+    title: "orders",
+    console: { db: { connectionId: "c", database: "shop" }, mode: "AutoCommit" },
+    table: { schema: "public", table: "orders", page: 0, query: EMPTY_QUERY },
+    file: null,
+  });
   useTableEdits.getState().edit("orders", (e) => setCell(e, [{ column: "id", value: "1" }], "total", "9", "1"));
   const saveAs = keydown("s", { ctrlKey: true, shiftKey: true }, false);
   await vi.waitFor(() => expect(cmds).toEqual(["plugin:dialog|save"]));
@@ -92,7 +98,11 @@ it("saves the active tab's statement on ⌘⇧E", async () => {
 });
 
 it("takes Cmd alone on macOS and leaves the Ctrl chords to the editor", () => {
-  expect([press("t", { ctrlKey: true }), press("p", { ctrlKey: true }), press("t", { metaKey: true, ctrlKey: true })]).toEqual([undefined, undefined, undefined]);
+  expect([press("t", { ctrlKey: true }), press("p", { ctrlKey: true }), press("t", { metaKey: true, ctrlKey: true })]).toEqual([
+    undefined,
+    undefined,
+    undefined,
+  ]);
 });
 
 it("takes Ctrl alone off macOS", () => {
@@ -158,7 +168,12 @@ it("stays on settings on ⌘P there and focuses the settings search box", () => 
   useWorkspace.getState().openSettings("queries");
   useWorkspace.getState().setSettingsQuery("row");
   press("p")?.run();
-  expect(searchState()).toEqual({ screen: { kind: "settings", section: "queries", query: "row" }, overlay: { kind: "none" }, sidebar: true, searchFocus: true });
+  expect(searchState()).toEqual({
+    screen: { kind: "settings", section: "queries", query: "row" },
+    overlay: { kind: "none" },
+    sidebar: true,
+    searchFocus: true,
+  });
 });
 
 it("toggles the settings screen on its shortcut, starting at Appearance", () => {

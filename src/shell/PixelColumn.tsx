@@ -4,7 +4,16 @@ import { handleLook } from "./ResizeHandle";
 
 const COLUMNS = {
   sidebar: { key: "sidebarWidth", min: 200, max: 480, shrink: 1, edge: "right", handle: "sidebar-resize", label: "Resize sidebar", line: "bg-hover" },
-  right: { key: "rightPanelWidth", min: 260, max: 560, shrink: 1e6, edge: "left", handle: "right-panel-resize", label: "Resize right panel", line: "bg-border" },
+  right: {
+    key: "rightPanelWidth",
+    min: 260,
+    max: 560,
+    shrink: 1e6,
+    edge: "left",
+    handle: "right-panel-resize",
+    label: "Resize right panel",
+    line: "bg-border",
+  },
 } as const;
 
 export type Column = keyof typeof COLUMNS;

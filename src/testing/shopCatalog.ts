@@ -56,7 +56,13 @@ export function shopCatalog(connectionId: ConnectionId, version: number): Catalo
     defaultSchema: "public",
     schemas: [
       { name: "lab", system: false, tableCount: tableCount(LAB), relations: LAB.map((s, i) => relation(s, 16_900 + i, "lab")), functions: [] },
-      { name: "public", system: false, tableCount: tableCount(SHOP), relations: SHOP.map((s, i) => relation(s, 16_400 + i, "public")), functions: SHOP_FUNCTIONS },
+      {
+        name: "public",
+        system: false,
+        tableCount: tableCount(SHOP),
+        relations: SHOP.map((s, i) => relation(s, 16_400 + i, "public")),
+        functions: SHOP_FUNCTIONS,
+      },
     ],
   };
 }

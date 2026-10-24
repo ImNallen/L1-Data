@@ -39,10 +39,10 @@ describe("keyText", () => {
 
   it("points a foreign key at its target, naming the schema only when it differs", () => {
     const fk = (refSchema: string, onDelete: "NoAction" | "Cascade") =>
-      key(
-        { kind: "Foreign", refSchema, refTable: "addresses", refColumns: ["customer_id", "id"], onDelete, onUpdate: "NoAction" },
-        ["customer_id", "ship_address_id"],
-      );
+      key({ kind: "Foreign", refSchema, refTable: "addresses", refColumns: ["customer_id", "id"], onDelete, onUpdate: "NoAction" }, [
+        "customer_id",
+        "ship_address_id",
+      ]);
     expect(keyText(fk("public", "NoAction"), "public")).toEqual({
       trailing: "foreign",
       second: "(customer_id, ship_address_id) → addresses(customer_id, id)",
@@ -91,7 +91,9 @@ describe("triggerText", () => {
 
   it("shows timing on the right and events with the function below", () => {
     expect(triggerText(trigger({}))).toEqual({ trailing: "before", second: "UPDATE · set_updated_at()" });
-    expect(triggerText(trigger({ timing: "After", events: ["Insert", "Update", "Delete"], implementation: { kind: "Function", name: "audit_order" } }))).toEqual({
+    expect(
+      triggerText(trigger({ timing: "After", events: ["Insert", "Update", "Delete"], implementation: { kind: "Function", name: "audit_order" } })),
+    ).toEqual({
       trailing: "after",
       second: "INSERT, UPDATE, DELETE · audit_order()",
     });
@@ -100,5 +102,8 @@ describe("triggerText", () => {
 });
 
 it("describes SQL module triggers without inventing a PostgreSQL function", () => {
-  expect(triggerText({ name: "audit", timing: "After", events: ["Update"], perRow: false, enabled: true, implementation: { kind: "SqlModule", definition: null } }).second).toBe("UPDATE · SQL module definition unavailable");
+  expect(
+    triggerText({ name: "audit", timing: "After", events: ["Update"], perRow: false, enabled: true, implementation: { kind: "SqlModule", definition: null } })
+      .second,
+  ).toBe("UPDATE · SQL module definition unavailable");
 });

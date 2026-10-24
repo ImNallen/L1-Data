@@ -47,7 +47,14 @@ function progressText(percent: number | null): string {
 
 export function updateButtonView(u: UpdateState, nowMs: number): UpdateButtonView | null {
   const status = u.status;
-  const view = (glyph: UpdateGlyph, label: string, tooltip: string) => ({ action: updateAction(status), glyph, percent: null, label, tooltip, attention: false });
+  const view = (glyph: UpdateGlyph, label: string, tooltip: string) => ({
+    action: updateAction(status),
+    glyph,
+    percent: null,
+    label,
+    tooltip,
+    attention: false,
+  });
   switch (status.kind) {
     case "Disabled":
       return null;
@@ -61,12 +68,21 @@ export function updateButtonView(u: UpdateState, nowMs: number): UpdateButtonVie
       return view("spinner", "Checking for updates", "Checking for updates…");
     case "Available": {
       const older = status.downgrade ? " It is the latest Stable build, older than this nightly." : "";
-      return { ...view("available", `Download L1 Data ${status.version}`, `L1 Data ${status.version} is available.${older} Click to download it.`), attention: true };
+      return {
+        ...view("available", `Download L1 Data ${status.version}`, `L1 Data ${status.version} is available.${older} Click to download it.`),
+        attention: true,
+      };
     }
     case "Downloading":
-      return { ...view("ring", `Downloading L1 Data ${status.version}`, `Downloading L1 Data ${status.version}…${progressText(status.percent)}`), percent: status.percent };
+      return {
+        ...view("ring", `Downloading L1 Data ${status.version}`, `Downloading L1 Data ${status.version}…${progressText(status.percent)}`),
+        percent: status.percent,
+      };
     case "Downloaded":
-      return { ...view("restart", `Restart to install L1 Data ${status.version}`, `L1 Data ${status.version} is ready. Click to restart and install it.`), attention: true };
+      return {
+        ...view("restart", `Restart to install L1 Data ${status.version}`, `L1 Data ${status.version} is ready. Click to restart and install it.`),
+        attention: true,
+      };
     case "Installing":
       return view("spinner", "Restarting", `Restarting into L1 Data ${status.version}…`);
     case "Failed":

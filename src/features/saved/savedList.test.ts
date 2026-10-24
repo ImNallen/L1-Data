@@ -2,7 +2,15 @@ import { describe, expect, it } from "vitest";
 import type { SavedQuery } from "../../ipc/bindings";
 import { keepSelection, rankSaved, savedKey, step } from "./savedList";
 
-const query = (id: number, name: string, sql = "select 1"): SavedQuery => ({ id, name, sql, databaseKind: "Postgres", excerpt: sql, createdAtMs: 1, usedAtMs: 1 });
+const query = (id: number, name: string, sql = "select 1"): SavedQuery => ({
+  id,
+  name,
+  sql,
+  databaseKind: "Postgres",
+  excerpt: sql,
+  createdAtMs: 1,
+  usedAtMs: 1,
+});
 
 const items = [
   query(1, "Revenue by region", "select region, sum(total) from orders group by region"),
@@ -58,19 +66,25 @@ describe("saved keys", () => {
     savedKey({ key, metaKey: false, ctrlKey: false, altKey: false, shiftKey: false, isComposing: false, ...modifiers }, selection);
 
   it("uses with Enter, opens with Mod-Enter, copies with Mod-C, and moves with the arrows", () => {
-    expect([key("Enter"), key("Enter", { metaKey: true }), key("Enter", { ctrlKey: true }), key("c", { metaKey: true }), key("ArrowDown"), key("ArrowUp")]).toEqual([
-      "primary",
-      "open",
-      "open",
-      "copy",
-      "next",
-      "previous",
-    ]);
+    expect([
+      key("Enter"),
+      key("Enter", { metaKey: true }),
+      key("Enter", { ctrlKey: true }),
+      key("c", { metaKey: true }),
+      key("ArrowDown"),
+      key("ArrowUp"),
+    ]).toEqual(["primary", "open", "open", "copy", "next", "previous"]);
   });
 
   it("leaves a search selection's copy, composition, and other chords alone", () => {
     expect(key("c", { metaKey: true }, true)).toBeNull();
     expect(key("Enter", { isComposing: true })).toBeNull();
-    expect([key("Enter", { shiftKey: true }), key("Enter", { altKey: true }), key("Backspace", { metaKey: true }), key("F2"), key("Escape")]).toEqual([null, null, null, null, null]);
+    expect([key("Enter", { shiftKey: true }), key("Enter", { altKey: true }), key("Backspace", { metaKey: true }), key("F2"), key("Escape")]).toEqual([
+      null,
+      null,
+      null,
+      null,
+      null,
+    ]);
   });
 });

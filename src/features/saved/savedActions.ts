@@ -1,4 +1,13 @@
-import { commands, type DatabaseKind, type DatabaseRef, type SavedQuery, type SavedQueryEdit, type SavedQueryError, type SavedQueryId, type SaveQueryReply } from "../../ipc/bindings";
+import {
+  commands,
+  type DatabaseKind,
+  type DatabaseRef,
+  type SavedQuery,
+  type SavedQueryEdit,
+  type SavedQueryError,
+  type SavedQueryId,
+  type SaveQueryReply,
+} from "../../ipc/bindings";
 import { savedQueryErrorText } from "../../ipc/errors";
 import { databaseKindFor } from "../../state/databaseKind";
 import { homeDb } from "../../state/dbKey";

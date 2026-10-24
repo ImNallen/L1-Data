@@ -144,7 +144,19 @@ function wrapTab(e: ReactKeyboardEvent<HTMLElement>) {
  * Placed by `pickerBox` beside the trigger's row. Escape and a click outside close it. It holds keyboard focus while open
  * and gives it back to the pill when it closes.
  */
-function Popover({ testId, trigger, title, subtitle, children }: { testId: string; trigger: HTMLElement; title: string; subtitle: string; children: ReactNode }) {
+function Popover({
+  testId,
+  trigger,
+  title,
+  subtitle,
+  children,
+}: {
+  testId: string;
+  trigger: HTMLElement;
+  title: string;
+  subtitle: string;
+  children: ReactNode;
+}) {
   const ref = useRef<HTMLDivElement>(null);
   const close = usePicker((s) => s.close);
 

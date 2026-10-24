@@ -11,7 +11,10 @@ export function parseHex(text: string): Rgba | null {
 }
 
 export function formatHex({ r, g, b, a }: Rgba): string {
-  const byte = (v: number) => Math.round(Math.min(1, Math.max(0, v)) * 255).toString(16).padStart(2, "0");
+  const byte = (v: number) =>
+    Math.round(Math.min(1, Math.max(0, v)) * 255)
+      .toString(16)
+      .padStart(2, "0");
   return `#${byte(r)}${byte(g)}${byte(b)}${a < 1 ? byte(a) : ""}`;
 }
 

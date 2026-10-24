@@ -26,7 +26,19 @@ import { commandForKey } from "../../shell/commands";
 import { rowCacheFor, type RowCache } from "../../state/rowCache";
 import { findRelation, isPrimaryKey, useCatalog, viewFor, type CatalogView } from "../../state/catalog";
 import { sameDb, type DbKey } from "../../state/dbKey";
-import { NO_EDITS, markDeleted, removeNewRows, resetNewCell, rowKey, setCell, setNewCell, useTableEdits, type CellValue, type RowId, type TableEdits } from "../../state/tableEdits";
+import {
+  NO_EDITS,
+  markDeleted,
+  removeNewRows,
+  resetNewCell,
+  rowKey,
+  setCell,
+  setNewCell,
+  useTableEdits,
+  type CellValue,
+  type RowId,
+  type TableEdits,
+} from "../../state/tableEdits";
 import { useWorkspace } from "../../state/workspace";
 import { fontStack } from "../../themes/fonts";
 import { ContextMenuArea, ContextMenuItem, cx } from "../../ui/primitives";
@@ -57,19 +69,29 @@ const QUERY_CONTROLS = SORT_BADGE_W + FILTER_BUTTON_W + 2 * HEADER_GAP;
 export type GridEditing = { pkColumns: string[]; writableColumns: ReadonlySet<string> };
 export type GridActions = { addRow(): void; deleteSelectedRows(): void };
 
-export function gridEditing(view: CatalogView | undefined, schema: string, table: string, meta: Pick<ResultMeta, "databaseKind" | "db" | "columns">): GridEditing | null {
+export function gridEditing(
+  view: CatalogView | undefined,
+  schema: string,
+  table: string,
+  meta: Pick<ResultMeta, "databaseKind" | "db" | "columns">,
+): GridEditing | null {
   if (view?.catalog.databaseKind !== "Postgres" || meta.databaseKind !== "Postgres") return null;
   const relation = findRelation(view, schema, table);
   if (!relation || relation.kind !== "Table" || !sameDb(view?.catalog.db, meta.db)) return null;
   const pkColumns = relation.columns.filter((c) => c.pk).map((c) => c.name);
   if (!pkColumns.length || !pkColumns.every((name) => meta.columns.some((c) => c.name === name))) return null;
-  if (!meta.columns.every((c) => c.source?.tableOid === relation.oid && relation.columns.some((column) => column.attnum === c.source?.attnum && column.name === c.name))) return null;
+  if (
+    !meta.columns.every(
+      (c) => c.source?.tableOid === relation.oid && relation.columns.some((column) => column.attnum === c.source?.attnum && column.name === c.name),
+    )
+  )
+    return null;
   return { pkColumns, writableColumns: new Set(relation.columns.filter((c) => c.writable).map((c) => c.name)) };
 }
 
 export function gridKeyColumns(editing: GridEditing | null, edits: TableEdits): string[] {
   const original = Object.values(edits.updates)[0]?.key ?? Object.values(edits.deletes)[0];
-  return original ? original.map((cell) => cell.column) : editing?.pkColumns ?? [];
+  return original ? original.map((cell) => cell.column) : (editing?.pkColumns ?? []);
 }
 
 const DEFAULT = Symbol("default");
@@ -447,7 +469,10 @@ export function ResultGrid({
   useEffect(() => {
     if (edits.inserts.length > insertsSeen.current) {
       const row = rowCount + edits.inserts.length - 1;
-      const col = Math.max(0, columns.findIndex((c) => editing?.writableColumns.has(c.name)));
+      const col = Math.max(
+        0,
+        columns.findIndex((c) => editing?.writableColumns.has(c.name)),
+      );
       rows.scrollToIndex(row);
       setSelection({ anchor: { row, col }, focus: { row, col } });
       scroller.current?.focus();
@@ -458,7 +483,6 @@ export function ResultGrid({
     if (!editable) return null;
     return { addRow: () => void useTableEdits.getState().addRow(tabId), deleteSelectedRows: () => void deleteSelectedRows() };
   });
-
 
   const onKeyDown = (e: KeyboardEvent) => {
     const mod = e.metaKey || e.ctrlKey;
@@ -697,7 +721,9 @@ export function ResultGrid({
                       <span className={cx(!deleted && "text-dim")}>NULL</span>
                     ) : (
                       <>
-                        <span className={cx("min-w-0 truncate whitespace-pre", !deleted && "text-fg")}>{right ? groupDigits(value) : value.replace(/\n/g, "↵ ")}</span>
+                        <span className={cx("min-w-0 truncate whitespace-pre", !deleted && "text-fg")}>
+                          {right ? groupDigits(value) : value.replace(/\n/g, "↵ ")}
+                        </span>
                         {cut && (
                           <button
                             type="button"

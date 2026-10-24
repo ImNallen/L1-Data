@@ -13,7 +13,22 @@ const iconOf = (category: TypeCategory, primaryKey = false) => {
 };
 
 it("marks each column with an icon for its type", () => {
-  const categories: TypeCategory[] = ["Integer", "Numeric", "Text", "Bool", "Temporal", "Json", "Uuid", "Binary", "Network", "Array", "Enum", "Composite", "Range", "Other"];
+  const categories: TypeCategory[] = [
+    "Integer",
+    "Numeric",
+    "Text",
+    "Bool",
+    "Temporal",
+    "Json",
+    "Uuid",
+    "Binary",
+    "Network",
+    "Array",
+    "Enum",
+    "Composite",
+    "Range",
+    "Other",
+  ];
   expect(categories.map((c) => iconOf(c))).toEqual([
     "hash",
     "hash",
@@ -65,7 +80,11 @@ it("looks primary keys up in the catalog of the database the rows came from", ()
     ],
   });
   const views = { [dbKey(shop.catalog.db)]: shop, [dbKey(reporting.catalog.db)]: reporting };
-  const column = (name: string, attnum: number): ColumnMeta => ({ name, type: { display: "bigint", category: "Numeric" }, source: { tableOid: orders.oid, attnum } });
+  const column = (name: string, attnum: number): ColumnMeta => ({
+    name,
+    type: { display: "bigint", category: "Numeric" },
+    source: { tableOid: orders.oid, attnum },
+  });
   const columns = [column("a", orders.columns[0]!.attnum), column("b", orders.columns[1]!.attnum)];
   expect(primaryKeyColumns(views, { db: { connectionId: "conn", database: "shop" }, columns })).toEqual([true, false]);
   expect(primaryKeyColumns(views, { db: { connectionId: "conn", database: "reporting" }, columns })).toEqual([false, true]);
@@ -107,7 +126,11 @@ it("keeps generated columns read-only and requires database-scoped edit provenan
   const meta = {
     databaseKind: catalog.databaseKind,
     db: catalog.db,
-    columns: relation.columns.map((column) => ({ name: column.name, type: { display: column.typeDisplay, category: column.category }, source: { tableOid: relation.oid, attnum: column.attnum } })),
+    columns: relation.columns.map((column) => ({
+      name: column.name,
+      type: { display: column.typeDisplay, category: column.category },
+      source: { tableOid: relation.oid, attnum: column.attnum },
+    })),
   };
   const view = buildCatalogView(catalog);
   const editing = gridEditing(view, "public", "orders", meta);
@@ -128,7 +151,11 @@ it.each<{ catalogKind: DatabaseKind; resultKind: DatabaseKind }>([
   const meta = {
     databaseKind: catalog.databaseKind,
     db: catalog.db,
-    columns: relation.columns.map((column) => ({ name: column.name, type: { display: column.typeDisplay, category: column.category }, source: { tableOid: relation.oid, attnum: column.attnum } })),
+    columns: relation.columns.map((column) => ({
+      name: column.name,
+      type: { display: column.typeDisplay, category: column.category },
+      source: { tableOid: relation.oid, attnum: column.attnum },
+    })),
   };
   expect(gridEditing(buildCatalogView(catalog), "public", "orders", meta)?.pkColumns).toEqual(["id"]);
   expect(gridEditing(buildCatalogView({ ...catalog, databaseKind: catalogKind }), "public", "orders", { ...meta, databaseKind: resultKind })).toBeNull();

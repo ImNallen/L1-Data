@@ -71,11 +71,7 @@ export function toggleDeletes(e: TableEdits, rows: RowId[]): TableEdits {
 
 const entries = (values: Record<string, CellValue>): CellWrite[] => Object.entries(values).map(([column, value]) => ({ column, value }));
 
-export function toChanges(
-  e: TableEdits,
-  schema: string,
-  table: string,
-): { changes: TableChanges; rowOf: (ref: ChangeRef) => TableEdits["failedAt"] } {
+export function toChanges(e: TableEdits, schema: string, table: string): { changes: TableChanges; rowOf: (ref: ChangeRef) => TableEdits["failedAt"] } {
   const deleteKeys = Object.keys(e.deletes);
   const updateKeys = Object.keys(e.updates).filter((k) => !(k in e.deletes));
   const changes: TableChanges = {

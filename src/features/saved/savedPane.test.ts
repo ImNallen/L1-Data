@@ -2,7 +2,15 @@ import { describe, expect, it } from "vitest";
 import type { SavedQuery } from "../../ipc/bindings";
 import { listKeysLive, paneReducer, type Pane, type PaneEvent } from "./savedPane";
 
-const query: SavedQuery = { id: 7, name: "Active sessions", sql: "select pid from pg_stat_activity", databaseKind: "Postgres", excerpt: "", createdAtMs: 1, usedAtMs: 1 };
+const query: SavedQuery = {
+  id: 7,
+  name: "Active sessions",
+  sql: "select pid from pg_stat_activity",
+  databaseKind: "Postgres",
+  excerpt: "",
+  createdAtMs: 1,
+  usedAtMs: 1,
+};
 const run = (events: PaneEvent[], from: Pane = { kind: "view" }) => events.reduce(paneReducer, from);
 const edit = (closeOnDone = false): PaneEvent => ({ type: "edit", query, focus: "name", closeOnDone });
 const rename: PaneEvent = { type: "change", draft: { name: "Sessions" } };

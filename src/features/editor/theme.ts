@@ -68,8 +68,22 @@ export const editorTheme = EditorView.theme({
   ".cm-panels": { backgroundColor: "var(--color-raised)", color: "var(--code)" },
   ".cm-panels-top": { borderBottom: "1px solid var(--color-border)" },
   ".cm-panels-bottom": { borderTop: "1px solid var(--color-border)" },
-  ".cm-panel.cm-search": { display: "flex", flexWrap: "wrap", alignItems: "center", rowGap: "6px", padding: "8px 32px 8px 12px", fontFamily: "var(--font-sans)" },
-  ".cm-panel.cm-search label": { display: "inline-flex", alignItems: "center", gap: "4px", margin: "0 10px 0 0", fontSize: "var(--text-ui-12)", color: "var(--color-muted)" },
+  ".cm-panel.cm-search": {
+    display: "flex",
+    flexWrap: "wrap",
+    alignItems: "center",
+    rowGap: "6px",
+    padding: "8px 32px 8px 12px",
+    fontFamily: "var(--font-sans)",
+  },
+  ".cm-panel.cm-search label": {
+    display: "inline-flex",
+    alignItems: "center",
+    gap: "4px",
+    margin: "0 10px 0 0",
+    fontSize: "var(--text-ui-12)",
+    color: "var(--color-muted)",
+  },
   ".cm-panel.cm-search input[type=checkbox]": { margin: "0", accentColor: "var(--color-run)" },
   ".cm-panel.cm-search [name=close]": {
     top: "6px",
@@ -106,7 +120,28 @@ export const editorHighlighting = syntaxHighlighting(HighlightStyle.define(SQL_T
 
 export const staticSqlHighlighter = tagHighlighter(SQL_TOKENS.map(({ tag, className }) => ({ tag, class: className })));
 
-const NOT_CALLS = new Set(["in", "values", "exists", "any", "all", "some", "over", "filter", "within", "using", "not", "and", "or", "on", "as", "from", "into", "table", "returning", "select"]);
+const NOT_CALLS = new Set([
+  "in",
+  "values",
+  "exists",
+  "any",
+  "all",
+  "some",
+  "over",
+  "filter",
+  "within",
+  "using",
+  "not",
+  "and",
+  "or",
+  "on",
+  "as",
+  "from",
+  "into",
+  "table",
+  "returning",
+  "select",
+]);
 const callMark = Decoration.mark({ class: "cm-call" });
 
 export function isKeywordCall(word: string, next: string): boolean {

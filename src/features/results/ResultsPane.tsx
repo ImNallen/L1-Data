@@ -15,33 +15,14 @@ import {
 import { useEffect, useMemo, useRef, useSyncExternalStore, type RefObject } from "react";
 import type { ConsoleState, OutputEntry, QueryError, RunState, TabId } from "../../ipc/bindings";
 import { useLive } from "../../state/live";
-import {
-  isBusy,
-  outputTone,
-  resultView,
-  rowResults,
-  runStatements,
-  runSummary,
-  shownResult,
-  type ResultView,
-  type Summary,
-} from "../../state/status";
+import { isBusy, outputTone, resultView, rowResults, runStatements, runSummary, shownResult, type ResultView, type Summary } from "../../state/status";
 import { useCatalog, viewFor } from "../../state/catalog";
 import { databaseKindFor } from "../../state/databaseKind";
 import { NO_EDITS, pendingCount, useTableEdits } from "../../state/tableEdits";
 import { isFiltered, isTableTab, useWorkspace, type TableTab } from "../../state/workspace";
 import { cx, IconButton, MenuContent, MenuItem, Spinner } from "../../ui/primitives";
 import { useNow } from "../../ui/useNow";
-import {
-  isBrowsing,
-  lastTablePage,
-  loadTableOnce,
-  onEditorDocChanged,
-  saveSettings,
-  setTablePage,
-  submitEdits,
-  updateTableQuery,
-} from "../editor/runActions";
+import { isBrowsing, lastTablePage, loadTableOnce, onEditorDocChanged, saveSettings, setTablePage, submitEdits, updateTableQuery } from "../editor/runActions";
 import { ExportMenu } from "./ExportMenu";
 import { FilterBar } from "./FilterBar";
 import { groupDigits, pageStatus, pluralRows } from "./format";
@@ -60,8 +41,9 @@ function TablePager({ tab, rows }: { tab: TableTab; rows: number }) {
   const { schema, table, page, query, exactRowCount } = tab.table;
   const estimate = useCatalog(
     (s) =>
-      viewFor(s.views, tab.console.db)?.catalog.schemas.find((sc) => sc.name === schema)?.relations.find((r) => r.name === table)
-        ?.rowEstimate ?? null,
+      viewFor(s.views, tab.console.db)
+        ?.catalog.schemas.find((sc) => sc.name === schema)
+        ?.relations.find((r) => r.name === table)?.rowEstimate ?? null,
   );
   const { label, isLast } = pageStatus(page, size, rows, isFiltered(query) ? null : estimate, exactRowCount);
   return (
@@ -160,7 +142,17 @@ function Empty({ children }: { children: React.ReactNode }) {
   return <div className="grid flex-1 place-items-center bg-bg text-ui-13 text-dim">{children}</div>;
 }
 
-function EditBar({ tabId, editable, canSubmit, actions }: { tabId: TabId | null; editable: boolean; canSubmit: boolean; actions: RefObject<GridActions | null> }) {
+function EditBar({
+  tabId,
+  editable,
+  canSubmit,
+  actions,
+}: {
+  tabId: TabId | null;
+  editable: boolean;
+  canSubmit: boolean;
+  actions: RefObject<GridActions | null>;
+}) {
   const edits = useTableEdits((s) => (tabId ? s.byTab[tabId] : undefined) ?? NO_EDITS);
   const pending = pendingCount(edits);
   const busy = useTableEdits((s) => (tabId ? s.submitting[tabId] === true : false));
@@ -224,7 +216,7 @@ function RunTail({ run }: { run: RunState }) {
   const error = failedError(run);
   if (error) return <ErrorBlock error={error} />;
   if (run.outcome === "Cancelled") return "Cancelled.";
-  const commands = runStatements(run).flatMap((s) => s.outputs.flatMap((o) => o.kind === "Command" ? [o.tag] : []));
+  const commands = runStatements(run).flatMap((s) => s.outputs.flatMap((o) => (o.kind === "Command" ? [o.tag] : [])));
   if (commands.length) return commands.join(", ");
   return rowResults(run).length ? null : "The statement returned no rows.";
 }
@@ -314,7 +306,10 @@ export function ResultsPane({ tabId }: { tabId: TabId | null }) {
   }, [tabId, isTable]);
   const catalogView = useCatalog((s) => viewFor(s.views, browsingTable?.console.db));
   const editing = useMemo(
-    () => browsingTable && shown && databaseKind === "Postgres" ? gridEditing(catalogView, browsingTable.table.schema, browsingTable.table.table, shown.meta) : null,
+    () =>
+      browsingTable && shown && databaseKind === "Postgres"
+        ? gridEditing(catalogView, browsingTable.table.schema, browsingTable.table.table, shown.meta)
+        : null,
     // oxlint-disable-next-line react-hooks/exhaustive-deps -- the deps name the fields the memo reads, not the objects that hold them
     [browsingTable?.console.db, browsingTable?.table.schema, browsingTable?.table.table, catalogView, shown?.meta, databaseKind],
   );
@@ -325,7 +320,12 @@ export function ResultsPane({ tabId }: { tabId: TabId | null }) {
   return (
     <section className="flex h-full min-h-0 flex-col bg-bg">
       <div className="flex h-[41px] shrink-0 items-center gap-3 border-b border-grid pr-2 pl-2.5">
-        <EditBar tabId={tabId} editable={!busy && editing !== null && tabId !== null} canSubmit={!busy && databaseKind !== "SqlServer" && shown?.meta.databaseKind !== "SqlServer"} actions={actions} />
+        <EditBar
+          tabId={tabId}
+          editable={!busy && editing !== null && tabId !== null}
+          canSubmit={!busy && databaseKind !== "SqlServer" && shown?.meta.databaseKind !== "SqlServer"}
+          actions={actions}
+        />
         {results.length > 1 && (
           <div data-testid="result-selector" className="flex items-center gap-0.5 rounded-md border border-control p-0.5">
             {results.map((r, i) => (
@@ -356,7 +356,14 @@ export function ResultsPane({ tabId }: { tabId: TabId | null }) {
           <ExportMenu
             tab={tab}
             result={shown}
-            table={browsingTable && { page: browsingTable.table.page, pageSize, exactRowCount: browsingTable.table.exactRowCount ?? null, filtered: isFiltered(browsingTable.table.query) }}
+            table={
+              browsingTable && {
+                page: browsingTable.table.page,
+                pageSize,
+                exactRowCount: browsingTable.table.exactRowCount ?? null,
+                filtered: isFiltered(browsingTable.table.query),
+              }
+            }
             disabled={!shown || busy}
           />
           <IconButton
@@ -377,8 +384,16 @@ export function ResultsPane({ tabId }: { tabId: TabId | null }) {
         </div>
       </div>
 
-      {(databaseKind === "SqlServer" || shown?.meta.databaseKind === "SqlServer") && <p data-testid="sqlserver-output-limit" className="border-b border-grid px-3 py-1 text-ui-11.5 text-dim">SQL Server PRINT and informational messages are unavailable. Affected row counts may be unknown.</p>}
-      {browsingTable && databaseKind === "SqlServer" && <p data-testid="sqlserver-edit-limit" className="border-b border-grid px-3 py-1 text-ui-11.5 text-dim">SQL Server table results are read-only. Use SQL scripts to insert, update or delete rows.</p>}
+      {(databaseKind === "SqlServer" || shown?.meta.databaseKind === "SqlServer") && (
+        <p data-testid="sqlserver-output-limit" className="border-b border-grid px-3 py-1 text-ui-11.5 text-dim">
+          SQL Server PRINT and informational messages are unavailable. Affected row counts may be unknown.
+        </p>
+      )}
+      {browsingTable && databaseKind === "SqlServer" && (
+        <p data-testid="sqlserver-edit-limit" className="border-b border-grid px-3 py-1 text-ui-11.5 text-dim">
+          SQL Server table results are read-only. Use SQL scripts to insert, update or delete rows.
+        </p>
+      )}
       {exporting?.writeError && (
         <p data-testid="export-write-error" className="border-b border-grid px-3 py-1 text-ui-11.5 text-amber">
           Couldn't write the file: {exporting.writeError}. The query keeps reading to the end so the session survives. Esc stops it now and resets the session.

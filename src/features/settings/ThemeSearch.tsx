@@ -7,11 +7,7 @@ import { addThemes } from "./themeActions";
 const POPULAR = ["Dracula", "Catppuccin", "Nord", "Tokyo Night"];
 const DEBOUNCE_MS = 250;
 
-type Search =
-  | { kind: "idle" }
-  | { kind: "loading" }
-  | { kind: "done"; query: string; results: VsxExtension[] }
-  | { kind: "error"; message: string };
+type Search = { kind: "idle" } | { kind: "loading" } | { kind: "done"; query: string; results: VsxExtension[] } | { kind: "error"; message: string };
 
 function useThemeSearch(query: string): Search {
   const [search, setSearch] = useState<Search>({ kind: "idle" });

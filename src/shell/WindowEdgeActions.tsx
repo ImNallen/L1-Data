@@ -1,11 +1,4 @@
-import {
-  PanelBottomDashedIcon,
-  PanelBottomIcon,
-  PanelLeftDashedIcon,
-  PanelLeftIcon,
-  PanelRightDashedIcon,
-  PanelRightIcon,
-} from "lucide-react";
+import { PanelBottomDashedIcon, PanelBottomIcon, PanelLeftDashedIcon, PanelLeftIcon, PanelRightDashedIcon, PanelRightIcon } from "lucide-react";
 import { useWorkspace } from "../state/workspace";
 import { IconButton } from "../ui/primitives";
 import { WindowControls } from "./WindowChrome";
@@ -36,12 +29,7 @@ export function SidebarToggle() {
   const sidebar = useWorkspace((s) => s.layout.sidebar);
   const setLayout = useWorkspace((s) => s.setLayout);
   return (
-    <IconButton
-      data-testid="toggle-sidebar"
-      aria-label="Toggle sidebar"
-      className="shrink-0"
-      onClick={() => setLayout({ sidebar: !sidebar })}
-    >
+    <IconButton data-testid="toggle-sidebar" aria-label="Toggle sidebar" className="shrink-0" onClick={() => setLayout({ sidebar: !sidebar })}>
       <PanelIcon side="left" shown={sidebar} />
     </IconButton>
   );
@@ -54,18 +42,10 @@ export function WindowEdgeActions({ hosted }: { hosted: HostedWindow | null }) {
   const setLayout = useWorkspace((s) => s.setLayout);
   return (
     <div className="flex items-center gap-2">
-      <IconButton
-        data-testid="toggle-results"
-        aria-label="Toggle results"
-        onClick={() => setLayout({ results: !results })}
-      >
+      <IconButton data-testid="toggle-results" aria-label="Toggle results" onClick={() => setLayout({ results: !results })}>
         <PanelIcon side="bottom" shown={results} />
       </IconButton>
-      <IconButton
-        data-testid="toggle-right-panel"
-        aria-label="Toggle right panel"
-        onClick={() => setLayout({ rightPanel: rightPanel ? null : "Assistant" })}
-      >
+      <IconButton data-testid="toggle-right-panel" aria-label="Toggle right panel" onClick={() => setLayout({ rightPanel: rightPanel ? null : "Assistant" })}>
         <PanelIcon side="right" shown={rightPanel !== null} />
       </IconButton>
       {hosted?.chrome === "custom" && (

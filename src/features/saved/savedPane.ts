@@ -2,7 +2,17 @@ import type { DatabaseKind, SavedQuery, SavedQueryId } from "../../ipc/bindings"
 
 export type Draft = { name: string; sql: string };
 
-export type EditPane = { kind: "edit"; id: SavedQueryId; databaseKind: DatabaseKind; base: Draft; draft: Draft; focus: "name" | "sql"; closeOnDone: boolean; error: string | null; saving: boolean };
+export type EditPane = {
+  kind: "edit";
+  id: SavedQueryId;
+  databaseKind: DatabaseKind;
+  base: Draft;
+  draft: Draft;
+  focus: "name" | "sql";
+  closeOnDone: boolean;
+  error: string | null;
+  saving: boolean;
+};
 
 export type Pane = { kind: "view" } | EditPane | { kind: "confirmDiscard"; edit: EditPane } | { kind: "confirmDelete"; id: SavedQueryId } | { kind: "done" };
 
@@ -27,7 +37,17 @@ export function paneReducer(pane: Pane, event: PaneEvent): Pane {
     case "view":
       if (event.type === "edit") {
         const base = { name: event.query.name, sql: event.query.sql };
-        return { kind: "edit", id: event.query.id, databaseKind: event.query.databaseKind, base, draft: base, focus: event.focus, closeOnDone: event.closeOnDone ?? false, error: null, saving: false };
+        return {
+          kind: "edit",
+          id: event.query.id,
+          databaseKind: event.query.databaseKind,
+          base,
+          draft: base,
+          focus: event.focus,
+          closeOnDone: event.closeOnDone ?? false,
+          error: null,
+          saving: false,
+        };
       }
       return event.type === "askDelete" ? { kind: "confirmDelete", id: event.id } : pane;
     case "edit":

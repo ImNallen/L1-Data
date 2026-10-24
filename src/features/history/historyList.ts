@@ -29,7 +29,10 @@ export function appendRuns(current: HistoryDetail, requested: HistoryDetail, pag
 }
 
 export type HistoryAction = "open" | "run" | "insert" | "copy" | "next" | "previous";
-export function historyKey(e: Pick<KeyboardEvent, "key" | "metaKey" | "ctrlKey" | "altKey" | "shiftKey" | "isComposing">, searchHasSelection: boolean): HistoryAction | null {
+export function historyKey(
+  e: Pick<KeyboardEvent, "key" | "metaKey" | "ctrlKey" | "altKey" | "shiftKey" | "isComposing">,
+  searchHasSelection: boolean,
+): HistoryAction | null {
   if (e.isComposing || e.shiftKey) return null;
   const mod = e.metaKey || e.ctrlKey;
   if (e.key === "Enter") return mod ? "run" : e.altKey ? "insert" : "open";

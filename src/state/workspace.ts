@@ -91,7 +91,15 @@ export type WorkspaceData = {
   cursor: { line: number; col: number };
 };
 
-const DEFAULT_LAYOUT: Layout = { sidebar: true, results: true, rightPanel: null, resultsHeight: 320, sidebarWidth: 256, rightPanelWidth: 341, assistantChat: null };
+const DEFAULT_LAYOUT: Layout = {
+  sidebar: true,
+  results: true,
+  rightPanel: null,
+  resultsHeight: 320,
+  sidebarWidth: 256,
+  rightPanelWidth: 341,
+  assistantChat: null,
+};
 export const DEFAULT_SETTINGS: Settings = {
   maxRows: 200_000,
   maxResultBytes: 512 * 1024 * 1024,
@@ -294,7 +302,9 @@ export const useWorkspace = create<WorkspaceData & WorkspaceActions>()((set, get
       return {
         configs: { ...s.configs, [c.id]: c },
         tabs: Object.fromEntries(
-          Object.entries(s.tabs).map(([id, t]) => (t.table === null && follows(t.console.db) ? [id, { ...t, console: { ...t.console, db: homeDb(c, connection) } }] : [id, t])),
+          Object.entries(s.tabs).map(([id, t]) =>
+            t.table === null && follows(t.console.db) ? [id, { ...t, console: { ...t.console, db: homeDb(c, connection) } }] : [id, t],
+          ),
         ),
       };
     }),
@@ -317,8 +327,7 @@ export const useWorkspace = create<WorkspaceData & WorkspaceActions>()((set, get
   closeSettings: () => set({ screen: { kind: "workspace" }, overlay: { kind: "none" } }),
   setTreeQuery: (treeQuery) => set({ treeQuery }),
   setSettingsQuery: (query) => set((s) => (s.screen.kind === "settings" ? { screen: { ...s.screen, query } } : {})),
-  focusSearch: () =>
-    set((s) => ({ overlay: { kind: "none" }, layout: s.layout.sidebar ? s.layout : { ...s.layout, sidebar: true }, searchFocus: true })),
+  focusSearch: () => set((s) => ({ overlay: { kind: "none" }, layout: s.layout.sidebar ? s.layout : { ...s.layout, sidebar: true }, searchFocus: true })),
   searchFocused: () => set({ searchFocus: false }),
   notify: (text) => set({ toast: { id: ++toastSeq, text } }),
   setCursor: (cursor) => set({ cursor }),
