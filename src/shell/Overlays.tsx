@@ -23,12 +23,16 @@ function Toast() {
   );
 }
 
-/** Keyed by `seq`, so a question that follows another remounts and takes focus again. Enter picks the primary choice. */
+/**
+ * Keyed by `seq`, so a question that follows another remounts and takes focus again. Enter picks the primary choice.
+ * A question with a danger choice and no primary opens on Cancel, its safe answer.
+ */
 function AskDialog({ question }: { question: Extract<Overlay, { kind: "ask" }> }) {
   const answer = useWorkspace((s) => s.answer);
   const close = useWorkspace((s) => s.close);
   const primary = useRef<HTMLButtonElement>(null);
-  const hasPrimary = question.choices.some((c) => c.variant === "primary");
+  const cancel = useRef<HTMLButtonElement>(null);
+  const has = (variant: "primary" | "danger") => question.choices.some((c) => c.variant === variant);
   return (
     <Modal
       open
@@ -37,10 +41,10 @@ function AskDialog({ question }: { question: Extract<Overlay, { kind: "ask" }> }
       description={question.body}
       width={440}
       testId={`${question.testId}-dialog`}
-      initialFocus={hasPrimary ? primary : undefined}
+      initialFocus={has("primary") ? primary : has("danger") ? cancel : undefined}
     >
       <div className="flex justify-end gap-2">
-        <Button variant="ghost" data-testid={`${question.testId}-cancel`} onClick={close}>
+        <Button ref={cancel} variant="ghost" data-testid={`${question.testId}-cancel`} onClick={close}>
           Cancel
         </Button>
         {question.choices.map((c) => (
