@@ -7,14 +7,14 @@ use tokio::sync::{Mutex, watch};
 
 use crate::Shared;
 use crate::model::*;
-use crate::results::{Caps, ResultSet};
+use crate::results::{Caps, Origin, ResultSet, Rerun};
 use crate::session::{CancelHandle, Session, QueryEvent};
 use crate::sql::{Invalidates, StmtKind, StmtSpan};
 use crate::store::HistoryInsert;
 use crate::text::{OffsetMap, synthesize_tag};
 use crate::txn::{StmtOutcome, TransactionPlan, txn_after};
 
-const STREAM_EMIT_INTERVAL: Duration = Duration::from_millis(100);
+pub(crate) const STREAM_EMIT_INTERVAL: Duration = Duration::from_millis(100);
 
 pub struct Console {
     pub tab: TabId,
@@ -81,6 +81,15 @@ impl ConsoleInner {
         pending.owed.add(invalidates);
     }
 
+    /// The running export's progress. Reached only through `Console::edit`, which checks that the
+    /// caller's run id still owns the slot.
+    pub fn export_progress_mut(&mut self) -> Option<&mut ExportProgress> {
+        match &mut self.session {
+            SessionSlot::Busy { work: Work::Export(progress), .. } => Some(progress),
+            _ => None,
+        }
+    }
+
     pub fn finish_refreshes(&mut self, committed: bool) -> Option<(DatabaseRef, Owed)> {
         if self.txn != TxnState::Idle { return None; }
         let pending = self.refreshes.take()?;
@@ -89,12 +98,37 @@ impl ConsoleInner {
     }
 }
 
+/// What holds a tab's session while it is out of its slot. `ConsoleState.work` and
+/// `ConsoleState.export` both derive from this one value, so an export's progress leaves the
+/// snapshot on every path out of `Busy`: return, close, and disconnect.
+pub enum Work {
+    Run,
+    Count,
+    Transaction,
+    Edit,
+    Probe,
+    Export(ExportProgress),
+}
+
+impl Work {
+    pub fn kind(&self) -> ConsoleWork {
+        match self {
+            Work::Run => ConsoleWork::Run,
+            Work::Count => ConsoleWork::Count,
+            Work::Transaction => ConsoleWork::Transaction,
+            Work::Edit => ConsoleWork::Edit,
+            Work::Probe => ConsoleWork::Probe,
+            Work::Export(_) => ConsoleWork::Export,
+        }
+    }
+}
+
 pub enum SessionSlot {
     Empty,
     Idle(Session),
     Busy {
         run_id: RunId,
-        work: ConsoleWork,
+        work: Work,
         backend_pid: i32,
         cancel: CancelHandle,
         stop: Arc<AtomicBool>,
@@ -127,6 +161,7 @@ impl Console {
             config: inner.config.clone(),
             session: SessionState::None,
             work: None,
+            export: None,
             txn: TxnState::Idle,
             txn_depth: None,
             run: RunState::Idle,
@@ -157,7 +192,11 @@ impl Console {
             },
             txn: inner.txn,
             work: match &inner.session {
-                SessionSlot::Busy { work, .. } => Some(*work),
+                SessionSlot::Busy { work, .. } => Some(work.kind()),
+                _ => None,
+            },
+            export: match &inner.session {
+                SessionSlot::Busy { work: Work::Export(progress), .. } => Some(progress.clone()),
                 _ => None,
             },
             txn_depth: inner.txn_depth,
@@ -190,7 +229,7 @@ impl Console {
         });
     }
 
-    pub fn take_session(&self, inner: &mut ConsoleInner, run_id: RunId, work: ConsoleWork) -> Option<(Session, Arc<AtomicBool>)> {
+    pub fn take_session(&self, inner: &mut ConsoleInner, run_id: RunId, work: Work) -> Option<(Session, Arc<AtomicBool>)> {
         let SessionSlot::Idle(_) = inner.session else { return None };
         let SessionSlot::Idle(session) = std::mem::replace(&mut inner.session, SessionSlot::Empty) else { unreachable!() };
         let stop = Arc::new(AtomicBool::new(false));
@@ -305,7 +344,12 @@ pub struct RunPlan {
     /// The database the session is on; catalog refreshes and history rows name it.
     pub database: String,
     pub connection: ConnectionConfig,
-    pub table: Option<Relation>,
+    pub page: Option<TablePage>,
+}
+
+pub struct TablePage {
+    pub relation: Option<Relation>,
+    pub rerun: Rerun,
 }
 
 pub struct PlannedStmt {
@@ -416,12 +460,7 @@ pub async fn run_task(console: Arc<Console>, shared: Arc<Shared>, mut session: S
         for s in statements.iter_mut().skip(index) { if matches!(s.status, StmtStatus::Pending) { s.status = StmtStatus::Skipped; } }
         let statements = statements.clone();
         if let Some(reason) = &lost {
-            let message = match session.transaction_loss(txn) {
-                TransactionLoss::RolledBack => format!("Transaction rolled back: connection lost ({reason})"),
-                TransactionLoss::None => format!("Session reset: connection lost ({reason})"),
-                TransactionLoss::Unknown => format!("Session reset: earlier commits remain committed; the last transaction outcome may be unknown ({reason})"),
-            };
-            console.output(&shared, run_id, OutputBody::Info { message });
+            console.output(&shared, run_id, loss_line(&session, txn, reason));
         }
         let due = Console::return_session(inner, session, txn, lost);
         inner.run = RunState::Finished { run_id, elapsed_ms: elapsed_ms(started), statements, outcome };
@@ -467,6 +506,15 @@ pub async fn count_task(console: Arc<Console>, shared: Arc<Shared>, mut session:
     let _ = reply.send(result);
 }
 
+pub fn loss_line(session: &Session, txn: TxnState, reason: &str) -> OutputBody {
+    let message = match session.transaction_loss(txn) {
+        TransactionLoss::RolledBack => format!("Transaction rolled back: connection lost ({reason})"),
+        TransactionLoss::None => format!("Session reset: connection lost ({reason})"),
+        TransactionLoss::Unknown => format!("Session reset: earlier commits remain committed; the last transaction outcome may be unknown ({reason})"),
+    };
+    OutputBody::Info { message }
+}
+
 async fn set_status(console: &Console, shared: &Shared, run_id: RunId, index: u16, status: StmtStatus) -> Result<(), Orphaned> {
     console.edit(shared, run_id, |inner| Console::statements_mut(inner)[index as usize].status = status).await
 }
@@ -483,6 +531,8 @@ async fn run_outputs(console: &Console, shared: &Shared, session: &mut Session, 
     let mut rows: Option<u64> = None;
     let mut tags = Vec::new();
     let mut failure = None;
+    let mut nth: u16 = 0;
+    let mut rerun: Option<Rerun> = None;
     let mut stream = session.query(sql);
     while let Some(event) = stream.next().await {
         match event {
@@ -491,7 +541,7 @@ async fn run_outputs(console: &Console, shared: &Shared, session: &mut Session, 
             Ok(QueryEvent::Prepared) => {}
             Ok(QueryEvent::Columns(mut columns)) => {
                 if let Some((set, out)) = active.take() { finish_rows(console, shared, index, &set, &mut outputs[out], started, &mut rows); }
-                if let Some(table) = &plan.table && plan.connection.database_kind == DatabaseKind::SqlServer {
+                if let Some(table) = plan.page.as_ref().and_then(|p| p.relation.as_ref()) && plan.connection.database_kind == DatabaseKind::SqlServer {
                     if columns.len() != table.columns.len() || columns.iter().zip(&table.columns).any(|(actual, known)| actual.name != known.name || actual.r#type.category != known.category) {
                         failure = Some(crate::session::error("Table shape changed. Refresh the catalog before browsing again."));
                         break;
@@ -503,7 +553,15 @@ async fn run_outputs(console: &Console, shared: &Shared, session: &mut Session, 
                 }
                 let ordinal = match u16::try_from(console.results.lock().unwrap().len()) { Ok(n) => n, Err(_) => { failure = Some(crate::session::error("Too many result sets")); break; } };
                 let db = DatabaseRef { connection_id: plan.connection.id, database: plan.database.clone() };
-                let set = Arc::new(ResultSet::new(ResultRef { tab_id: console.tab, run_id, index: ordinal }, db, plan.connection.database_kind, columns));
+                let rerun = rerun
+                    .get_or_insert_with(|| match &plan.page {
+                        Some(page) => page.rerun.clone(),
+                        None => crate::export::rerun(plan.connection.database_kind, sql, false),
+                    })
+                    .clone();
+                let origin = Origin { rerun, nth, schema: plan.schema.clone(), page: plan.page.is_some() };
+                nth = nth.saturating_add(1);
+                let set = Arc::new(ResultSet::new(ResultRef { tab_id: console.tab, run_id, index: ordinal }, db, plan.connection.database_kind, columns, origin));
                 console.results.lock().unwrap().push(set.clone());
                 active = Some((set.clone(), outputs.len()));
                 outputs.push(RunOutput::Rows { result: set.meta(), state: RowsState::Streaming });

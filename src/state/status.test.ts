@@ -12,6 +12,7 @@ const meta = (index: number, rowCount: number, extra: Partial<ResultMeta> = {}):
   rowsSeen: rowCount,
   truncated: null,
   elapsedMs: 38,
+  allRows: { kind: "Statement" },
   ...extra,
 });
 const stmt = (index: number, status: StatementRun["status"], outputs: RunOutput[] = []): StatementRun => ({ index, range: { from: 0, to: 1 }, status, outputs });
@@ -26,7 +27,7 @@ const finished = (statements: StatementRun[], outcome: "Ok" | "Failed" | "Cancel
 });
 
 function consoleWith(mode: "AutoCommit" | "Manual", txn: ConsoleState["txn"]): ConsoleState {
-  return { tabId: "t", rev: 1, config: { connectionId: "c", database: "shop", schema: null, mode }, session: { kind: "None" }, txnDepth: null, work: null, txn, run: { kind: "Idle" } };
+  return { tabId: "t", rev: 1, config: { connectionId: "c", database: "shop", schema: null, mode }, session: { kind: "None" }, txnDepth: null, work: null, export: null, txn, run: { kind: "Idle" } };
 }
 
 describe("hasUncommittedWork", () => {

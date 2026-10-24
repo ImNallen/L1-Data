@@ -178,7 +178,7 @@ fn from_sql(schema: &str, table: &str, q: &TableQuery) -> String {
     format!("FROM {}.{}{}", quote_ident(schema), quote_ident(table), where_sql(q))
 }
 
-pub fn browse_sql(schema: &str, table: &str, pk: &[String], q: &TableQuery, limit: u32, offset: u64) -> String {
+pub fn browse_sql(schema: &str, table: &str, pk: &[String], q: &TableQuery, window: Option<(u32, u64)>) -> String {
     let mut sql = format!("SELECT * {}", from_sql(schema, table, q));
     let mut order: Vec<String> = Vec::new();
     if !q.order_by.trim().is_empty() {
@@ -189,7 +189,9 @@ pub fn browse_sql(schema: &str, table: &str, pk: &[String], q: &TableQuery, limi
     if !order.is_empty() {
         sql.push_str(&format!(" ORDER BY {}", order.join(", ")));
     }
-    sql.push_str(&format!(" LIMIT {limit} OFFSET {offset}"));
+    if let Some((limit, offset)) = window {
+        sql.push_str(&format!(" LIMIT {limit} OFFSET {offset}"));
+    }
     sql
 }
 
@@ -336,14 +338,16 @@ mod tests {
     fn browse_sql_quotes_identifiers_and_orders_by_pk() {
         let none = TableQuery::default();
         assert_eq!(
-            browse_sql("public", "orders", &["id".into()], &none, 500, 1000),
+            browse_sql("public", "orders", &["id".into()], &none, Some((500, 1000))),
             r#"SELECT * FROM "public"."orders" ORDER BY "id" LIMIT 500 OFFSET 1000"#
         );
         assert_eq!(
-            browse_sql("we\"ird", "T;x", &["a\"b".into(), "c".into()], &none, 10, 0),
+            browse_sql("we\"ird", "T;x", &["a\"b".into(), "c".into()], &none, Some((10, 0))),
             r#"SELECT * FROM "we""ird"."T;x" ORDER BY "a""b", "c" LIMIT 10 OFFSET 0"#
         );
-        assert_eq!(browse_sql("s", "t", &[], &none, 5, 0), r#"SELECT * FROM "s"."t" LIMIT 5 OFFSET 0"#);
+        assert_eq!(browse_sql("s", "t", &[], &none, Some((5, 0))), r#"SELECT * FROM "s"."t" LIMIT 5 OFFSET 0"#);
+        assert_eq!(browse_sql("public", "orders", &["id".into()], &none, None), r#"SELECT * FROM "public"."orders" ORDER BY "id""#);
+        assert_eq!(browse_sql("s", "t", &[], &none, None), r#"SELECT * FROM "s"."t""#);
     }
 
     fn filter(column: &str, op: FilterOp, value: &str) -> ColumnFilter {
@@ -354,7 +358,7 @@ mod tests {
     fn browse_sql_puts_the_order_by_text_before_the_pk_tiebreak() {
         let q = TableQuery { order_by: " lower(name) DESC NULLS LAST ".into(), ..Default::default() };
         assert_eq!(
-            browse_sql("public", "customers", &["id".into(), "tenant".into()], &q, 50, 0),
+            browse_sql("public", "customers", &["id".into(), "tenant".into()], &q, Some((50, 0))),
             "SELECT * FROM \"public\".\"customers\" ORDER BY lower(name) DESC NULLS LAST\n, \"id\", \"tenant\" LIMIT 50 OFFSET 0"
         );
     }
@@ -367,7 +371,7 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(
-            browse_sql("public", "customers", &[], &q, 10, 0),
+            browse_sql("public", "customers", &[], &q, Some((10, 0))),
             "SELECT * FROM \"public\".\"customers\" WHERE (created_at > now() - interval '7 days'\n) AND \"region\" = 'O''Hare' AND \"email\" IS NOT NULL LIMIT 10 OFFSET 0"
         );
         assert_eq!(
@@ -476,11 +480,11 @@ pub fn table_order(kind: DatabaseKind, relation: Option<&Relation>, order_by: &s
     Ok(TableOrderView { sql, keys: Some(keys.into_iter().map(|(column,desc)| TableSortKey { column,desc }).collect()) })
 }
 
-pub fn table_browse(kind: DatabaseKind, schema: &str, table: &str, relation: Option<&Relation>, query: &TableQuery, limit: u32, offset: u64) -> Result<String, String> {
+pub fn table_browse(kind: DatabaseKind, schema: &str, table: &str, relation: Option<&Relation>, query: &TableQuery, window: Option<(u32, u64)>) -> Result<String, String> {
     let pk = relation.map(Relation::pk_columns).unwrap_or_default();
     match kind {
         DatabaseKind::Postgres => {
-            let text = browse_sql(schema,table,&pk,query,limit,offset);
+            let text = browse_sql(schema,table,&pk,query,window);
             if sql::split_statements(&text).len()!=1 { return Err("The filter must be a single expression.".into()); }
             Ok(text)
         }
@@ -491,7 +495,7 @@ pub fn table_browse(kind: DatabaseKind, schema: &str, table: &str, relation: Opt
                 let col = sql::tsql::quote_ident(&c.name);
                 if matches!(c.type_display.as_str(),"money"|"smallmoney") { format!("CAST({col} AS decimal(19,4)) AS {col}") } else { col }
             }).collect::<Vec<_>>().join(", ")).filter(|p| !p.is_empty()).unwrap_or_else(|| "*".into());
-            sql::tsql::browse_sql(schema,table,&projection,relation.map(|r| r.columns.as_slice()).unwrap_or_default(),&pk,query,limit,offset)
+            sql::tsql::browse_sql(schema,table,&projection,relation.map(|r| r.columns.as_slice()).unwrap_or_default(),&pk,query,window)
         }
     }
 }

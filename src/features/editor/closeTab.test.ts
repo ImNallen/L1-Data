@@ -66,6 +66,7 @@ function tabWithConsole(): string {
     txn: "Open",
     txnDepth: null,
     work: null,
+    export: null,
     run: { kind: "Idle" },
   };
   useLive.setState({ consoles: { [id]: console } });

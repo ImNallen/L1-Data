@@ -80,12 +80,12 @@ it("keeps the query, editor and displayed rows when the engine refuses an additi
     ref: { tabId: raw.id, runId: 7, index: 0 },
     db: raw.console.db,
     columns: [{ name: "id", type: { display: "int", category: "Integer" }, source: null }],
-    rowCount: 2, rowsSeen: 2, truncated: null, elapsedMs: 1,
+    rowCount: 2, rowsSeen: 2, truncated: null, elapsedMs: 1, allRows: { kind: "Table" },
   } satisfies ResultMeta;
   const console: ConsoleState = {
     tabId: raw.id, rev: 3,
     config: { connectionId: "ms", database: "shop", schema: "dbo", mode: "AutoCommit" },
-    session: { kind: "Open", backendPid: 1 }, txn: "Idle", txnDepth: 0, work: null,
+    session: { kind: "Open", backendPid: 1 }, txn: "Idle", txnDepth: 0, work: null, export: null,
     run: { kind: "Finished", runId: 7, elapsedMs: 1, outcome: "Ok", statements: [{ index: 0, range: { from: 0, to: 30 }, status: { kind: "Finished" }, outputs: [{ kind: "Rows", result, state: "Complete" }] }] },
   };
   useLive.getState().apply({ kind: "ConsoleChanged", ...console });

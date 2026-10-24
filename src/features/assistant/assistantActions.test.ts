@@ -47,6 +47,7 @@ const rows = (runId: number): ResultMeta => ({
   rowsSeen: 6,
   truncated: null,
   elapsedMs: 27,
+  allRows: { kind: "Statement" },
 });
 
 function showTab(text: string, live?: ConsoleState) {
@@ -70,7 +71,7 @@ function captureSend() {
 it("sends the active tab's text, cursor, and the result its grid shows when attach is on", async () => {
   const sent = captureSend();
   const run: ConsoleState["run"] = { kind: "Finished", runId: 4, elapsedMs: 30, outcome: "Ok", statements: [{ index: 0, range: { from: 0, to: 9 }, status: { kind: "Finished" }, outputs: [{ kind: "Rows", result: rows(4), state: "Complete" }] }] };
-  showTab(DOC, { tabId: TAB.id, rev: 3, config: { connectionId: "c1", database: "shop", schema: null, mode: "AutoCommit" }, session: { kind: "None" }, txn: "Idle", txnDepth: null, work: null, run });
+  showTab(DOC, { tabId: TAB.id, rev: 3, config: { connectionId: "c1", database: "shop", schema: null, mode: "AutoCommit" }, session: { kind: "None" }, txn: "Idle", txnDepth: null, work: null, export: null, run });
 
   expect(await sendMessage("chat-1", "Which regions grew?", true)).toBe(true);
   expect(await sendMessage("chat-1", "And without it?", false)).toBe(true);

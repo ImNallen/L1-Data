@@ -139,7 +139,7 @@ async function exportCsv(meta: ResultMeta) {
   }
   if (!path) return;
   const res = await commands.resultExport(meta.ref, "Csv", "Loaded", path);
-  if (res.status === "error") notify(exportErrorText(res.error));
+  if (res.status === "error") notify(exportErrorText(res.error, path));
   else notify(`Exported ${pluralRows(res.data.rows)} to ${path}${res.data.truncated ? " (truncated at the row limit)" : ""}.`);
 }
 

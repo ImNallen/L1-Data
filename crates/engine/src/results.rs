@@ -1,6 +1,6 @@
-use std::sync::RwLock;
+use std::sync::{Arc, RwLock};
 
-use crate::model::{ColumnMeta, DatabaseKind, DatabaseRef, ResultMeta, ResultRef, RowPage, TruncateReason};
+use crate::model::{AllRows, ColumnMeta, DatabaseKind, DatabaseRef, ResultMeta, ResultRef, RowPage, TruncateReason};
 
 pub const CELL_CHAR_LIMIT: usize = 2_000;
 pub const PAGE_LEN_MAX: u32 = 2_000;
@@ -12,7 +12,46 @@ pub struct ResultSet {
     pub r#ref: ResultRef,
     pub db: DatabaseRef,
     pub columns: Vec<ColumnMeta>,
+    /// What produced these rows. Set when the result is created and never changed, and dropped
+    /// with the result at the next run or tab close, so no other structure keeps SQL per result.
+    pub origin: Origin,
     data: RwLock<Arena>,
+}
+
+pub struct Origin {
+    pub rerun: Rerun,
+    /// This result's position among the result sets its SQL returns. A SQL Server batch can
+    /// return several; a PostgreSQL statement returns one.
+    pub nth: u16,
+    pub schema: Option<String>,
+    pub page: bool,
+}
+
+#[derive(Clone)]
+pub enum Rerun {
+    Ready(Arc<str>),
+    Unvetted { sql: Arc<str>, calls: Arc<[String]> },
+    Refused(&'static str),
+}
+
+impl Rerun {
+    pub fn sql(&self) -> Option<&Arc<str>> {
+        match self {
+            Rerun::Ready(sql) | Rerun::Unvetted { sql, .. } => Some(sql),
+            Rerun::Refused(_) => None,
+        }
+    }
+}
+
+impl Origin {
+    pub fn all_rows(&self) -> AllRows {
+        match &self.rerun {
+            Rerun::Ready(_) if self.page => AllRows::Table,
+            Rerun::Ready(_) => AllRows::Statement,
+            Rerun::Unvetted { calls, .. } => AllRows::Confirm { calls: calls.to_vec() },
+            Rerun::Refused(reason) => AllRows::Refused { reason: (*reason).to_owned() },
+        }
+    }
 }
 
 struct Arena {
@@ -30,13 +69,14 @@ pub struct Caps {
 }
 
 impl ResultSet {
-    pub fn new(r#ref: ResultRef, db: DatabaseRef, database_kind: DatabaseKind, columns: Vec<ColumnMeta>) -> Self {
+    pub fn new(r#ref: ResultRef, db: DatabaseRef, database_kind: DatabaseKind, columns: Vec<ColumnMeta>, origin: Origin) -> Self {
         let ncols = columns.len();
         Self {
             database_kind,
             r#ref,
             db,
             columns,
+            origin,
             data: RwLock::new(Arena {
                 text: String::new(),
                 cells: Vec::new(),
@@ -92,6 +132,7 @@ impl ResultSet {
             rows_seen: a.rows_seen,
             truncated: a.truncated,
             elapsed_ms: a.elapsed_ms,
+            all_rows: self.origin.all_rows(),
         }
     }
 
@@ -130,8 +171,6 @@ impl ResultSet {
         Some(a.cell(row as usize, col as usize).map(str::to_owned))
     }
 
-    /// Calls `f` with each stored row's cells under one read lock, and returns the row count and
-    /// whether the result stopped at a limit.
     pub fn each_row<E>(&self, mut f: impl FnMut(&[Option<&str>]) -> Result<(), E>) -> Result<(u64, bool), E> {
         let a = self.data.read().unwrap();
         let rows = a.row_count();
@@ -170,7 +209,8 @@ mod tests {
             })
             .collect();
         let db = DatabaseRef { connection_id: ConnectionId(uuid::Uuid::nil()), database: "shop".into() };
-        ResultSet::new(ResultRef { tab_id: TabId(uuid::Uuid::nil()), run_id: RunId(1), index: 0 }, db, DatabaseKind::Postgres, columns)
+        let origin = Origin { rerun: Rerun::Ready("select".into()), nth: 0, schema: None, page: false };
+        ResultSet::new(ResultRef { tab_id: TabId(uuid::Uuid::nil()), run_id: RunId(1), index: 0 }, db, DatabaseKind::Postgres, columns, origin)
     }
 
     const NO_CAPS: Caps = Caps { max_rows: u32::MAX, max_bytes: u64::MAX };

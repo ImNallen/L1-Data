@@ -104,6 +104,11 @@ impl Session {
             Driver::Postgres(_) => TransactionLoss::None,
         }
     }
+    /// Whether `CancelHandle::cancel` leaves the session usable. PostgreSQL cancels the statement and
+    /// keeps the session. SQL Server sends an attention and retires it.
+    pub fn cancel_keeps_session(&self) -> bool {
+        matches!(self.driver, Driver::Postgres(_))
+    }
     pub fn cancel_handle(&self) -> CancelHandle {
         match &self.driver {
             Driver::Postgres(p) => CancelHandle(CancelDriver::Postgres(p.cancel_handle())),

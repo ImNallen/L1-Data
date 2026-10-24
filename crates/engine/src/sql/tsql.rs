@@ -445,6 +445,24 @@ pub(crate) fn is_write(text: &str) -> bool {
     })
 }
 
+pub(crate) fn rerun_refusal(text: &str) -> Option<&'static str> {
+    const MAY_WRITE: &str = "The batch may write, so it does not run again.";
+    let Ok(tokens) = significant(text) else { return Some(MAY_WRITE) };
+    if is_write(text) {
+        Some(MAY_WRITE)
+    } else if (0..tokens.len()).any(|i| transaction_at(&tokens, i).is_some()) {
+        Some("The batch begins or ends a transaction, so it does not run again.")
+    } else if tokens.iter().any(|t| t.word("IMPLICIT_TRANSACTIONS")) {
+        Some("The batch turns on implicit transactions, so it does not run again.")
+    } else if (0..tokens.len()).any(|i| tokens[i].word("NEXT") && word_at(&tokens, i + 1, "VALUE") && word_at(&tokens, i + 2, "FOR")) {
+        Some("The batch advances a sequence, so it does not run again.")
+    } else if tokens.iter().any(|t| ["OPENQUERY", "OPENROWSET", "OPENDATASOURCE"].iter().any(|w| t.word(w))) {
+        Some("The batch reads from another server, so it does not run again.")
+    } else {
+        None
+    }
+}
+
 fn name_path(tokens: &[Token<'_>], mut at: usize) -> Option<(Vec<String>, usize)> {
     let mut names = vec![tokens.get(at)?.name()?];
     at += 1;
@@ -875,6 +893,35 @@ mod tests {
             "MERGE INTO t USING (SELECT 7 AS n) s ON t.n=s.n WHEN MATCHED THEN UPDATE SET n=s.n OUTPUT inserted.n INTO audit;",
         ] {
             assert_eq!(invalidates(text), Invalidates::Nothing, "{text}");
+        }
+    }
+
+    #[test]
+    fn only_plain_reads_run_again_for_an_export() {
+        for read in [
+            "SELECT * FROM dbo.orders WHERE note = N'BEGIN TRAN; COMMIT'",
+            "DECLARE @n int = 3; SELECT TOP (@n) * FROM dbo.orders; SELECT 1 AS [next value for]",
+            "WITH t AS (SELECT 1 AS x) SELECT x FROM t -- ROLLBACK",
+            "SET DATEFORMAT dmy; SELECT CONVERT(datetime, N'02/01/2024')",
+        ] {
+            assert_eq!(rerun_refusal(read), None, "{read}");
+        }
+        for (batch, why) in [
+            ("UPDATE dbo.orders SET total = 0", "may write"),
+            ("SELECT * INTO #copy FROM dbo.orders", "may write"),
+            ("EXEC dbo.report", "may write"),
+            ("sp_who", "may write"),
+            ("SELECT 1; BEGIN TRANSACTION", "begins or ends a transaction"),
+            ("SELECT 1; COMMIT", "begins or ends a transaction"),
+            ("SAVE TRAN s; SELECT 1", "begins or ends a transaction"),
+            ("SET IMPLICIT_TRANSACTIONS ON; SELECT 1", "implicit transactions"),
+            ("SELECT NEXT VALUE FOR dbo.ids", "advances a sequence"),
+            ("SELECT * FROM OPENQUERY(remote, 'SELECT 1')", "another server"),
+            ("SELECT * FROM OPENROWSET('SQLNCLI', 'x', 'SELECT 1') AS r", "another server"),
+            ("SELECT * FROM OPENDATASOURCE('SQLNCLI', 'x').db.dbo.t", "another server"),
+            ("SELECT 'unterminated", "may write"),
+        ] {
+            assert!(rerun_refusal(batch).is_some_and(|r| r.contains(why)), "{batch}: {:?}", rerun_refusal(batch));
         }
     }
 

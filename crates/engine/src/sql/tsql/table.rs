@@ -94,8 +94,7 @@ pub(crate) fn browse_sql(
     columns: &[ColumnInfo],
     pk: &[String],
     query: &TableQuery,
-    limit: u32,
-    offset: u64,
+    window: Option<(u32, u64)>,
 ) -> Result<String, String> {
     let mut sql = format!("SELECT {projection} {}", from_sql(schema, table, columns, query)?);
     let mut order = Vec::new();
@@ -107,10 +106,16 @@ pub(crate) fn browse_sql(
         let column = quote_ident(column);
         order.push(if user_order { format!("(SELECT {column})") } else { column });
     }
-    if order.is_empty() {
-        order.push("(SELECT NULL)".into());
+    match window {
+        Some((limit, offset)) => {
+            if order.is_empty() {
+                order.push("(SELECT NULL)".into());
+            }
+            sql.push_str(&format!(" ORDER BY {} OFFSET {offset} ROWS FETCH NEXT {limit} ROWS ONLY", order.join(", ")));
+        }
+        None if !order.is_empty() => sql.push_str(&format!(" ORDER BY {}", order.join(", "))),
+        None => {}
     }
-    sql.push_str(&format!(" ORDER BY {} OFFSET {offset} ROWS FETCH NEXT {limit} ROWS ONLY", order.join(", ")));
     Ok(sql)
 }
 
@@ -140,21 +145,23 @@ mod tests {
     fn browse_paginates_with_pk_tiebreakers_and_preserves_trusted_projection() {
         let query = TableQuery::default();
         assert_eq!(
-            browse_sql("s]", "旅", "*", &[], &["Id".into(), "Tenant".into()], &query, 50, 200).unwrap(),
+            browse_sql("s]", "旅", "*", &[], &["Id".into(), "Tenant".into()], &query, Some((50, 200))).unwrap(),
             "SELECT * FROM [s]]].[旅] ORDER BY [Id], [Tenant] OFFSET 200 ROWS FETCH NEXT 50 ROWS ONLY"
         );
         assert_eq!(
-            browse_sql("s", "t", "CONVERT(decimal(19,4), [money]) AS [money]", &[], &[], &query, 1, u64::MAX).unwrap(),
+            browse_sql("s", "t", "CONVERT(decimal(19,4), [money]) AS [money]", &[], &[], &query, Some((1, u64::MAX))).unwrap(),
             "SELECT CONVERT(decimal(19,4), [money]) AS [money] FROM [s].[t] ORDER BY (SELECT NULL) OFFSET 18446744073709551615 ROWS FETCH NEXT 1 ROWS ONLY"
         );
         let query = TableQuery { order_by: "[Id] DESC, LOWER([Name])".into(), ..Default::default() };
         assert_eq!(
-            browse_sql("s", "t", "*", &[], &["Id".into(), "Tenant".into()], &query, 10, 0).unwrap(),
+            browse_sql("s", "t", "*", &[], &["Id".into(), "Tenant".into()], &query, Some((10, 0))).unwrap(),
             "SELECT * FROM [s].[t] ORDER BY [Id] DESC, LOWER([Name])\n, (SELECT [Id]), (SELECT [Tenant]) OFFSET 0 ROWS FETCH NEXT 10 ROWS ONLY"
         );
         let query = TableQuery { order_by: "[t].[Id] DESC".into(), ..Default::default() };
-        assert!(browse_sql("s", "t", "*", &[], &["Id".into()], &query, 10, 0).unwrap().contains(", (SELECT [Id])"));
+        assert!(browse_sql("s", "t", "*", &[], &["Id".into()], &query, Some((10, 0))).unwrap().contains(", (SELECT [Id])"));
         assert!(validate_expression("(SELECT [Id])", true).is_err());
+        assert_eq!(browse_sql("s", "t", "*", &[], &["Id".into()], &query, None).unwrap(), "SELECT * FROM [s].[t] ORDER BY [t].[Id] DESC\n, (SELECT [Id])");
+        assert_eq!(browse_sql("s", "t", "*", &[], &[], &TableQuery::default(), None).unwrap(), "SELECT * FROM [s].[t]");
     }
 
     #[test]

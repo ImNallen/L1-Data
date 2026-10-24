@@ -168,14 +168,29 @@ export function disconnectErrorText(e: DisconnectError): string {
   }
 }
 
-export function exportErrorText(e: ExportError): string {
+export function exportErrorText(e: ExportError, path: string): string {
+  const unchanged = `${path} was not changed.`;
   switch (e.kind) {
     case "Gone":
       return "This result is gone. Run the query again to export it.";
     case "Io":
-      return e.message;
+      return `Couldn't write ${path}: ${e.message}. ${unchanged}`;
     case "NotRerunnable":
       return "Only a read statement runs again to export every row.";
+    case "Busy":
+      return "This tab is busy. Export when it finishes.";
+    case "TargetChanged":
+      return "This tab now targets another database. Run the query again, then export.";
+    case "TransactionAborted":
+      return "The transaction failed. Roll back, then export.";
+    case "Connect":
+      return connectErrorText(e.error);
+    case "Query":
+      return `The export query failed: ${e.error.message}. ${unchanged}`;
+    case "ShapeChanged":
+      return `The query returned other columns when it ran again. ${unchanged}`;
+    case "Cancelled":
+      return `Export cancelled. ${unchanged}`;
     default: {
       const unreachable: never = e;
       return unreachable;

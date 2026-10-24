@@ -29,7 +29,7 @@ use std::time::Duration;
 use tokio::sync::broadcast;
 
 use connection::{CatalogSlot, ConnEntry, ConnSlot, ConnectParams, DbSlot, Instance, Wanted};
-use console::{Console, Owed, PlannedStmt, RunPlan, SessionSlot};
+use console::{Console, Owed, PlannedStmt, RunPlan, SessionSlot, Work};
 use model::*;
 use provider::ProbeDepth;
 use secrets::{SecretSlot, Vault};
@@ -589,7 +589,7 @@ impl Shared {
                 if inner.txn == TxnState::Idle {
                     return None;
                 }
-                let taken = console.take_session(&mut inner, run_id, ConsoleWork::Probe);
+                let taken = console.take_session(&mut inner, run_id, Work::Probe);
                 if taken.is_some() { console.publish(&mut inner, self); }
                 taken
             };
@@ -625,7 +625,7 @@ impl Shared {
                 SessionSlot::Idle(_) => {}
             }
             let aborted = inner.txn == TxnState::Aborted;
-            let (session, _stop) = console.take_session(&mut inner, run_id, ConsoleWork::Transaction).expect("slot is idle");
+            let (session, _stop) = console.take_session(&mut inner, run_id, Work::Transaction).expect("slot is idle");
             console.publish(&mut inner, self);
             (session, aborted)
         };
@@ -1125,7 +1125,7 @@ impl Engine {
                 inner.session = SessionSlot::Idle(session);
             }
         }
-        let (session, stop) = console.take_session(&mut inner, run_id, ConsoleWork::Count).ok_or_else(|| failed("The count tab is busy."))?;
+        let (session, stop) = console.take_session(&mut inner, run_id, Work::Count).ok_or_else(|| failed("The count tab is busy."))?;
         console.publish(&mut inner, s);
         drop(inner);
 
@@ -1213,18 +1213,21 @@ impl Engine {
             return Err(RunError::NotConfigured);
         }
 
-        let mut table_relation = None;
+        let mut page = None;
         let (text, spans) = match r {
             RunRequest::Script { text, target } => {
                 let target = text::OffsetMap::new(&text).target(target);
                 let spans = text::pick(&text, target, connection.database_kind).map_err(|what| RunError::Unsupported { what })?;
                 (text, spans)
             }
-            RunRequest::TablePage { schema, table, page, query } => {
+            RunRequest::TablePage { schema, table, page: index, query } => {
                 let catalog = self.catalog(config.db()).await.map_err(|_| RunError::NotConfigured)?;
-                table_relation = catalog.relation(&schema, &table).cloned();
+                let relation = catalog.relation(&schema, &table).cloned();
                 let size = s.settings().table_page_size.max(1);
-                let text = text::table_browse(connection.database_kind, &schema, &table, table_relation.as_ref(), &query, size, u64::from(page) * u64::from(size)).map_err(|_| RunError::BadFilter)?;
+                let window = Some((size, u64::from(index) * u64::from(size)));
+                let text = text::table_browse(connection.database_kind, &schema, &table, relation.as_ref(), &query, window).map_err(|_| RunError::BadFilter)?;
+                let all = text::table_browse(connection.database_kind, &schema, &table, relation.as_ref(), &query, None).map_err(|_| RunError::BadFilter)?;
+                page = Some(console::TablePage { rerun: export::rerun(connection.database_kind, &all, true), relation });
                 let spans = text::pick(&text, sql::ByteTarget::All, connection.database_kind).map_err(|_| RunError::BadFilter)?;
                 if spans.len() != 1 {
                     return Err(RunError::BadFilter);
@@ -1276,7 +1279,7 @@ impl Engine {
                 SessionSlot::Busy { .. } => return Err(RunError::Busy),
             }
         }
-        let Some((session, stop)) = console.take_session(&mut inner, run_id, ConsoleWork::Run) else { return Err(RunError::Busy) };
+        let Some((session, stop)) = console.take_session(&mut inner, run_id, Work::Run) else { return Err(RunError::Busy) };
         let txn = inner.txn;
         console.results.lock().unwrap().clear();
         inner.run = RunState::Running {
@@ -1291,7 +1294,7 @@ impl Engine {
         console.publish(&mut inner, s);
         drop(inner);
 
-        let plan = RunPlan { run_id, text, statements, txn, schema: config.schema.clone(), database: config.database.clone(), connection, table: table_relation };
+        let plan = RunPlan { run_id, text, statements, txn, schema: config.schema.clone(), database: config.database.clone(), connection, page };
         s.spawn(console::run_task(console.clone(), s.clone(), session, plan, stop));
         Ok(RunAccepted { run_id, statements: ranges })
     }
@@ -1373,7 +1376,7 @@ impl Engine {
                 return Err(ApplyError::TransactionAborted);
             }
             let txn = inner.txn;
-            let Some((session, stop)) = console.take_session(&mut inner, run_id, ConsoleWork::Edit) else { return Err(ApplyError::Busy) };
+            let Some((session, stop)) = console.take_session(&mut inner, run_id, Work::Edit) else { return Err(ApplyError::Busy) };
             console.publish(&mut inner, s);
             (session, txn, stop)
         };

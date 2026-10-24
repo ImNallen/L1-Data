@@ -1,18 +1,9 @@
-//! Column metadata and canonical cell text go in, bytes come out. Writing into a `Vec<u8>` cannot
-//! fail, so nothing here returns an error; a disk error belongs to the caller that moves the bytes.
-//!
-//! A cell becomes a bare JSON number or SQL numeric literal only when its canonical text already
-//! matches the JSON number grammar, and then it is copied byte for byte. Nothing is parsed into a
-//! float.
-
 use std::collections::HashSet;
 
 use crate::model::{ColumnMeta, DatabaseKind, TypeCategory};
 use crate::sql::mssql_value;
 use crate::text::{quote_ident_in, quote_literal_in};
 
-/// `ExportFormat` with what each format needs resolved. Only an INSERT needs more than the column
-/// metadata, so an INSERT encoder cannot be built without a target.
 pub(crate) enum Format {
     Csv,
     Json,
@@ -21,9 +12,7 @@ pub(crate) enum Format {
 }
 
 pub(crate) struct InsertTarget {
-    /// Quoted and schema-qualified, or `target_table` when no single source table is known.
     pub table: String,
-    /// Quoted, one per result column, in result order.
     pub columns: Vec<String>,
 }
 
@@ -41,16 +30,13 @@ impl InsertTarget {
 
 struct Col {
     category: TypeCategory,
-    /// The native type name, which SQL Server literals convert through.
     native: String,
 }
 
 enum Shape {
     Csv { header: Vec<String> },
-    /// Each key already a JSON string token followed by `:`.
     Json { keys: Vec<String> },
     Markdown { header: Vec<String>, right: Vec<bool> },
-    /// `INSERT INTO <table> (<columns>) VALUES (`
     Insert { prefix: String },
 }
 
@@ -100,7 +86,6 @@ impl Encoder {
         }
     }
 
-    /// `cells` has one entry per column, in column order.
     pub fn row<'a>(&mut self, cells: impl Iterator<Item = Option<&'a str>>, out: &mut Vec<u8>) {
         match &self.shape {
             Shape::Csv { .. } => csv_record(out, cells),
@@ -144,7 +129,6 @@ impl Encoder {
         self.rows += 1;
     }
 
-    /// Consumes the encoder, so nothing can be written after the footer.
     pub fn finish(self, out: &mut Vec<u8>) {
         if let Shape::Json { .. } = self.shape {
             out.extend_from_slice(if self.rows == 0 { b"]\n" } else { b"\n]\n" });
@@ -152,7 +136,6 @@ impl Encoder {
     }
 }
 
-/// RFC 4180 with CRLF, NULL as an empty field and the empty string as `""`, as `COPY … CSV` writes.
 fn csv_record<'a>(out: &mut Vec<u8>, cells: impl Iterator<Item = Option<&'a str>>) {
     for (i, cell) in cells.enumerate() {
         if i > 0 {
@@ -171,8 +154,7 @@ fn csv_record<'a>(out: &mut Vec<u8>, cells: impl Iterator<Item = Option<&'a str>
     out.extend_from_slice(b"\r\n");
 }
 
-/// RFC 8259's number grammar: `-?(0|[1-9][0-9]*)(\.[0-9]+)?([eE][+-]?[0-9]+)?`. `NaN`, `Infinity`,
-/// PostgreSQL money (`$1.00`), and anything else fail and stay strings.
+/// RFC 8259's number grammar: `-?(0|[1-9][0-9]*)(\.[0-9]+)?([eE][+-]?[0-9]+)?`.
 pub(crate) fn json_number(s: &str) -> bool {
     let b = s.as_bytes();
     let digits = |mut i: usize| {
@@ -214,16 +196,11 @@ fn json_value(out: &mut Vec<u8>, dialect: DatabaseKind, category: TypeCategory, 
         (Integer | Numeric, _, t) if json_number(t) => out.extend_from_slice(t.as_bytes()),
         (Bool, Postgres, "t") | (Bool, SqlServer, "1") => out.extend_from_slice(b"true"),
         (Bool, Postgres, "f") | (Bool, SqlServer, "0") => out.extend_from_slice(b"false"),
-        // PostgreSQL validates json on input, so this fails only for text the server did not
-        // produce; it keeps the file valid JSON whatever the cell holds.
         (Json, _, t) if serde_json::from_str::<serde::de::IgnoredAny>(t).is_ok() => out.extend_from_slice(t.as_bytes()),
         _ => serde_json::to_writer(&mut *out, text).expect("a Vec accepts every write"),
     }
 }
 
-/// First occurrences keep their names. A later duplicate becomes `name_2`, `name_3`, …, skipping
-/// any key already taken, including a real column named `name_2`, so no value is lost the way a
-/// parser's last-key-wins would lose it.
 pub(crate) fn unique_keys(names: &[String]) -> Vec<String> {
     let mut taken: HashSet<&str> = HashSet::new();
     let firsts: Vec<bool> = names.iter().map(|n| taken.insert(n)).collect();
@@ -244,7 +221,6 @@ pub(crate) fn unique_keys(names: &[String]) -> Vec<String> {
         .collect()
 }
 
-/// `\` and `|` are escaped, and each line break (`\r\n`, `\r`, or `\n`) becomes `<br>`.
 fn markdown_text(out: &mut Vec<u8>, s: &str) {
     let mut bytes = s.bytes().peekable();
     while let Some(b) = bytes.next() {
@@ -272,14 +248,14 @@ fn sql_literal(out: &mut Vec<u8>, dialect: DatabaseKind, col: &Col, cell: Option
     use TypeCategory::*;
     let Some(t) = cell else { return out.extend_from_slice(b"NULL") };
     let literal = match (dialect, col.category, t) {
+        // T-SQL reads a bare number as decimal, capped at 38 digits, so a float as large as 1e300
+        // goes through CONVERT instead.
+        (SqlServer, Numeric, t) if matches!(col.native.as_str(), "float" | "real") => mssql_value::input_sql(&col.native, t).unwrap_or_else(|_| quote_literal_in(SqlServer, t)),
         (_, Integer | Numeric, t) if json_number(t) => t.to_owned(),
         (Postgres, Bool, "t") => "true".into(),
         (Postgres, Bool, "f") => "false".into(),
         (SqlServer, Bool, "1" | "0") => t.to_owned(),
-        // The SQL Server driver's canonical binary text is already a T-SQL binary literal.
         (SqlServer, Binary, t) if mssql_hex(t) => t.to_owned(),
-        // Converts with an explicit style, so DATEFORMAT and LANGUAGE cannot change what a
-        // datetime means. A type it cannot spell falls back to a national string literal.
         (SqlServer, _, t) => mssql_value::input_sql(&col.native, t).unwrap_or_else(|_| quote_literal_in(SqlServer, t)),
         // PostgreSQL's text output is accepted by the type's input function, including bytea's
         // `\x..` hex form under standard_conforming_strings; an untyped literal coerces on insert.
@@ -386,10 +362,19 @@ mod tests {
             col("at", "datetime", TypeCategory::Temporal),
             col("d", "decimal", TypeCategory::Numeric),
             col("odd", "sql_variant", TypeCategory::Other),
+            col("big", "float", TypeCategory::Numeric),
         ];
-        let target = InsertTarget { table: "[dbo].[t]".into(), columns: ["[b]", "[f]", "[s]", "[at]", "[d]", "[odd]"].map(String::from).to_vec() };
-        let sql = encode(Format::Insert(target), DatabaseKind::SqlServer, &cols, &[&[Some("0x00FF"), Some("1"), Some("O'Brien"), Some("2024-01-02 03:04:05.123"), Some("-12.50"), Some("x")]]);
-        assert_eq!(sql, "INSERT INTO [dbo].[t] ([b], [f], [s], [at], [d], [odd]) VALUES (0x00FF, 1, N'O''Brien', CONVERT(datetime, N'2024-01-02 03:04:05.123', 121), -12.50, N'x');\n");
+        let target = InsertTarget { table: "[dbo].[t]".into(), columns: ["[b]", "[f]", "[s]", "[at]", "[d]", "[odd]", "[big]"].map(String::from).to_vec() };
+        let sql = encode(
+            Format::Insert(target),
+            DatabaseKind::SqlServer,
+            &cols,
+            &[&[Some("0x00FF"), Some("1"), Some("O'Brien"), Some("2024-01-02 03:04:05.123"), Some("-12.50"), Some("x"), Some("1.5")]],
+        );
+        assert_eq!(
+            sql,
+            "INSERT INTO [dbo].[t] ([b], [f], [s], [at], [d], [odd], [big]) VALUES (0x00FF, 1, N'O''Brien', CONVERT(datetime, N'2024-01-02 03:04:05.123', 121), -12.50, N'x', CONVERT(float, N'1.5'));\n"
+        );
     }
 
     #[test]

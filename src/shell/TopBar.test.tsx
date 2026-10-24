@@ -24,6 +24,7 @@ function lostSession(transaction: TransactionLoss): string {
     txn: "Idle",
     txnDepth: null,
     work: null,
+    export: null,
     run: { kind: "Idle" },
   };
   Object.assign(workspace, { tabs: { [tab.id]: tab }, active: tab.id });
