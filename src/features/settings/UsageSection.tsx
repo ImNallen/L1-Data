@@ -1,4 +1,4 @@
-import { IconAlertTriangle, IconRefresh, IconRotate } from "@tabler/icons-react";
+import { RefreshCwIcon, RotateCcwIcon, TriangleAlertIcon } from "lucide-react";
 import type { ReactNode } from "react";
 import type { LimitLevel, LimitSource, LimitWindow, SourceLimits } from "../../ipc/bindings";
 import { cx, IconButton } from "../../ui/primitives";
@@ -15,13 +15,13 @@ const LEVEL_NOTE = {
   Normal: null,
   Low: (
     <span className="flex items-center gap-1 text-amber">
-      <IconAlertTriangle size={13} />
+      <TriangleAlertIcon size={13} />
       Running low
     </span>
   ),
   Exhausted: (
     <span className="flex items-center gap-1 text-danger">
-      <IconAlertTriangle size={13} />
+      <TriangleAlertIcon size={13} />
       Limit reached
     </span>
   ),
@@ -36,7 +36,7 @@ export function UsageRefresh() {
         {checkedText(report, loading, now)}
       </span>
       <IconButton data-testid="usage-refresh" aria-label="Refresh limits" title="Refresh limits" disabled={loading} onClick={refreshLimits}>
-        <IconRefresh size={15} className={cx(loading && "animate-spin")} />
+        <RefreshCwIcon size={15} className={cx(loading && "animate-spin")} />
       </IconButton>
     </div>
   );
@@ -159,7 +159,7 @@ function LimitBar({ source, left, reset, label }: { source: LimitSource; left: n
       </span>
       {reset && (
         <span className="absolute top-1/2 right-1.5 flex -translate-y-1/2 items-center gap-1 rounded bg-bg/80 px-1.5 py-0.5 text-ui-12 text-muted tabular-nums">
-          <IconRotate size={12} />
+          <RotateCcwIcon size={12} />
           {reset}
         </span>
       )}

@@ -1,5 +1,5 @@
 import * as Menu from "@radix-ui/react-dropdown-menu";
-import { IconChevronDown, IconIndentIncrease, IconPlayerPlayFilled, IconPlayerStopFilled } from "@tabler/icons-react";
+import { ChevronDownIcon, ListIndentIncreaseIcon, PlayIcon, SquareIcon } from "lucide-react";
 import { ConnectionColorDot } from "../features/connections/connectionColors";
 import { cancelActive, endTransaction, formatActive, runOrChoose, setTabMode, setTabTarget } from "../features/editor/runActions";
 import type { TransactionLoss, TxnMode } from "../ipc/bindings";
@@ -87,7 +87,7 @@ export function TopBar({ hosted }: { hosted: HostedWindow | null }) {
               <span className={txn === "Aborted" ? "text-danger" : "text-fg"}> · {txn === "Aborted" ? "aborted" : "in transaction"}{txnDepth !== null && txnDepth !== undefined && txnDepth > 1 ? ` (${txnDepth})` : ""}</span>
             )}
             {loss && <span className="text-danger"> · {loss.label}</span>}
-            <IconChevronDown size={13} />
+            <ChevronDownIcon size={13} />
           </Menu.Trigger>
           <MenuContent align="end">
             {(["AutoCommit", "Manual"] as const).map((m) => (
@@ -113,7 +113,7 @@ export function TopBar({ hosted }: { hosted: HostedWindow | null }) {
 
       {tab && (
         <Button data-testid="format-btn" title="Format the selection or the marked statement (⌘⌥L)" onClick={() => void formatActive()}>
-          <IconIndentIncrease size={14} className="text-muted" />
+          <ListIndentIncreaseIcon size={14} className="text-muted" />
           Format
         </Button>
       )}
@@ -123,7 +123,7 @@ export function TopBar({ hosted }: { hosted: HostedWindow | null }) {
       {tab &&
         (cancellable ? (
           <Button data-testid="cancel-btn" title={sqlServer ? "Cancel resets the SQL Server session. Earlier commits remain committed." : undefined} className="w-[104px] justify-center bg-hover" onClick={() => cancelActive()}>
-            <IconPlayerStopFilled size={10} className="text-muted" />
+            <SquareIcon fill="currentColor" size={10} className="text-muted" />
             Cancel
             <Kbd className="bg-control text-muted">Esc</Kbd>
           </Button>
@@ -136,7 +136,7 @@ export function TopBar({ hosted }: { hosted: HostedWindow | null }) {
             className="w-[104px] justify-center pr-2 pl-2.5 font-medium"
             onClick={() => void runOrChoose()}
           >
-            <IconPlayerPlayFilled size={13} className="text-run-icon" />
+            <PlayIcon fill="currentColor" size={13} className="text-run-icon" />
             Run
             <Kbd className="bg-run-fg/15 text-run-fg/85">⌘↵</Kbd>
           </Button>

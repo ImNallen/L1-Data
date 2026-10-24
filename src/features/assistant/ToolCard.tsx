@@ -1,4 +1,4 @@
-import { IconChevronRight, IconCircleOff, IconDatabaseSearch, IconPlayerPlay, IconTable, IconTool } from "@tabler/icons-react";
+import { ChevronRightIcon, CircleOffIcon, DatabaseSearchIcon, PlayIcon, TableIcon, WrenchIcon } from "lucide-react";
 import { memo, useState, type ReactNode } from "react";
 import type { ApprovalId, ApprovalReason, ChatId, DatabaseKind, DatabaseRef, Decision, ToolResult, ToolStatus, ToolUse } from "../../ipc/bindings";
 import { toolLine } from "../../state/transcript";
@@ -8,7 +8,7 @@ import { SqlHighlight } from "./SqlHighlight";
 
 type RowsResult = Extract<ToolResult, { kind: "Rows" }>;
 
-const TOOL_ICONS = { DescribeTables: IconTable, SearchCatalog: IconDatabaseSearch, RunQuery: IconPlayerPlay, Other: IconTool } satisfies Record<ToolUse["kind"], unknown>;
+const TOOL_ICONS = { DescribeTables: TableIcon, SearchCatalog: DatabaseSearchIcon, RunQuery: PlayIcon, Other: WrenchIcon } satisfies Record<ToolUse["kind"], unknown>;
 
 const PREVIEW_ROWS = 8;
 
@@ -86,7 +86,7 @@ function ApprovalCard({ chatId, testId, tool, approval, reason, databaseKind }: 
 
 function StatusIcon({ tool, status }: { tool: ToolUse; status: ToolStatus }): ReactNode {
   if (status.kind === "Running") return <Spinner />;
-  if (status.kind === "Denied" || status.kind === "Expired" || status.kind === "Failed") return <IconCircleOff size={13} />;
+  if (status.kind === "Denied" || status.kind === "Expired" || status.kind === "Failed") return <CircleOffIcon size={13} />;
   const Icon = TOOL_ICONS[tool.kind];
   return <Icon size={13} />;
 }
@@ -111,7 +111,7 @@ export const ToolCard = memo(function ToolCard({ chatId, seq, tool, status, db, 
           <StatusIcon tool={tool} status={status} />
         </span>
         <span className="min-w-0 truncate">{line}</span>
-        {rows && <IconChevronRight size={12} className={cx("shrink-0 transition-transform", open && "rotate-90")} />}
+        {rows && <ChevronRightIcon size={12} className={cx("shrink-0 transition-transform", open && "rotate-90")} />}
       </button>
       {open && rows && <RowsPreview rows={rows} sql={tool.kind === "RunQuery" ? tool.sql : null} db={db} />}
     </div>

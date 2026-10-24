@@ -1,4 +1,4 @@
-import { IconDownload, IconSearch } from "@tabler/icons-react";
+import { DownloadIcon, SearchIcon } from "lucide-react";
 import { useEffect, useRef, useState, type ReactNode } from "react";
 import { fetchExtensionThemes, searchThemes, type VsxExtension } from "../../themes/openVsx";
 import { cx, inputClass, Spinner } from "../../ui/primitives";
@@ -78,7 +78,7 @@ export function ThemeSearch({ onImported }: { onImported: () => void }) {
         <span className="block text-ui-12 text-dim">Find open-source themes from Open VSX.</span>
       </div>
       <div className="relative">
-        <IconSearch size={14} className="pointer-events-none absolute top-1/2 left-2.5 -translate-y-1/2 text-dim" />
+        <SearchIcon size={14} className="pointer-events-none absolute top-1/2 left-2.5 -translate-y-1/2 text-dim" />
         <input
           id="theme-search"
           data-testid="theme-search"
@@ -130,7 +130,7 @@ export function ThemeSearch({ onImported }: { onImported: () => void }) {
                   <Spinner />
                 ) : (
                   <span className="flex shrink-0 items-center gap-1 text-ui-12 text-dim tabular-nums">
-                    <IconDownload size={12} />
+                    <DownloadIcon size={12} />
                     {downloads.format(ext.downloadCount)}
                   </span>
                 )}

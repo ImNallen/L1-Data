@@ -1,7 +1,7 @@
 import * as ContextMenu from "@radix-ui/react-context-menu";
 import * as Dialog from "@radix-ui/react-dialog";
 import * as Menu from "@radix-ui/react-dropdown-menu";
-import { IconCheck, IconChevronRight, IconX } from "@tabler/icons-react";
+import { CheckIcon, ChevronRightIcon, XIcon } from "lucide-react";
 import { useLayoutEffect, useRef, type ButtonHTMLAttributes, type ComponentProps, type ReactElement, type ReactNode, type RefObject } from "react";
 import type { DatabaseKind } from "../ipc/bindings";
 import { DATABASE_LABEL } from "../state/databaseKind";
@@ -171,7 +171,7 @@ export function MenuItem({
       disabled={disabled}
       className={cx(MENU_ITEM, danger ? "text-danger" : "text-fg", "data-[disabled]:opacity-40")}
     >
-      <span className="grid w-3.5 place-items-center">{checked && <IconCheck size={13} className="text-muted" />}</span>
+      <span className="grid w-3.5 place-items-center">{checked && <CheckIcon size={13} className="text-muted" />}</span>
       {children}
     </Menu.Item>
   );
@@ -211,7 +211,7 @@ export function ContextSubmenu({ label, children, testId }: { label: ReactNode; 
     <ContextMenu.Sub>
       <ContextMenu.SubTrigger data-testid={testId} className={cx(MENU_ITEM, "pr-1 text-fg data-[state=open]:bg-selected")}>
         {label}
-        <IconChevronRight size={14} className="ml-auto text-muted" />
+        <ChevronRightIcon size={14} className="ml-auto text-muted" />
       </ContextMenu.SubTrigger>
       <ContextMenu.Portal>
         <ContextMenu.SubContent sideOffset={6} alignOffset={-5} className={MENU_PANEL}>
@@ -288,7 +288,7 @@ export function Modal({
             </div>
             <Dialog.Close asChild>
               <IconButton aria-label="Close" className="-mt-1 -mr-1">
-                <IconX size={15} />
+                <XIcon size={15} />
               </IconButton>
             </Dialog.Close>
           </div>

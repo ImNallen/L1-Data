@@ -1,11 +1,11 @@
 import {
-  IconLayoutBottombar,
-  IconLayoutBottombarFilled,
-  IconLayoutSidebar,
-  IconLayoutSidebarFilled,
-  IconLayoutSidebarRight,
-  IconLayoutSidebarRightFilled,
-} from "@tabler/icons-react";
+  PanelBottomDashedIcon,
+  PanelBottomIcon,
+  PanelLeftDashedIcon,
+  PanelLeftIcon,
+  PanelRightDashedIcon,
+  PanelRightIcon,
+} from "lucide-react";
 import { useWorkspace } from "../state/workspace";
 import { IconButton } from "../ui/primitives";
 import { WindowControls } from "./WindowChrome";
@@ -21,9 +21,9 @@ export function windowLeadingInset(hosted: HostedWindow | null): string {
 }
 
 const PANEL_ICONS = {
-  left: { hidden: IconLayoutSidebar, shown: IconLayoutSidebarFilled },
-  right: { hidden: IconLayoutSidebarRight, shown: IconLayoutSidebarRightFilled },
-  bottom: { hidden: IconLayoutBottombar, shown: IconLayoutBottombarFilled },
+  left: { hidden: PanelLeftDashedIcon, shown: PanelLeftIcon },
+  right: { hidden: PanelRightDashedIcon, shown: PanelRightIcon },
+  bottom: { hidden: PanelBottomDashedIcon, shown: PanelBottomIcon },
 };
 
 function PanelIcon({ side, shown }: { side: keyof typeof PANEL_ICONS; shown: boolean }) {

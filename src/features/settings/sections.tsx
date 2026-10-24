@@ -1,4 +1,11 @@
-import { IconChartBar, IconInfoCircle, IconPalette, IconSparkles, IconSql, type Icon } from "@tabler/icons-react";
+import {
+  ChartNoAxesColumnIcon,
+  InfoIcon,
+  PaletteIcon,
+  SparklesIcon,
+  SquareCodeIcon,
+  type LucideIcon,
+} from "lucide-react";
 import type { ComponentType } from "react";
 import { useWorkspace } from "../../state/workspace";
 import { AppVersionSetting, UpdateTrackSetting } from "./AboutSection";
@@ -10,7 +17,7 @@ import { Card } from "./SettingLayout";
 import { UsageLimitsSetting, UsageRefresh } from "./UsageSection";
 import { sectionLabel, sectionSettings, settingRuns, type SettingEntry, type SettingId, type SettingsSectionId } from "./settingsIndex";
 
-export const SECTION_ICONS = { appearance: IconPalette, queries: IconSql, providers: IconSparkles, usage: IconChartBar, about: IconInfoCircle } satisfies Record<SettingsSectionId, Icon>;
+export const SECTION_ICONS = { appearance: PaletteIcon, queries: SquareCodeIcon, providers: SparklesIcon, usage: ChartNoAxesColumnIcon, about: InfoIcon } satisfies Record<SettingsSectionId, LucideIcon>;
 
 export const SECTION_ACTIONS: Partial<Record<SettingsSectionId, ComponentType>> = { usage: UsageRefresh };
 

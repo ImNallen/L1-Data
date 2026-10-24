@@ -1,5 +1,5 @@
 import * as Dialog from "@radix-ui/react-dialog";
-import { IconCheck, IconClock, IconCopy, IconPlayerPlayFilled } from "@tabler/icons-react";
+import { CheckIcon, ClockIcon, CopyIcon, PlayIcon } from "lucide-react";
 import { Fragment, useEffect, useRef, useState, type KeyboardEvent } from "react";
 import { commands, type HistoryFilter, type HistoryOutcome } from "../../ipc/bindings";
 import { isMac } from "../../shell/hostedWindow";
@@ -121,7 +121,7 @@ function HistoryBrowser({ close, restoreEditorFocus }: { close: () => void; rest
   return (
     <div className="flex h-full min-h-0 flex-col" onKeyDown={onKeyDown}>
       <div className="flex min-h-14 shrink-0 items-center gap-3 border-b border-control px-4">
-        <IconClock size={18} className="shrink-0 text-green" aria-hidden />
+        <ClockIcon size={18} className="shrink-0 text-green" aria-hidden />
         <input ref={searchRef} data-testid="history-input" autoFocus spellCheck={false} autoCorrect="off" autoCapitalize="off" value={query} onChange={(e) => setQuery(e.target.value)}
           role="combobox" aria-expanded={true} aria-autocomplete="list" aria-label="Search query history" aria-controls="history-list" aria-activedescendant={selected ? `history-group-${selected.id}` : undefined}
           placeholder="Search SQL, tables, errors or connections" className="h-12 min-w-0 flex-1 bg-transparent text-ui-14 text-fg outline-none placeholder:text-faint" />
@@ -181,7 +181,7 @@ function HistoryBrowser({ close, restoreEditorFocus }: { close: () => void; rest
             <div className="relative min-h-0 flex-1 overflow-hidden rounded-lg border border-control bg-bg">
               {detail ? <HistorySql text={detail.sql} databaseKind={detail.databaseKind} /> : <p role="status" className="p-4 text-ui-12 text-dim">Loading SQL…</p>}
               <button type="button" data-testid="history-copy" disabled={!detail} onClick={() => void copy()} className="absolute top-2 right-2 flex h-6 items-center gap-1.5 rounded-md bg-raised px-2 text-ui-11 text-muted shadow-sm outline-none hover:text-fg focus-visible:ring-1 focus-visible:ring-focus disabled:opacity-40">
-                {copied ? <IconCheck size={13} /> : <IconCopy size={13} />}{copied ? "Copied" : "Copy"}<Kbd className="bg-pill text-dim">{mod}C</Kbd>
+                {copied ? <CheckIcon size={13} /> : <CopyIcon size={13} />}{copied ? "Copied" : "Copy"}<Kbd className="bg-pill text-dim">{mod}C</Kbd>
               </button>
             </div>
             <span className="sr-only" role="status">{copied ? "Query copied" : ""}</span>
@@ -200,7 +200,7 @@ function HistoryBrowser({ close, restoreEditorFocus }: { close: () => void; rest
             </div>
             <div className="flex shrink-0 flex-wrap items-center gap-2">
               <Button variant="primary" data-testid="history-open" disabled={!detail} onClick={() => act("open")}>Open in new tab<Kbd className="bg-white/15">↵</Kbd></Button>
-              <Button data-testid="history-run-again" disabled={!detail} onClick={() => act("run")}><IconPlayerPlayFilled size={12} className="text-run-icon" />Run again<Kbd className="bg-pill text-dim">{mod}↵</Kbd></Button>
+              <Button data-testid="history-run-again" disabled={!detail} onClick={() => act("run")}><PlayIcon fill="currentColor" size={12} className="text-run-icon" />Run again<Kbd className="bg-pill text-dim">{mod}↵</Kbd></Button>
               <Button variant="ghost" data-testid="history-insert" disabled={!detail || !insertEnabled} title={insertEnabled ? "Insert into the active tab" : "Open a tab to insert this query"} onClick={() => act("insert")}>Insert at cursor<Kbd className="bg-pill text-dim">Alt+↵</Kbd></Button>
             </div>
           </>}

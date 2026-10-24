@@ -1,4 +1,4 @@
-import { IconFileOff, IconTable, IconX } from "@tabler/icons-react";
+import { FileXIcon, TableIcon, XIcon } from "lucide-react";
 import { useState, useSyncExternalStore } from "react";
 import { closeTab } from "../features/editor/closeTab";
 import { isDirty, onBuffersChanged } from "../features/editor/editorStates";
@@ -58,7 +58,7 @@ function TabItem({ id }: { id: TabId }) {
       )}
     >
       {tab.table ? (
-        <IconTable size={14} className="shrink-0 text-muted" />
+        <TableIcon size={14} className="shrink-0 text-muted" />
       ) : (
         <span className="font-mono text-ui-9.5 font-bold tracking-tight text-badge">SQL</span>
       )}
@@ -81,7 +81,7 @@ function TabItem({ id }: { id: TabId }) {
       ) : (
         <span className={cx("truncate text-ui-13.5", missing && "line-through")}>{tab.title}</span>
       )}
-      {missing && <IconFileOff data-testid={`tab-file-missing-${id}`} aria-label="File missing" size={13} className="-ml-1 shrink-0 text-amber" />}
+      {missing && <FileXIcon data-testid={`tab-file-missing-${id}`} aria-label="File missing" size={13} className="-ml-1 shrink-0 text-amber" />}
       {unsaved && (
         <span data-testid={`tab-unsaved-${id}`} aria-label="Unsaved changes" className="-ml-1 size-2 shrink-0 rounded-full border-[1.5px] border-focus" />
       )}
@@ -100,7 +100,7 @@ function TabItem({ id }: { id: TabId }) {
             active && !dirty ? "visible" : "invisible group-hover:visible",
           )}
         >
-          <IconX size={13} />
+          <XIcon size={13} />
         </button>
       </span>
     </div>

@@ -1,4 +1,4 @@
-import { IconCheck, IconCopy, IconPlayerPlayFilled } from "@tabler/icons-react";
+import { CheckIcon, CopyIcon, PlayIcon } from "lucide-react";
 import { useEffect, useState } from "react";
 import type { DatabaseKind, DatabaseRef } from "../../ipc/bindings";
 import { useWorkspace } from "../../state/workspace";
@@ -34,7 +34,7 @@ export function SqlCard({ sql, relations, vetted, complete, db, databaseKind = "
         )}
         <div className="flex-1" />
         <IconButton data-testid="sql-card-copy" aria-label="Copy SQL" title={copied ? "Copied" : "Copy SQL"} className="size-6" disabled={!complete} onClick={() => void copy()}>
-          {copied ? <IconCheck size={13} /> : <IconCopy size={13} />}
+          {copied ? <CheckIcon size={13} /> : <CopyIcon size={13} />}
         </IconButton>
       </div>
       <SqlHighlight sql={sql} databaseKind={databaseKind} className="px-3 py-2.5" />
@@ -45,7 +45,7 @@ export function SqlCard({ sql, relations, vetted, complete, db, databaseKind = "
           </Button>
         ) : (
           <Button data-testid="sql-run-new-tab" className={ACTION} disabled={!complete} onClick={() => runInNewTab(sql, db)}>
-            <IconPlayerPlayFilled size={11} className="text-run-icon" />
+            <PlayIcon fill="currentColor" size={11} className="text-run-icon" />
             Run in new tab
           </Button>
         )}

@@ -1,19 +1,19 @@
 import * as Menu from "@radix-ui/react-dropdown-menu";
 import { save } from "@tauri-apps/plugin-dialog";
 import {
-  IconAlertCircle,
-  IconArrowBackUp,
-  IconCheck,
-  IconChevronDown,
-  IconChevronLeft,
-  IconChevronLeftPipe,
-  IconChevronRight,
-  IconChevronRightPipe,
-  IconDownload,
-  IconMinus,
-  IconPlus,
-  IconTerminal2,
-} from "@tabler/icons-react";
+  CheckIcon,
+  ChevronDownIcon,
+  ChevronFirstIcon,
+  ChevronLastIcon,
+  ChevronLeftIcon,
+  ChevronRightIcon,
+  CircleAlertIcon,
+  DownloadIcon,
+  MinusIcon,
+  PlusIcon,
+  SquareTerminalIcon,
+  Undo2Icon,
+} from "lucide-react";
 import { useEffect, useMemo, useRef, useSyncExternalStore, type RefObject } from "react";
 import { commands, type OutputEntry, type QueryError, type ResultMeta, type RunState, type TabId } from "../../ipc/bindings";
 import { exportErrorText } from "../../ipc/errors";
@@ -72,10 +72,10 @@ function TablePager({ tab, rows }: { tab: TableTab; rows: number }) {
       className="absolute bottom-3 left-1/2 z-30 flex -translate-x-1/2 items-center gap-0.5 rounded-lg border border-control bg-raised p-1 text-ui-12.5 text-muted shadow-[var(--shadow-float)]"
     >
       <IconButton aria-label="First page" disabled={page === 0} onClick={() => setTablePage(tab.id, 0)}>
-        <IconChevronLeftPipe size={15} />
+        <ChevronFirstIcon size={15} />
       </IconButton>
       <IconButton aria-label="Previous page" disabled={page === 0} onClick={() => setTablePage(tab.id, page - 1)}>
-        <IconChevronLeft size={15} />
+        <ChevronLeftIcon size={15} />
       </IconButton>
       <Menu.Root modal={false}>
         <Menu.Trigger
@@ -84,7 +84,7 @@ function TablePager({ tab, rows }: { tab: TableTab; rows: number }) {
           className="inline-flex h-7 items-center gap-1 rounded-md pr-1.5 pl-2 whitespace-nowrap text-fg tabular-nums outline-none hover:bg-hover data-[state=open]:bg-hover"
         >
           {label}
-          <IconChevronDown size={13} className="text-muted" />
+          <ChevronDownIcon size={13} className="text-muted" />
         </Menu.Trigger>
         <MenuContent align="end">
           {PAGE_SIZES.map((n) => (
@@ -95,10 +95,10 @@ function TablePager({ tab, rows }: { tab: TableTab; rows: number }) {
         </MenuContent>
       </Menu.Root>
       <IconButton aria-label="Next page" disabled={isLast} onClick={() => setTablePage(tab.id, page + 1)}>
-        <IconChevronRight size={15} />
+        <ChevronRightIcon size={15} />
       </IconButton>
       <IconButton aria-label="Last page" disabled={isLast || busy} onClick={() => void lastTablePage(tab.id)}>
-        <IconChevronRightPipe size={15} />
+        <ChevronLastIcon size={15} />
       </IconButton>
     </div>
   );
@@ -111,8 +111,8 @@ function SummaryText({ summary }: { summary: Summary }) {
       data-tone={summary.tone}
       className={cx("flex min-w-0 items-center gap-1.5 text-ui-13", summary.tone === "error" ? "text-danger" : "text-dim")}
     >
-      {summary.tone === "ok" && <IconCheck size={15} className="shrink-0 text-green" />}
-      {summary.tone === "error" && <IconAlertCircle size={14} className="shrink-0" />}
+      {summary.tone === "ok" && <CheckIcon size={15} className="shrink-0 text-green" />}
+      {summary.tone === "error" && <CircleAlertIcon size={14} className="shrink-0" />}
       {summary.tone === "running" && <Spinner />}
       <span className="truncate">{summary.text}</span>
     </span>
@@ -162,7 +162,7 @@ function EditBar({ tabId, editable, canSubmit, actions }: { tabId: TabId | null;
   return (
     <div data-testid="edit-bar" className="flex items-center gap-0.5">
       <IconButton data-testid="add-row" aria-label="Add row" title="Add row" disabled={!editable} onClick={() => actions.current?.addRow()}>
-        <IconPlus size={16} />
+        <PlusIcon size={16} />
       </IconButton>
       <IconButton
         data-testid="delete-rows"
@@ -171,7 +171,7 @@ function EditBar({ tabId, editable, canSubmit, actions }: { tabId: TabId | null;
         disabled={!editable}
         onClick={() => actions.current?.deleteSelectedRows()}
       >
-        <IconMinus size={16} />
+        <MinusIcon size={16} />
       </IconButton>
       <IconButton
         data-testid="submit-edits"
@@ -181,7 +181,7 @@ function EditBar({ tabId, editable, canSubmit, actions }: { tabId: TabId | null;
         className={cx(pending > 0 && "text-green!")}
         onClick={() => tabId && void submitEdits(tabId)}
       >
-        <IconCheck size={16} />
+        <CheckIcon size={16} />
       </IconButton>
       <IconButton
         data-testid="revert-edits"
@@ -190,7 +190,7 @@ function EditBar({ tabId, editable, canSubmit, actions }: { tabId: TabId | null;
         disabled={pending === 0 || busy}
         onClick={() => tabId && useTableEdits.getState().clear(tabId)}
       >
-        <IconArrowBackUp size={16} />
+        <Undo2Icon size={16} />
       </IconButton>
       {pending > 0 && (
         <span data-testid="pending-count" className="ml-1.5 text-ui-12.5 whitespace-nowrap text-amber">
@@ -351,7 +351,7 @@ export function ResultsPane({ tabId }: { tabId: TabId | null }) {
             disabled={!shown || busy}
             onClick={() => shown && void exportCsv(shown.meta)}
           >
-            <IconDownload size={16} />
+            <DownloadIcon size={16} />
           </IconButton>
           <IconButton
             data-testid="output-toggle"
@@ -366,7 +366,7 @@ export function ResultsPane({ tabId }: { tabId: TabId | null }) {
             }}
             className={cx(view.kind === "output" && "bg-pill!", tone === "warn" ? "text-amber!" : view.kind === "output" && "text-fg!")}
           >
-            <IconTerminal2 size={16} />
+            <SquareTerminalIcon size={16} />
           </IconButton>
         </div>
       </div>

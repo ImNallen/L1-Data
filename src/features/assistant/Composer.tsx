@@ -1,5 +1,16 @@
 import * as Menu from "@radix-ui/react-dropdown-menu";
-import { IconAlertTriangle, IconArrowUp, IconBrain, IconChevronDown, IconLock, IconLockOpen, IconPaperclip, IconPlayerStopFilled, IconTable, IconX } from "@tabler/icons-react";
+import {
+  ArrowUpIcon,
+  BrainIcon,
+  ChevronDownIcon,
+  LockIcon,
+  LockOpenIcon,
+  PaperclipIcon,
+  SquareIcon,
+  TableIcon,
+  TriangleAlertIcon,
+  XIcon,
+} from "lucide-react";
 import { useLayoutEffect, useRef, useState, type ReactNode } from "react";
 import { commands, type ChatOptions, type ChatState, type ModelOption, type Permission } from "../../ipc/bindings";
 import { useLive } from "../../state/live";
@@ -14,8 +25,8 @@ import { PROVIDER_ICONS } from "./providerIcons";
 const MAX_INPUT_PX = 200;
 
 const PERMISSIONS = {
-  AskFirst: { label: "Ask first", hint: "Every query waits for Run or Deny", Icon: IconLock },
-  Auto: { label: "Auto", hint: "Read-only queries run without asking", Icon: IconLockOpen },
+  AskFirst: { label: "Ask first", hint: "Every query waits for Run or Deny", Icon: LockIcon },
+  Auto: { label: "Auto", hint: "Read-only queries run without asking", Icon: LockOpenIcon },
 } satisfies Record<Permission, unknown>;
 
 function Picker({ testId, label, icon, disabled, children }: { testId: string; label: string; icon: ReactNode; disabled?: boolean; children: ReactNode }) {
@@ -28,7 +39,7 @@ function Picker({ testId, label, icon, disabled, children }: { testId: string; l
       >
         {icon}
         <span className="truncate">{label}</span>
-        <IconChevronDown size={12} className="shrink-0 text-dim" />
+        <ChevronDownIcon size={12} className="shrink-0 text-dim" />
       </Menu.Trigger>
       <MenuContent>{children}</MenuContent>
     </Menu.Root>
@@ -58,7 +69,7 @@ function Pickers({ chat, models }: { chat: ChatState; models: ModelOption[] }) {
       {efforts.length > 0 && (
         <>
           <Divider />
-          <Picker testId="assistant-effort" label={efforts.find((e) => e.id === options.effort)?.label ?? "Effort"} icon={<IconBrain size={13} className="shrink-0" />}>
+          <Picker testId="assistant-effort" label={efforts.find((e) => e.id === options.effort)?.label ?? "Effort"} icon={<BrainIcon size={13} className="shrink-0" />}>
             {efforts.map((e) => (
               <MenuItem key={e.id} checked={e.id === options.effort} onSelect={() => configure({ effort: e.id })}>
                 {e.label}
@@ -108,7 +119,7 @@ function bannerMessage(banner: ProviderBanner): ReactNode {
 function Banner({ banner }: { banner: ProviderBanner }) {
   return (
     <div data-testid="assistant-provider-banner" className="mb-2 flex items-start gap-2 rounded-lg border border-control px-3 py-2 text-ui-12 leading-relaxed text-muted">
-      <IconAlertTriangle size={13} className="mt-[3px] shrink-0 text-amber" />
+      <TriangleAlertIcon size={13} className="mt-[3px] shrink-0 text-amber" />
       <p className="min-w-0 flex-1">{bannerMessage(banner)}</p>
       <button type="button" className="shrink-0 text-fg underline-offset-2 hover:underline" onClick={() => useWorkspace.getState().openSettings("providers")}>
         Open settings
@@ -166,12 +177,12 @@ export function Composer({ chat }: { chat: ChatState | undefined }) {
         {attaching && (
           <div className="flex px-3 pt-2.5">
             <span data-testid="assistant-attachment" className="inline-flex min-w-0 items-center gap-1.5 rounded-md bg-pill py-0.5 pr-0.5 pl-2 text-ui-12 text-muted">
-              <IconTable size={12} className="shrink-0" />
+              <TableIcon size={12} className="shrink-0" />
               <span className="truncate">
                 {tabTitle} · {pluralRows(shown.meta.rowCount)}
               </span>
               <button type="button" aria-label="Remove attachment" onClick={() => setAttach(false)} className="grid size-4 shrink-0 place-items-center rounded hover:bg-hover hover:text-fg">
-                <IconX size={11} />
+                <XIcon size={11} />
               </button>
             </span>
           </div>
@@ -202,7 +213,7 @@ export function Composer({ chat }: { chat: ChatState | undefined }) {
             onClick={() => setAttach((a) => !a)}
             className={cx(attaching && "bg-pill text-fg")}
           >
-            <IconPaperclip size={15} />
+            <PaperclipIcon size={15} />
           </IconButton>
           {running ? (
             <button
@@ -213,7 +224,7 @@ export function Composer({ chat }: { chat: ChatState | undefined }) {
               onClick={() => stopTurn(chat.id)}
               className="grid size-7 place-items-center rounded-full bg-muted text-bg transition-colors hover:bg-fg"
             >
-              <IconPlayerStopFilled size={12} />
+              <SquareIcon fill="currentColor" size={12} />
             </button>
           ) : (
             <button
@@ -225,7 +236,7 @@ export function Composer({ chat }: { chat: ChatState | undefined }) {
               onClick={() => void send()}
               className="grid size-7 place-items-center rounded-full bg-muted text-bg transition-colors hover:bg-fg disabled:pointer-events-none disabled:opacity-40"
             >
-              <IconArrowUp size={15} stroke={2.25} />
+              <ArrowUpIcon size={15} strokeWidth={2.25} />
             </button>
           )}
         </div>

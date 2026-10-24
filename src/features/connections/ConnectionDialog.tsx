@@ -1,5 +1,15 @@
 import * as Dialog from "@radix-ui/react-dialog";
-import { IconAlertCircle, IconCheck, IconEye, IconEyeOff, IconKey, IconLock, IconPlus, IconSelector, IconX } from "@tabler/icons-react";
+import {
+  CheckIcon,
+  ChevronsUpDownIcon,
+  CircleAlertIcon,
+  EyeIcon,
+  EyeOffIcon,
+  KeyIcon,
+  LockIcon,
+  PlusIcon,
+  XIcon,
+} from "lucide-react";
 import { useEffect, useId, useRef, useState, type ReactNode } from "react";
 import { commands, type ConnectionConfig, type ConnectionDraft, type ConnectionId, type SslMode } from "../../ipc/bindings";
 import { connectErrorText } from "../../ipc/errors";
@@ -96,7 +106,7 @@ function ConnectionList({ selected, onSelect }: { selected: ConnectionId | null;
       <div className="flex h-12 shrink-0 items-center justify-between pr-2 pl-4">
         <span className="text-ui-13.5 font-semibold text-fg">Connections</span>
         <Button data-testid="conn-new" variant="ghost" className="h-7 gap-1 px-2" onClick={() => onSelect(null)}>
-          <IconPlus size={14} /> New
+          <PlusIcon size={14} /> New
         </Button>
       </div>
       <div className="min-h-0 flex-1 space-y-0.5 overflow-y-auto px-2 pb-2">
@@ -120,7 +130,7 @@ function ConnectionList({ selected, onSelect }: { selected: ConnectionId | null;
         })}
       </div>
       <div className="flex shrink-0 gap-2 border-t border-border px-4 py-3 text-ui-11.5 leading-4 text-dim">
-        <IconLock size={14} className="mt-px shrink-0" />
+        <LockIcon size={14} className="mt-px shrink-0" />
         <span>Passwords are encrypted with a key kept in the system keychain.</span>
       </div>
     </aside>
@@ -163,7 +173,7 @@ function SecretInput({ testId, label, value, placeholder, onChange }: { testId: 
         onClick={() => setReveal(!reveal)}
         className="absolute top-1/2 right-1 grid size-6 -translate-y-1/2 place-items-center rounded-md text-dim hover:bg-hover hover:text-fg"
       >
-        {reveal ? <IconEyeOff size={14} /> : <IconEye size={14} />}
+        {reveal ? <EyeOffIcon size={14} /> : <EyeIcon size={14} />}
       </button>
     </div>
   );
@@ -392,7 +402,7 @@ function ConnectionForm({
         <Dialog.Description className="sr-only">Saved connections, and the settings of the selected one.</Dialog.Description>
         <Dialog.Close asChild>
           <IconButton aria-label="Close">
-            <IconX size={15} />
+            <XIcon size={15} />
           </IconButton>
         </Dialog.Close>
       </div>
@@ -508,7 +518,7 @@ function ConnectionForm({
                 </option>
               ))}
             </select>
-            <IconSelector size={14} className="pointer-events-none absolute top-1/2 right-2.5 -translate-y-1/2 text-dim" />
+            <ChevronsUpDownIcon size={14} className="pointer-events-none absolute top-1/2 right-2.5 -translate-y-1/2 text-dim" />
           </div>
         </FormRow>
         {fields.databaseKind === "Postgres" && (
@@ -561,7 +571,7 @@ function ConnectionForm({
                       </option>
                     ))}
                   </select>
-                  <IconSelector size={14} className="pointer-events-none absolute top-1/2 right-2.5 -translate-y-1/2 text-dim" />
+                  <ChevronsUpDownIcon size={14} className="pointer-events-none absolute top-1/2 right-2.5 -translate-y-1/2 text-dim" />
                 </div>
               </div>
             </FormRow>
@@ -632,7 +642,7 @@ function ConnectionForm({
           )}
           {probe.kind === "ok" && (
             <span className="flex items-center gap-1.5 text-fg">
-              <IconCheck size={14} className="shrink-0 text-green" />
+              <CheckIcon size={14} className="shrink-0 text-green" />
               <span className="truncate">Connected to {DATABASE_LABEL[fields.databaseKind]} {probe.version}</span>
             </span>
           )}
@@ -654,7 +664,7 @@ function HostKeyCard({ hostKey, onTrust }: { hostKey: UnknownHostKey; onTrust: (
   const fingerprint = `${hostKey.algorithm} ${hostKey.fingerprint}`;
   return (
     <div data-testid="ssh-host-key" className="flex shrink-0 items-center gap-3 border-t border-border px-5 py-3">
-      <IconKey size={16} className="shrink-0 text-amber" />
+      <KeyIcon size={16} className="shrink-0 text-amber" />
       <div className="min-w-0 flex-1 text-ui-12.5 leading-4">
         <div className="truncate text-fg">
           {hostKey.host}:{hostKey.port} offered an unknown host key
@@ -673,7 +683,7 @@ function HostKeyCard({ hostKey, onTrust }: { hostKey: UnknownHostKey; onTrust: (
 function ErrorLine({ message }: { message: string }) {
   return (
     <span title={message} className="flex items-start gap-1.5 text-danger">
-      <IconAlertCircle size={14} className="shrink-0" />
+      <CircleAlertIcon size={14} className="shrink-0" />
       <span className="line-clamp-2">{message}</span>
     </span>
   );
