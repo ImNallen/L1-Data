@@ -1,6 +1,6 @@
 import { commands, type ConnectError, type ConnectionId, type DatabaseRef, type SshError, type ViewEdit } from "../../ipc/bindings";
 import { catalogErrorText, connectErrorText, disconnectErrorText } from "../../ipc/errors";
-import { useWorkspace } from "../../state/workspace";
+import { confirm, useWorkspace } from "../../state/workspace";
 
 const ws = () => useWorkspace.getState();
 
@@ -20,17 +20,15 @@ export async function connect(id: ConnectionId): Promise<void> {
     ws().notify(`${name}: ${connectErrorText(res.error)}`);
     return;
   }
-  ws().open({
-    kind: "confirm",
+  const trust = await confirm({
     title: `Trust the host key of ${key.host}:${key.port}?`,
     body: `${name} connects through this SSH server, which offered an unknown ${key.algorithm} key ${key.fingerprint}. Trust it only if it matches the server's key.`,
     confirmLabel: "Trust and connect",
-    onConfirm: async () => {
-      const trusted = await commands.sshTrustHostKey(key.trust);
-      if (trusted.status === "error") ws().notify(`${name}: SSH: ${trusted.error}`);
-      else await connect(id);
-    },
   });
+  if (!trust) return;
+  const trusted = await commands.sshTrustHostKey(key.trust);
+  if (trusted.status === "error") ws().notify(`${name}: SSH: ${trusted.error}`);
+  else await connect(id);
 }
 
 export async function disconnect(id: ConnectionId): Promise<void> {
@@ -40,28 +38,21 @@ export async function disconnect(id: ConnectionId): Promise<void> {
     ws().notify(disconnectErrorText(res.error));
     return;
   }
-  ws().open({
-    kind: "confirm",
+  const rollBack = await confirm({
     title: "Disconnect with open transactions?",
     body: `${disconnectErrorText(res.error)} Disconnecting rolls it back.`,
     confirmLabel: "Roll back and disconnect",
-    onConfirm: () => void commands.connectionDisconnect(id, true),
   });
+  if (rollBack) await commands.connectionDisconnect(id, true);
 }
 
-export function confirmDelete(id: ConnectionId): void {
+export async function confirmDelete(id: ConnectionId): Promise<void> {
   const name = ws().configs[id]?.name ?? "this connection";
-  ws().open({
-    kind: "confirm",
-    title: `Delete ${name}?`,
-    body: "This removes the saved connection and its stored password. Query history is kept.",
-    confirmLabel: "Delete",
-    onConfirm: async () => {
-      const res = await commands.connectionDelete(id);
-      if (res.status === "error") ws().notify(disconnectErrorText(res.error));
-      else ws().removeConfig(id);
-    },
-  });
+  const ok = await confirm({ title: `Delete ${name}?`, body: "This removes the saved connection and its stored password. Query history is kept.", confirmLabel: "Delete" });
+  if (!ok) return;
+  const res = await commands.connectionDelete(id);
+  if (res.status === "error") ws().notify(disconnectErrorText(res.error));
+  else ws().removeConfig(id);
 }
 
 export async function refreshCatalog(db: DatabaseRef): Promise<void> {

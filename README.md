@@ -32,8 +32,12 @@ L1 Data is a desktop IDE for PostgreSQL and Microsoft SQL Server, built with Tau
 - Every tab is a query editor. A tab opened from a table also browses that table. Tabs complete table and column names from the live catalog, including the columns after a table alias such as `o.`. The editor draws a rounded box behind the statement `⌘↵` will run. On PostgreSQL, a statement ends at `;`, or at a blank line when the next line starts a new statement. `⌘↵` or **Run** runs the selection as written, or the marked statement when nothing is selected. On a blank line nothing is marked, and `⌘↵` opens a list of the tab's statements instead. `⌘⇧↵` opens the list whenever the tab holds several statements. The list has an **All** row when there are several, and highlights in the editor what the row under the pointer or the arrow keys would run. `Enter`, a click, or a statement's number runs it and moves the cursor to its end. `Esc` closes the list. `Esc` or **Cancel** stops a running query.
 - On PostgreSQL, `⌘⌥L` or **Format** formats the marked statement, or every statement the selection touches. Each clause starts a line, each list item and each `AND` or `OR` of a condition gets its own line, subqueries indent, and keywords are uppercase. Strings, comments, and function bodies stay byte for byte, and a column named like a keyword, such as `day`, keeps its case. Statements other than queries, `INSERT`, `UPDATE`, `DELETE`, and `CREATE TABLE` change only their keyword case. One `⌘Z` undoes the format. When the result might not mean the same, the editor keeps the text and says so.
 - SQL Server formatting supports simple `SELECT` batches. Other constructs stay unchanged and show an unsupported message. Advanced table filters and sort expressions accept a conservative expression subset. Use a query tab for subqueries, casts, `CASE`, `COLLATE`, or functions outside that subset.
-- Each tab has its own session, so `SET` and temp tables stay with the tab. The connection name in the top bar picks the tab's connection. On PostgreSQL, the **Auto-commit** menu also offers app-managed Manual mode. The menu shows a confirmed PostgreSQL rollback or a SQL Server session reset after connection loss. Double-click a tab to rename it.
+- Each tab has its own session, so `SET` and temp tables stay with the tab. The connection name in the top bar picks the tab's connection. On PostgreSQL, the **Auto-commit** menu also offers app-managed Manual mode. The menu shows a confirmed PostgreSQL rollback or a SQL Server session reset after connection loss. Double-click a tab to rename it, unless it is bound to a file.
 - **Commit** and **Rollback** appear while a transaction is open, and the tab shows a dot. Closing that tab or disconnecting asks before it rolls back.
+- `⌘O` opens `.sql` files, several at once, each in a new tab on the database `⌘T` would use. A file that is already open switches to its tab. Files must be UTF-8 and at most 4 MB. The editor shows neither a byte-order mark nor CRLF line breaks, and a save writes back the ones the file had.
+- `⌘S` saves the tab to its file. In a tab with no file, `⌘S` asks where to save it, as **Save As** (`⌘⇧S`) does, and binds the tab to the new file. A tab bound to a file is named after the file, and a ring beside the name shows while its text differs from the file. With pending table edits in the tab, `⌘S` submits them instead.
+- A save writes a new file beside the old one and renames it over the old one, so a crash never leaves half a file. A crash during a save can leave a hidden `.<name>.*.l1data-tmp` file in the folder. The new file keeps the old one's permission bits, but not its owner or group, its ACLs, or its extended attributes such as Finder tags, and other hard links to the old file keep the old text. A save writes through a symlink to its target. A read-only file is refused. If the file changed on disk since the tab opened or last saved it, the save asks before it overwrites. If you cancel, the tab shows the ring, since its file no longer holds what the tab last read. **Save As** refuses a file that another tab has open.
+- Closing a tab whose text differs from its file asks **Save**, **Don't Save**, or **Cancel**. Every tab's text, saved or not, comes back after you close the window or quit with `⌘Q`. At launch, a tab with no unsaved changes reloads its file if the file changed. A tab whose file was moved or deleted keeps its text, and its name is struck through until a save writes the file again.
 - SQL Server runs native scripts in **Auto-commit**, including explicit `BEGIN TRANSACTION`, `COMMIT` and `ROLLBACK`. The toolbar reports when a transaction is open; its nesting depth and committability are unavailable through the SQL Server protocol. App-managed Manual mode is unavailable. Server-side code such as triggers can commit or replace a transaction, so the app cannot guarantee that wrapping an arbitrary batch keeps every write rollbackable.
 - An error shows the available server diagnostics, including PostgreSQL SQLSTATE, and the editor underlines a reported error location.
 - The **Output** button at the right end of the results header opens a timestamped log of everything the tab ran: each statement, its server messages such as `RAISE NOTICE` and warnings, and its result line. **Commit**, **Rollback**, and table edits are logged too. When a statement returns no rows, the log fills the results pane. The button turns amber when the latest run raised a warning.
@@ -82,6 +86,9 @@ L1 Data is a desktop IDE for PostgreSQL and Microsoft SQL Server, built with Tau
 | Keys | Action |
 |---|---|
 | `⌘T` | New SQL tab |
+| `⌘O` | Open `.sql` files |
+| `⌘S` | Save the tab to its file, or submit pending table edits |
+| `⌘⇧S` | Save the tab to a new file |
 | `⌘N` | New connection |
 | `⌘P` | Focus the sidebar search: the tree, or the settings while Settings is open |
 | `⌘,` | Open or close Settings |
@@ -92,14 +99,13 @@ L1 Data is a desktop IDE for PostgreSQL and Microsoft SQL Server, built with Tau
 | `Esc` | Cancel the running query |
 | `Enter` | Edit the selected cell in an editable table, or show its full value elsewhere |
 | `F2` | Edit the selected cell |
-| `⌘S` | Submit pending table edits |
 | `⌘⌫` | Delete or restore the selected rows |
 | `⌘C` | Copy the selected cells as TSV |
 | `⌘A` | Select all cells |
 
 In query history, `↑` and `↓` select a query, `Enter` opens it in a new tab, `⌘↵` runs it in a new tab, and `Alt+Enter` inserts it at the active tab's cursor. `⌘C` copies the query unless text is selected in the search field. `Esc` closes history. **Clear history** asks for confirmation.
 
-On macOS, **Close Window** moves to `⇧⌘W` so that `⌘W` closes a tab.
+On macOS, **Close Window** moves to `⇧⌘W` so that `⌘W` closes a tab. On macOS the global shortcuts take `⌘` only. `Ctrl` chords there stay with the editor.
 
 ## Quickstart
 

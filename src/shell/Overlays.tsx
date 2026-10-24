@@ -1,5 +1,5 @@
-import { useEffect, useState } from "react";
-import { useWorkspace } from "../state/workspace";
+import { useEffect, useRef, useState } from "react";
+import { useWorkspace, type Overlay } from "../state/workspace";
 import { Button, Modal } from "../ui/primitives";
 
 function Toast() {
@@ -23,6 +23,42 @@ function Toast() {
   );
 }
 
+/** Keyed by `seq`, so a question that follows another remounts and takes focus again. Enter picks the primary choice. */
+function AskDialog({ question }: { question: Extract<Overlay, { kind: "ask" }> }) {
+  const answer = useWorkspace((s) => s.answer);
+  const close = useWorkspace((s) => s.close);
+  const primary = useRef<HTMLButtonElement>(null);
+  const hasPrimary = question.choices.some((c) => c.variant === "primary");
+  return (
+    <Modal
+      open
+      onOpenChange={(open) => !open && close()}
+      title={question.title}
+      description={question.body}
+      width={440}
+      testId={`${question.testId}-dialog`}
+      initialFocus={hasPrimary ? primary : undefined}
+    >
+      <div className="flex justify-end gap-2">
+        <Button variant="ghost" data-testid={`${question.testId}-cancel`} onClick={close}>
+          Cancel
+        </Button>
+        {question.choices.map((c) => (
+          <Button
+            key={c.id}
+            ref={c.variant === "primary" ? primary : undefined}
+            data-testid={`${question.testId}-${c.id}`}
+            variant={c.variant}
+            onClick={() => answer(c.id)}
+          >
+            {c.label}
+          </Button>
+        ))}
+      </div>
+    </Modal>
+  );
+}
+
 export function Overlays() {
   const overlay = useWorkspace((s) => s.overlay);
   const close = useWorkspace((s) => s.close);
@@ -30,30 +66,7 @@ export function Overlays() {
 
   return (
     <>
-      <Modal
-        open={overlay.kind === "confirm"}
-        onOpenChange={onOpenChange}
-        title={overlay.kind === "confirm" ? overlay.title : ""}
-        description={overlay.kind === "confirm" ? overlay.body : undefined}
-        width={420}
-        testId="confirm-dialog"
-      >
-        <div className="flex justify-end gap-2">
-          <Button variant="ghost" onClick={close}>
-            Cancel
-          </Button>
-          <Button
-            data-testid="confirm-btn"
-            variant="danger"
-            onClick={() => {
-              if (overlay.kind === "confirm") overlay.onConfirm();
-              close();
-            }}
-          >
-            {overlay.kind === "confirm" ? overlay.confirmLabel : ""}
-          </Button>
-        </div>
-      </Modal>
+      {overlay.kind === "ask" && <AskDialog key={overlay.seq} question={overlay} />}
       <Modal open={overlay.kind === "cell"} onOpenChange={onOpenChange} title={overlay.kind === "cell" ? overlay.title : ""} width={720} testId="cell-dialog">
         {overlay.kind === "cell" && (
           <pre className="selectable max-h-[52vh] overflow-auto rounded-lg border border-control bg-bg p-3 font-mono text-ui-12.5 leading-5 whitespace-pre-wrap text-fg">

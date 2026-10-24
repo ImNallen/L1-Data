@@ -15,7 +15,7 @@ afterEach(() => {
   useLive.setState(useLive.getInitialState(), true);
 });
 
-const TAB: Tab = { id: "tab-1", title: "orders_by_region.sql", console: { db: { connectionId: "c1", database: "shop" }, mode: "AutoCommit" }, table: null };
+const TAB: Tab = { id: "tab-1", title: "orders_by_region.sql", console: { db: { connectionId: "c1", database: "shop" }, mode: "AutoCommit" }, table: null, file: null };
 
 const DOC = "-- 🦀 crab\nselect 1;\nselect 2;";
 
@@ -171,16 +171,16 @@ it("deletes a chat only after the user confirms, and says the provider keeps its
   mockIPC((cmd, args) => {
     if (cmd === "assistant_delete") deleted.push(args);
   });
-  confirmDeleteChat(chatAt(4, IDLE, 2));
+  void confirmDeleteChat(chatAt(4, IDLE, 2));
   const overlay = useWorkspace.getState().overlay;
-  if (overlay.kind !== "confirm") throw new Error(`expected a confirmation, got ${overlay.kind}`);
-  expect([overlay.title, overlay.body, overlay.confirmLabel, deleted.length]).toEqual([
+  if (overlay.kind !== "ask") throw new Error(`expected a confirmation, got ${overlay.kind}`);
+  expect([overlay.title, overlay.body, overlay.choices.map((c) => c.label).join(), deleted.length]).toEqual([
     "Delete this chat?",
     "This removes the chat from L1 Data. Claude keeps its own copy of the conversation in its config directory.",
     "Delete",
     0,
   ]);
-  overlay.onConfirm();
+  useWorkspace.getState().answer("btn");
   await settle();
   expect(deleted).toEqual([{ chatId: CHAT }]);
 });

@@ -225,7 +225,7 @@ const handle = (html: string, id: string) =>
   html.match(new RegExp(`<div[^>]*data-testid="${id}"[^>]*>(.*?)</div></div>`));
 
 function withQueryTab() {
-  const tab: Tab = { id: "t1", title: "Untitled-1.sql", console: { db: null, mode: "AutoCommit" }, table: null };
+  const tab: Tab = { id: "t1", title: "Untitled-1.sql", console: { db: null, mode: "AutoCommit" }, table: null, file: null };
   Object.assign(useWorkspace.getInitialState(), { tabs: { t1: tab }, active: "t1" });
 }
 
@@ -268,6 +268,7 @@ it("lists the start commands with their shortcuts when no tab is open", () => {
   const rows = [...html.matchAll(/data-testid="start-[^"]+"[^>]*>([^<]+)<kbd[^>]*>([^<]+)<\/kbd>/g)].map((m) => [m[1], m[2]]);
   expect(rows).toEqual([
     ["New query tab", "⌘T"],
+    ["Open file…", "⌘O"],
     ["New connection", "⌘N"],
     ["Search", "⌘P"],
     ["Settings", "⌘,"],
@@ -303,6 +304,7 @@ function withTableTab(mode: TxnMode = "AutoCommit", color: string | null = null)
     title: "orders",
     console: { db: { connectionId: "c", database: "shop" }, mode },
     table: { schema: "public", table: "orders", page: 0, query: EMPTY_QUERY },
+    file: null,
   };
   const config: ConnectionConfig = {
     id: "c",

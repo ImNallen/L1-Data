@@ -42,7 +42,7 @@ function routineRows(node: ReactNode): ReactElement<ComponentProps<typeof Functi
 }
 
 function target(db: DatabaseRef | null) {
-  const tab: Tab = { id: "active", title: "Query", console: { db, mode: "AutoCommit" }, table: null };
+  const tab: Tab = { id: "active", title: "Query", console: { db, mode: "AutoCommit" }, table: null, file: null };
   const other: Tab = { ...tab, id: "other", console: { db: db?.connectionId === postgres.connectionId ? sqlServer : postgres, mode: "AutoCommit" } };
   useWorkspace.setState({ tabs: { active: tab, other }, order: ["other", "active"], active: "active" });
 }

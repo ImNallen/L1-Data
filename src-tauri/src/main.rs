@@ -47,6 +47,8 @@ fn specta_builder() -> tauri_specta::Builder<tauri::Wry> {
             ipc::result_page,
             ipc::result_cell,
             ipc::result_export_csv,
+            ipc::file_open,
+            ipc::file_save,
             ipc::history_list,
             ipc::history_browse,
             ipc::history_group,
@@ -120,7 +122,7 @@ fn macos_menu(app: &AppHandle) -> tauri::Result<tauri::menu::Menu<tauri::Wry>> {
                     &PredefinedMenuItem::hide(app, None)?,
                     &PredefinedMenuItem::hide_others(app, None)?,
                     &PredefinedMenuItem::separator(app)?,
-                    &PredefinedMenuItem::quit(app, None)?,
+                    &MenuItem::with_id(app, QUIT, format!("Quit {}", app.package_info().name), true, Some("CmdOrCtrl+Q"))?,
                 ],
             )?,
             &Submenu::with_items(app, "File", true, &[&close_window()?])?,
@@ -156,6 +158,28 @@ fn macos_menu(app: &AppHandle) -> tauri::Result<tauri::menu::Menu<tauri::Wry>> {
 
 #[cfg(target_os = "macos")]
 const CLOSE_WINDOW: &str = "close-window";
+
+#[cfg(target_os = "macos")]
+const QUIT: &str = "quit";
+
+/// Longer than the 2 s the webview gives its close flush, so the shell never cuts a flush short.
+const CLOSE_BOUND: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// The predefined Quit item terminates the app with no close event first, so the webview could not flush its
+/// pending workspace save.
+#[cfg(target_os = "macos")]
+fn quit(app: &AppHandle) {
+    for window in app.webview_windows().into_values() {
+        if let Err(e) = window.close() {
+            eprintln!("close window failed: {e}");
+        }
+    }
+    let app = app.clone();
+    tauri::async_runtime::spawn(async move {
+        tokio::time::sleep(CLOSE_BOUND).await;
+        app.exit(0);
+    });
+}
 
 const LIGHT_BACKGROUND: tauri::window::Color = tauri::window::Color(255, 255, 255, 255);
 
@@ -301,7 +325,9 @@ fn main() {
     let app = tauri::Builder::default();
     #[cfg(target_os = "macos")]
     let app = app.menu(macos_menu).on_menu_event(|app, event| {
-        if event.id() == CLOSE_WINDOW
+        if event.id() == QUIT {
+            quit(app);
+        } else if event.id() == CLOSE_WINDOW
             && let Some(window) = app.webview_windows().into_values().find(|w| w.is_focused().unwrap_or(false))
             && let Err(e) = window.close()
         {
@@ -311,6 +337,17 @@ fn main() {
     app.plugin(tauri_plugin_dialog::init())
         .plugin(updater::plugin())
         .invoke_handler(builder.invoke_handler())
+        .on_window_event(|window, event| {
+            // The webview destroys the window when its flush ends. This destroy, after every close request, bounds a
+            // flush that never ends, and does nothing to a window already gone.
+            if let tauri::WindowEvent::CloseRequested { .. } = event {
+                let window = window.clone();
+                tauri::async_runtime::spawn(async move {
+                    tokio::time::sleep(CLOSE_BOUND).await;
+                    let _ = window.destroy();
+                });
+            }
+        })
         .setup(move |app| {
             let engine = tauri::async_runtime::block_on(Engine::open(engine_config(app)?))?;
             app.manage(engine.clone());
@@ -418,6 +455,13 @@ mod tests {
         let package = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/../package.json")).unwrap();
         assert!(capabilities.contains("core:default") && !capabilities.contains("updater:"), "a capability grants the webview an updater permission");
         assert!(package.contains("@tauri-apps/api") && !package.contains("@tauri-apps/plugin-updater"), "the frontend depends on the updater plugin's JS API");
+    }
+
+    #[test]
+    fn capabilities_let_the_webview_destroy_its_window_after_the_close_flush() {
+        let capabilities: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/capabilities/default.json")).unwrap()).unwrap();
+        assert!(capabilities["permissions"].as_array().unwrap().iter().any(|p| p == "core:window:allow-destroy"));
     }
 
     #[test]

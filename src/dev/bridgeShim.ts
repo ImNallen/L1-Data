@@ -1,5 +1,6 @@
 import { emit } from "@tauri-apps/api/event";
 import { mockIPC } from "@tauri-apps/api/mocks";
+import { installDialogShim } from "./dialogShim";
 
 const BRIDGE_URL = "http://127.0.0.1:7077";
 
@@ -24,8 +25,10 @@ function isObject(value: unknown): value is Record<string, unknown> {
 }
 
 export function installBridgeShim(): void {
+  const dialogs = installDialogShim();
   mockIPC(
     async (cmd, args) => {
+      if (dialogs.handles(cmd)) return dialogs.reply(cmd, args);
       const res = await fetch(`${BRIDGE_URL}/invoke/${cmd}`, {
         method: "POST",
         headers: { "content-type": "application/json" },

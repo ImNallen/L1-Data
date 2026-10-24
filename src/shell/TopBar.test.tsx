@@ -15,7 +15,7 @@ afterEach(() => {
 });
 
 function lostSession(transaction: TransactionLoss): string {
-  const tab: Tab = { id: "t1", title: "Query", console: { db: { connectionId: "c1", database: "shop" }, mode: "AutoCommit" }, table: null };
+  const tab: Tab = { id: "t1", title: "Query", console: { db: { connectionId: "c1", database: "shop" }, mode: "AutoCommit" }, table: null, file: null };
   const state: ConsoleState = {
     tabId: tab.id,
     rev: 1,

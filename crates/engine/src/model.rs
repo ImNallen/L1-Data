@@ -1044,6 +1044,8 @@ pub struct TabSnapshot {
     pub text: Option<String>,
     pub console: ConsoleConfigSnapshot,
     pub table: Option<TableSnapshot>,
+    /// `None` for a scratch tab. A file tab's `text` is its buffer, saved or not.
+    pub file: Option<FileSnapshot>,
 }
 
 /// The table a tab opened from the sidebar browses, in the tab's console database.
@@ -1056,7 +1058,8 @@ pub struct TableSnapshot {
     pub query: TableQuery,
 }
 
-// Hand-written so workspaces saved while tabs were a `Sql` or `Table` enum still load.
+// Hand-written so workspaces saved while tabs were a `Sql` or `Table` enum still load. `Legacy` is tagged by
+// `kind` and tried first, so `Current` must never gain a field named `kind`.
 impl<'de> Deserialize<'de> for TabSnapshot {
     fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
         #[derive(Deserialize)]
@@ -1087,6 +1090,9 @@ impl<'de> Deserialize<'de> for TabSnapshot {
             text: Option<String>,
             console: ConsoleConfigSnapshot,
             table: Option<TableSnapshot>,
+            /// Parsed on its own, so a `file` a later build wrote drops the binding and keeps the tab. A tab that
+            /// failed to parse would fail the workspace, which `boot()` replaces with an empty one.
+            file: Option<serde_json::Value>,
         }
         #[derive(Deserialize)]
         #[serde(untagged)]
@@ -1095,18 +1101,59 @@ impl<'de> Deserialize<'de> for TabSnapshot {
             Current(Current),
         }
         Ok(match Saved::deserialize(d)? {
-            Saved::Current(Current { id, title, text, console, table }) => Self { id, title, text, console, table },
-            Saved::Legacy(Legacy::Sql { id, title, text, console }) => Self { id, title, text: Some(text), console, table: None },
+            Saved::Current(Current { id, title, text, console, table, file }) => {
+                Self { id, title, text, console, table, file: file.and_then(FileSnapshot::lenient) }
+            }
+            Saved::Legacy(Legacy::Sql { id, title, text, console }) => Self { id, title, text: Some(text), console, table: None, file: None },
             Saved::Legacy(Legacy::Table { id, connection_id, database, schema, table, page, query }) => Self {
                 id,
                 title: table.clone(),
                 text: None,
                 console: ConsoleConfigSnapshot { connection_id: Some(connection_id), database, schema: None, mode: TxnMode::AutoCommit },
                 table: Some(TableSnapshot { schema, table, page, query }),
+                file: None,
             },
         })
     }
 }
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct FileSnapshot {
+    pub binding: FileBinding,
+    /// The tab's `text` differed from the file when this snapshot was taken.
+    pub dirty: bool,
+}
+
+impl FileSnapshot {
+    fn lenient(value: serde_json::Value) -> Option<Self> {
+        serde_json::from_value(value).inspect_err(|e| eprintln!("dropped a tab's file binding this build cannot read: {e}")).ok()
+    }
+}
+
+/// Made only by the engine (`file_open`, `file_save`); the frontend stores it whole and hands it back whole.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct FileBinding {
+    /// The canonical folder joined with the file's own name: `..` and folder symlinks collapse, a symlink keeps its name.
+    pub path: String,
+    pub stamp: FileStamp,
+    pub format: FileFormat,
+}
+
+/// How the file's bytes differ from the LF, BOM-less text the editor holds. A save writes them back, with every
+/// line break as CRLF when the file's first break was.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct FileFormat {
+    pub bom: bool,
+    pub crlf: bool,
+}
+
+/// Opaque outside `files.rs`, which makes it from the file's bytes; everything else only compares two for
+/// equality. A stamp this build does not make never equals a fresh one, so the file reads as changed.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Type)]
+pub struct FileStamp(pub String);
 
 #[derive(Debug, Clone, Serialize, Deserialize, Type)]
 #[serde(rename_all = "camelCase")]
@@ -1665,6 +1712,58 @@ pub enum ExportError {
     Io { message: String },
 }
 
+#[derive(Debug, Clone, Serialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct FileOpened {
+    pub binding: FileBinding,
+    pub name: String,
+    pub text: String,
+}
+
+#[derive(Debug, Clone, Serialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct FileSaved {
+    pub binding: FileBinding,
+    pub name: String,
+}
+
+#[derive(Debug, Clone, Deserialize, Type)]
+#[serde(tag = "kind", rename_all_fields = "camelCase")]
+pub enum SaveTarget {
+    /// Refused with `Changed` when the file's bytes no longer match `binding.stamp`, unless they match
+    /// `overwrite`, the `disk` stamp of the `Changed` the user agreed to overwrite.
+    Bound { binding: FileBinding, overwrite: Option<FileStamp> },
+    /// A path from the save dialog, which already asked before replacing a file. No stamp check. Refused with
+    /// `OpenInAnotherTab` when it is the same file as one of `taken`, the paths the other tabs are bound to.
+    New { path: String, format: Option<FileFormat>, taken: Vec<String> },
+}
+
+#[derive(Debug, Clone, Serialize, Type)]
+#[serde(tag = "kind", rename_all_fields = "camelCase")]
+pub enum FileReadError {
+    NotFound,
+    NotAFile,
+    PermissionDenied,
+    /// `offset` counts from the start of the file, BOM included.
+    NotUtf8 { offset: u64 },
+    TooLarge { bytes: u64, limit: u64 },
+    Io { message: String },
+}
+
+#[derive(Debug, Clone, Serialize, Type)]
+#[serde(tag = "kind", rename_all_fields = "camelCase")]
+pub enum FileWriteError {
+    /// The file changed on disk; nothing was written. `disk` is the stamp of what is there now.
+    Changed { disk: FileStamp },
+    /// The folder the file goes in does not exist.
+    NotFound,
+    NotAFile,
+    PermissionDenied,
+    /// `path` is the other tab's, which may name the file differently: a symlink, a hard link, another case.
+    OpenInAnotherTab { path: String },
+    Io { message: String },
+}
+
 /// Minted by the frontend (`crypto.randomUUID()`), like `TabId`. A chat reaches the store with its
 /// first message; until then it is a draft held in memory.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Type)]
@@ -2186,7 +2285,8 @@ mod tests {
         let value = json!({
             "id": TAB, "title": "orders", "text": "select * from orders",
             "console": { "connectionId": CONN, "database": "shop", "schema": null, "mode": "Manual" },
-            "table": { "schema": "public", "table": "orders", "page": 1, "query": { "orderBy": "", "filters": [], "where": "total > 0" } }
+            "table": { "schema": "public", "table": "orders", "page": 1, "query": { "orderBy": "", "filters": [], "where": "total > 0" } },
+            "file": null
         });
         let tab: TabSnapshot = serde_json::from_value(value.clone()).unwrap();
         assert_eq!((tab.text.as_deref(), tab.console.mode), (Some("select * from orders"), TxnMode::Manual));
@@ -2195,11 +2295,120 @@ mod tests {
 
         let plain = json!({
             "id": TAB, "title": "Untitled-1.sql", "text": "",
-            "console": { "connectionId": null, "database": null, "schema": null, "mode": "AutoCommit" }, "table": null
+            "console": { "connectionId": null, "database": null, "schema": null, "mode": "AutoCommit" }, "table": null, "file": null
         });
         let tab: TabSnapshot = serde_json::from_value(plain.clone()).unwrap();
         assert_eq!(serde_json::to_value(&tab).unwrap(), plain);
         assert_eq!(tab.table, None);
+    }
+
+    fn file_tab(file: serde_json::Value) -> serde_json::Value {
+        json!({
+            "id": TAB, "title": "report.sql", "text": "select 1;\n",
+            "console": { "connectionId": CONN, "database": "shop", "schema": null, "mode": "AutoCommit" }, "table": null,
+            "file": file
+        })
+    }
+
+    fn binding_json() -> serde_json::Value {
+        json!({ "path": "/Users/a/report.sql", "stamp": "11:4a5e", "format": { "bom": true, "crlf": false } })
+    }
+
+    #[test]
+    fn a_tab_saved_before_files_existed_loads_as_scratch() {
+        let mut old = file_tab(json!(null));
+        assert_eq!(serde_json::from_value::<TabSnapshot>(old.clone()).unwrap().file, None);
+        old.as_object_mut().unwrap().remove("file");
+        let tab: TabSnapshot = serde_json::from_value(old).unwrap();
+        assert_eq!((tab.title.as_str(), tab.text.as_deref(), tab.file), ("report.sql", Some("select 1;\n"), None));
+    }
+
+    #[test]
+    fn a_file_tab_round_trips() {
+        let value = file_tab(json!({ "binding": binding_json(), "dirty": true }));
+        let tab: TabSnapshot = serde_json::from_value(value.clone()).unwrap();
+        let binding = FileBinding {
+            path: "/Users/a/report.sql".into(),
+            stamp: FileStamp("11:4a5e".into()),
+            format: FileFormat { bom: true, crlf: false },
+        };
+        assert_eq!(tab.file, Some(FileSnapshot { binding, dirty: true }));
+        assert_eq!(serde_json::to_value(&tab).unwrap(), value);
+    }
+
+    #[test]
+    fn a_file_binding_this_build_cannot_read_drops_to_scratch_and_keeps_the_tab() {
+        for file in [json!({ "binding": { "path": 3 } }), json!("x")] {
+            let tab: TabSnapshot = serde_json::from_value(file_tab(file.clone())).unwrap();
+            assert_eq!((tab.title.as_str(), tab.text.as_deref(), tab.file), ("report.sql", Some("select 1;\n"), None), "{file}");
+        }
+        let good = file_tab(json!({ "binding": binding_json(), "dirty": false }));
+        let mut bad = file_tab(json!("x"));
+        bad["id"] = json!(CONN);
+        let workspace: Workspace =
+            serde_json::from_value(json!({ "tabs": [bad, good], "active": TAB, "layout": serde_json::to_value(Layout::default()).unwrap() })).unwrap();
+        let files: Vec<_> = workspace.tabs.iter().map(|t| t.file.as_ref().map(|f| f.binding.path.as_str())).collect();
+        assert_eq!(files, vec![None, Some("/Users/a/report.sql")]);
+    }
+
+    #[test]
+    fn a_file_binding_with_fields_from_a_later_build_still_loads() {
+        let mut binding = binding_json();
+        binding["format"]["encoding"] = json!("utf-16");
+        let tab: TabSnapshot = serde_json::from_value(file_tab(json!({ "binding": binding, "dirty": false, "watched": true }))).unwrap();
+        let file = tab.file.expect("the binding survives fields this build does not know");
+        assert_eq!((file.binding.format, file.dirty), (FileFormat { bom: true, crlf: false }, false));
+    }
+
+    /// Stable's `TabSnapshot` and `Workspace` from before file tabs. Update this copy only when a release changes
+    /// `Current`.
+    #[derive(Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct StableTab {
+        id: TabId,
+        title: String,
+        text: Option<String>,
+        console: ConsoleConfigSnapshot,
+        table: Option<TableSnapshot>,
+    }
+
+    #[derive(Deserialize)]
+    struct StableWorkspace {
+        tabs: Vec<StableTab>,
+        active: Option<TabId>,
+        layout: Layout,
+    }
+
+    #[test]
+    fn the_previous_stable_build_loads_a_workspace_this_build_wrote() {
+        let tab: TabSnapshot = serde_json::from_value(file_tab(json!({ "binding": binding_json(), "dirty": true }))).unwrap();
+        let workspace = Workspace { tabs: vec![tab], active: Some(TabId(uuid(TAB))), layout: Layout::default() };
+        let stable: StableWorkspace = serde_json::from_value(serde_json::to_value(&workspace).unwrap()).unwrap();
+        let tab = &stable.tabs[0];
+        assert_eq!((tab.id, tab.title.as_str(), tab.text.as_deref()), (TabId(uuid(TAB)), "report.sql", Some("select 1;\n")));
+        assert_eq!((tab.console.connection_id, &tab.table), (Some(ConnectionId(uuid(CONN))), &None));
+        assert_eq!((stable.active, stable.layout.sidebar), (Some(TabId(uuid(TAB))), true));
+    }
+
+    #[test]
+    fn file_errors_are_tagged_by_kind_with_camel_case_fields() {
+        assert_eq!(serde_json::to_value(FileReadError::TooLarge { bytes: 5, limit: 4 }).unwrap(), json!({ "kind": "TooLarge", "bytes": 5, "limit": 4 }));
+        assert_eq!(serde_json::to_value(FileReadError::NotUtf8 { offset: 3 }).unwrap(), json!({ "kind": "NotUtf8", "offset": 3 }));
+        let changed = FileWriteError::Changed { disk: FileStamp("1:ab".into()) };
+        assert_eq!(serde_json::to_value(changed).unwrap(), json!({ "kind": "Changed", "disk": "1:ab" }));
+        assert_eq!(serde_json::to_value(FileWriteError::NotFound).unwrap(), json!({ "kind": "NotFound" }));
+        let taken = FileWriteError::OpenInAnotherTab { path: "/a.sql".into() };
+        assert_eq!(serde_json::to_value(taken).unwrap(), json!({ "kind": "OpenInAnotherTab", "path": "/a.sql" }));
+    }
+
+    #[test]
+    fn save_targets_deserialize_from_the_wire() {
+        let bound: SaveTarget = serde_json::from_value(json!({ "kind": "Bound", "binding": binding_json(), "overwrite": null })).unwrap();
+        assert!(matches!(&bound, SaveTarget::Bound { binding, overwrite: None } if binding.path == "/Users/a/report.sql" && binding.format.bom), "{bound:?}");
+        let consent: SaveTarget = serde_json::from_value(json!({ "kind": "Bound", "binding": binding_json(), "overwrite": "2:cd" })).unwrap();
+        assert!(matches!(&consent, SaveTarget::Bound { overwrite: Some(FileStamp(disk)), .. } if disk == "2:cd"), "{consent:?}");
+        let new: SaveTarget = serde_json::from_value(json!({ "kind": "New", "path": "/a.sql", "format": null, "taken": ["/b.sql"] })).unwrap();
+        assert!(matches!(&new, SaveTarget::New { path, format: None, taken } if path == "/a.sql" && taken == &["/b.sql"]), "{new:?}");
     }
 
     #[test]

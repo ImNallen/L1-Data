@@ -1,7 +1,7 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
-  "description": "Main window: core IPC, app-event listening, and file dialogs for CSV export.",
+  "description": "Main window: core IPC, app-event listening, file dialogs for CSV export and .sql files, and destroying the window once its close has flushed the workspace.",
   "windows": ["main"],
   "permissions": [
     "core:default",
@@ -11,6 +11,7 @@
     "core:window:allow-minimize",
     "core:window:allow-toggle-maximize",
     "core:window:allow-close",
+    "core:window:allow-destroy",
     "core:window:allow-set-theme",
     "core:window:allow-set-background-color"
   ]

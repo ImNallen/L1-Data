@@ -20,14 +20,13 @@ const ws = () => useWorkspace.getState();
 
 function confirmShown() {
   const overlay = ws().overlay;
-  if (overlay.kind !== "confirm") throw new Error(`no confirm dialog, overlay is ${overlay.kind}`);
+  if (overlay.kind !== "ask" || overlay.testId !== "confirm") throw new Error(`no confirm dialog, overlay is ${overlay.kind}`);
   return overlay;
 }
 
 /** What the dialog's confirm button does. */
 function confirm() {
-  confirmShown().onConfirm();
-  ws().close();
+  ws().answer(confirmShown().choices[0]!.id);
 }
 
 it("asks before the restart, sends back what it showed, and asks again when more would end", async () => {

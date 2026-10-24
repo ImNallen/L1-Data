@@ -543,7 +543,7 @@ function ConnectionMenu({ config, shown }: { config: ConnectionConfig; shown: Da
       <ContextMenuItem testId="conn-edit" onSelect={() => open({ kind: "connection", editing: config.id })}>
         Edit…
       </ContextMenuItem>
-      <ContextMenuItem danger onSelect={() => confirmDelete(config.id)}>
+      <ContextMenuItem danger onSelect={() => void confirmDelete(config.id)}>
         Delete
       </ContextMenuItem>
     </>

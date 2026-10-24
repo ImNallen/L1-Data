@@ -2,7 +2,7 @@ import { commands, type ChatId, type RestartImpact, type TabId, type UpdateError
 import { updateErrorText } from "../../ipc/errors";
 import { useLive } from "../../state/live";
 import { pendingCount, useTableEdits } from "../../state/tableEdits";
-import { useWorkspace } from "../../state/workspace";
+import { confirm, useWorkspace } from "../../state/workspace";
 import { flushWorkspaceSave } from "../editor/persistence";
 import { restartBody, restartTitle, type UpdateAction } from "./updateText";
 
@@ -54,13 +54,12 @@ export async function installUpdate(version: string, accepted: Accepted | null):
   if (res.data.kind === "Restarting") return;
   const { impact } = res.data;
   const unsubmitted = tabsWithUnsubmittedEdits();
-  ws().open({
-    kind: "confirm",
+  const restart = await confirm({
     title: restartTitle(version, useLive.getState().updates),
     body: restartBody(impact, unsubmitted, tabTitle, chatTitle),
     confirmLabel: "Restart and install",
-    onConfirm: () => void installUpdate(version, { impact, unsubmitted }),
   });
+  if (restart) await installUpdate(version, { impact, unsubmitted });
 }
 
 /** The select shows the engine's track, so a refused switch snaps back on its own. */

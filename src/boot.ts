@@ -7,7 +7,8 @@ import { tabFromSnapshot, tabTarget, useWorkspace } from "./state/workspace";
 import { startAppearance } from "./shell/appearance";
 import { startTheme } from "./shell/theme";
 import { seedEditor } from "./features/editor/editorStates";
-import { startPersistence } from "./features/editor/persistence";
+import { reconcileFiles, savesInFlight } from "./features/editor/fileActions";
+import { installCloseFlush, startPersistence } from "./features/editor/persistence";
 import { browseTemplate, installRunBehavior, openSqlTab } from "./features/editor/runActions";
 import { startAssistantSync } from "./features/assistant/assistantActions";
 import { startUpdateSync } from "./features/updates/updateActions";
@@ -39,7 +40,8 @@ export async function boot(): Promise<void> {
     const tab = tabFromSnapshot(saved, configs);
     const db = tabTarget(tab);
     const template = tab?.table && db ? await browseTemplate(db, tab.table.schema, tab.table.table) : null;
-    seedEditor(saved.id, saved.text ?? template ?? "");
+    // A tab saved dirty does not know what its file holds until reconcileFiles reads it.
+    seedEditor(saved.id, saved.text ?? template ?? "", saved.file ? (saved.file.dirty ? "unknown" : "seeded") : "none");
   }
   useWorkspace.getState().restore(snapshot.workspace, snapshot.connections, snapshot.settings);
   useWorkspace.getState().resolveDatabases(useLive.getState().connections);
@@ -50,6 +52,8 @@ export async function boot(): Promise<void> {
   startAppearance();
   if (snapshot.workspace.tabs.length === 0) openSqlTab();
   startPersistence();
+  installCloseFlush(savesInFlight);
+  void reconcileFiles();
   startCatalogSync();
   startAssistantSync();
   startUpdateSync();

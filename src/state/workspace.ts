@@ -4,6 +4,8 @@ import type {
   ConnectionId,
   ConnectionState,
   DatabaseRef,
+  FileBinding,
+  FileSaved,
   Layout,
   Settings,
   TabId,
@@ -22,7 +24,16 @@ export type ConsoleTarget = { db: DatabaseRef | null; mode: TxnMode };
 
 /** The table a tab opened from the sidebar browses, in the tab's console database. */
 export type TableBrowse = { schema: string; table: string; page: number; query: TableQuery; exactRowCount?: number };
-export type Tab = { id: TabId; title: string; console: ConsoleTarget; table: TableBrowse | null };
+/**
+ * What the last read or write found about a tab's file. Not saved: boot reads every file again.
+ * `changed`: the file changed on disk while the tab held edits, so the next save asks before overwriting.
+ * `unreadable`: the file is there, but reading it failed.
+ */
+export type FileHealth = "ok" | "missing" | "changed" | "unreadable";
+export type TabFile = { binding: FileBinding; health: FileHealth };
+
+/** A tab with a `file` is titled with the file's name: `bindFile` sets both, and `renameTab` refuses a file tab. */
+export type Tab = { id: TabId; title: string; console: ConsoleTarget; table: TableBrowse | null; file: TabFile | null };
 /** A tab bound to a table. Its console always names a database. */
 export type TableTab = Tab & { table: TableBrowse; console: ConsoleTarget & { db: DatabaseRef } };
 
@@ -43,7 +54,16 @@ export type Overlay =
   | { kind: "history" }
   | { kind: "connection"; editing: ConnectionId | null }
   | { kind: "cell"; title: string; value: string | null }
-  | { kind: "confirm"; title: string; body: string; confirmLabel: string; onConfirm: () => void };
+  | ({ kind: "ask"; seq: number; settle: (choice: string | null) => void } & Required<Question<string>>);
+
+export type Choice<C extends string> = { id: C; label: string; variant: "primary" | "danger" | "ghost" };
+
+/**
+ * Every question also has a Cancel button. Cancel, Esc, the close button, and any overlay that replaces the
+ * question all answer `null`. The dialog's test ids are `<testId>-dialog`, `<testId>-cancel`, and
+ * `<testId>-<choice id>`.
+ */
+export type Question<C extends string> = { testId?: string; title: string; body: string; choices: readonly Choice<C>[] };
 
 /** `query` filters the settings in place; while it is set the page lists matches instead of `section`. */
 export type Screen = { kind: "workspace" } | { kind: "settings"; section: SettingsSectionId; query: string };
@@ -95,10 +115,13 @@ export function tabFromSnapshot(t: TabSnapshot, configs: Record<ConnectionId, Co
   const config = t.console.connectionId ? configs[t.console.connectionId] : undefined;
   const db = config ? (t.console.database == null ? homeDb(config) : { connectionId: config.id, database: t.console.database }) : null;
   const table = db && t.table && { schema: t.table.schema, table: t.table.table, page: t.table.page, query: t.table.query };
-  return { id: t.id, title: t.title, console: { db, mode: t.console.mode }, table };
+  return { id: t.id, title: t.title, console: { db, mode: t.console.mode }, table, file: t.file && { binding: t.file.binding, health: "ok" } };
 }
 
-export function workspaceSnapshot(s: Pick<WorkspaceData, "tabs" | "order" | "active" | "layout">, textOf: (id: TabId) => string): Workspace {
+export type Buffers = { textOf(id: TabId): string; isDirty(id: TabId): boolean };
+
+/** A file tab's `dirty` is read from the same buffer as its `text`, so the two always describe one state. */
+export function workspaceSnapshot(s: Pick<WorkspaceData, "tabs" | "order" | "active" | "layout">, buffers: Buffers): Workspace {
   const tabs = s.order.flatMap((id): TabSnapshot[] => {
     const t = s.tabs[id];
     if (!t) return [];
@@ -107,9 +130,10 @@ export function workspaceSnapshot(s: Pick<WorkspaceData, "tabs" | "order" | "act
       {
         id: t.id,
         title: t.title,
-        text: textOf(t.id),
+        text: buffers.textOf(t.id),
         console: { connectionId: db?.connectionId ?? null, database: db?.database ?? null, schema: null, mode },
         table: t.table && { schema: t.table.schema, table: t.table.table, page: t.table.page, query: t.table.query },
+        file: t.file && { binding: t.file.binding, dirty: buffers.isDirty(t.id) },
       },
     ];
   });
@@ -125,6 +149,10 @@ export function nextUntitled(tabs: Iterable<Tab>): string {
   return `Untitled-${max + 1}.sql`;
 }
 
+export function tabWithFile(tabs: Record<TabId, Tab>, path: string): Tab | undefined {
+  return Object.values(tabs).find((t) => t.file?.binding.path === path);
+}
+
 export function tabTarget(tab: Tab | undefined): DatabaseRef | null {
   return tab?.console.db ?? null;
 }
@@ -136,6 +164,8 @@ type WorkspaceActions = {
   closeTab(id: TabId): void;
   setActive(id: TabId): void;
   renameTab(id: TabId, title: string): void;
+  bindFile(id: TabId, file: FileSaved): void;
+  setFileHealth(id: TabId, health: FileHealth): void;
   patchConsole(id: TabId, patch: Partial<ConsoleTarget>): void;
   setTablePage(id: TabId, page: number, exactRowCount?: number): void;
   setTableQuery(id: TabId, query: TableQuery): void;
@@ -147,6 +177,7 @@ type WorkspaceActions = {
   select(r: RelationRef | null): void;
   open(o: Overlay): void;
   close(): void;
+  answer(choice: string): void;
   openSettings(section?: SettingsSectionId): void;
   closeSettings(): void;
   setTreeQuery(query: string): void;
@@ -159,7 +190,7 @@ type WorkspaceActions = {
 
 let toastSeq = 0;
 
-export const useWorkspace = create<WorkspaceData & WorkspaceActions>()((set) => ({
+export const useWorkspace = create<WorkspaceData & WorkspaceActions>()((set, get) => ({
   tabs: {},
   order: [],
   active: null,
@@ -219,7 +250,17 @@ export const useWorkspace = create<WorkspaceData & WorkspaceActions>()((set) => 
   renameTab: (id, title) =>
     set((s) => {
       const t = s.tabs[id];
-      return t ? { tabs: { ...s.tabs, [id]: { ...t, title } } } : {};
+      return t && !t.file ? { tabs: { ...s.tabs, [id]: { ...t, title } } } : {};
+    }),
+  bindFile: (id, file) =>
+    set((s) => {
+      const t = s.tabs[id];
+      return t ? { tabs: { ...s.tabs, [id]: { ...t, title: file.name, file: { binding: file.binding, health: "ok" } } } } : {};
+    }),
+  setFileHealth: (id, health) =>
+    set((s) => {
+      const t = s.tabs[id];
+      return t?.file && t.file.health !== health ? { tabs: { ...s.tabs, [id]: { ...t, file: { ...t.file, health } } } } : {};
     }),
   patchConsole: (id, patch) =>
     set((s) => {
@@ -262,6 +303,12 @@ export const useWorkspace = create<WorkspaceData & WorkspaceActions>()((set) => 
   select: (selected) => set({ selected }),
   open: (overlay) => set({ overlay }),
   close: () => set({ overlay: { kind: "none" } }),
+  answer: (choice) => {
+    const overlay = get().overlay;
+    if (overlay.kind !== "ask") return;
+    overlay.settle(choice);
+    set({ overlay: { kind: "none" } });
+  },
   openSettings: (section = "appearance") => set({ screen: { kind: "settings", section, query: "" }, overlay: { kind: "none" } }),
   closeSettings: () => set({ screen: { kind: "workspace" }, overlay: { kind: "none" } }),
   setTreeQuery: (treeQuery) => set({ treeQuery }),
@@ -272,3 +319,27 @@ export const useWorkspace = create<WorkspaceData & WorkspaceActions>()((set) => 
   notify: (text) => set({ toast: { id: ++toastSeq, text } }),
   setCursor: (cursor) => set({ cursor }),
 }));
+
+// Whatever replaces or clears a question answers it `null`, so no caller waits forever. A promise keeps only its first
+// answer, so the `null` that follows `answer` is ignored.
+useWorkspace.subscribe((s, prev) => {
+  if (prev.overlay !== s.overlay && prev.overlay.kind === "ask") prev.overlay.settle(null);
+});
+
+let askSeq = 0;
+
+/**
+ * Shows a question and resolves with the chosen id, or `null`. The caller's continuation runs after the click that
+ * answered has closed the dialog, so it can ask the next question straight away.
+ */
+export function ask<C extends string>(q: Question<C>): Promise<C | null> {
+  return new Promise((resolve) => {
+    const settle = (choice: string | null) => resolve(choice as C | null);
+    useWorkspace.getState().open({ kind: "ask", seq: ++askSeq, testId: q.testId ?? "ask", title: q.title, body: q.body, choices: q.choices, settle });
+  });
+}
+
+/** A question with one danger button, `confirm-btn`, in a `confirm-dialog`. Resolves `true` when it is pressed. */
+export async function confirm(q: { title: string; body: string; confirmLabel: string }): Promise<boolean> {
+  return (await ask({ testId: "confirm", title: q.title, body: q.body, choices: [{ id: "btn", label: q.confirmLabel, variant: "danger" }] })) === "btn";
+}
