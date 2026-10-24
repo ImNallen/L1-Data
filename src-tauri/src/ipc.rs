@@ -108,6 +108,12 @@ pub fn script_outline(engine: State<'_, Arc<Engine>>, text: String, cursor: DocO
 
 #[tauri::command]
 #[specta::specta]
+pub fn script_writes(engine: State<'_, Arc<Engine>>, text: String, target: RunTarget, database_kind: DatabaseKind) -> Vec<DocRange> {
+    engine.script_writes(&text, target, database_kind)
+}
+
+#[tauri::command]
+#[specta::specta]
 pub fn editor_format(engine: State<'_, Arc<Engine>>, text: String, target: RunTarget, database_kind: DatabaseKind) -> Result<FormatEdit, FormatError> {
     engine.editor_format(&text, target, database_kind)
 }

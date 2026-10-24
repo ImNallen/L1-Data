@@ -871,6 +871,11 @@ impl Engine {
         text::script_outline(text, cursor, database_kind)
     }
 
+    /// The confirm before a run on a Production connection. Pure, so the sync command never needs the runtime.
+    pub fn script_writes(&self, text: &str, target: RunTarget, database_kind: DatabaseKind) -> Vec<DocRange> {
+        text::script_writes(text, target, database_kind)
+    }
+
     /// The editor's format action. Pure, so the sync command never needs the runtime.
     pub fn editor_format(&self, text: &str, target: RunTarget, database_kind: DatabaseKind) -> Result<FormatEdit, FormatError> {
         text::format_edit(text, target, database_kind)
