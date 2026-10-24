@@ -67,10 +67,9 @@ export function TopBar({ hosted }: { hosted: HostedWindow | null }) {
   const loss = liveConsole?.session.kind === "Lost" ? LOSS_LABEL[liveConsole.session.transaction] : null;
   const environment = config?.environment ?? null;
 
-  // Each segment after the connection sits in a zero-basis box that gets only the room left over, so the tab title
-  // truncates first, then the database, and the connection name last. The boxes clip their own separators, so an
-  // empty one takes no room from the connection. The top padding matches the bottom border, so the items stay level
-  // with the sidebar header and the traffic lights.
+  // The database sits in a zero-basis box that gets only the room left over, so it truncates before the connection
+  // name. The top padding matches the bottom border, so the items stay level with the sidebar header and the traffic
+  // lights.
   return (
     <header
       data-tauri-drag-region="deep"
@@ -110,18 +109,10 @@ export function TopBar({ hosted }: { hosted: HostedWindow | null }) {
             <span className="truncate">{config?.name ?? ""}</span>
           </span>
         )}
-        {tab && (
+        {tab && db && config && (
           <div className="flex min-w-0 flex-1 items-center overflow-hidden">
-            {db && config && (
-              <>
-                <Separator />
-                <DatabaseMenu tab={tab} db={db} />
-              </>
-            )}
-            <div className="flex min-w-0 flex-1 items-center overflow-hidden @max-[520px]:hidden">
-              <Separator />
-              <span data-testid="tab-title" className="truncate text-ui-14 text-muted">{tab.title}</span>
-            </div>
+            <Separator />
+            <DatabaseMenu tab={tab} db={db} />
           </div>
         )}
       </div>

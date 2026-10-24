@@ -56,12 +56,13 @@ it.each(["Local", null] satisfies (Environment | null)[])("draws no marker for a
   expect(header(html)).not.toContain("border-danger");
 });
 
-it("reads the run target as the environment icon and connection, then database, then tab title", () => {
+it("reads the run target as the environment icon and connection, then database, and leaves the tab title to the tab bar", () => {
   const html = onConnection("Production");
   const at = (pattern: RegExp) => html.search(pattern);
-  const order = [at(/data-testid="tab-connection"/), at(/data-testid="env-icon"/), at(/>prod-postgres</), at(/data-testid="tab-database"[^>]*>(<[^>]*>)*shop</), at(/data-testid="tab-title"[^>]*>Query 3</)];
+  const order = [at(/data-testid="tab-connection"/), at(/data-testid="env-icon"/), at(/>prod-postgres</), at(/data-testid="tab-database"[^>]*>(<[^>]*>)*shop</)];
   expect(order.every((i) => i >= 0)).toBe(true);
   expect([...order].sort((a, b) => a - b)).toEqual(order);
+  expect(html).not.toContain("Query 3");
 });
 
 it("shows an open transaction as pending and an aborted one as an error", () => {
