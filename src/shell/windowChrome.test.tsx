@@ -320,6 +320,7 @@ function withTableTab(mode: TxnMode = "AutoCommit", color: string | null = null)
     hasPassword: true,
     color,
     ssh: null,
+    environment: null,
   };
   Object.assign(useWorkspace.getInitialState(), { tabs: { t2: tab }, active: "t2", configs: { c: config } });
 }
@@ -332,12 +333,12 @@ it("shows the transaction mode and cursor position on a table tab", () => {
   expect(html).toMatch(/data-testid="cursor-position"[^>]*>Ln 1, Col 1</);
 });
 
-it("gives a table tab the connection menu and the transaction mode menu a query tab has", () => {
+it("gives a table tab the connection, database, and transaction mode menus a query tab has", () => {
   withTableTab("Manual");
   const html = renderToStaticMarkup(<TopBar hosted={null} />);
   expect(html).toMatch(/<button[^>]*aria-haspopup="menu"[^>]*data-testid="tab-connection"[^>]*><span class="truncate">dev</);
   expect(html).toMatch(/<button[^>]*aria-haspopup="menu"[^>]*data-testid="tx-mode"[^>]*>Manual</);
-  expect(html).toMatch(/text-fg">orders</);
+  expect(html).toMatch(/<button[^>]*aria-haspopup="menu"[^>]*data-testid="tab-database"[^>]*><span class="truncate">shop</);
 });
 
 it("marks the tab's connection with its color in the top bar", () => {

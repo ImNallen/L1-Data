@@ -40,6 +40,7 @@ impl Harness {
             ca_cert_path: None,
             color: None,
             ssh: None,
+            environment: None,
         }).await.unwrap().id;
         engine.connect(connection).await.unwrap();
         let tab = TabId(uuid::Uuid::new_v4());

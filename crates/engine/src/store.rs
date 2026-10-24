@@ -253,7 +253,7 @@ impl Store {
                     h.sql,
                     h.elapsed_ms,
                     serde_json::to_string(&h.outcome)?,
-                    match h.database_kind { DatabaseKind::Postgres => crate::sql::history_is_write(&h.sql), DatabaseKind::SqlServer => crate::sql::tsql::is_write(&h.sql) },
+                    crate::text::is_write(&h.sql, h.database_kind),
                     serde_json::to_value(h.database_kind)?.as_str().unwrap(),
                 ],
             )?;
@@ -475,6 +475,7 @@ mod tests {
             has_password: true,
             color: None,
             ssh: None,
+            environment: None,
         };
         {
             let s = Store::open(&path).unwrap();

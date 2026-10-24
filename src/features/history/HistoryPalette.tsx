@@ -115,7 +115,7 @@ function HistoryBrowser({ close, restoreEditorFocus }: { close: () => void; rest
   return (
     <div className="flex h-full min-h-0 flex-col" onKeyDown={onKeyDown}>
       <div className="flex min-h-14 shrink-0 items-center gap-3 border-b border-control px-4">
-        <ClockIcon size={18} className="shrink-0 text-green" aria-hidden />
+        <ClockIcon size={18} className="shrink-0 text-muted" aria-hidden />
         <input ref={searchRef} data-testid="history-input" autoFocus spellCheck={false} autoCorrect="off" autoCapitalize="off" value={query} onChange={(e) => setQuery(e.target.value)}
           role="combobox" aria-expanded={true} aria-autocomplete="list" aria-label="Search query history" aria-controls="history-list" aria-activedescendant={selected ? `history-group-${selected.id}` : undefined}
           placeholder="Search SQL, tables, errors or connections" className="h-12 min-w-0 flex-1 bg-transparent text-ui-14 text-fg outline-none placeholder:text-faint" />
@@ -123,7 +123,7 @@ function HistoryBrowser({ close, restoreEditorFocus }: { close: () => void; rest
           {(["All", "Failed", "Writes"] satisfies HistoryFilter[]).map((value) => (
             <button key={value} type="button" data-testid={`history-filter-${value.toLowerCase()}`} aria-pressed={filter === value} onClick={() => setFilter(value)}
               className={cx("flex h-7 items-center gap-1.5 rounded-md bg-pill px-2 text-ui-12 outline-none focus-visible:ring-1 focus-visible:ring-focus", filter === value ? "bg-selected text-fg" : "text-dim hover:bg-hover hover:text-fg")}>
-              {value}<span className="text-faint tabular-nums">{list ? { All: list.counts.all, Failed: list.counts.failed, Writes: list.counts.writes }[value].toLocaleString() : "…"}</span>
+              {value}<span className="text-dim tabular-nums">{list ? { All: list.counts.all, Failed: list.counts.failed, Writes: list.counts.writes }[value].toLocaleString() : "…"}</span>
             </button>
           ))}
         </div>
@@ -149,11 +149,11 @@ function HistoryBrowser({ close, restoreEditorFocus }: { close: () => void; rest
                 <div className="flex min-w-0 items-center gap-2">
                   <OutcomeDot outcome={group.representative.outcome} />
                   <span className="min-w-0 flex-1 truncate text-ui-13 font-medium text-fg" title={group.title}>{group.title}</span>
-                  {group.runCount > 1 && <span data-testid="history-repeat" className="shrink-0 rounded bg-pill px-1 text-ui-10.5 text-dim">×{group.runCount.toLocaleString()}</span>}
-                  <time dateTime={new Date(group.latestAtMs).toISOString()} className="shrink-0 text-ui-10.5 text-faint">{time(group.latestAtMs)}</time>
+                  {group.runCount > 1 && <span data-testid="history-repeat" className="shrink-0 rounded bg-pill px-1 text-ui-11.5 text-dim">×{group.runCount.toLocaleString()}</span>}
+                  <time dateTime={new Date(group.latestAtMs).toISOString()} className="shrink-0 text-ui-11.5 text-dim">{time(group.latestAtMs)}</time>
                 </div>
                 <div className="mt-1 ml-3.5 flex min-w-0 items-center gap-1.5" title={`${group.representative.connectionName} / ${group.database}`}>
-                  {(!activeDb || !sameDb(activeDb, { connectionId: group.connectionId, database: group.database })) && <span className="max-w-[45%] shrink-0 truncate rounded bg-badge-bg px-1 text-ui-10.5 text-badge">{group.representative.connectionName} / {group.database}</span>}
+                  {(!activeDb || !sameDb(activeDb, { connectionId: group.connectionId, database: group.database })) && <span className="max-w-[45%] shrink-0 truncate rounded bg-badge-bg px-1 text-ui-11.5 text-badge">{group.representative.connectionName} / {group.database}</span>}
                   <span className="min-w-0 truncate font-mono text-code-sm text-dim" title={group.excerpt}>{group.excerpt || group.title}</span>
                 </div>
               </button>
@@ -201,7 +201,7 @@ function HistoryBrowser({ close, restoreEditorFocus }: { close: () => void; rest
           </>}
         </section>
       </div>
-      <div className="flex min-h-10 shrink-0 items-center gap-3 border-t border-control px-4 text-ui-10.5 text-dim">
+      <div className="flex min-h-10 shrink-0 items-center gap-3 border-t border-control px-4 text-ui-11.5 text-dim">
         <span><Kbd className="bg-pill">↑↓</Kbd> Navigate</span><span><Kbd className="bg-pill">↵</Kbd> Open</span><span><Kbd className="bg-pill">{mod}↵</Kbd> Run</span><span><Kbd className="bg-pill">esc</Kbd> Close</span>
         <span data-testid="history-count" role="status" className="ml-auto shrink-0">{count === null ? "…" : count.toLocaleString()} {count === 1 ? "query" : "queries"}</span>
         <button type="button" data-testid="history-clear" onClick={() => void clearHistory()} disabled={!list} className="shrink-0 rounded px-1 py-1 text-dim outline-none hover:text-danger focus-visible:ring-1 focus-visible:ring-focus disabled:opacity-40">Clear history…</button>

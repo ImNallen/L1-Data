@@ -1,5 +1,5 @@
 import { BookmarkIcon, ChartNoAxesColumnIcon, ClockIcon, PlusIcon, SlidersHorizontalIcon } from "lucide-react";
-import { useMemo } from "react";
+import { useMemo, useRef } from "react";
 import { useCatalog } from "../../state/catalog";
 import { useLive } from "../../state/live";
 import { useWorkspace, type Screen } from "../../state/workspace";
@@ -12,6 +12,7 @@ import { SettingsSidebarBody } from "../settings/SettingsSidebarBody";
 import { UpdateButton } from "../updates/UpdateButton";
 import { ConnectionTree } from "./ConnectionTree";
 import { SidebarSearch } from "./SidebarSearch";
+import { focusFirstRow } from "./treeFocus";
 import { filterTree, firstRelation, type TreeFilter } from "./treeFilter";
 
 function SidebarHeader({ hosted }: { hosted: HostedWindow | null }) {
@@ -64,6 +65,7 @@ function WorkspaceSidebarBody() {
   const query = useWorkspace((s) => s.treeQuery);
   const setTreeQuery = useWorkspace((s) => s.setTreeQuery);
   const filter = useTreeFilter(query);
+  const tree = useRef<HTMLDivElement>(null);
   const openFirst = () => {
     const first = filter && firstRelation(filter, parseQuery(query));
     if (first) openTableTab(first);
@@ -71,7 +73,7 @@ function WorkspaceSidebarBody() {
 
   return (
     <>
-      <SidebarSearch testId="sidebar-search" query={query} count={filter?.count ?? 0} onQueryChange={setTreeQuery} onEnter={openFirst}>
+      <SidebarSearch testId="sidebar-search" query={query} count={filter?.count ?? 0} onQueryChange={setTreeQuery} onEnter={openFirst} onArrowDown={() => focusFirstRow(tree.current)}>
         <IconButton
           data-testid="new-connection"
           aria-label="New connection"
@@ -81,7 +83,7 @@ function WorkspaceSidebarBody() {
         </IconButton>
       </SidebarSearch>
 
-      <ConnectionTree filter={filter} query={query} />
+      <ConnectionTree ref={tree} filter={filter} query={query} />
 
       <div className="mx-2 flex shrink-0 items-center gap-1 py-2">
         <IconButton

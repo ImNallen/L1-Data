@@ -38,6 +38,7 @@ impl Harness {
                 ca_cert_path: None,
                 color: None,
                 ssh: None,
+                environment: None,
             })
             .await
             .unwrap();

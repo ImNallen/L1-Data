@@ -149,7 +149,7 @@ describe("outputTone", () => {
 
 describe("workspace snapshot", () => {
   const configs: Record<string, ConnectionConfig> = {
-    c: { databaseKind: "Postgres", id: "c", name: "dev", host: "localhost", port: 5433, database: "shop", user: "l1data", sslMode: "Prefer", caCertPath: null, hasPassword: true, color: null, ssh: null },
+    c: { databaseKind: "Postgres", id: "c", name: "dev", host: "localhost", port: 5433, database: "shop", user: "l1data", sslMode: "Prefer", caCertPath: null, hasPassword: true, color: null, ssh: null, environment: null },
   };
   const tabs: Tab[] = [
     { id: "a", title: "Untitled-2.sql", console: { db: { connectionId: "c", database: "reporting" }, mode: "Manual" }, table: null, file: null },

@@ -20,7 +20,7 @@ import { useLive } from "../../state/live";
 import { dropRowCaches } from "../../state/rowCache";
 import { canCancel, isBusy } from "../../state/status";
 import { pendingCount, toChanges, useTableEdits, type TableEdits } from "../../state/tableEdits";
-import { EMPTY_QUERY, isTableTab, nextUntitled, tabTarget, useWorkspace, type ConsoleTarget, type RelationRef, type Tab, type TableTab } from "../../state/workspace";
+import { EMPTY_QUERY, confirm, isTableTab, nextUntitled, tabTarget, useWorkspace, type ConsoleTarget, type RelationRef, type Tab, type TableTab } from "../../state/workspace";
 import {
   applyFormatEdit,
   cursorAnchor,
@@ -147,6 +147,25 @@ function deferPageForPendingWork(tabId: TabId, target: PageTarget | undefined): 
   return true;
 }
 
+/** The answer holds only for the target it named, so a target changed meanwhile drops the run. */
+async function writesConfirmed(tab: Tab, text: string, target: RunTarget): Promise<boolean> {
+  const db = tabTarget(tab);
+  const config = db ? ws().configs[db.connectionId] : undefined;
+  if (!db || config?.environment !== "Production") return true;
+  const unchanged = () => ws().tabs[tab.id]?.console === tab.console;
+  const writes = await commands.scriptWrites(text, target, config.databaseKind);
+  if (!unchanged()) return false;
+  if (writes.length === 0) return true;
+  const n = writes.length;
+  const unit = config.databaseKind === "SqlServer" ? (n === 1 ? "batch" : "batches") : n === 1 ? "statement" : "statements";
+  const ok = await confirm({
+    title: `Run ${plural(n, "write")} on Production?`,
+    body: `This run sends ${n} ${unit} that ${n === 1 ? "writes" : "write"} to ${config.name} / ${db.database}.`,
+    confirmLabel: "Run writes",
+  });
+  return ok && unchanged();
+}
+
 async function runTab(tabId: TabId, target?: PageTarget, script?: RunTarget): Promise<void> {
   const tab = ws().tabs[tabId];
   if (!tab) return;
@@ -167,7 +186,9 @@ async function runTab(tabId: TabId, target?: PageTarget, script?: RunTarget): Pr
   } else {
     const state = editorStateOf(tabId);
     text = state.doc.toString();
-    request = { kind: "script", text, target: script ?? selectionTarget(state) };
+    const run = script ?? selectionTarget(state);
+    if (!(await writesConfirmed(tab, text, run))) return;
+    request = { kind: "script", text, target: run };
     showDiagnostics(tabId, []);
   }
 

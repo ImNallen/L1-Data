@@ -1,17 +1,82 @@
 import { renderToStaticMarkup } from "react-dom/server";
 import { afterEach, expect, it } from "vitest";
-import type { ConsoleState, ConsoleWork, TransactionLoss } from "../ipc/bindings";
+import type { ConsoleState, ConsoleWork, Environment, TransactionLoss, TxnState } from "../ipc/bindings";
+import { connectedState, connectionConfig, databaseState } from "../testing/connections";
 import { useLive } from "../state/live";
 import { useWorkspace, type Tab } from "../state/workspace";
-import { TopBar } from "./TopBar";
+import { TopBar, databaseChoices } from "./TopBar";
 
 const workspace = useWorkspace.getInitialState();
 const live = useLive.getInitialState();
-const saved = { tabs: workspace.tabs, active: workspace.active, consoles: live.consoles };
+const saved = { tabs: workspace.tabs, active: workspace.active, configs: workspace.configs, consoles: live.consoles };
 
 afterEach(() => {
-  Object.assign(workspace, { tabs: saved.tabs, active: saved.active });
+  Object.assign(workspace, { tabs: saved.tabs, active: saved.active, configs: saved.configs });
   live.consoles = saved.consoles;
+});
+
+function onConnection(environment: Environment | null, txn: TxnState = "Idle"): string {
+  const tab: Tab = { id: "t1", title: "Query 3", console: { db: { connectionId: "c1", database: "shop" }, mode: "Manual" }, table: null, file: null };
+  const state: ConsoleState = {
+    tabId: tab.id,
+    rev: 1,
+    config: { connectionId: "c1", database: "shop", schema: null, mode: "Manual" },
+    session: { kind: "Open", backendPid: 1 },
+    txn,
+    txnDepth: null,
+    work: null,
+    export: null,
+    run: { kind: "Idle" },
+  };
+  Object.assign(workspace, { tabs: { [tab.id]: tab }, active: tab.id, configs: { c1: { ...connectionConfig("c1", "prod-postgres"), environment } } });
+  live.consoles = { [tab.id]: state };
+  return renderToStaticMarkup(<TopBar hosted={null} />);
+}
+
+const header = (html: string) => html.slice(0, html.indexOf(">") + 1);
+const icon = (html: string) => html.match(/<span data-testid="env-icon" role="img" aria-label="([^"]*)" title="[^"]*" class="([^"]*)">/)?.slice(1);
+
+it("marks Production with a danger icon and a danger hairline under the bar", () => {
+  const html = onConnection("Production");
+  expect(icon(html)?.[0]).toBe("Production");
+  expect(icon(html)?.[1]).toMatch(/\btext-danger\b/);
+  expect(header(html)).toMatch(/\bborder-b-2\b[^"]*\bborder-danger\b/);
+});
+
+it("marks Staging with an amber icon and no hairline", () => {
+  const html = onConnection("Staging");
+  expect(icon(html)?.[0]).toBe("Staging");
+  expect(icon(html)?.[1]).toMatch(/\btext-amber\b/);
+  expect(header(html)).not.toContain("border-danger");
+});
+
+it.each(["Local", null] satisfies (Environment | null)[])("draws no marker for a %s connection", (environment) => {
+  const html = onConnection(environment);
+  expect(html).not.toContain('data-testid="env-icon"');
+  expect(header(html)).not.toContain("border-danger");
+});
+
+it("reads the run target as the environment icon and connection, then database, and leaves the tab title to the tab bar", () => {
+  const html = onConnection("Production");
+  const at = (pattern: RegExp) => html.search(pattern);
+  const order = [at(/data-testid="tab-connection"/), at(/data-testid="env-icon"/), at(/>prod-postgres</), at(/data-testid="tab-database"[^>]*>(<[^>]*>)*shop</)];
+  expect(order.every((i) => i >= 0)).toBe(true);
+  expect([...order].sort((a, b) => a - b)).toEqual(order);
+  expect(html).not.toContain("Query 3");
+});
+
+it("shows an open transaction as pending and an aborted one as an error", () => {
+  expect(onConnection(null, "Open")).toMatch(/<span class="text-amber"> · in transaction/);
+  expect(onConnection(null, "Aborted")).toMatch(/<span class="text-danger"> · aborted/);
+});
+
+it("offers the shown databases and keeps the tab's own when the tree hides it or the connection is down", () => {
+  const db = { connectionId: "c1", database: "shop" };
+  const shown = connectedState("c1", [databaseState("reporting", true, []), databaseState("shop", true, []), databaseState("staging_copy", false, [])]);
+  expect(databaseChoices(db, shown)).toEqual(["reporting", "shop"]);
+  expect(databaseChoices({ ...db, database: "staging_copy" }, shown)).toEqual(["staging_copy", "reporting", "shop"]);
+  expect(databaseChoices(db, undefined)).toEqual(["shop"]);
+  expect(databaseChoices(db, { id: "c1", rev: 2, status: { kind: "Disconnected" } })).toEqual(["shop"]);
 });
 
 function lostSession(transaction: TransactionLoss): string {

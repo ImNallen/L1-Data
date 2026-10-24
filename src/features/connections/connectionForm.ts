@@ -1,10 +1,11 @@
-import type { ConnectionConfig, DatabaseKind, PasswordInput, SshAuth, SshTunnelDraft, SslMode } from "../../ipc/bindings";
+import type { ConnectionConfig, DatabaseKind, Environment, PasswordInput, SshAuth, SshTunnelDraft, SslMode } from "../../ipc/bindings";
 import { connectionColorId, type ConnectionColorId } from "./connectionColors";
 
 export type SshAuthKind = SshAuth["kind"];
 
 export type Fields = {
   databaseKind: DatabaseKind;
+  environment: Environment | null;
   name: string;
   host: string;
   port: string;
@@ -31,6 +32,7 @@ export function initialFields(c: ConnectionConfig | undefined, databaseKind: Dat
   const ssh = c?.ssh;
   return {
     databaseKind,
+    environment: c?.environment ?? null,
     name: c?.name ?? "",
     host: c?.host ?? "localhost",
     port: String(c?.port ?? (sqlServer ? 1433 : 5432)),

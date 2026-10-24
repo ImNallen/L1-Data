@@ -20,7 +20,7 @@ import {
   ZapIcon,
   type LucideIcon,
 } from "lucide-react";
-import { Fragment, useCallback, useEffect, useRef, useState, type ReactNode } from "react";
+import { Fragment, useCallback, useEffect, useRef, useState, type KeyboardEvent, type ReactNode, type RefObject } from "react";
 import {
   commands,
   type ColumnInfo,
@@ -57,12 +57,14 @@ import {
 } from "../../ui/primitives";
 import type { TextRange } from "../../ui/textMatch";
 import { connect, confirmDelete, disconnect, refreshCatalog, refreshConnection } from "../connections/connectionActions";
-import { ConnectionColorDot, connectionColor } from "../connections/connectionColors";
+import { ConnectionColorDot, EnvironmentIcon, connectionColor } from "../connections/connectionColors";
 import { insertAtCursor } from "../editor/editorStates";
 import { openSqlTab, openTableTab } from "../editor/runActions";
 import { columnType, defaultText, indexText, keyText, triggerText, type RowText } from "./detailText";
 import { databaseCount, schemaCount } from "./pickers";
 import type { FilteredRelation, FilteredSchema, TreeFilter } from "./treeFilter";
+import { focusRow, treeItem, treeRows, useRovingTabStop } from "./treeFocus";
+import { treeKey } from "./treeKeys";
 import { PickerHost, PickerPill, useIsPickerOpen, type PickerTarget } from "./VisibilityPopover";
 
 const INDENT = 12;
@@ -108,15 +110,44 @@ function Row({
   contextMenu?: ReactNode;
 }) {
   const twoLines = second !== undefined;
+  const toggle = expandable ? (onToggle ?? onClick) : undefined;
+  // Enter does what a double-click does, which a click starts.
+  const activate = () => {
+    if (!onDoubleClick) return toggle?.();
+    onClick?.();
+    onDoubleClick();
+  };
+  const onKeyDown = (e: KeyboardEvent<HTMLDivElement>) => {
+    if (e.target !== e.currentTarget || e.metaKey || e.ctrlKey || e.altKey || e.shiftKey) return;
+    const rows = treeRows(e.currentTarget);
+    const action = treeKey(e.key, rows.map(treeItem), rows.indexOf(e.currentTarget));
+    if (!action) return;
+    e.preventDefault();
+    switch (action.kind) {
+      case "focus":
+        return focusRow(rows[action.index]);
+      case "expand":
+      case "collapse":
+        return toggle?.();
+      case "activate":
+        return activate();
+      default: {
+        const unreachable: never = action;
+        return unreachable;
+      }
+    }
+  };
   const row = (
     <div
       data-testid={`tree-node-${path}`}
       role="treeitem"
       aria-expanded={expandable ? open : undefined}
       aria-selected={selected}
+      aria-level={depth + 1}
       tabIndex={-1}
       onClick={onClick}
       onDoubleClick={onDoubleClick}
+      onKeyDown={onKeyDown}
       style={{ paddingLeft: 8 + depth * INDENT }}
       className={cx(
         "group mx-2 flex cursor-default gap-1.5 rounded-md pr-2.5",
@@ -739,10 +770,11 @@ function ConnectionNode({ config, expanded, revealed }: { config: ConnectionConf
           </span>
         }
         label={
-          <>
-            <span className={cx("font-medium", tone === "off" && "text-muted")}>{config.name}</span>
-            {!tinted && <ConnectionColorDot color={config.color} className="ml-1.5 align-middle" />}
-          </>
+          <span className="flex min-w-0 items-center">
+            <span className={cx("truncate font-medium", tone === "off" && "text-muted")}>{config.name}</span>
+            {!tinted && <ConnectionColorDot color={config.color} className="ml-1.5" />}
+            <EnvironmentIcon environment={config.environment} size={13} testId={`env-icon-${config.name}`} className="ml-1.5" />
+          </span>
         }
         trailing={<ConnectionTrailing config={config} tone={tone} instance={instance} target={target} active={picking} />}
         contextMenu={<ConnectionMenu config={config} shown={instance && shown.map((d) => ({ connectionId: config.id, database: d.name }))} />}
@@ -866,7 +898,7 @@ function FilteredTree({ filter, query }: { filter: TreeFilter; query: string }) 
 }
 
 /** `filter` is set while the sidebar search holds a query, and the tree then shows only its matches. */
-export function ConnectionTree({ filter, query }: { filter: TreeFilter | null; query: string }) {
+export function ConnectionTree({ filter, query, ref }: { filter: TreeFilter | null; query: string; ref: RefObject<HTMLDivElement | null> }) {
   const configs = useWorkspace((s) => s.configs);
   const [open, setOpen] = useState<ReadonlySet<string>>(new Set());
   const toggle = useCallback(
@@ -883,9 +915,10 @@ export function ConnectionTree({ filter, query }: { filter: TreeFilter | null; q
   // Held here, not in each node, so a search that swaps the nodes out does not reopen what the user closed.
   const revealed = useRef<Revealed>(new Map()).current;
   const list = Object.values(configs).sort((a, b) => a.name.localeCompare(b.name));
+  useRovingTabStop(ref);
 
   return (
-    <div data-testid="conn-tree" role="tree" className="min-h-0 flex-1 overflow-y-auto pt-2 pb-3">
+    <div ref={ref} data-testid="conn-tree" role="tree" aria-label="Connections" className="min-h-0 flex-1 overflow-y-auto pt-2 pb-3">
       {filter ? (
         <FilteredTree key={query} filter={filter} query={query.trim()} />
       ) : (

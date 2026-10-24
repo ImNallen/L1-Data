@@ -405,6 +405,7 @@ mod tests {
             has_password: false,
             color: None,
             ssh: None,
+            environment: None,
         };
         let databases = ["Shop", "shop"].map(|name| DatabaseInfo { name: name.into(), system: false, access: DbAccess::Ok });
         let home = DbSlot::new(DatabaseRef { connection_id: id, database: "Shop".into() });

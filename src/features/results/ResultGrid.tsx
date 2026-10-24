@@ -689,9 +689,9 @@ export function ResultGrid({
                         className="absolute inset-0 z-10 bg-bg px-2 font-mono text-code text-fg outline outline-1 -outline-offset-1 outline-focus"
                       />
                     ) : value === DEFAULT ? (
-                      <span className="text-faint italic">DEFAULT</span>
+                      <span className={cx("italic", !deleted && "text-dim")}>DEFAULT</span>
                     ) : value === undefined ? null : value === null ? (
-                      <span className="text-faint">NULL</span>
+                      <span className={cx(!deleted && "text-dim")}>NULL</span>
                     ) : (
                       <>
                         <span className={cx("min-w-0 truncate whitespace-pre", !deleted && "text-fg")}>{right ? groupDigits(value) : value.replace(/\n/g, "↵ ")}</span>

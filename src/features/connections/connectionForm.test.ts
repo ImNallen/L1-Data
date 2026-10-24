@@ -15,11 +15,12 @@ const saved: ConnectionConfig = {
   hasPassword: true,
   color: "red",
   ssh: null,
+  environment: null,
 };
 
-const savedFields = { databaseKind: "Postgres", caCertPath: "", name: "shop", host: "db.internal", port: "5433", database: "shop", user: "l1data", sslMode: "Require", color: "red", sshEnabled: false, sshHost: "", sshPort: "22", sshUser: "", sshAuth: "Password", sshKeyPath: "", sshAgentSocket: "" } as const;
+const savedFields = { databaseKind: "Postgres", environment: null, caCertPath: "", name: "shop", host: "db.internal", port: "5433", database: "shop", user: "l1data", sslMode: "Require", color: "red", sshEnabled: false, sshHost: "", sshPort: "22", sshUser: "", sshAuth: "Password", sshKeyPath: "", sshAgentSocket: "" } as const;
 
-const newFields = { databaseKind: "Postgres", caCertPath: "", name: "", host: "localhost", port: "5432", database: "postgres", user: "postgres", sslMode: "Prefer", color: null, sshEnabled: false, sshHost: "", sshPort: "22", sshUser: "", sshAuth: "Password", sshKeyPath: "", sshAgentSocket: "" } as const;
+const newFields = { databaseKind: "Postgres", environment: null, caCertPath: "", name: "", host: "localhost", port: "5432", database: "postgres", user: "postgres", sslMode: "Prefer", color: null, sshEnabled: false, sshHost: "", sshPort: "22", sshUser: "", sshAuth: "Password", sshKeyPath: "", sshAgentSocket: "" } as const;
 
 it("reads an untouched new form as clean", () => {
   expect(isDirty(undefined, { fields: { ...newFields }, password: { kind: "clear" }, sshSecret: { kind: "clear" }, url: "" })).toBe(false);
@@ -41,6 +42,13 @@ it("reads a kept saved password as clean and a cleared one as dirty", () => {
 it("compares color against the normalized id", () => {
   expect(isDirty(saved, { fields: { ...savedFields }, password: { kind: "keep" }, sshSecret: { kind: "clear" }, url: "" })).toBe(false);
   expect(isDirty({ ...saved, color: "#ef4444" }, { fields: { ...savedFields, color: null }, password: { kind: "keep" }, sshSecret: { kind: "clear" }, url: "" })).toBe(false);
+});
+
+it("opens a saved environment and reads a change to it as an edit", () => {
+  const production: ConnectionConfig = { ...saved, environment: "Production" };
+  expect(initialFields(production).environment).toBe("Production");
+  expect(isDirty(production, { fields: { ...savedFields, environment: "Production" }, password: { kind: "keep" }, sshSecret: { kind: "clear" }, url: "" })).toBe(false);
+  expect(isDirty(production, { fields: { ...savedFields, environment: null }, password: { kind: "keep" }, sshSecret: { kind: "clear" }, url: "" })).toBe(true);
 });
 
 it("starts SQL Server with SQL login, master and verified TLS", () => {

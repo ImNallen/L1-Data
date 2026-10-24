@@ -109,7 +109,8 @@ fn writes(tokens: &[Token<'_>]) -> bool {
     };
     match first.to_ascii_uppercase().as_str() {
         "INSERT" | "UPDATE" | "DELETE" | "MERGE" | "TRUNCATE" | "CREATE" | "ALTER" | "DROP"
-        | "COMMENT" | "GRANT" | "REVOKE" | "REINDEX" | "RENAME" | "IMPORT" | "SECURITY" => true,
+        | "COMMENT" | "GRANT" | "REVOKE" | "REINDEX" | "RENAME" | "IMPORT" | "SECURITY" | "CALL" | "DO" | "REFRESH"
+        | "VACUUM" | "CLUSTER" => true,
         "WITH" => {
             let mut i = 1;
             if word(tokens.get(i), "RECURSIVE") {
@@ -321,6 +322,11 @@ mod tests {
             "explain analyze update t set x=1",
             "explain (analyze true, buffers) delete from t",
             "explain (analyze 1) delete from t",
+            "call purge_orders()",
+            "do $$ begin delete from t; end $$",
+            "refresh materialized view v",
+            "vacuum full t",
+            "cluster t using t_pkey",
         ] {
             assert!(history_is_write(sql), "{sql}");
         }

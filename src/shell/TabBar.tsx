@@ -33,6 +33,7 @@ function TabItem({ id }: { id: TabId }) {
   const setActive = useWorkspace((s) => s.setActive);
   const renameTab = useWorkspace((s) => s.renameTab);
   const dirty = useLive((s) => hasUncommittedWork(s.consoles[id]));
+  const aborted = useLive((s) => s.consoles[id]?.txn === "Aborted");
   const unsaved = useSyncExternalStore(onBuffersChanged, () => isDirty(id));
   const [editing, setEditing] = useState(false);
   if (!tab) return null;
@@ -87,7 +88,12 @@ function TabItem({ id }: { id: TabId }) {
       )}
       <span className="relative grid size-5 shrink-0 place-items-center">
         {dirty && (
-          <span data-testid={`tab-dirty-${id}`} className="absolute size-1.5 rounded-full bg-dim group-hover:hidden" />
+          <span
+            data-testid={`tab-dirty-${id}`}
+            role="img"
+            aria-label={aborted ? "Transaction aborted" : "Transaction open"}
+            className={cx("absolute size-1.5 rounded-full group-hover:hidden", aborted ? "bg-danger" : "bg-amber")}
+          />
         )}
         <button
           type="button"

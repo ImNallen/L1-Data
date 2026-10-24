@@ -52,9 +52,11 @@ impl<'de> Deserialize<'de> for ConnectionConfig {
             color: Option<String>,
             #[serde(default)]
             ssh: Option<SshTunnel>,
+            #[serde(default)]
+            environment: Option<Environment>,
         }
-        let Stored { database_kind, id, name, host, port, database, user, ssl_mode, ca_cert_path, has_password, color, ssh } = Stored::deserialize(d)?;
-        Ok(Self { database_kind, id, name, host, port, database, user, ssl_mode, ca_cert_path, has_password, color, ssh })
+        let Stored { database_kind, id, name, host, port, database, user, ssl_mode, ca_cert_path, has_password, color, ssh, environment } = Stored::deserialize(d)?;
+        Ok(Self { database_kind, id, name, host, port, database, user, ssl_mode, ca_cert_path, has_password, color, ssh, environment })
     }
 }
 
@@ -84,6 +86,15 @@ pub struct ConnectionConfig {
     /// Sessions reach the database through this SSH server. `host` and `port` above are then
     /// resolved and dialed by that server.
     pub ssh: Option<SshTunnel>,
+    pub environment: Option<Environment>,
+}
+
+/// What the user says the connection points at. The UI marks `Production` and asks before a run on it writes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Type)]
+pub enum Environment {
+    Local,
+    Staging,
+    Production,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Type)]
@@ -142,6 +153,7 @@ pub struct ConnectionDraft {
     pub password: PasswordInput,
     pub color: Option<String>,
     pub ssh: Option<SshTunnelDraft>,
+    pub environment: Option<Environment>,
 }
 
 #[derive(Debug, Clone, Serialize, Type)]
@@ -2840,9 +2852,25 @@ mod database_compatibility_tests {
         assert_eq!(serde_json::from_value::<ConnectionConfig>(stored).unwrap().ssh, Some(tunnel));
     }
 
-    /// The hand-written reader defaults `ssh` for old rows; the wire type must still require it.
     #[test]
-    fn bindings_require_the_tunnel_field() {
+    fn connections_saved_before_environments_load_as_not_set() {
+        let saved = serde_json::json!({"databaseKind":"Postgres", "id":Uuid::nil(), "name":"legacy", "host":"localhost", "port":5432, "database":"shop", "user":"reader", "sslMode":"Prefer", "caCertPath":null, "hasPassword":true, "color":null, "ssh":null});
+        assert_eq!(serde_json::from_value::<ConnectionConfig>(saved).unwrap().environment, None);
+    }
+
+    #[test]
+    fn a_production_connection_round_trips() {
+        let saved = serde_json::json!({"databaseKind":"Postgres", "id":Uuid::nil(), "name":"prod-postgres", "host":"db.internal", "port":5432, "database":"shop", "user":"reader", "sslMode":"VerifyFull", "caCertPath":null, "hasPassword":true, "color":"red", "ssh":null, "environment":"Production"});
+        let config: ConnectionConfig = serde_json::from_value(saved.clone()).unwrap();
+        assert_eq!(config.environment, Some(Environment::Production));
+        assert_eq!(serde_json::to_value(&config).unwrap(), saved);
+        let unset = serde_json::to_value(ConnectionConfig { environment: None, ..config }).unwrap();
+        assert_eq!(unset["environment"], serde_json::Value::Null);
+    }
+
+    /// The hand-written reader defaults these fields for old rows; the wire type must still require them.
+    #[test]
+    fn bindings_require_the_fields_old_rows_default() {
         let bindings = include_str!("../../../src/ipc/bindings.ts");
         let block = |name: &str| {
             let start = bindings.find(&format!("export type {name} = {{")).unwrap_or_else(|| panic!("{name} is not in bindings.ts"));
@@ -2850,5 +2878,7 @@ mod database_compatibility_tests {
         };
         assert!(block("ConnectionConfig").contains("\tssh: SshTunnel | null,"), "{}", block("ConnectionConfig"));
         assert!(block("ConnectionDraft").contains("\tssh: SshTunnelDraft | null,"), "{}", block("ConnectionDraft"));
+        assert!(block("ConnectionConfig").contains("\tenvironment: Environment | null,"), "{}", block("ConnectionConfig"));
+        assert!(block("ConnectionDraft").contains("\tenvironment: Environment | null,"), "{}", block("ConnectionDraft"));
     }
 }

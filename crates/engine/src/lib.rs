@@ -847,6 +847,7 @@ impl Engine {
             has_password,
             color: d.color,
             ssh,
+            environment: d.environment,
         };
         s.store.upsert_connection(&config).map_err(store)?;
         Ok(config)
@@ -868,6 +869,11 @@ impl Engine {
     /// The statement chooser and the editor's run mark. Pure, so the sync command never needs the runtime.
     pub fn script_outline(&self, text: &str, cursor: DocOffset, database_kind: DatabaseKind) -> ScriptOutline {
         text::script_outline(text, cursor, database_kind)
+    }
+
+    /// The confirm before a run on a Production connection. Pure, so the sync command never needs the runtime.
+    pub fn script_writes(&self, text: &str, target: RunTarget, database_kind: DatabaseKind) -> Vec<DocRange> {
+        text::script_writes(text, target, database_kind)
     }
 
     /// The editor's format action. Pure, so the sync command never needs the runtime.
@@ -1654,6 +1660,7 @@ mod tests {
             password: PasswordInput::Set("pw".into()),
             color: None,
             ssh: None,
+            environment: None,
         }
     }
 
@@ -1788,7 +1795,7 @@ mod tests {
         let saved = {
             let engine = Engine::open(cfg()).await.unwrap();
             let saved = engine
-                .save_connection(ConnectionDraft { password: PasswordInput::Set(PLAINTEXT.into()), ..draft("dev") })
+                .save_connection(ConnectionDraft { password: PasswordInput::Set(PLAINTEXT.into()), environment: Some(Environment::Production), ..draft("dev") })
                 .await
                 .unwrap();
             assert!(saved.has_password);
@@ -1801,6 +1808,7 @@ mod tests {
         let boot = engine.boot();
         assert_eq!(boot.connections.len(), 1);
         assert_eq!(boot.connections[0].id, saved.id);
+        assert_eq!(boot.connections[0].environment, Some(Environment::Production));
         assert_eq!(boot.settings.max_rows, 10);
         assert!(!boot.workspace.layout.sidebar);
         assert_eq!(password(&engine, saved.id).as_deref(), Some(PLAINTEXT));
@@ -1811,6 +1819,7 @@ mod tests {
             .await
             .unwrap();
         assert!(renamed.has_password && renamed.name == "renamed");
+        assert_eq!(renamed.environment, None, "the draft's environment replaces the saved one");
         assert_eq!(password(&engine, saved.id).as_deref(), Some(PLAINTEXT));
         let cleared = engine
             .save_connection(ConnectionDraft { id: Some(saved.id), password: PasswordInput::Clear, ..draft("x") })

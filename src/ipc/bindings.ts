@@ -21,6 +21,7 @@ export const commands = {
 	exactRowCount: (tabId: TabId, db: DatabaseRef, schema: string, table: string, query: TableQuery) => typedError<number, CountError>(__TAURI_INVOKE("exact_row_count", { tabId, db, schema, table, query })),
 	consoleConfigure: (tabId: TabId, config: ConsoleConfig) => typedError<ConsoleState, ConfigureError>(__TAURI_INVOKE("console_configure", { tabId, config })),
 	scriptOutline: (text: string, cursor: DocOffset, databaseKind: DatabaseKind) => __TAURI_INVOKE<ScriptOutline>("script_outline", { text, cursor, databaseKind }),
+	scriptWrites: (text: string, target: RunTarget, databaseKind: DatabaseKind) => __TAURI_INVOKE<DocRange[]>("script_writes", { text, target, databaseKind }),
 	editorFormat: (text: string, target: RunTarget, databaseKind: DatabaseKind) => typedError<FormatEdit, FormatError>(__TAURI_INVOKE("editor_format", { text, target, databaseKind })),
 	tableScript: (db: DatabaseRef, schema: string, table: string) => typedError<TableScript, string>(__TAURI_INVOKE("table_script", { db, schema, table })),
 	tableOrder: (db: DatabaseRef, schema: string, table: string, orderBy: string, edit: TableOrderEdit) => typedError<TableOrderView, string>(__TAURI_INVOKE("table_order", { db, schema, table, orderBy, edit })),
@@ -333,6 +334,7 @@ export type ConnectionConfig = {
 	 *  resolved and dialed by that server.
 	 */
 	ssh: SshTunnel | null,
+	environment: Environment | null,
 };
 
 export type ConnectionDraft = {
@@ -349,6 +351,7 @@ export type ConnectionDraft = {
 	password: PasswordInput,
 	color: string | null,
 	ssh: SshTunnelDraft | null,
+	environment: Environment | null,
 };
 
 export type ConnectionId = string;
@@ -510,6 +513,9 @@ export type EntrySnapshot = {
 	turn: number,
 	entry: Entry,
 };
+
+/**  What the user says the connection points at. The UI marks `Production` and asks before a run on it writes. */
+export type Environment = "Local" | "Staging" | "Production";
 
 export type ExecutionUnitKind = "Statement" | "Batch";
 
