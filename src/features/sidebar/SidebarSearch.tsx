@@ -10,6 +10,7 @@ export function SidebarSearch({
   count,
   onQueryChange,
   onEnter,
+  onArrowDown,
   children,
 }: {
   testId: string;
@@ -17,6 +18,7 @@ export function SidebarSearch({
   count: number;
   onQueryChange: (query: string) => void;
   onEnter?: () => void;
+  onArrowDown?: () => void;
   children?: ReactNode;
 }) {
   const input = useRef<HTMLInputElement>(null);
@@ -32,6 +34,10 @@ export function SidebarSearch({
 
   const onKeyDown = (e: KeyboardEvent<HTMLInputElement>) => {
     if (e.key === "Enter") onEnter?.();
+    if (e.key === "ArrowDown" && onArrowDown) {
+      e.preventDefault();
+      onArrowDown();
+    }
     if (e.key !== "Escape") return;
     // An empty box lets Escape through, so it still leaves settings.
     if (query) {
