@@ -1,5 +1,4 @@
 import * as Menu from "@radix-ui/react-dropdown-menu";
-import { save } from "@tauri-apps/plugin-dialog";
 import {
   CheckIcon,
   ChevronDownIcon,
@@ -8,15 +7,13 @@ import {
   ChevronLeftIcon,
   ChevronRightIcon,
   CircleAlertIcon,
-  DownloadIcon,
   MinusIcon,
   PlusIcon,
   SquareTerminalIcon,
   Undo2Icon,
 } from "lucide-react";
 import { useEffect, useMemo, useRef, useSyncExternalStore, type RefObject } from "react";
-import { commands, type OutputEntry, type QueryError, type ResultMeta, type RunState, type TabId } from "../../ipc/bindings";
-import { exportErrorText } from "../../ipc/errors";
+import type { ConsoleState, OutputEntry, QueryError, RunState, TabId } from "../../ipc/bindings";
 import { useLive } from "../../state/live";
 import {
   isBusy,
@@ -45,6 +42,7 @@ import {
   submitEdits,
   updateTableQuery,
 } from "../editor/runActions";
+import { ExportMenu } from "./ExportMenu";
 import { FilterBar } from "./FilterBar";
 import { groupDigits, pageStatus, pluralRows } from "./format";
 import { ErrorBlock, OutputPanel } from "./OutputPanel";
@@ -128,19 +126,13 @@ function CursorPosition() {
   );
 }
 
-async function exportCsv(meta: ResultMeta) {
-  const notify = useWorkspace.getState().notify;
-  let path: string | null;
-  try {
-    path = await save({ defaultPath: "result.csv", filters: [{ name: "CSV", extensions: ["csv"] }] });
-  } catch {
-    notify("Export needs the desktop app's save dialog.");
-    return;
-  }
-  if (!path) return;
-  const res = await commands.resultExport(meta.ref, "Csv", "Loaded", path);
-  if (res.status === "error") notify(exportErrorText(res.error, path));
-  else notify(`Exported ${pluralRows(res.data.rows)} to ${path}${res.data.truncated ? " (truncated at the row limit)" : ""}.`);
+function ExportStatus({ progress }: { progress: NonNullable<ConsoleState["export"]> }) {
+  return (
+    <span data-testid="export-status" role="status" className="flex min-w-0 items-center gap-1.5 text-ui-13 text-dim">
+      <Spinner />
+      <span className="truncate tabular-nums">Exporting {pluralRows(progress.rows)}…</span>
+    </span>
+  );
 }
 
 function ErrorPanel({ error }: { error: QueryError }) {
@@ -247,7 +239,7 @@ function ResultBody({
         <ResultGrid
           key={`${view.result.meta.ref.runId}:${view.result.index}`}
           meta={view.result.meta}
-          done={view.result.done}
+          done={view.result.state !== "Streaming"}
           bottomInset={bottomInset}
           query={query}
           editing={editing}
@@ -313,6 +305,8 @@ export function ResultsPane({ tabId }: { tabId: TabId | null }) {
     [browsingTable?.console.db, browsingTable?.table.schema, browsingTable?.table.table, catalogView, shown?.meta, databaseKind],
   );
   const actions = useRef<GridActions | null>(null);
+  const pageSize = useWorkspace((s) => s.settings.tablePageSize);
+  const exporting = console?.export ?? null;
 
   return (
     <section className="flex h-full min-h-0 flex-col bg-bg">
@@ -340,19 +334,16 @@ export function ResultsPane({ tabId }: { tabId: TabId | null }) {
 
         <div className="flex-1" />
 
-        {summary && <SummaryText summary={summary} />}
+        {exporting ? <ExportStatus progress={exporting} /> : summary && <SummaryText summary={summary} />}
         {tab && <CursorPosition />}
 
         <div className="flex items-center gap-0.5">
-          <IconButton
-            data-testid="export-btn"
-            aria-label="Export CSV"
-            title="Export CSV"
+          <ExportMenu
+            tab={tab}
+            result={shown}
+            table={browsingTable && { page: browsingTable.table.page, pageSize, exactRowCount: browsingTable.table.exactRowCount ?? null, filtered: isFiltered(browsingTable.table.query) }}
             disabled={!shown || busy}
-            onClick={() => shown && void exportCsv(shown.meta)}
-          >
-            <DownloadIcon size={16} />
-          </IconButton>
+          />
           <IconButton
             data-testid="output-toggle"
             data-tone={tone}
@@ -373,6 +364,11 @@ export function ResultsPane({ tabId }: { tabId: TabId | null }) {
 
       {(databaseKind === "SqlServer" || shown?.meta.databaseKind === "SqlServer") && <p data-testid="sqlserver-output-limit" className="border-b border-grid px-3 py-1 text-ui-11.5 text-dim">SQL Server PRINT and informational messages are unavailable. Affected row counts may be unknown.</p>}
       {browsingTable && databaseKind === "SqlServer" && <p data-testid="sqlserver-edit-limit" className="border-b border-grid px-3 py-1 text-ui-11.5 text-dim">SQL Server table results are read-only. Use SQL scripts to insert, update or delete rows.</p>}
+      {exporting?.writeError && (
+        <p data-testid="export-write-error" className="border-b border-grid px-3 py-1 text-ui-11.5 text-amber">
+          Couldn't write the file: {exporting.writeError}. The query keeps reading to the end so the session survives. Esc stops it now and resets the session.
+        </p>
+      )}
       {browsingTable && <FilterBar tab={browsingTable} />}
 
       <div className="relative flex min-h-0 flex-1 flex-col">

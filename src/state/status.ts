@@ -1,4 +1,4 @@
-import type { ConnectionState, ConsoleState, OutputEntry, ResultMeta, RunState, StatementRun } from "../ipc/bindings";
+import type { ConnectionState, ConsoleState, OutputEntry, ResultMeta, RowsState, RunState, StatementRun } from "../ipc/bindings";
 import { formatElapsed, groupDigits, pluralRows } from "../features/results/format";
 
 export function hasUncommittedWork(console: ConsoleState | undefined): boolean {
@@ -14,7 +14,7 @@ export function isBusy(console: ConsoleState | undefined): boolean {
 }
 
 export function canCancel(console: ConsoleState | undefined): boolean {
-  return console?.work === "Count" || isRunning(console);
+  return console?.work === "Count" || console?.work === "Export" || isRunning(console);
 }
 
 export type Tone = "live" | "pending" | "off" | "error";
@@ -38,7 +38,7 @@ export function connectionTone(state: ConnectionState | undefined): Tone {
   }
 }
 
-export type RowResult = { index: number; meta: ResultMeta; done: boolean };
+export type RowResult = { index: number; meta: ResultMeta; state: RowsState };
 
 export function runStatements(run: RunState): StatementRun[] {
   return run.kind === "Idle" ? [] : run.statements;
@@ -48,7 +48,7 @@ export function rowResults(run: RunState): RowResult[] {
   const out: RowResult[] = [];
   for (const s of runStatements(run)) {
     for (const output of s.outputs) {
-      if (output.kind === "Rows") out.push({ index: output.result.ref.index, meta: output.result, done: output.state !== "Streaming" });
+      if (output.kind === "Rows") out.push({ index: output.result.ref.index, meta: output.result, state: output.state });
     }
   }
   return out;
