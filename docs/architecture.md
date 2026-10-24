@@ -405,6 +405,7 @@ pub struct BootSnapshot {
     pub consoles: Vec<ConsoleState>, pub workspace: Workspace, pub settings: Settings,
     pub providers: Vec<ProviderState>, pub chats: Vec<ChatState>,   // chats: stored, newest first, at most 200
     pub updates: UpdateState,
+    pub saved_queries: SavedQueries,                                // every readable saved query, most recently used first
 }
 
 // ---- the one event (emitted as "app-event") -------------------------------------
@@ -419,6 +420,7 @@ pub enum AppEvent {
     ChatChanged(ChatState),
     ChatEntryChanged(EntrySnapshot),                    // coalesced to <= 20/s per chat while a text block streams
     UpdateChanged(UpdateState),
+    SavedQueriesChanged(SavedQueries),                  // the whole list, after a write that changed a row
 }
 ```
 
@@ -588,6 +590,10 @@ Each command is one line delegating to `Engine`. tauri-specta uses `ErrorHandlin
 | `history_browse` | `HistoryBrowseQuery` | `Result<HistoryBrowsePage, HistoryError>` | Paged exact SQL groups, matching group counts, and a store revision. |
 | `history_group` | `HistoryGroupQuery` | `Result<HistoryGroupPage, HistoryError>` | Full SQL and paged runs for one group at the requested revision. |
 | `history_clear` | – | `()` | |
+| `saved_query_save` | `text: String, target: RunTarget, databaseKind: DatabaseKind` | `Result<SaveQueryReply, SavedQueryError>` | Saves the selection, or what a `Cursor` run would pick, or the whole text for `All`. Text already saved in the same dialect returns that entry with `alreadySaved` and writes nothing. `NothingToSave` for blank text, `TooLong` past 64 KiB. Sync. |
+| `saved_query_update` | `id: SavedQueryId, edit: SavedQueryEdit` | `Result<SavedQueries, SavedQueryError>` | Renames and rewrites the SQL in one call. A blank name falls back to the SQL's first comment or first 72 characters. `NotFound` for a deleted id. Sync. |
+| `saved_query_delete` | `id: SavedQueryId` | `Result<SavedQueries, SavedQueryError>` | Idempotent. Sync. |
+| `saved_query_used` | `id: SavedQueryId` | `Result<SavedQueries, SavedQueryError>` | Moves the entry to the top. A missing id is not an error. Sync. |
 | `workspace_save` | `Workspace` | `()` | Debounced 500 ms by the UI. Last write wins (single writer). |
 | `settings_set` | `Settings` | `()` | Re-probes each enabled provider whose `enabled` flag, binary path, config directory, or launch arguments changed. |
 | `assistant_open` | `chatId: ChatId` | `Result<ChatView, ChatError>` | Every entry, with the running turn's as of now. An unknown id opens a draft with default options, held in memory until its first send. Closes what a crash left open, with a `Lost` end and `Expired` for waiting tools. Idempotent, and mints no rev: stored rows come at the chat's own rev, so two opens of an unchanged chat return the same view. |
@@ -910,12 +916,14 @@ type LiveData = {
   chats: Record<ChatId, ChatState>;
   transcripts: Record<ChatId, Record<number, EntrySnapshot>>;   // by seq, only for chats the panel opened; other chats' entry events are dropped
   updates: UpdateState | null;                                 // null only before the boot snapshot
+  savedQueries: SavedQueries;                                  // rev 0 until the boot snapshot
 };
 // wantedCatalogs(connections): every Ready catalog of every Connected instance, keyed by DbKey (connection id + NUL + database).
 // boot.ts prunes useCatalog to that set and calls ensure for each entry.
 type LiveState = LiveData & {
   hydrate(b: BootSnapshot): void;
   hydrateChat(view: ChatView): void;                   // assistant_open's whole chat; a newer streamed entry wins
+  hydrateSaved(queries: SavedQueries): void;           // a saved_query_* reply; the higher rev wins, as for the event
   apply(e: AppEvent): void;                            // keep-higher-rev; exhaustive switch on e.kind
 };
 // export const useLive = create<LiveState>()(...)
@@ -932,7 +940,7 @@ type WorkspaceData = {
   activeResult: Record<TabId, number>;                 // which statement's result is shown
   settings: Settings;
   selected: RelationRef | null;                        // highlighted relation in the tree: { db, schema, relation }
-  overlay: Overlay;                                    // none | history | connection | cell | ask
+  overlay: Overlay;                                    // none | history | saved | connection | cell | ask
   screen: Screen;                                      // workspace | settings, with the settings search query
   treeQuery: string;                                   // the sidebar search; not saved, kept across a trip to settings
   searchFocus: boolean;                                // ⌘P's request that the shown search box take focus
@@ -1003,6 +1011,7 @@ Everything lives under `app_data_dir()` (override with `L1_DATA_DATA_DIR` in deb
 - `kv(key TEXT PK, json TEXT)`. Holds `workspace`, `settings`, and `updates`. `updates` holds only the update track. The update state stays in memory. A file-bound tab's `TabSnapshot.file` holds its `FileBinding` and a `dirty` bit taken in the same pass as `text`. The reader parses `file` on its own and drops a shape it cannot read, so a later build's binding never fails the tab, and with it the workspace that `boot()` would replace with an empty one.
 - `secrets(connection_id TEXT PK, nonce BLOB, ciphertext BLOB)`. One sealed password per connection. Migration 2 adds it.
 - `ssh_secrets(connection_id TEXT PK, nonce BLOB, ciphertext BLOB)`. One sealed SSH password or key passphrase per connection. Migration 7 adds it. Deleting a connection deletes both rows.
+- `saved_queries(id INTEGER PK AUTOINCREMENT, name, sql, database_kind, created_ms, used_ms)`. One typed row per saved query, not JSON. Migration 8 adds it. History pruning and **Clear history** never touch it.
 - `chats(id TEXT PK, updated_ms, json)`, indexed on `updated_ms`, and `chat_entries(chat_id, seq, turn, json)` with the key `(chat_id, seq)`. Migration 5 adds both. Deleting a chat deletes its entries. A chat's `json` is a `ChatRecord`, which holds the title, the options, the entry count, and the provider session the next turn resumes, with the config directory the CLI made it under. Each entry's `json` is one `Entry`. A chat row that fails to parse is logged and left out of the list, and an entry row that fails to parse loads as `Entry::Unreadable`.
 
 Provider configs and the health check interval are part of `settings` in `kv`. Probe results stay in memory, so a launch never shows a stale sign-in. An update can install an older build, so a `settings` row that this build cannot parse loads as the defaults and stays as saved until the user changes a setting, rather than stopping `Engine::open`.
@@ -1027,7 +1036,8 @@ crates/engine/
   src/results.rs              # Arena, pages, each result's Origin
   src/export/{mod,encode}.rs  # export: CSV, JSON, Markdown, and INSERT encoders, the all-rows re-run, its fence and writer
   src/catalog.rs              # 4 catalog queries -> Catalog
-  src/store.rs                # SQLite: migrations, connections, history, kv, secrets, ssh_secrets
+  src/store.rs                # SQLite: migrations, connections, history, kv, secrets, ssh_secrets, saved_queries
+  src/saved.rs                # saved queries: what a save takes, default names, limits, dedupe, the revision, the list
   src/secrets.rs              # Vault + KeyStore (Keyring/Memory), one sealing slot per secret kind
   src/session/stream.rs       # DbStream: a driver's own socket or a channel through the SSH tunnel
   src/tunnel/{mod,auth,known_hosts}.rs   # SSH tunnels: the shared-connection registry, auth methods, host-key trust
@@ -1071,6 +1081,7 @@ src/                          # frontend
   features/updates/{UpdateButton.tsx,updateActions.ts,updateText.ts}   # the sidebar update button, the install confirm loop, every update string
   features/results/{ResultsPane,ResultGrid,FilterBar}.tsx  features/results/{format,tableQuery}.ts
   features/history/{HistoryPalette.tsx,historyList.ts}
+  features/saved/{SavedPalette.tsx,savedActions.ts,savedList.ts,savedPane.ts}   # the Saved queries palette, its pure ranking and keys, and its preview reducer
   testing/shopCatalog.ts      # catalog fixture for vitest
   **/*.test.ts(x)             # vitest, next to the code under test
 crates/dev-bridge/             # bin (not shipped): axum on 127.0.0.1:7077, POST /invoke/:cmd + GET /events (SSE)
@@ -1098,7 +1109,8 @@ Tracing a run from the button to the grid takes four files: `runActions.ts` → 
    - `browse_sql`: the ORDER BY text before the PK tiebreak, the WHERE text ANDed with column filters, every `FilterOp` with `LIKE` wildcards escaped
    - edit SQL (`insert_sql`, `update_sql`, `delete_sql`): quoted names and values, NULL written as `NULL` or `IS NULL`
    - secrets: seal and open, a reopened vault, one key read per vault, a password sealed for another connection, a lost key, concurrent first seals
-   - store: migrations run once, history paging and pruning
+   - store: migrations run once, history paging and pruning, migration 8 on a version-7 file
+   - saved queries through `Engine`: the cursor's statement, a SQL Server batch, UTF-16 offsets past an emoji, blank and oversized text, default names, dedupe without a new `rev`, which writes raise `rev` and emit, use order, a restart, a row with an unknown `database_kind`, and a defaulted column a newer build added
    - model: wire casing, `RunRequest` tags, the nested `ConnectError` tag, settings and layouts saved by older versions still load
    - `Engine` without a DB: boot on an empty dir, passwordless saves never touch the keychain, persistence across `open`, draft validation
    - updates: the machine's phase tables, the offer policy for each pair of build and track, the schedule's due rule, consent, and the scripted scenarios. Through `Engine` with `ScriptedTransport` on a paused clock: the first check at 15 s, a nightly build switched to Stable offered the older stable and back, the install and relaunch, the implied track saved at first launch and kept by a later stable build, a track saved by a newer build left alone, a failed install, a bad signature, `Busy` during a download, and each sync update command called from a thread with no runtime
@@ -1345,6 +1357,8 @@ Files (`file_open`, `file_save`, `⌘O`, `⌘S`, `⌘⇧S`). The design had no f
 - **One prompt mechanism.** `ask()` in `workspace.ts` replaces the `confirm` overlay. It resolves with the chosen id, or `null` when anything else replaces or clears the question, and the caller's continuation runs after the answering click has closed the dialog, so `closeTab` asks its next question straight from the continuation. `confirm()` wraps it and keeps `confirm-dialog` and `confirm-btn`. `closeTab` asks about a dirty file first (Save, Don't Save, Cancel), then staged edits, then the open transaction.
 - **A focused control owns its chord.** The window keydown handler skips an event with `defaultPrevented`, so a chord a focused control handles never also runs a global command. The grid leaves `⌘S` and `⌘⇧S` to the window. With staged edits in the active tab, the global `⌘S` submits them wherever focus is, and `⌘⇧S` is always Save As. The in-cell editor stops every keydown, so that the grid never acts on a key typed into the cell, and runs a global shortcut itself after it commits the cell. `⌘O` and the saves do nothing while a dialog is up, so they never cancel a question. On macOS the global commands match `⌘` only, because CodeMirror owns the `Ctrl` chords there.
 - **A window close flushes first.** The webview's close-requested listener makes Tauri hold the close, writes the pending save and waits for file saves under way for at most 2 s, then destroys the window, which needs `core:window:allow-destroy`. The shell destroys the window 5 s after every close request, which does nothing to a window the webview already destroyed. On macOS, **Quit L1 Data** (`⌘Q`) is a custom menu item that closes every window and exits the app 5 s later, because the predefined item terminates with no close event. Dock Quit, logout, and SIGTERM still terminate directly, since tao exposes no hook before `applicationWillTerminate`. They lose at most the last 500 ms of typing, as before.
+- **Saved queries are a column table, not a JSON blob (PR: add saved queries).** `saved_queries` holds one typed row per query, so a stable build that opens a file a nightly migrated reads only the columns it names. A column a later migration adds to this table must have a `DEFAULT`, because that stable build still inserts rows. A row this build cannot read, such as one whose `database_kind` a newer build wrote, is logged and left out of the list. No statement touches it, since updates and deletes go by id. `saved.rs` owns every rule. A save takes the selection as selected, or what a `Cursor` run would pick through `text::pick`, with the statement's `;`, so an inserted query does not run into the next statement. Saving the same text in the same dialect returns the existing entry and writes nothing. An in-memory revision starts at 1 and rises only when a write changes a row, which `Connection::total_changes` decides inside the store lock, and the list is read under that lock. Each `saved_query_*` command returns the whole list, and only a write that changed a row emits `SavedQueriesChanged`. `live.ts` merges the boot snapshot, the event, and each reply by keeping the higher `rev`, as `hydrateChat` does for chats. That reply path writes `live.ts` outside an event, so the palette can open on a just-saved id without waiting for the event.
+- **The Saved queries palette.** The sidebar's bookmark button and `⌘E` open the `saved` overlay, and `⌘⇧E` saves from the active tab. `entry: name` opens the new entry's name for editing, and finishing or leaving that edit closes the palette. The list is the snapshot in `live.ts`, filtered in TypeScript by `rankSaved` with no round trip. The preview side is `paneReducer` over `view`, `edit`, `confirmDiscard`, `confirmDelete`, and `done`, so Esc and a backdrop click leave an edit or a confirmation before they close the palette. Copy calls `navigator.clipboard.writeText` before any IPC and records the use after it. `HistorySql` became `features/editor/SqlText.tsx` with a read-only `view` mode, which history uses, and an `edit` mode with undo and dialect highlighting and no completion.
 - **The dev-bridge answers file dialogs.** `src/dev/dialogShim.ts` answers `plugin:dialog|open` and `plugin:dialog|save` in the page from answers queued on `window.__l1Dialog`, so the dialog calls never reach the bridge and `ROUTES` stays equal to the Tauri command list. An empty queue answers Cancel.
 
 ## Open questions and risks
