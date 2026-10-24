@@ -1036,6 +1036,24 @@ async fn insert_exports_replay_identity_and_generated_columns_into_an_empty_copy
 }
 
 #[tokio::test]
+async fn all_rows_refuses_a_rerun_whose_column_types_changed() {
+    let mut h = Harness::start().await;
+    let tab = h.sql_tab(TxnMode::AutoCommit).await;
+    let table = unique("t_retype");
+    let oracle = h.oracle().await;
+    oracle.batch_execute(&format!("create table public.{table} (id int, n int); insert into public.{table} values (1, 123)")).await.unwrap();
+    let state = h.run_ok(tab, &format!("select id, n from public.{table}")).await;
+    let meta = Harness::result(&state, 0);
+    oracle.batch_execute(&format!("alter table public.{table} alter column n type text")).await.unwrap();
+
+    let path = h.dir.path().join("retyped.json");
+    let exported = h.engine.result_export(meta.r#ref, ExportFormat::Json, ExportScope::All, path.display().to_string()).await;
+    oracle.batch_execute(&format!("drop table public.{table}")).await.unwrap();
+    assert!(matches!(exported, Err(ExportError::ShapeChanged)), "{exported:?}");
+    assert!(!path.exists(), "no file when the column types changed");
+}
+
+#[tokio::test]
 async fn history_survives_reopen_on_the_same_dir() {
     let dir = tempfile::tempdir().unwrap();
     let marker = unique("select 'hist");

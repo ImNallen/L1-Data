@@ -416,10 +416,10 @@ async fn pump(job: &Job, session: &mut Session, encoder: &mut Encoder, writer: &
             Some(Ok(QueryEvent::Columns(columns))) => {
                 let index = set.map_or(0, |i| i.saturating_add(1));
                 set = Some(index);
-                // Names and count only: the encoder keeps the loaded categories, which a SQL
-                // Server table page took from the catalog.
-                let same_names = columns.len() == job.set.columns.len() && columns.iter().zip(&job.set.columns).all(|(a, b)| a.name == b.name);
-                if index == nth && !same_names && halt.is_none() {
+                // The encoder types values by the loaded categories. A SQL Server page loaded only
+                // when its live categories matched the catalog's, so the same check holds there.
+                let same = columns.len() == job.set.columns.len() && columns.iter().zip(&job.set.columns).all(|(a, b)| a.name == b.name && a.r#type.category == b.r#type.category);
+                if index == nth && !same && halt.is_none() {
                     halt = Some(Halt::ShapeChanged);
                     if cancel_keeps_session {
                         cancel.cancel().await;
