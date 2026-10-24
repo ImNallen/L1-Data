@@ -149,7 +149,7 @@ function SavedDialog({ entry, close, ref }: { entry: SavedEntry; close: () => vo
     >
       <Dialog.Title className="sr-only">Saved queries</Dialog.Title>
       <div className="flex min-h-14 shrink-0 items-center gap-3 border-b border-control px-4">
-        <BookmarkIcon size={18} className="shrink-0 text-amber" aria-hidden />
+        <BookmarkIcon size={18} className="shrink-0 text-muted" aria-hidden />
         <input ref={searchRef} data-testid="saved-input" autoFocus={pane.kind === "view"} inert={frozen} spellCheck={false} autoCorrect="off" autoCapitalize="off" value={text} onChange={(e) => search(e.target.value)}
           role="combobox" aria-expanded={true} aria-autocomplete="list" aria-label="Search saved queries" aria-controls="saved-list" aria-activedescendant={selectedId !== null ? `saved-item-${selectedId}` : undefined}
           placeholder="Search saved queries by name or SQL" className="h-12 min-w-0 flex-1 bg-transparent text-ui-14 text-fg outline-none placeholder:text-faint" />
@@ -225,7 +225,7 @@ function SavedDialog({ entry, close, ref }: { entry: SavedEntry; close: () => vo
           )}
         </div>
       )}
-      <div className="flex min-h-10 shrink-0 items-center gap-3 border-t border-control px-4 text-ui-10.5 text-dim">
+      <div className="flex min-h-10 shrink-0 items-center gap-3 border-t border-control px-4 text-ui-11.5 text-dim">
         <span><Kbd className="bg-pill">↑↓</Kbd> Navigate</span>
         <span><Kbd className="bg-pill">↵</Kbd> {insertable ? "Insert" : "Open"}</span>
         <span><Kbd className="bg-pill">{mod}↵</Kbd> New tab</span>

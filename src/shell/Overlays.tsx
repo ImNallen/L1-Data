@@ -70,7 +70,7 @@ export function Overlays() {
       <Modal open={overlay.kind === "cell"} onOpenChange={onOpenChange} title={overlay.kind === "cell" ? overlay.title : ""} width={720} testId="cell-dialog">
         {overlay.kind === "cell" && (
           <pre className="selectable max-h-[52vh] overflow-auto rounded-lg border border-control bg-bg p-3 font-mono text-ui-12.5 leading-5 whitespace-pre-wrap text-fg">
-            {overlay.value ?? <span className="text-faint">NULL</span>}
+            {overlay.value ?? <span className="text-dim">NULL</span>}
           </pre>
         )}
       </Modal>
