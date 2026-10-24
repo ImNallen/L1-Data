@@ -44,6 +44,7 @@ Run the checks that cover your change before you open a PR. Docker is needed onl
 | `cargo test -p engine --features mssql-tests` | engine against SQL Server | `pnpm db:mssql:up` |
 | `cargo test -p engine --features ssh-tests` | engine through the `dev/sshd` bastion: first-use host-key trust, each auth method, a catalog, a run and its cancel, the assistant's read-only query, a refused forward, and SQL Server when it is up | `pnpm db:up` and `pnpm db:ssh:up`, plus `pnpm db:mssql:up` for SQL Server |
 | `pnpm lint` | oxlint's correctness rules on the frontend and `scripts/` | nothing |
+| `pnpm fmt:check` | oxfmt formatting of the frontend, `scripts/`, and the root config files. `pnpm fmt` rewrites them. | nothing |
 | `pnpm typecheck` | the frontend types | nothing |
 | `pnpm test` | vitest units for state, formatting, and shell, then the release scripts in `scripts/` | nothing |
 | `pnpm build` | the production bundle | nothing |
