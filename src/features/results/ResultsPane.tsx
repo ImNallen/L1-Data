@@ -117,6 +117,19 @@ function SummaryText({ summary }: { summary: Summary }) {
   );
 }
 
+/**
+ * Says the settled summary to a screen reader. It stays empty while the run ticks, so the clock is not read out and
+ * a repeat run with the same summary is heard again. The pane keys it by tab, so switching tabs reads nothing.
+ */
+function RunAnnouncement({ summary }: { summary: Summary | null }) {
+  const text = !summary || summary.tone === "running" ? "" : summary.tone === "error" ? `Query failed: ${summary.text}` : summary.text;
+  return (
+    <span data-testid="run-announcement" role="status" className="sr-only">
+      {text}
+    </span>
+  );
+}
+
 function CursorPosition() {
   const { line, col } = useWorkspace((s) => s.cursor);
   return (
@@ -335,6 +348,7 @@ export function ResultsPane({ tabId }: { tabId: TabId | null }) {
         <div className="flex-1" />
 
         {exporting ? <ExportStatus progress={exporting} /> : summary && <SummaryText summary={summary} />}
+        <RunAnnouncement key={tabId} summary={summary} />
         {tab && <CursorPosition />}
 
         <div className="flex items-center gap-0.5">
