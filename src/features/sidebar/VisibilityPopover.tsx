@@ -1,5 +1,5 @@
 import { useVirtualizer } from "@tanstack/react-virtual";
-import { IconCheck, IconSearch, IconX } from "@tabler/icons-react";
+import { CheckIcon, SearchIcon, XIcon } from "lucide-react";
 import { useCallback, useEffect, useLayoutEffect, useRef, useState, type KeyboardEvent as ReactKeyboardEvent, type ReactNode } from "react";
 import { createPortal } from "react-dom";
 import { create } from "zustand";
@@ -210,7 +210,7 @@ function Popover({ testId, trigger, title, subtitle, children }: { testId: strin
         </div>
         <div className="truncate text-ui-12 text-muted">{subtitle}</div>
         <IconButton data-testid="picker-close" aria-label="Close" onClick={close} className="absolute top-2 right-2 size-6">
-          <IconX size={15} />
+          <XIcon size={15} />
         </IconButton>
       </div>
       {children}
@@ -232,7 +232,7 @@ function Check({ checked, disabled, onChange, testId }: { checked: boolean; disa
         onChange={(e) => onChange(e.target.checked)}
         className="peer size-4 appearance-none rounded-[4px] border border-dim checked:border-run checked:bg-run"
       />
-      <IconCheck size={12} stroke={3} className="pointer-events-none absolute text-run-fg opacity-0 peer-checked:opacity-100" />
+      <CheckIcon size={12} strokeWidth={3} className="pointer-events-none absolute text-run-fg opacity-0 peer-checked:opacity-100" />
     </span>
   );
 }
@@ -274,7 +274,7 @@ function PickerBody({
   return (
     <>
       <div className="relative mx-3 shrink-0">
-        <IconSearch size={15} className="pointer-events-none absolute top-1/2 left-2.5 -translate-y-1/2 text-muted" />
+        <SearchIcon size={15} className="pointer-events-none absolute top-1/2 left-2.5 -translate-y-1/2 text-muted" />
         <input
           data-testid="picker-filter"
           data-autofocus

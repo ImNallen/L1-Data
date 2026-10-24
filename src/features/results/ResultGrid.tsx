@@ -1,24 +1,24 @@
-import {
-  IconArrowNarrowDown,
-  IconArrowNarrowUp,
-  IconArrowsHorizontal,
-  IconBinary,
-  IconBox,
-  IconBrackets,
-  IconCalendar,
-  IconCircleDot,
-  IconFilter,
-  IconFingerprint,
-  IconHash,
-  IconJson,
-  IconKeyFilled,
-  IconLetterCase,
-  IconList,
-  IconNetwork,
-  IconToggleLeft,
-  type Icon,
-} from "@tabler/icons-react";
 import { useVirtualizer } from "@tanstack/react-virtual";
+import {
+  BinaryIcon,
+  BoxIcon,
+  BracesIcon,
+  BracketsIcon,
+  CalendarIcon,
+  CaseSensitiveIcon,
+  CircleDotIcon,
+  FingerprintPatternIcon,
+  FunnelIcon,
+  HashIcon,
+  KeyRoundIcon,
+  ListIcon,
+  MoveDownIcon,
+  MoveHorizontalIcon,
+  MoveUpIcon,
+  NetworkIcon,
+  ToggleLeftIcon,
+  type LucideIcon,
+} from "lucide-react";
 import { useEffect, useImperativeHandle, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore, type KeyboardEvent, type Ref } from "react";
 import type { ColumnMeta, Density, FontSetting, ResultMeta, TypeCategory } from "../../ipc/bindings";
 import { DENSITY_FACTOR, gridRowHeight } from "../../shell/appearance";
@@ -82,25 +82,25 @@ export type GridQuery = {
   onFilterValue(column: string, value: string | null, negate: boolean): void;
 };
 
-const TYPE_ICONS: Record<TypeCategory, Icon> = {
-  Integer: IconHash,
-  Numeric: IconHash,
-  Text: IconLetterCase,
-  Bool: IconToggleLeft,
-  Temporal: IconCalendar,
-  Json: IconJson,
-  Uuid: IconFingerprint,
-  Binary: IconBinary,
-  Network: IconNetwork,
-  Array: IconBrackets,
-  Enum: IconList,
-  Composite: IconBox,
-  Range: IconArrowsHorizontal,
-  Other: IconCircleDot,
+const TYPE_ICONS: Record<TypeCategory, LucideIcon> = {
+  Integer: HashIcon,
+  Numeric: HashIcon,
+  Text: CaseSensitiveIcon,
+  Bool: ToggleLeftIcon,
+  Temporal: CalendarIcon,
+  Json: BracesIcon,
+  Uuid: FingerprintPatternIcon,
+  Binary: BinaryIcon,
+  Network: NetworkIcon,
+  Array: BracketsIcon,
+  Enum: ListIcon,
+  Composite: BoxIcon,
+  Range: MoveHorizontalIcon,
+  Other: CircleDotIcon,
 };
 
 export function HeaderIcon({ column, primaryKey }: { column: ColumnMeta; primaryKey: boolean }) {
-  if (primaryKey) return <IconKeyFilled size={HEADER_ICON} className="shrink-0 text-amber" />;
+  if (primaryKey) return <KeyRoundIcon fill="currentColor" size={HEADER_ICON} className="shrink-0 text-amber" />;
   const TypeIcon = TYPE_ICONS[column.type.category];
   return <TypeIcon size={HEADER_ICON} className="shrink-0 text-faint" />;
 }
@@ -545,7 +545,7 @@ export function ResultGrid({
                 <span className="min-w-0 truncate text-ui-12.5 font-medium">{c.name}</span>
                 {sortKey && (
                   <span data-testid={`grid-sort-${vc.index}`} className="flex shrink-0 items-center text-keyword">
-                    {sortKey.desc ? <IconArrowNarrowDown size={13} /> : <IconArrowNarrowUp size={13} />}
+                    {sortKey.desc ? <MoveDownIcon size={13} /> : <MoveUpIcon size={13} />}
                     {query!.sort.length > 1 && <span className="font-mono text-ui-10">{sortAt + 1}</span>}
                   </span>
                 )}
@@ -563,7 +563,7 @@ export function ResultGrid({
                       filtered ? "text-keyword" : "text-dim opacity-0 group-hover/header:opacity-100",
                     )}
                   >
-                    <IconFilter size={12} />
+                    <FunnelIcon size={12} />
                   </button>
                 )}
                 <div

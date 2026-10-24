@@ -1,4 +1,4 @@
-import { IconColorSwatch, IconX } from "@tabler/icons-react";
+import { SwatchBookIcon, XIcon } from "lucide-react";
 import { useEffect, useId, useState } from "react";
 import type { Appearance } from "../../ipc/bindings";
 import { previewTheme } from "../../shell/theme";
@@ -102,7 +102,7 @@ export function CreateThemePanel({ initial, onClose }: { initial: ThemeDraft; on
         </h2>
         <span className="flex-1 truncate text-ui-12 text-dim">Two colors, the rest derived</span>
         <IconButton aria-label="Close" onClick={onClose}>
-          <IconX size={15} />
+          <XIcon size={15} />
         </IconButton>
       </div>
       <div className="flex min-h-0 flex-col gap-3 overflow-auto px-4 py-3">
@@ -175,7 +175,7 @@ export function CreateThemePanel({ initial, onClose }: { initial: ThemeDraft; on
           Cancel
         </Button>
         <Button variant="primary" data-testid="create-theme-save" disabled={!name} title={name ? undefined : "Name the theme first"} onClick={() => void create()}>
-          <IconColorSwatch size={14} />
+          <SwatchBookIcon size={14} />
           Create theme
         </Button>
       </div>

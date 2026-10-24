@@ -1,4 +1,4 @@
-import { IconColorSwatch, IconCopy, IconMoon, IconPlus, IconSun, IconTrash } from "@tabler/icons-react";
+import { CopyIcon, MoonIcon, PlusIcon, SunIcon, SwatchBookIcon, Trash2Icon } from "lucide-react";
 import { useState, useSyncExternalStore } from "react";
 import type { Appearance, ColorScheme } from "../../ipc/bindings";
 import { useWorkspace } from "../../state/workspace";
@@ -67,7 +67,7 @@ const ORB_SIZES = {
 
 const orbSize = (count: number): OrbSize => (count <= 2 ? ORB_SIZES.large : count === 3 ? ORB_SIZES.medium : ORB_SIZES.small);
 
-const ORB_ICON: Record<Appearance, typeof IconSun> = { light: IconSun, dark: IconMoon };
+const ORB_ICON: Record<Appearance, typeof SunIcon> = { light: SunIcon, dark: MoonIcon };
 
 function Orb({ variant, checked, size }: { variant: ThemeVariant; checked: boolean; size: OrbSize }) {
   const { background, accent } = variant.swatch;
@@ -125,12 +125,12 @@ function ThemeCard({ family, picks, appearance, onDuplicate }: CardProps) {
       <div className="absolute top-1.5 right-1.5 flex opacity-0 transition-opacity group-focus-within:opacity-100 group-hover:opacity-100">
         {shown && (
           <IconButton aria-label={`Duplicate ${shown.name}`} title="Duplicate into a new theme" onClick={() => onDuplicate(draftOf(shown, `${shown.name} copy`))}>
-            <IconCopy size={14} />
+            <CopyIcon size={14} />
           </IconButton>
         )}
         {family.custom && (
           <IconButton aria-label={`Delete ${family.name}`} title="Delete theme" onClick={() => void confirmDeleteTheme(family)}>
-            <IconTrash size={14} />
+            <Trash2Icon size={14} />
           </IconButton>
         )}
       </div>
@@ -200,11 +200,11 @@ export function ThemesSetting() {
             className="h-7 px-2.5 text-ui-12.5"
             onClick={() => edit(draftOf(current, ""))}
           >
-            <IconColorSwatch size={14} />
+            <SwatchBookIcon size={14} />
             Create theme
           </Button>
           <Button data-testid="add-theme" className="h-7 px-2.5 text-ui-12.5" onClick={() => setAdding(true)}>
-            <IconPlus size={14} />
+            <PlusIcon size={14} />
             Add theme
           </Button>
         </div>

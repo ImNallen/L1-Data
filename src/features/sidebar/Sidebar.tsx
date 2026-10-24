@@ -1,4 +1,4 @@
-import { IconAdjustmentsHorizontal, IconChartBar, IconClock, IconPlus } from "@tabler/icons-react";
+import { ChartNoAxesColumnIcon, ClockIcon, PlusIcon, SlidersHorizontalIcon } from "lucide-react";
 import { useMemo } from "react";
 import { useCatalog } from "../../state/catalog";
 import { useLive } from "../../state/live";
@@ -77,7 +77,7 @@ function WorkspaceSidebarBody() {
           aria-label="New connection"
           onClick={() => open({ kind: "connection", editing: null })}
         >
-          <IconPlus size={17} />
+          <PlusIcon size={17} />
         </IconButton>
       </SidebarSearch>
 
@@ -90,10 +90,10 @@ function WorkspaceSidebarBody() {
           title="Settings"
           onClick={() => openSettings()}
         >
-          <IconAdjustmentsHorizontal size={16} />
+          <SlidersHorizontalIcon size={16} />
         </IconButton>
         <IconButton data-testid="open-usage" aria-label="Usage" title="Usage" onClick={() => openSettings("usage")}>
-          <IconChartBar size={16} />
+          <ChartNoAxesColumnIcon size={16} />
         </IconButton>
         <IconButton
           data-testid="open-history"
@@ -101,7 +101,7 @@ function WorkspaceSidebarBody() {
           title="Query history"
           onClick={() => open({ kind: "history" })}
         >
-          <IconClock size={16} />
+          <ClockIcon size={16} />
         </IconButton>
         <UpdateButton />
       </div>

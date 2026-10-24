@@ -1,4 +1,4 @@
-import { IconDownload, IconPlus } from "@tabler/icons-react";
+import { DownloadIcon, PlusIcon } from "lucide-react";
 import { useRef, useState, type DragEvent } from "react";
 import type { ThemeFamilyDraft } from "../../themes/catalog";
 import { parseThemeFile } from "../../themes/importers";
@@ -74,7 +74,7 @@ export function AddThemeDialog({ open, onOpenChange }: { open: boolean; onOpenCh
             <span className="block text-ui-12 text-dim">Drop L1 or VS Code .json files</span>
           </div>
           <Button onClick={() => picker.current?.click()}>
-            <IconDownload size={14} />
+            <DownloadIcon size={14} />
             Choose files
           </Button>
           <input
@@ -121,7 +121,7 @@ export function AddThemeDialog({ open, onOpenChange }: { open: boolean; onOpenCh
             Cancel
           </Button>
           <Button variant="primary" data-testid="add-theme-save" disabled={!json.trim()} onClick={() => void importJson()}>
-            <IconPlus size={14} />
+            <PlusIcon size={14} />
             Add theme
           </Button>
         </div>

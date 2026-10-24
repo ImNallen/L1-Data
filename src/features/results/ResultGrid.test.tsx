@@ -9,7 +9,7 @@ import { gridEditing, gridKeyColumns, HeaderIcon, nextFocus, primaryKeyColumns, 
 
 const iconOf = (category: TypeCategory, primaryKey = false) => {
   const html = renderToStaticMarkup(<HeaderIcon column={{ name: "c", type: { display: "t", category }, source: null }} primaryKey={primaryKey} />);
-  return html.match(/tabler-icon-([a-z-]+)/)?.[1];
+  return html.match(/lucide-([a-z-]+)/)?.[1];
 };
 
 it("marks each column with an icon for its type", () => {
@@ -17,23 +17,23 @@ it("marks each column with an icon for its type", () => {
   expect(categories.map((c) => iconOf(c))).toEqual([
     "hash",
     "hash",
-    "letter-case",
+    "case-sensitive",
     "toggle-left",
     "calendar",
-    "json",
-    "fingerprint",
+    "braces",
+    "fingerprint-pattern",
     "binary",
     "network",
     "brackets",
     "list",
     "box",
-    "arrows-horizontal",
+    "move-horizontal",
     "circle-dot",
   ]);
 });
 
 it("shows the key instead of the type on a primary key column", () => {
-  expect(iconOf("Integer", true)).toBe("key-filled");
+  expect(iconOf("Integer", true)).toBe("key-round");
 });
 
 it("looks primary keys up in the catalog of the database the rows came from", () => {

@@ -1,4 +1,4 @@
-import { IconAlertTriangle, IconDownload, IconRefresh, IconRotateClockwise } from "@tabler/icons-react";
+import { DownloadIcon, RefreshCwIcon, RotateCwIcon, TriangleAlertIcon } from "lucide-react";
 import { useLive } from "../../state/live";
 import { cx, IconButton, Spinner } from "../../ui/primitives";
 import { useNow } from "../../ui/useNow";
@@ -30,17 +30,17 @@ function ProgressRing({ percent }: { percent: number | null }) {
 function Glyph({ view }: { view: UpdateButtonView }) {
   switch (view.glyph) {
     case "check":
-      return <IconRefresh size={16} />;
+      return <RefreshCwIcon size={16} />;
     case "spinner":
       return <Spinner />;
     case "available":
-      return <IconDownload size={16} />;
+      return <DownloadIcon size={16} />;
     case "ring":
       return <ProgressRing percent={view.percent} />;
     case "restart":
-      return <IconRotateClockwise size={16} />;
+      return <RotateCwIcon size={16} />;
     case "error":
-      return <IconAlertTriangle size={16} className="text-amber" />;
+      return <TriangleAlertIcon size={16} className="text-amber" />;
     default: {
       const unreachable: never = view.glyph;
       return unreachable;

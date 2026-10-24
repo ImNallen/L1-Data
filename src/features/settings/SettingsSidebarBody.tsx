@@ -1,4 +1,4 @@
-import { IconArrowLeft } from "@tabler/icons-react";
+import { ArrowLeftIcon } from "lucide-react";
 import { useWorkspace } from "../../state/workspace";
 import { cx, Kbd } from "../../ui/primitives";
 import { parseQuery } from "../../ui/textMatch";
@@ -59,7 +59,7 @@ export function SettingsSidebarBody({ section, query }: { section: SettingsSecti
           onClick={closeSettings}
           className="flex h-7 w-full items-center gap-2 rounded-md px-2 text-ui-13.5 text-muted hover:bg-hover hover:text-fg"
         >
-          <IconArrowLeft size={16} />
+          <ArrowLeftIcon size={16} />
           Back
         </button>
       </div>

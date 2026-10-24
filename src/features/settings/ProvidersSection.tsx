@@ -1,4 +1,4 @@
-import { IconArrowBackUp, IconInfoCircle, IconMinus, IconPlus, IconRefresh } from "@tabler/icons-react";
+import { InfoIcon, MinusIcon, PlusIcon, RefreshCwIcon, Undo2Icon } from "lucide-react";
 import { useState, type ReactNode } from "react";
 import { commands, type ProviderConfig, type ProviderInfo, type ProviderKind, type ProviderState } from "../../ipc/bindings";
 import { useLive } from "../../state/live";
@@ -141,7 +141,7 @@ function ProviderDetail({ config, state }: { config: ProviderConfig; state: Prov
           disabled={sameConfig(config, defaults)}
           onClick={() => saveProvider(kind, defaults)}
         >
-          <IconArrowBackUp size={14} />
+          <Undo2Icon size={14} />
         </IconButton>
       </div>
       <div className="rounded-xl border border-control">
@@ -218,7 +218,7 @@ export function ProviderListSetting() {
           onClick={() => void commands.providerRefresh()}
           className="inline-flex h-6 items-center gap-1.5 rounded-md px-1.5 text-ui-12 text-dim transition-colors hover:bg-hover hover:text-fg"
         >
-          <IconRefresh size={13} className={cx(checking && "animate-spin")} />
+          <RefreshCwIcon size={13} className={cx(checking && "animate-spin")} />
           <span data-testid="providers-checked">{checkedAgo(known, now)}</span>
         </button>
       </div>
@@ -258,7 +258,7 @@ function SecondsStepper({ id, value }: { id: string; value: number }) {
     <>
       <div className="flex h-8 items-stretch overflow-hidden rounded-lg border border-control">
         <button type="button" aria-label={`${STEP_SECS} seconds less`} disabled={value === 0} className={step} onClick={() => save(value - STEP_SECS)}>
-          <IconMinus size={14} />
+          <MinusIcon size={14} />
         </button>
         <input
           id={id}
@@ -277,7 +277,7 @@ function SecondsStepper({ id, value }: { id: string; value: number }) {
           }}
         />
         <button type="button" aria-label={`${STEP_SECS} seconds more`} className={step} onClick={() => save(value + STEP_SECS)}>
-          <IconPlus size={14} />
+          <PlusIcon size={14} />
         </button>
       </div>
       <span className="text-ui-13 text-dim">seconds</span>
@@ -293,7 +293,7 @@ export function HealthCheckSetting() {
       labelFor="setting-provider-health-check"
       extra={
         <span title="Each check asks the CLI for its version and sign-in. It never starts a chat." className="text-faint">
-          <IconInfoCircle size={13} />
+          <InfoIcon size={13} />
         </span>
       }
       hint="Refresh provider status, versions and models in the background. Set to 0 to turn it off."

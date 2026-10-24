@@ -1,4 +1,4 @@
-import { IconSearch, IconX } from "@tabler/icons-react";
+import { SearchIcon, XIcon } from "lucide-react";
 import { useEffect, useRef, useState, type KeyboardEvent, type ReactNode } from "react";
 import { useWorkspace } from "../../state/workspace";
 import { cx, IconButton, Kbd } from "../../ui/primitives";
@@ -49,7 +49,7 @@ export function SidebarSearch({
           focused ? "border-accent-border" : "border-transparent hover:bg-hover",
         )}
       >
-        <IconSearch size={15} className="shrink-0" />
+        <SearchIcon size={15} className="shrink-0" />
         <input
           ref={input}
           data-testid={testId}
@@ -78,7 +78,7 @@ export function SidebarSearch({
                 input.current?.focus();
               }}
             >
-              <IconX size={13} />
+              <XIcon size={13} />
             </IconButton>
           </>
         ) : (

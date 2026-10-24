@@ -1,25 +1,25 @@
 import {
-  IconBolt,
-  IconBraces,
-  IconChecks,
-  IconChevronRight,
-  IconClock,
-  IconDatabase,
-  IconEqual,
-  IconEye,
-  IconFilter2,
-  IconHash,
-  IconKey,
-  IconLetterT,
-  IconLink,
-  IconList,
-  IconPoint,
-  IconStack2,
-  IconSum,
-  IconTable,
-  IconToggleLeft,
-  type Icon,
-} from "@tabler/icons-react";
+  BracesIcon,
+  CheckCheckIcon,
+  ChevronRightIcon,
+  CircleSmallIcon,
+  ClockIcon,
+  DatabaseIcon,
+  EqualIcon,
+  EyeIcon,
+  HashIcon,
+  KeyIcon,
+  LayersIcon,
+  LinkIcon,
+  ListFilterIcon,
+  ListIcon,
+  SigmaIcon,
+  TableIcon,
+  ToggleLeftIcon,
+  TypeIcon,
+  ZapIcon,
+  type LucideIcon,
+} from "lucide-react";
 import { Fragment, useCallback, useEffect, useRef, useState, type ReactNode } from "react";
 import {
   commands,
@@ -136,7 +136,7 @@ function Row({
         className={cx("shrink-0 place-items-center self-stretch text-muted", expandable || keepChevronSpace ? "grid w-3.5" : "hidden")}
       >
         {expandable && (
-          <IconChevronRight
+          <ChevronRightIcon
             size={14}
             className={cx("transition-transform duration-100", open && "rotate-90", quietChevron && !open && "invisible group-hover:visible")}
           />
@@ -178,17 +178,17 @@ function Count({ children }: { children: ReactNode }) {
   return <span className="shrink-0 pl-2 text-ui-11.5 text-muted tabular-nums">{children}</span>;
 }
 
-const COLUMN_GLYPHS: Partial<Record<TypeCategory, Icon>> = {
-  Integer: IconHash,
-  Numeric: IconSum,
-  Text: IconLetterT,
-  Enum: IconList,
-  Bool: IconToggleLeft,
-  Json: IconBraces,
-  Temporal: IconClock,
+const COLUMN_GLYPHS: Partial<Record<TypeCategory, LucideIcon>> = {
+  Integer: HashIcon,
+  Numeric: SigmaIcon,
+  Text: TypeIcon,
+  Enum: ListIcon,
+  Bool: ToggleLeftIcon,
+  Json: BracesIcon,
+  Temporal: ClockIcon,
 };
 
-const glyph = (Glyph: Icon, className = "text-muted") => <Glyph size={14} className={className} />;
+const glyph = (Glyph: LucideIcon, className = "text-muted") => <Glyph size={14} className={className} />;
 
 /** A detail row's name in mono, with marks after it that stay visible when the name is cut. */
 function DetailName({ name, marks }: { name: ReactNode; marks?: ReactNode }) {
@@ -207,8 +207,8 @@ function Trailing({ children }: { children: string }) {
 function ColumnRow({ path, depth, column, ranges }: { path: string; depth: number; column: ColumnInfo; ranges?: readonly TextRange[] }) {
   const marks = (
     <>
-      {column.pk && <IconKey size={13} className="shrink-0 text-amber" />}
-      {column.fk && <IconLink size={13} className="shrink-0 text-badge" />}
+      {column.pk && <KeyIcon size={13} className="shrink-0 text-amber" />}
+      {column.fk && <LinkIcon size={13} className="shrink-0 text-badge" />}
     </>
   );
   return (
@@ -216,7 +216,7 @@ function ColumnRow({ path, depth, column, ranges }: { path: string; depth: numbe
       path={`${path}/${column.name}`}
       depth={depth}
       expandable={false}
-      icon={glyph(COLUMN_GLYPHS[column.category] ?? IconPoint)}
+      icon={glyph(COLUMN_GLYPHS[column.category] ?? CircleSmallIcon)}
       label={<DetailName name={<Highlight text={column.name} ranges={ranges} />} marks={marks} />}
       trailing={<Trailing>{columnType(column)}</Trailing>}
     />
@@ -224,10 +224,10 @@ function ColumnRow({ path, depth, column, ranges }: { path: string; depth: numbe
 }
 
 const KEY_GLYPHS: Record<KeyKind["kind"], ReactNode> = {
-  Primary: glyph(IconKey, "text-amber"),
-  Foreign: glyph(IconLink, "text-badge"),
-  Unique: glyph(IconKey),
-  Check: glyph(IconChecks),
+  Primary: glyph(KeyIcon, "text-amber"),
+  Foreign: glyph(LinkIcon, "text-badge"),
+  Unique: glyph(KeyIcon),
+  Check: glyph(CheckCheckIcon),
 };
 
 function TextRow({ path, depth, icon, name, text }: { path: string; depth: number; icon: ReactNode; name: string; text: RowText }) {
@@ -271,7 +271,7 @@ function detailGroups(path: string, depth: number, schema: string, rel: Relation
             path={at("defaults", d.column)}
             depth={depth}
             expandable={false}
-            icon={glyph(IconEqual)}
+            icon={glyph(EqualIcon)}
             label={<DetailName name={d.column} />}
             trailing={<Trailing>{defaultText(d.value)}</Trailing>}
           />
@@ -291,14 +291,14 @@ function detailGroups(path: string, depth: number, schema: string, rel: Relation
       label: "Indexes",
       count: detail.indexes.length,
       rows: () =>
-        detail.indexes.map((i) => <TextRow key={i.name} path={at("indexes", i.name)} depth={depth} icon={glyph(IconFilter2)} name={i.name} text={indexText(i)} />),
+        detail.indexes.map((i) => <TextRow key={i.name} path={at("indexes", i.name)} depth={depth} icon={glyph(ListFilterIcon)} name={i.name} text={indexText(i)} />),
     },
     {
       id: "triggers",
       label: "Triggers",
       count: detail.triggers.length,
       rows: () =>
-        detail.triggers.map((t) => <TextRow key={t.name} path={at("triggers", t.name)} depth={depth} icon={glyph(IconBolt)} name={t.name} text={triggerText(t)} />),
+        detail.triggers.map((t) => <TextRow key={t.name} path={at("triggers", t.name)} depth={depth} icon={glyph(ZapIcon)} name={t.name} text={triggerText(t)} />),
     },
   ];
   return [columns, ...rest.filter((g) => g.count !== 0)];
@@ -352,7 +352,7 @@ function useIsSelected(db: DatabaseRef, schema: string, rel: Relation): boolean 
   return useWorkspace((s) => sameDb(s.selected?.db, db) && s.selected?.schema === schema && s.selected.relation === rel.name);
 }
 
-const relationIcon = (rel: Relation) => (isViewKind(rel.kind) ? <IconEye size={15} className="text-muted" /> : <IconTable size={15} className="text-muted" />);
+const relationIcon = (rel: Relation) => (isViewKind(rel.kind) ? <EyeIcon size={15} className="text-muted" /> : <TableIcon size={15} className="text-muted" />);
 
 function RelationRow({
   path,
@@ -497,7 +497,7 @@ export function SchemaNode({
         expandable
         open={open}
         onClick={() => expanded.toggle(me)}
-        icon={<IconStack2 size={15} className="text-muted" />}
+        icon={<LayersIcon size={15} className="text-muted" />}
         label={schema.name}
         contextMenu={<NewMenu db={db} />}
         trailing={<Count>{schema.tableCount}</Count>}
@@ -511,7 +511,7 @@ export function SchemaNode({
             <Group
               path={`${me}/#functions`}
               depth={depth + 1}
-              icon={<IconBraces size={14} className="text-muted" />}
+              icon={<BracesIcon size={14} className="text-muted" />}
               label="Functions"
               count={schema.functions.length}
               expanded={expanded}
@@ -577,7 +577,7 @@ function DatabaseNode({ path, db, state, expanded }: { path: string; db: Databas
         open={open}
         active={picking}
         onClick={() => expanded.toggle(me)}
-        icon={<IconDatabase size={15} className="text-muted" />}
+        icon={<DatabaseIcon size={15} className="text-muted" />}
         label={db.database}
         contextMenu={<NewMenu db={db} />}
         trailing={count && <PickerPill target={target} count={count} active={picking} testId={`schema-pill-${me}`} />}
@@ -809,14 +809,14 @@ export function FilteredSchemaNode({ path, db, match, expanded }: { path: string
   const functions = `${me}/#functions`;
   return (
     <>
-      <FoldRow path={me} depth={2} icon={<IconStack2 size={15} className="text-muted" />} label={match.name} expanded={expanded} />
+      <FoldRow path={me} depth={2} icon={<LayersIcon size={15} className="text-muted" />} label={match.name} expanded={expanded} />
       {expanded.has(me) && (
         <>
           {match.relations.map((r) => (
             <FilteredRelationNode key={r.rel.oid} path={me} db={db} schema={match.name} match={r} expanded={expanded} />
           ))}
           {match.functions.length > 0 && (
-            <FoldRow path={functions} depth={3} icon={<IconBraces size={14} className="text-muted" />} label="Functions" expanded={expanded} />
+            <FoldRow path={functions} depth={3} icon={<BracesIcon size={14} className="text-muted" />} label="Functions" expanded={expanded} />
           )}
           {expanded.has(functions) && match.functions.map((f) => <FunctionRow key={f.fn.oid} path={functions} depth={4} db={db} fn={f.fn} ranges={f.ranges} />)}
         </>
@@ -856,7 +856,7 @@ function FilteredTree({ filter, query }: { filter: TreeFilter; query: string }) 
           const path = `${config.name}/${db.database}`;
           return (
             <Fragment key={db.database}>
-              <FoldRow path={path} depth={1} icon={<IconDatabase size={15} className="text-muted" />} label={db.database} expanded={expanded} />
+              <FoldRow path={path} depth={1} icon={<DatabaseIcon size={15} className="text-muted" />} label={db.database} expanded={expanded} />
               {expanded.has(path) && schemas.map((s) => <FilteredSchemaNode key={s.name} path={path} db={db} match={s} expanded={expanded} />)}
             </Fragment>
           );

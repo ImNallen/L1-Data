@@ -1,5 +1,5 @@
 import * as Menu from "@radix-ui/react-dropdown-menu";
-import { IconHistory, IconTrash } from "@tabler/icons-react";
+import { HistoryIcon, Trash2Icon } from "lucide-react";
 import { useMemo } from "react";
 import type { ChatState } from "../../ipc/bindings";
 import { useLive } from "../../state/live";
@@ -45,7 +45,7 @@ function HistoryItem({ chat, current, now }: { chat: ChatState; current: boolean
           void confirmDeleteChat(chat);
         }}
       >
-        <IconTrash size={13} />
+        <Trash2Icon size={13} />
       </IconButton>
     </Menu.Item>
   );
@@ -62,7 +62,7 @@ export function ChatHistory() {
     <Menu.Root modal={false}>
       <Menu.Trigger asChild>
         <IconButton data-testid="assistant-history" aria-label={label} title={label} className="relative">
-          <IconHistory size={16} />
+          <HistoryIcon size={16} />
           {waiting && (
             <span data-testid="assistant-history-waiting" className="absolute top-1 right-1 flex">
               <StatusDot tone="pending" />

@@ -1,5 +1,5 @@
 import * as Menu from "@radix-ui/react-dropdown-menu";
-import { IconChevronDown, IconX } from "@tabler/icons-react";
+import { ChevronDownIcon, XIcon } from "lucide-react";
 import { useEffect, useState } from "react";
 import type { ColumnFilter, FilterOp, TableQuery } from "../../ipc/bindings";
 import { isFiltered, type TableTab } from "../../state/workspace";
@@ -43,7 +43,7 @@ function FilterChip({
           className="inline-flex h-5 items-center gap-0.5 rounded px-1 text-keyword outline-none hover:bg-hover data-[state=open]:bg-hover"
         >
           {FILTER_OPS.find((o) => o.op === op)?.label}
-          <IconChevronDown size={11} className="text-dim" />
+          <ChevronDownIcon size={11} className="text-dim" />
         </Menu.Trigger>
         <MenuContent>
           {FILTER_OPS.map((o) => (
@@ -77,7 +77,7 @@ function FilterChip({
         />
       )}
       <IconButton aria-label={`Remove ${filter.column} filter`} className="size-5" onClick={onRemove}>
-        <IconX size={12} />
+        <XIcon size={12} />
       </IconButton>
     </div>
   );

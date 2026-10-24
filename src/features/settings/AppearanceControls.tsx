@@ -1,4 +1,4 @@
-import { IconArrowBackUp, IconSelector } from "@tabler/icons-react";
+import { ChevronsUpDownIcon, Undo2Icon } from "lucide-react";
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { Density, FontSetting } from "../../ipc/bindings";
 import { gridRowHeight } from "../../shell/appearance";
@@ -54,7 +54,7 @@ export function Select({ testId, label, value, options, onChange, className, dis
           </option>
         ))}
       </select>
-      <IconSelector size={14} className="pointer-events-none absolute top-1/2 right-2 -translate-y-1/2 text-dim" />
+      <ChevronsUpDownIcon size={14} className="pointer-events-none absolute top-1/2 right-2 -translate-y-1/2 text-dim" />
     </div>
   );
 }
@@ -225,7 +225,7 @@ export function PanelMotionSetting() {
             className="size-5"
             onClick={() => void savePanelMotion(motionDefault)}
           >
-            <IconArrowBackUp size={13} />
+            <Undo2Icon size={13} />
           </IconButton>
         )
       }
