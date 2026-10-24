@@ -147,7 +147,8 @@ it("marks a Production or Staging connection's row and leaves a Local one plain"
     },
   });
   render(<Sidebar hosted={null} />);
-  expect(screen.getByTestId("env-chip-prod").textContent).toBe("Production");
+  expect(screen.getByTestId("env-chip-prod").textContent).toBe("Prod");
+  expect(screen.getByTestId("env-chip-prod").title).toBe("Production");
   expect(screen.getByTestId("env-chip-stage").textContent).toBe("Staging");
   expect(screen.queryByTestId("env-chip-local")).toBeNull();
 });

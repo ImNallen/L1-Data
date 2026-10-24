@@ -770,11 +770,11 @@ function ConnectionNode({ config, expanded, revealed }: { config: ConnectionConf
           </span>
         }
         label={
-          <>
-            <span className={cx("font-medium", tone === "off" && "text-muted")}>{config.name}</span>
-            {!tinted && <ConnectionColorDot color={config.color} className="ml-1.5 align-middle" />}
-            <EnvironmentChip environment={config.environment} testId={`env-chip-${config.name}`} className="ml-1.5 align-middle" />
-          </>
+          <span className="flex min-w-0 items-center">
+            <span className={cx("truncate font-medium", tone === "off" && "text-muted")}>{config.name}</span>
+            {!tinted && <ConnectionColorDot color={config.color} className="ml-1.5" />}
+            <EnvironmentChip environment={config.environment} short testId={`env-chip-${config.name}`} className="ml-1.5" />
+          </span>
         }
         trailing={<ConnectionTrailing config={config} tone={tone} instance={instance} target={target} active={picking} />}
         contextMenu={<ConnectionMenu config={config} shown={instance && shown.map((d) => ({ connectionId: config.id, database: d.name }))} />}

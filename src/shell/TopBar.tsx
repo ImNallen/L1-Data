@@ -109,7 +109,12 @@ export function TopBar({ hosted }: { hosted: HostedWindow | null }) {
             <span className="truncate">{config?.name ?? ""}</span>
           </span>
         )}
-        <EnvironmentChip environment={environment} className="ml-1.5" />
+        <span className="contents @max-[720px]:hidden">
+          <EnvironmentChip environment={environment} className="ml-1.5" />
+        </span>
+        <span className="hidden @max-[720px]:contents">
+          <EnvironmentChip environment={environment} short testId="env-chip-short" className="ml-1.5" />
+        </span>
         {tab && (
           <div className="flex min-w-0 flex-1 items-center overflow-hidden">
             {db && config && (
@@ -118,7 +123,7 @@ export function TopBar({ hosted }: { hosted: HostedWindow | null }) {
                 <DatabaseMenu tab={tab} db={db} />
               </>
             )}
-            <div className="flex min-w-0 flex-1 items-center overflow-hidden">
+            <div className="flex min-w-0 flex-1 items-center overflow-hidden @max-[640px]:hidden">
               <Separator />
               <span data-testid="tab-title" className="truncate text-ui-14 text-muted">{tab.title}</span>
             </div>
@@ -163,10 +168,10 @@ export function TopBar({ hosted }: { hosted: HostedWindow | null }) {
       )}
 
       {tab && (
-        // Below 640px the run target needs the room, and ⌘⌥L still formats.
-        <Button data-testid="format-btn" title="Format the selection or the marked statement (⌘⌥L)" className="@max-[640px]:hidden" onClick={() => void formatActive()}>
+        // The run target needs the room: below 900px Format keeps only its icon, below 640px it hides, and ⌘⌥L still formats.
+        <Button data-testid="format-btn" title="Format the selection or the marked statement (⌘⌥L)" className="@max-[900px]:px-2.5 @max-[640px]:hidden" onClick={() => void formatActive()}>
           <ListIndentIncreaseIcon size={14} className="text-muted" />
-          Format
+          <span className="@max-[900px]:sr-only">Format</span>
         </Button>
       )}
 
