@@ -1,7 +1,7 @@
 import { undo } from "@codemirror/commands";
 import { mockIPC } from "@tauri-apps/api/mocks";
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
-import type { ApplyError, ConsoleState, DatabaseKind, Settings, TableQuery, TableScript, TabSnapshot } from "../../ipc/bindings";
+import type { ApplyError, ConnectionConfig, ConsoleState, DatabaseKind, DocRange, Environment, Settings, TableQuery, TableScript, TabSnapshot } from "../../ipc/bindings";
 import { connectionConfig } from "../../testing/connections";
 import { shopCatalog } from "../../testing/shopCatalog";
 import { buildCatalogView, useCatalog } from "../../state/catalog";
@@ -11,7 +11,7 @@ import { markDeleted, pendingCount, setCell, useTableEdits } from "../../state/t
 import { useWorkspace, workspaceSnapshot } from "../../state/workspace";
 import { gridEditing } from "../results/ResultGrid";
 import { dropEditor, editorStateOf, insertAtCursor, moveCursor, seedEditor, textOf } from "./editorStates";
-import { browseTemplate, formatActive, lastTablePage, loadTableOnce, openTableTab, saveSettings, setTabMode, setTabTarget, runOrChoose, openSqlTab, isBrowsing, submitEdits, cancelActive, installRunBehavior, setTablePage, updateTableQuery } from "./runActions";
+import { browseTemplate, formatActive, lastTablePage, loadTableOnce, openTableTab, saveSettings, setTabMode, setTabTarget, runActive, runOrChoose, openSqlTab, isBrowsing, submitEdits, cancelActive, installRunBehavior, setTablePage, updateTableQuery } from "./runActions";
 
 afterEach(() => {
   vi.unstubAllGlobals();
@@ -689,5 +689,110 @@ describe("pages during an exact count", () => {
       expect(cancelActive()).toBe(false);
     }
     expect(requests).toEqual([]);
+  });
+});
+
+describe("a run on a Production connection", () => {
+  const SCRIPT = "update orders set n = 1;\nselect 1;\ndelete from orders;";
+  const BOTH: DocRange[] = [{ from: 0, to: 23 }, { from: 35, to: 53 }];
+
+  function connection(environment: Environment | null, patch: Partial<ConnectionConfig> = {}) {
+    useWorkspace.setState({ configs: { prod: { ...connectionConfig("prod", "prod-postgres"), environment, ...patch } } });
+  }
+
+  function record(writes: DocRange[]) {
+    const calls: { cmd: string; args: unknown }[] = [];
+    mockIPC((cmd, args) => {
+      calls.push({ cmd, args });
+      if (cmd === "script_writes") return writes;
+      if (cmd === "script_outline") return { statements: BOTH, atCursor: 0, unitKind: "Statement" };
+      if (cmd === "console_run") return { runId: 1, statements: [] };
+      if (cmd === "table_script") return ordersScript;
+      return null;
+    });
+    const sent = (cmd: string) => calls.filter((c) => c.cmd === cmd).map((c) => c.args);
+    return { calls, sent };
+  }
+
+  const question = () => {
+    const overlay = useWorkspace.getState().overlay;
+    return overlay.kind === "ask" ? overlay : null;
+  };
+
+  it("asks first, then runs the text and target it checked", async () => {
+    connection("Production");
+    const id = openSqlTab({ db: { connectionId: "prod", database: "shop" }, text: SCRIPT });
+    const { sent } = record(BOTH);
+    runActive({ kind: "all" });
+    await vi.waitFor(() => expect(question()).not.toBeNull());
+    expect(question()).toMatchObject({ testId: "confirm", title: "Run 2 writes on Production?", body: "This run sends 2 statements that write to prod-postgres / shop." });
+    expect(question()?.choices).toEqual([{ id: "btn", label: "Run writes", variant: "danger" }]);
+    expect(sent("console_run")).toEqual([]);
+    useWorkspace.getState().answer("btn");
+    await vi.waitFor(() => expect(sent("console_run")).toHaveLength(1));
+    expect(sent("script_writes")).toEqual([{ text: SCRIPT, target: { kind: "all" }, databaseKind: "Postgres" }]);
+    expect(sent("console_run")).toEqual([{ tabId: id, request: { kind: "script", text: SCRIPT, target: { kind: "all" } } }]);
+  });
+
+  it("runs nothing when ⌘↵'s question is cancelled", async () => {
+    connection("Production");
+    openSqlTab({ db: { connectionId: "prod", database: "shop" }, text: SCRIPT });
+    const { sent } = record([BOTH[0]!]);
+    void runOrChoose();
+    await vi.waitFor(() => expect(question()?.title).toBe("Run 1 write on Production?"));
+    expect(sent("script_writes")).toEqual([{ text: SCRIPT, target: { kind: "cursor", offset: 0 }, databaseKind: "Postgres" }]);
+    useWorkspace.getState().close();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(sent("console_run")).toEqual([]);
+    expect(useWorkspace.getState().overlay.kind).toBe("none");
+  });
+
+  it("names a SQL Server batch", async () => {
+    connection("Production", { name: "prod-mssql", databaseKind: "SqlServer" });
+    openSqlTab({ db: { connectionId: "prod", database: "master" }, text: "EXEC dbo.purge" });
+    record([{ from: 0, to: 14 }]);
+    runActive({ kind: "all" });
+    await vi.waitFor(() => expect(question()?.body).toBe("This run sends 1 batch that writes to prod-mssql / master."));
+  });
+
+  it("runs without asking when the run writes nothing", async () => {
+    connection("Production");
+    openSqlTab({ db: { connectionId: "prod", database: "shop" }, text: "select 1" });
+    const { sent } = record([]);
+    runActive({ kind: "all" });
+    await vi.waitFor(() => expect(sent("console_run")).toHaveLength(1));
+    expect(sent("script_writes")).toHaveLength(1);
+    expect(question()).toBeNull();
+  });
+
+  it.each([null, "Local", "Staging"] satisfies (Environment | null)[])("runs a write on a %s connection without checking", async (environment) => {
+    connection(environment);
+    openSqlTab({ db: { connectionId: "prod", database: "shop" }, text: SCRIPT });
+    const { sent } = record(BOTH);
+    runActive({ kind: "all" });
+    await vi.waitFor(() => expect(sent("console_run")).toHaveLength(1));
+    expect(sent("script_writes")).toEqual([]);
+    expect(question()).toBeNull();
+  });
+
+  it("loads a table page without checking", async () => {
+    connection("Production");
+    const { sent } = record(BOTH);
+    await openTableTab({ db: { connectionId: "prod", database: "shop" }, schema: "public", relation: "orders" });
+    setTablePage(useWorkspace.getState().active!, 1);
+    await vi.waitFor(() => expect(sent("console_run")).toHaveLength(1));
+    expect(sent("script_writes")).toEqual([]);
+  });
+
+  it("drops the run when the tab's target changes while it asks", async () => {
+    connection("Production");
+    const id = openSqlTab({ db: { connectionId: "prod", database: "shop" }, text: SCRIPT });
+    const { sent } = record(BOTH);
+    runActive({ kind: "all" });
+    await vi.waitFor(() => expect(question()).not.toBeNull());
+    useWorkspace.getState().patchConsole(id, { db: { connectionId: "prod", database: "reporting" } });
+    useWorkspace.getState().answer("btn");
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(sent("console_run")).toEqual([]);
   });
 });
