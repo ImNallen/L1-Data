@@ -34,32 +34,32 @@ function onConnection(environment: Environment | null, txn: TxnState = "Idle"): 
 }
 
 const header = (html: string) => html.slice(0, html.indexOf(">") + 1);
-const chip = (html: string) => html.match(/<span data-testid="env-chip" class="([^"]*)">([^<]*)</)?.slice(1);
+const icon = (html: string) => html.match(/<span data-testid="env-icon" role="img" aria-label="([^"]*)" title="[^"]*" class="([^"]*)">/)?.slice(1);
 
-it("marks Production with a danger chip and a danger hairline under the bar", () => {
+it("marks Production with a danger icon and a danger hairline under the bar", () => {
   const html = onConnection("Production");
-  expect(chip(html)?.[1]).toBe("Production");
-  expect(chip(html)?.[0]).toMatch(/\btext-danger\b/);
+  expect(icon(html)?.[0]).toBe("Production");
+  expect(icon(html)?.[1]).toMatch(/\btext-danger\b/);
   expect(header(html)).toMatch(/\bborder-b-2\b[^"]*\bborder-danger\b/);
 });
 
-it("marks Staging with an amber chip and no hairline", () => {
+it("marks Staging with an amber icon and no hairline", () => {
   const html = onConnection("Staging");
-  expect(chip(html)?.[1]).toBe("Staging");
-  expect(chip(html)?.[0]).toMatch(/\btext-amber\b/);
+  expect(icon(html)?.[0]).toBe("Staging");
+  expect(icon(html)?.[1]).toMatch(/\btext-amber\b/);
   expect(header(html)).not.toContain("border-danger");
 });
 
 it.each(["Local", null] satisfies (Environment | null)[])("draws no marker for a %s connection", (environment) => {
   const html = onConnection(environment);
-  expect(html).not.toContain('data-testid="env-chip"');
+  expect(html).not.toContain('data-testid="env-icon"');
   expect(header(html)).not.toContain("border-danger");
 });
 
-it("reads the run target as connection, environment, database, then tab title", () => {
+it("reads the run target as connection, then the environment icon and database, then tab title", () => {
   const html = onConnection("Production");
   const at = (pattern: RegExp) => html.search(pattern);
-  const order = [at(/data-testid="tab-connection"[^>]*>(<[^>]*>)*prod-postgres</), at(/data-testid="env-chip"/), at(/data-testid="tab-database"[^>]*>(<[^>]*>)*shop</), at(/data-testid="tab-title"[^>]*>Query 3</)];
+  const order = [at(/data-testid="tab-connection"[^>]*>(<[^>]*>)*prod-postgres</), at(/data-testid="tab-database"/), at(/data-testid="env-icon"/), at(/>shop</), at(/data-testid="tab-title"[^>]*>Query 3</)];
   expect(order.every((i) => i >= 0)).toBe(true);
   expect([...order].sort((a, b) => a - b)).toEqual(order);
 });

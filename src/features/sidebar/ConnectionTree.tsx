@@ -57,7 +57,7 @@ import {
 } from "../../ui/primitives";
 import type { TextRange } from "../../ui/textMatch";
 import { connect, confirmDelete, disconnect, refreshCatalog, refreshConnection } from "../connections/connectionActions";
-import { ConnectionColorDot, EnvironmentChip, connectionColor } from "../connections/connectionColors";
+import { ConnectionColorDot, EnvironmentIcon, connectionColor } from "../connections/connectionColors";
 import { insertAtCursor } from "../editor/editorStates";
 import { openSqlTab, openTableTab } from "../editor/runActions";
 import { columnType, defaultText, indexText, keyText, triggerText, type RowText } from "./detailText";
@@ -773,7 +773,7 @@ function ConnectionNode({ config, expanded, revealed }: { config: ConnectionConf
           <span className="flex min-w-0 items-center">
             <span className={cx("truncate font-medium", tone === "off" && "text-muted")}>{config.name}</span>
             {!tinted && <ConnectionColorDot color={config.color} className="ml-1.5" />}
-            <EnvironmentChip environment={config.environment} short testId={`env-chip-${config.name}`} className="ml-1.5" />
+            <EnvironmentIcon environment={config.environment} size={13} testId={`env-icon-${config.name}`} className="ml-1.5" />
           </span>
         }
         trailing={<ConnectionTrailing config={config} tone={tone} instance={instance} target={target} active={picking} />}

@@ -1,3 +1,4 @@
+import { FlaskConicalIcon, ShieldAlertIcon, type LucideIcon } from "lucide-react";
 import type { Environment } from "../../ipc/bindings";
 import { cx } from "../../ui/primitives";
 
@@ -27,20 +28,20 @@ export function ConnectionColorDot({ color, className }: { color: string | null;
   return <span aria-hidden className={cx("inline-block size-2 shrink-0 rounded-full", className)} style={{ backgroundColor: hex }} />;
 }
 
-/** Local and an unset environment draw nothing, so a chip always means a shared server. A 6% fill keeps the label at
- * 4.5:1 in L1 Light. */
-const ENVIRONMENT_CHIP: Record<Environment, { look: string; short: string } | null> = {
+/** Local and an unset environment draw nothing, so an icon always means a shared server. The shape differs as well as
+ * the color, so the two stay apart without color vision. */
+const ENVIRONMENT_ICON: Record<Environment, { Icon: LucideIcon; tone: string } | null> = {
   Local: null,
-  Staging: { look: "bg-amber/6 text-amber", short: "Staging" },
-  Production: { look: "bg-danger/6 text-danger", short: "Prod" },
+  Staging: { Icon: FlaskConicalIcon, tone: "text-amber" },
+  Production: { Icon: ShieldAlertIcon, tone: "text-danger" },
 };
 
-export function EnvironmentChip({ environment, short = false, testId = "env-chip", className }: { environment: Environment | null; short?: boolean; testId?: string; className?: string }) {
-  const chip = environment && ENVIRONMENT_CHIP[environment];
-  if (!chip) return null;
+export function EnvironmentIcon({ environment, size = 14, testId = "env-icon", className }: { environment: Environment | null; size?: number; testId?: string; className?: string }) {
+  const icon = environment && ENVIRONMENT_ICON[environment];
+  if (!icon) return null;
   return (
-    <span data-testid={testId} className={cx("inline-flex h-[18px] shrink-0 items-center rounded-sm px-1.5 text-ui-11.5 leading-none font-medium", chip.look, className)} title={short ? environment : undefined}>
-      {short ? chip.short : environment}
+    <span data-testid={testId} role="img" aria-label={environment} title={environment} className={cx("inline-grid shrink-0 place-items-center", icon.tone, className)}>
+      <icon.Icon size={size} aria-hidden />
     </span>
   );
 }

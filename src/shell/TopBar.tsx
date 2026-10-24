@@ -1,6 +1,6 @@
 import * as Menu from "@radix-ui/react-dropdown-menu";
 import { ChevronDownIcon, ListIndentIncreaseIcon, PlayIcon, SquareIcon } from "lucide-react";
-import { ConnectionColorDot, EnvironmentChip } from "../features/connections/connectionColors";
+import { ConnectionColorDot, EnvironmentIcon } from "../features/connections/connectionColors";
 import { cancelActive, endTransaction, formatActive, runOrChoose, setTabMode, setTabTarget } from "../features/editor/runActions";
 import type { ConnectionState, DatabaseRef, TransactionLoss, TxnMode } from "../ipc/bindings";
 import { homeDb } from "../state/dbKey";
@@ -32,9 +32,11 @@ function Separator() {
 
 function DatabaseMenu({ tab, db }: { tab: Tab; db: DatabaseRef }) {
   const state = useLive((s) => s.connections[db.connectionId]);
+  const environment = useWorkspace((s) => s.configs[db.connectionId]?.environment ?? null);
   return (
     <Menu.Root modal={false}>
       <Menu.Trigger data-testid="tab-database" title={db.database} className={cx(TARGET_TRIGGER, "text-fg")}>
+        <EnvironmentIcon environment={environment} className="mr-0.5" />
         <span className="truncate">{db.database}</span>
         <ChevronDownIcon size={12} className="shrink-0 text-dim" />
       </Menu.Trigger>
@@ -109,12 +111,6 @@ export function TopBar({ hosted }: { hosted: HostedWindow | null }) {
             <span className="truncate">{config?.name ?? ""}</span>
           </span>
         )}
-        <span className="contents @max-[620px]:hidden">
-          <EnvironmentChip environment={environment} className="ml-1.5" />
-        </span>
-        <span className="hidden @max-[620px]:contents">
-          <EnvironmentChip environment={environment} short testId="env-chip-short" className="ml-1.5" />
-        </span>
         {tab && (
           <div className="flex min-w-0 flex-1 items-center overflow-hidden">
             {db && config && (
