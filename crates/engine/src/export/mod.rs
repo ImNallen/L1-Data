@@ -77,18 +77,27 @@ async fn insert_target(shared: &Arc<Shared>, set: &ResultSet) -> InsertTarget {
     let placeholder = || InsertTarget::placeholder(dialect, &set.columns);
     let Some(oid) = single_source(&set.columns) else { return placeholder() };
     let Ok(catalog) = shared.catalog(&set.db).await else { return placeholder() };
-    let named = catalog.relation_by_oid(oid).and_then(|(schema, relation)| {
-        let columns = set
-            .columns
-            .iter()
-            .map(|c| {
-                let attnum = c.source?.attnum;
-                relation.columns.iter().find(|k| k.attnum == attnum).map(|k| quote_ident_in(dialect, &k.name))
-            })
-            .collect::<Option<Vec<_>>>()?;
-        Some(InsertTarget { table: format!("{}.{}", quote_ident_in(dialect, schema), quote_ident_in(dialect, &relation.name)), columns })
-    });
-    named.unwrap_or_else(placeholder)
+    let Some((schema, relation)) = catalog.relation_by_oid(oid) else { return placeholder() };
+    let found = set.columns.iter().map(|c| relation.columns.iter().find(|k| c.source.is_some_and(|s| s.attnum == k.attnum))).collect::<Option<Vec<_>>>();
+    let Some(sources) = found else { return placeholder() };
+    // `writable` is false both for an identity the server numbers and for a column it computes.
+    // Only the identity takes a value, so the detail tells them apart.
+    let identities = match sources.iter().any(|k| !k.writable) {
+        false => vec![],
+        true => match shared.relation_detail(&set.db, oid).await {
+            Ok(detail) => detail.defaults.into_iter().filter(|d| matches!(d.value, DefaultValue::Identity { .. })).map(|d| d.column).collect(),
+            Err(_) => return placeholder(),
+        },
+    };
+    let columns: Vec<_> = sources.iter().map(|k| (k.writable || identities.contains(&k.name)).then(|| quote_ident_in(dialect, &k.name))).collect();
+    if columns.iter().all(Option::is_none) {
+        return placeholder();
+    }
+    InsertTarget {
+        table: format!("{}.{}", quote_ident_in(dialect, schema), quote_ident_in(dialect, &relation.name)),
+        columns,
+        identity: sources.iter().any(|k| !k.writable && identities.contains(&k.name)),
+    }
 }
 
 fn single_source(columns: &[ColumnMeta]) -> Option<u32> {

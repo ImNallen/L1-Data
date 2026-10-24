@@ -511,6 +511,21 @@ impl Shared {
         self.ensure_catalog(&instance, &slot).await
     }
 
+    async fn relation_detail(self: &Arc<Self>, db: &DatabaseRef, oid: u32) -> Result<RelationDetail, DetailError> {
+        let (instance, slot) = self.slot(db).map_err(|error| DetailError::Catalog { error })?;
+        // A `Failed` slot still serves its last catalog; reloading here would retry on every expand.
+        let version = match slot.last() {
+            Some(catalog) => catalog.version,
+            None => self.ensure_catalog(&instance, &slot).await.map_err(|error| DetailError::Catalog { error })?.version,
+        };
+        let mut meta = slot.meta.lock().await;
+        let session = self.session_in(&instance, &slot, &mut meta).await.map_err(|e| DetailError::Failed { message: connection::connect_error_text(&e) })?;
+        session.detail(slot.db.clone(), oid, version)
+            .await
+            .map_err(|e| DetailError::Failed { message: e.message })?
+            .ok_or(DetailError::Gone)
+    }
+
     async fn connect(self: &Arc<Self>, id: ConnectionId) -> Result<ServerInfo, ConnectError> {
         loop {
             let connecting = match self.connections.read().unwrap().get(&id).map(|e| &e.slot) {
@@ -1137,18 +1152,7 @@ impl Engine {
     /// Defaults, keys, indexes, and triggers of one relation, read on the database's metadata
     /// session when the tree opens the relation. The engine keeps no copy.
     pub async fn relation_detail(&self, db: DatabaseRef, oid: u32) -> Result<RelationDetail, DetailError> {
-        let (instance, slot) = self.shared.slot(&db).map_err(|error| DetailError::Catalog { error })?;
-        // A `Failed` slot still serves its last catalog; reloading here would retry on every expand.
-        let version = match slot.last() {
-            Some(catalog) => catalog.version,
-            None => self.shared.ensure_catalog(&instance, &slot).await.map_err(|error| DetailError::Catalog { error })?.version,
-        };
-        let mut meta = slot.meta.lock().await;
-        let session = self.shared.session_in(&instance, &slot, &mut meta).await.map_err(|e| DetailError::Failed { message: connection::connect_error_text(&e) })?;
-        session.detail(slot.db.clone(), oid, version)
-            .await
-            .map_err(|e| DetailError::Failed { message: e.message })?
-            .ok_or(DetailError::Gone)
+        self.shared.relation_detail(&db, oid).await
     }
 
     /// A connection, database, or mode change needs an idle tab with no open transaction. A

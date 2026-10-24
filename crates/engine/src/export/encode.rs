@@ -13,7 +13,11 @@ pub(crate) enum Format {
 
 pub(crate) struct InsertTarget {
     pub table: String,
-    pub columns: Vec<String>,
+    /// One per result column. `None` leaves the column and its cells out, because the server
+    /// computes its value.
+    pub columns: Vec<Option<String>>,
+    /// A kept column is an identity, whose value the server takes only with the dialect's override.
+    pub identity: bool,
 }
 
 pub(crate) const PLACEHOLDER_TABLE: &str = "target_table";
@@ -24,7 +28,7 @@ const INSERTS_PER_BATCH: u64 = 1_000;
 
 impl InsertTarget {
     pub fn placeholder(dialect: DatabaseKind, columns: &[ColumnMeta]) -> Self {
-        Self { table: PLACEHOLDER_TABLE.into(), columns: columns.iter().map(|c| quote_ident_in(dialect, &c.name)).collect() }
+        Self { table: PLACEHOLDER_TABLE.into(), columns: columns.iter().map(|c| Some(quote_ident_in(dialect, &c.name))).collect(), identity: false }
     }
 }
 
@@ -37,7 +41,7 @@ enum Shape {
     Csv { header: Vec<String> },
     Json { keys: Vec<String> },
     Markdown { header: Vec<String>, right: Vec<bool> },
-    Insert { prefix: String },
+    Insert { prefix: String, keep: Vec<bool>, identity_insert: Option<String> },
 }
 
 pub(crate) struct Encoder {
@@ -60,7 +64,16 @@ impl Encoder {
                 header: names(),
                 right: columns.iter().map(|c| matches!(c.r#type.category, TypeCategory::Integer | TypeCategory::Numeric)).collect(),
             },
-            Format::Insert(target) => Shape::Insert { prefix: format!("INSERT INTO {} ({}) VALUES (", target.table, target.columns.join(", ")) },
+            Format::Insert(target) => {
+                let names: Vec<&str> = target.columns.iter().flatten().map(String::as_str).collect();
+                let overriding = if target.identity && dialect == DatabaseKind::Postgres { " OVERRIDING SYSTEM VALUE" } else { "" };
+                Shape::Insert {
+                    prefix: format!("INSERT INTO {} ({}){overriding} VALUES (", target.table, names.join(", ")),
+                    keep: target.columns.iter().map(Option::is_some).collect(),
+                    // Session-scoped, so it holds across the `GO` batches.
+                    identity_insert: (target.identity && dialect == DatabaseKind::SqlServer).then_some(target.table),
+                }
+            }
         };
         Self { dialect, cols, shape, rows: 0 }
     }
@@ -82,7 +95,11 @@ impl Encoder {
                 }
                 out.push(b'\n');
             }
-            Shape::Insert { .. } => {}
+            Shape::Insert { identity_insert, .. } => {
+                if let Some(table) = identity_insert {
+                    out.extend_from_slice(format!("SET IDENTITY_INSERT {table} ON;\n").as_bytes());
+                }
+            }
         }
     }
 
@@ -112,9 +129,10 @@ impl Encoder {
                 }
                 out.push(b'\n');
             }
-            Shape::Insert { prefix } => {
+            Shape::Insert { prefix, keep, .. } => {
                 out.extend_from_slice(prefix.as_bytes());
-                for (i, (cell, col)) in cells.zip(&self.cols).enumerate() {
+                let kept = cells.zip(&self.cols).zip(keep).filter_map(|(pair, k)| k.then_some(pair));
+                for (i, (cell, col)) in kept.enumerate() {
                     if i > 0 {
                         out.extend_from_slice(b", ");
                     }
@@ -130,8 +148,10 @@ impl Encoder {
     }
 
     pub fn finish(self, out: &mut Vec<u8>) {
-        if let Shape::Json { .. } = self.shape {
-            out.extend_from_slice(if self.rows == 0 { b"]\n" } else { b"\n]\n" });
+        match self.shape {
+            Shape::Json { .. } => out.extend_from_slice(if self.rows == 0 { b"]\n" } else { b"\n]\n" }),
+            Shape::Insert { identity_insert: Some(table), .. } => out.extend_from_slice(format!("SET IDENTITY_INSERT {table} OFF;\n").as_bytes()),
+            _ => {}
         }
     }
 }
@@ -344,7 +364,7 @@ mod tests {
             col("raw", "bytea", TypeCategory::Binary),
             col("note", "text", TypeCategory::Text),
         ];
-        let target = InsertTarget { table: "\"public\".\"t\"".into(), columns: ["id", "n", "ok", "raw", "note"].iter().map(|c| quote_ident_in(DatabaseKind::Postgres, c)).collect() };
+        let target = InsertTarget { table: "\"public\".\"t\"".into(), columns: ["id", "n", "ok", "raw", "note"].iter().map(|c| Some(quote_ident_in(DatabaseKind::Postgres, c))).collect(), identity: false };
         let sql = encode(Format::Insert(target), DatabaseKind::Postgres, &cols, &[&[Some("1"), Some("NaN"), Some("f"), Some("\\x00ff"), Some("O'Brien")], &[None, Some("2.50"), Some("t"), None, None]]);
         assert_eq!(
             sql,
@@ -364,7 +384,7 @@ mod tests {
             col("odd", "sql_variant", TypeCategory::Other),
             col("big", "float", TypeCategory::Numeric),
         ];
-        let target = InsertTarget { table: "[dbo].[t]".into(), columns: ["[b]", "[f]", "[s]", "[at]", "[d]", "[odd]", "[big]"].map(String::from).to_vec() };
+        let target = InsertTarget { table: "[dbo].[t]".into(), columns: ["[b]", "[f]", "[s]", "[at]", "[d]", "[odd]", "[big]"].map(|c| Some(c.into())).to_vec(), identity: false };
         let sql = encode(
             Format::Insert(target),
             DatabaseKind::SqlServer,
@@ -375,6 +395,42 @@ mod tests {
             sql,
             "INSERT INTO [dbo].[t] ([b], [f], [s], [at], [d], [odd], [big]) VALUES (0x00FF, 1, N'O''Brien', CONVERT(datetime, N'2024-01-02 03:04:05.123', 121), -12.50, N'x', CONVERT(float, N'1.5'));\n"
         );
+    }
+
+    fn target(table: &str, columns: &[Option<&str>], identity: bool) -> Format {
+        Format::Insert(InsertTarget { table: table.into(), columns: columns.iter().map(|c| c.map(String::from)).collect(), identity })
+    }
+
+    #[test]
+    fn postgres_inserts_override_an_always_identity() {
+        let cols = [col("id", "bigint", TypeCategory::Integer), col("label", "text", TypeCategory::Text)];
+        let sql = encode(target("\"t\"", &[Some("\"id\""), Some("\"label\"")], true), DatabaseKind::Postgres, &cols, &[&[Some("7"), Some("a")]]);
+        assert_eq!(sql, "INSERT INTO \"t\" (\"id\", \"label\") OVERRIDING SYSTEM VALUE VALUES (7, 'a');\n");
+    }
+
+    #[test]
+    fn postgres_inserts_leave_out_a_generated_column_and_its_cells() {
+        let cols = [col("label", "text", TypeCategory::Text), col("width", "integer", TypeCategory::Integer), col("note", "text", TypeCategory::Text)];
+        let sql = encode(target("\"t\"", &[Some("\"label\""), None, Some("\"note\"")], false), DatabaseKind::Postgres, &cols, &[&[Some("ab"), Some("2"), None], &[Some("c"), Some("1"), Some("x")]]);
+        assert_eq!(sql, "INSERT INTO \"t\" (\"label\", \"note\") VALUES ('ab', NULL);\nINSERT INTO \"t\" (\"label\", \"note\") VALUES ('c', 'x');\n");
+    }
+
+    #[test]
+    fn sql_server_inserts_wrap_an_identity_in_identity_insert_across_batches() {
+        let cols = [col("id", "int", TypeCategory::Integer)];
+        let rows: Vec<[Option<&str>; 1]> = (0..1_000).map(|_| [Some("1")]).collect();
+        let rows: Vec<&[Option<&str>]> = rows.iter().map(|r| r.as_slice()).collect();
+        let script = encode(target("[dbo].[t]", &[Some("[id]")], true), DatabaseKind::SqlServer, &cols, &rows);
+        let lines: Vec<&str> = script.lines().collect();
+        assert_eq!((lines[0], lines[1]), ("SET IDENTITY_INSERT [dbo].[t] ON;", "INSERT INTO [dbo].[t] ([id]) VALUES (1);"));
+        assert_eq!(&lines[1_000..], ["INSERT INTO [dbo].[t] ([id]) VALUES (1);", "GO", "SET IDENTITY_INSERT [dbo].[t] OFF;"]);
+    }
+
+    #[test]
+    fn sql_server_inserts_leave_out_computed_and_rowversion_columns() {
+        let cols = [col("total", "int", TypeCategory::Integer), col("doubled", "int", TypeCategory::Integer), col("ver", "timestamp", TypeCategory::Binary), col("s", "nvarchar", TypeCategory::Text)];
+        let sql = encode(target("[t]", &[Some("[total]"), None, None, Some("[s]")], false), DatabaseKind::SqlServer, &cols, &[&[Some("3"), Some("6"), Some("0x00000000000007D1"), Some("x")]]);
+        assert_eq!(sql, "INSERT INTO [t] ([total], [s]) VALUES (3, N'x');\n");
     }
 
     #[test]

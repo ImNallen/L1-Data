@@ -538,3 +538,37 @@ async fn esc_during_a_sql_server_all_rows_export_resets_the_session_and_leaves_t
     assert!(matches!(&after.session, SessionState::Lost { reason, .. } if reason.contains("Cancelled")), "{:?}", after.session);
     h.ok("SELECT 1").await;
 }
+
+#[tokio::test]
+async fn insert_exports_replay_identity_and_leave_out_computed_and_rowversion_columns() {
+    let mut h = Harness::open(TxnMode::AutoCommit).await;
+    let source = format!("l1_export_ident_{}", uuid::Uuid::new_v4().simple());
+    let copy = format!("l1_export_ident_copy_{}", uuid::Uuid::new_v4().simple());
+    let columns = "id int IDENTITY PRIMARY KEY, label nvarchar(20) NOT NULL, doubled AS (LEN(label) * 2), ver rowversion";
+    h.ok(&format!("CREATE TABLE dbo.[{source}] ({columns}); CREATE TABLE dbo.[{copy}] ({columns})")).await;
+    let outcome = AssertUnwindSafe(async {
+        h.ok(&format!("INSERT INTO dbo.[{source}] (label) VALUES (N'a'), (N'bb'), (N'ccc'); DELETE FROM dbo.[{source}] WHERE id = 2")).await;
+        h.engine.refresh_catalog(h.db()).await.unwrap();
+        let page = h.engine.console_run(h.tab, RunRequest::TablePage { schema: "dbo".into(), table: source.clone(), page: 0, query: TableQuery::default() }).await.unwrap();
+        let state = h.finish(page.run_id).await;
+        let meta = Harness::rowsets(&state)[0].clone();
+        let (summary, script) = h.export(&meta, ExportFormat::SqlInsert, ExportScope::All, "ident.sql").await;
+        assert_eq!(summary.rows, 2);
+        let table = format!("[dbo].[{source}]");
+        assert_eq!(
+            script,
+            format!("SET IDENTITY_INSERT {table} ON;\nINSERT INTO {table} ([id], [label]) VALUES (1, N'a');\nINSERT INTO {table} ([id], [label]) VALUES (3, N'ccc');\nSET IDENTITY_INSERT {table} OFF;\n")
+        );
+        h.ok(&script.replace(&table, &format!("dbo.[{copy}]"))).await;
+        let differ = |a: &str, b: &str| format!("SELECT COUNT_BIG(*) FROM (SELECT id, label, doubled FROM dbo.[{a}] EXCEPT SELECT id, label, doubled FROM dbo.[{b}]) d");
+        let state = h.ok(&format!("{}; {}; SELECT COUNT_BIG(*) FROM dbo.[{copy}]", differ(&source, &copy), differ(&copy, &source))).await;
+        let counts: Vec<_> = Harness::rowsets(&state).iter().map(|s| h.rows(s)[0][0].clone()).collect();
+        assert_eq!(counts, [Some("0".into()), Some("0".into()), Some("2".into())], "the script rebuilds every row with its identity value");
+    })
+    .catch_unwind()
+    .await;
+    h.ok(&format!("DROP TABLE dbo.[{source}]; DROP TABLE dbo.[{copy}]")).await;
+    if let Err(panic) = outcome {
+        std::panic::resume_unwind(panic);
+    }
+}
