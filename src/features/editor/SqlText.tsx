@@ -16,6 +16,7 @@ export type SqlTextProps =
 export function SqlText(props: SqlTextProps) {
   const host = useRef<HTMLDivElement>(null);
   const latest = useRef(props);
+  // oxlint-disable-next-line react/refs -- the editor's listeners read the newest props, and nothing renders from this ref
   latest.current = props;
   const { mode, databaseKind, label } = props;
   const doc = props.mode === "view" ? props.text : props.initial;

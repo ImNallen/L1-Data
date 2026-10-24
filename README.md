@@ -137,6 +137,7 @@ cargo test -p engine --features pg-tests   # engine against PostgreSQL
 cargo test -p engine --features mssql-tests   # engine against SQL Server; needs pnpm db:mssql:up
 cargo test -p engine --features ssh-tests   # engine through an SSH bastion; needs pnpm db:up and pnpm db:ssh:up
 python3 dev/mssql-tls-smoke.py   # public Engine VerifyFull CA/name checks against a disposable SQL Server
+pnpm lint                # oxlint over the frontend and scripts/
 pnpm typecheck
 pnpm test                # vitest, then the release scripts' node tests
 pnpm build               # production frontend bundle

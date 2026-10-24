@@ -31,13 +31,13 @@ const editErrorText = (e: SavedQueryError) => (e.kind === "NothingToSave" ? "Ent
 export function SavedPalette() {
   const entry = useWorkspace((s) => (s.overlay.kind === "saved" ? s.overlay.entry : null));
   const close = useWorkspace((s) => s.close);
-  const opened = useRef<{ entry: SavedEntry; key: number }>({ entry: { kind: "browse" }, key: 0 });
-  if (entry && entry !== opened.current.entry) opened.current = { entry, key: opened.current.key + 1 };
+  const [opened, setOpened] = useState<{ entry: SavedEntry; key: number }>({ entry: { kind: "browse" }, key: 0 });
+  if (entry && entry !== opened.entry) setOpened({ entry, key: opened.key + 1 });
   return (
     <Dialog.Root open={entry !== null} onOpenChange={(open) => !open && close()}>
       <Dialog.Portal>
         <DialogBackdrop />
-        <SavedDialog key={opened.current.key} entry={opened.current.entry} close={close} />
+        <SavedDialog key={opened.key} entry={opened.entry} close={close} />
       </Dialog.Portal>
     </Dialog.Root>
   );
@@ -71,6 +71,7 @@ function SavedDialog({ entry, close, ref }: { entry: SavedEntry; close: () => vo
   useEffect(() => {
     if (pane.kind === "view") searchRef.current?.focus();
     if (pane.kind === "done") finish();
+    // oxlint-disable-next-line react-hooks/exhaustive-deps -- runs on a pane change, and `finish` is new on every render
   }, [pane.kind]);
 
   function finish() {

@@ -68,6 +68,7 @@ export function CreateThemePanel({ initial, onClose }: { initial: ThemeDraft; on
 
   useEffect(() => {
     previewTheme({ id: "draft", name: draft.name, appearance: draft.appearance, swatch: { background: draft.colors.background, accent: draft.colors.accent }, palette });
+    // oxlint-disable-next-line react-hooks/exhaustive-deps -- `palette` derives from `draft`
   }, [draft]);
   useEffect(() => () => previewTheme(null), []);
 

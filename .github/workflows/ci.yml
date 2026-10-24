@@ -24,7 +24,7 @@ env:
 
 jobs:
   frontend:
-    name: pnpm typecheck, test, build
+    name: pnpm lint, typecheck, test, build
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     steps:
@@ -41,6 +41,9 @@ jobs:
 
       - name: pnpm install
         run: pnpm install --frozen-lockfile
+
+      - name: pnpm lint
+        run: pnpm lint
 
       - name: pnpm typecheck
         run: pnpm typecheck

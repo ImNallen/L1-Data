@@ -7,6 +7,7 @@ function Toast() {
   const [visible, setVisible] = useState<number | null>(null);
   useEffect(() => {
     if (!toast) return;
+    // oxlint-disable-next-line react/set-state-in-effect -- each new toast shows for 4 s
     setVisible(toast.id);
     const t = setTimeout(() => setVisible(null), 4_000);
     return () => clearTimeout(t);

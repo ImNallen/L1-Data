@@ -57,6 +57,7 @@ function HistoryBrowser({ close, restoreEditorFocus }: { close: () => void; rest
   const activeDb = active ? tabTarget(active) : null;
   const insertEnabled = active !== undefined;
   const mod = isMac(navigator.userAgent) ? "⌘" : "Ctrl+";
+  // oxlint-disable-next-line react/purity -- relative times read the clock on each render
   const now = new Date();
   const count = list ? { All: list.counts.all, Failed: list.counts.failed, Writes: list.counts.writes }[filter] : null;
 
@@ -64,7 +65,11 @@ function HistoryBrowser({ close, restoreEditorFocus }: { close: () => void; rest
     listRef.current?.querySelector('[aria-selected="true"]')?.scrollIntoView({ block: "nearest" });
   }, [selected?.id]);
   useEffect(() => { listRef.current?.scrollTo({ top: 0 }); }, [query, filter]);
-  useEffect(() => { setCopied(false); setCopyError(false); }, [selected?.id]);
+  useEffect(() => {
+    // oxlint-disable-next-line react/set-state-in-effect -- copy feedback belongs to the selected entry
+    setCopied(false);
+    setCopyError(false);
+  }, [selected?.id]);
   useEffect(() => {
     if (!copied) return;
     const timer = setTimeout(() => setCopied(false), 1800);

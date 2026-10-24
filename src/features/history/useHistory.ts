@@ -19,6 +19,7 @@ export function useHistory(text: string, filter: HistoryFilter) {
 
   useEffect(() => {
     const version = ++generation.current;
+    // oxlint-disable-next-line react/set-state-in-effect -- clears the last query's results before the debounced fetch
     setList(null);
     setDetail(null);
     setError(null);
@@ -34,12 +35,17 @@ export function useHistory(text: string, filter: HistoryFilter) {
         setSelectedId((id) => keepSelection(res.data.groups, id));
       }).catch((e: unknown) => { if (generation.current === version) setError(String(e)); });
     }, text.trim() ? 150 : 0);
-    return () => { ++generation.current; clearTimeout(timer); };
+    return () => {
+      // oxlint-disable-next-line react-hooks/exhaustive-deps -- bumping the live counter drops a reply that lands after cleanup
+      ++generation.current;
+      clearTimeout(timer);
+    };
   }, [text, filter, tail, refresh]);
 
   const selected = list?.groups.find((g) => g.id === selectedId) ?? null;
   const revision = list?.revision;
   useEffect(() => {
+    // oxlint-disable-next-line react/set-state-in-effect -- clears the last selection's runs before the fetch
     setDetail(null);
     setLoadingRuns(false);
     runRequest.current = null;

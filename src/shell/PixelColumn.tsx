@@ -80,6 +80,7 @@ export function PixelColumn({ column, open, children }: { column: Column; open: 
   useLayoutEffect(() => {
     if (phase !== "entering") return;
     body.current?.getBoundingClientRect();
+    // oxlint-disable-next-line react/set-state-in-effect -- the forced layout commits the entering frame, so the switch to opening runs the transition
     setPhase("opening");
   }, [phase]);
   const settle = () => setPhase((p) => (p === "opening" ? "open" : p === "closing" ? "closed" : p));

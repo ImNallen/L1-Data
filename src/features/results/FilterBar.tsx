@@ -24,6 +24,7 @@ function FilterChip({
   const [op, setOp] = useState<FilterOp>(filter.op);
   const [value, setValue] = useState(filter.value);
   useEffect(() => {
+    // oxlint-disable-next-line react/set-state-in-effect -- the draft resets when the applied filter changes
     setOp(filter.op);
     setValue(filter.value);
   }, [filter.op, filter.value]);
@@ -99,6 +100,7 @@ function ClauseInput({
   className?: string;
 }) {
   const [text, setText] = useState(applied);
+  // oxlint-disable-next-line react/set-state-in-effect -- the draft resets when the applied text changes
   useEffect(() => setText(applied), [applied]);
   const dirty = text.trim() !== applied.trim();
   return (

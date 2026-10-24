@@ -315,6 +315,7 @@ export function ResultsPane({ tabId }: { tabId: TabId | null }) {
   const catalogView = useCatalog((s) => viewFor(s.views, browsingTable?.console.db));
   const editing = useMemo(
     () => browsingTable && shown && databaseKind === "Postgres" ? gridEditing(catalogView, browsingTable.table.schema, browsingTable.table.table, shown.meta) : null,
+    // oxlint-disable-next-line react-hooks/exhaustive-deps -- the deps name the fields the memo reads, not the objects that hold them
     [browsingTable?.console.db, browsingTable?.table.schema, browsingTable?.table.table, catalogView, shown?.meta, databaseKind],
   );
   const actions = useRef<GridActions | null>(null);

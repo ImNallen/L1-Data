@@ -37,6 +37,7 @@ export function useTableOrder(tab: TableTab | null): TableSortKey[] {
       if (!stale && res.status === "ok") setView({ key, value: res.data });
     });
     return () => { stale = true; };
+    // oxlint-disable-next-line react-hooks/exhaustive-deps -- `key` encodes every input, and `db` is a new object on every render
   }, [key]);
   return view?.key === key ? view.value.keys ?? [] : [];
 }

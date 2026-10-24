@@ -20,7 +20,7 @@ import {
   ZapIcon,
   type LucideIcon,
 } from "lucide-react";
-import { Fragment, useCallback, useEffect, useRef, useState, type KeyboardEvent, type ReactNode, type RefObject } from "react";
+import { Fragment, useCallback, useEffect, useState, type KeyboardEvent, type ReactNode, type RefObject } from "react";
 import {
   commands,
   type ColumnInfo,
@@ -355,9 +355,9 @@ function RelationGroups({
 }) {
   const key = detailKey(db, rel.oid);
   const entry = useRelationDetail((s) => s.entries[key]);
-  // `key` stands in for `db`, which is a new object on every render.
   useEffect(() => {
     void useRelationDetail.getState().ensure(db, version, rel.oid);
+    // oxlint-disable-next-line react-hooks/exhaustive-deps -- `key` stands in for `db`, which is a new object on every render
   }, [key, version, rel.oid]);
   return (
     <>
@@ -597,6 +597,7 @@ function DatabaseNode({ path, db, state, expanded }: { path: string; db: Databas
   const key = dbKey(db);
   useEffect(() => {
     if (open && idle) void commands.catalogGet(db);
+    // oxlint-disable-next-line react-hooks/exhaustive-deps -- `key` stands in for `db`, which is a new object on every render
   }, [open, idle, key]);
 
   return (
@@ -913,7 +914,7 @@ export function ConnectionTree({ filter, query, ref }: { filter: TreeFilter | nu
   );
   const expanded: Expanded = { has: (p) => open.has(p), toggle };
   // Held here, not in each node, so a search that swaps the nodes out does not reopen what the user closed.
-  const revealed = useRef<Revealed>(new Map()).current;
+  const [revealed] = useState<Revealed>(() => new Map());
   const list = Object.values(configs).sort((a, b) => a.name.localeCompare(b.name));
   useRovingTabStop(ref);
 

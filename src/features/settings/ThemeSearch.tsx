@@ -17,6 +17,7 @@ function useThemeSearch(query: string): Search {
   const [search, setSearch] = useState<Search>({ kind: "idle" });
   const trimmed = query.trim();
   useEffect(() => {
+    // oxlint-disable-next-line react/set-state-in-effect -- shows loading, or idle for an empty query, until the debounced search answers
     if (!trimmed) return setSearch({ kind: "idle" });
     setSearch({ kind: "loading" });
     const abort = new AbortController();
