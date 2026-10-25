@@ -110,9 +110,11 @@ fn config(p: &ConnectParams) -> Result<Config, ConnectError> {
     Ok(config)
 }
 
-/// 18456 is a failed login, and 18452 is a login from an untrusted domain.
+const LOGIN_FAILED: u32 = 18456;
+const UNTRUSTED_DOMAIN_LOGIN: u32 = 18452;
+
 fn refuses_login(code: u32, entra: bool) -> bool {
-    code == 18456 || (entra && code == 18452)
+    code == LOGIN_FAILED || (entra && code == UNTRUSTED_DOMAIN_LOGIN)
 }
 
 impl MsSession {

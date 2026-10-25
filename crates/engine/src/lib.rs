@@ -55,8 +55,7 @@ pub struct EngineConfig {
     pub data_dir: PathBuf,
     pub keys: Arc<dyn KeyStore>,
     pub agent_path: AgentPath,
-    /// The program Entra ID sign-in runs in place of `az` on the PATH. The dev-bridge passes
-    /// `L1_DATA_AZ_BINARY`. The app passes `None`, so a release build never reads that variable.
+    /// The program Entra ID sign-in runs in place of `az` on the PATH.
     pub az_binary: Option<PathBuf>,
     /// The OpenSSH known_hosts that SSH tunnels also trust, read at each dial and never written.
     /// The app passes `openssh_known_hosts()`. Tests pass `None`, so they never read the

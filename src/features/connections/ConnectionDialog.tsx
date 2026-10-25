@@ -63,7 +63,11 @@ const SQL_SERVER_AUTHS: { value: SqlServerAuth; label: string; hint: ReactNode }
       </>
     ),
   },
-  { value: "Unknown", label: "Set by a newer version", hint: "A newer version of L1 Data saved this sign-in method. Update L1 Data, or choose another method." },
+  {
+    value: "Unknown",
+    label: "Set by a newer version",
+    hint: "A newer version of L1 Data saved this sign-in method. Update L1 Data, or choose another method.",
+  },
 ];
 
 const SSH_AUTHS: { value: SshAuthKind; label: string }[] = [

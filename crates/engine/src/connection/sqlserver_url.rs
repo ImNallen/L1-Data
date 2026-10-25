@@ -27,14 +27,12 @@ fn flag(key: &str, value: &str) -> Result<bool, String> {
     }
 }
 
-/// JDBC-style `;key=value` properties start at the first `;` after the host. A `;` before the
-/// last `@` belongs to the user info, and one after a `/` belongs to the path, as a URL reads them.
-fn split_properties(input: &str) -> (&str, Option<&str>) {
-    let Some(start) = input.find("://").map(|i| i + 3) else { return (input, None) };
-    let end = input[start..].find(['/', '?', '#']).map_or(input.len(), |i| start + i);
-    let host = input[start..end].rfind('@').map_or(start, |i| start + i + 1);
-    match input[host..end].find(';') {
-        Some(i) => (&input[..host + i], Some(&input[host + i + 1..])),
+fn split_jdbc_properties_after_host(input: &str) -> (&str, Option<&str>) {
+    let Some(authority_start) = input.find("://").map(|i| i + 3) else { return (input, None) };
+    let authority_end = input[authority_start..].find(['/', '?', '#']).map_or(input.len(), |i| authority_start + i);
+    let host_start = input[authority_start..authority_end].rfind('@').map_or(authority_start, |i| authority_start + i + 1);
+    match input[host_start..authority_end].find(';') {
+        Some(i) => (&input[..host_start + i], Some(&input[host_start + i + 1..])),
         None => (input, None),
     }
 }
@@ -48,7 +46,7 @@ pub(super) fn parse(input: &str, name: &str) -> Result<ConnectionDraft, String> 
             return Err("SQL Server URL contains invalid percent encoding".into());
         }
     }
-    let (input, properties) = split_properties(input);
+    let (input, properties) = split_jdbc_properties_after_host(input);
     let (_, authority) = input.split_once("://").ok_or("Use mssql:// or sqlserver:// with a TCP host")?;
     let raw_path = authority.split(['?', '#']).next().unwrap_or_default().split_once('/').map(|(_, p)| p).unwrap_or_default();
     if raw_path.contains('/') || matches!(raw_path, "." | "..") {

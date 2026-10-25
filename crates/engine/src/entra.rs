@@ -17,15 +17,13 @@ pub(crate) struct AzCli {
     binary: Option<PathBuf>,
     path: tokio::sync::OnceCell<OsString>,
     state: tokio::sync::Mutex<State>,
-    /// Counts finished az calls. A caller that saw a lower count before it waited for the lock
-    /// waited on a call in flight, and takes that call's result instead of running az again.
-    fetched: AtomicU64,
+    finished_fetches: AtomicU64,
 }
 
 #[derive(Default)]
 struct State {
     cached: Option<Cached>,
-    last: Option<Result<String, ConnectError>>,
+    last_fetch: Option<Result<String, ConnectError>>,
 }
 
 struct Cached {
@@ -47,17 +45,18 @@ impl std::fmt::Debug for AzCli {
 
 impl AzCli {
     pub(crate) fn new(agent_path: AgentPath, binary: Option<PathBuf>) -> Self {
-        Self { agent_path, binary, path: tokio::sync::OnceCell::new(), state: tokio::sync::Mutex::default(), fetched: AtomicU64::new(0) }
+        Self { agent_path, binary, path: tokio::sync::OnceCell::new(), state: tokio::sync::Mutex::default(), finished_fetches: AtomicU64::new(0) }
     }
 
     pub(crate) async fn token(&self) -> Result<String, ConnectError> {
-        let seen = self.fetched.load(Ordering::Acquire);
+        let finished_before_wait = self.finished_fetches.load(Ordering::Acquire);
         let mut state = self.state.lock().await;
         if let Some(c) = state.cached.as_ref().filter(|c| SystemTime::now() < c.refresh_at) {
             return Ok(c.access.clone());
         }
-        if let Some(last) = state.last.as_ref().filter(|_| self.fetched.load(Ordering::Acquire) != seen) {
-            return last.clone();
+        let finished_while_waiting = self.finished_fetches.load(Ordering::Acquire) != finished_before_wait;
+        if let Some(last_fetch) = state.last_fetch.as_ref().filter(|_| finished_while_waiting) {
+            return last_fetch.clone();
         }
         let fetched = self.fetch().await;
         state.cached = fetched.as_ref().ok().and_then(|token| {
@@ -65,8 +64,8 @@ impl AzCli {
             Some(Cached { access: token.access.clone(), refresh_at })
         });
         let result = fetched.map(|token| token.access);
-        state.last = Some(result.clone());
-        self.fetched.fetch_add(1, Ordering::Release);
+        state.last_fetch = Some(result.clone());
+        self.finished_fetches.fetch_add(1, Ordering::Release);
         result
     }
 
@@ -75,8 +74,8 @@ impl AzCli {
         if state.cached.as_ref().is_some_and(|c| c.access == access) {
             state.cached = None;
         }
-        if matches!(&state.last, Some(Ok(last)) if last == access) {
-            state.last = None;
+        if matches!(&state.last_fetch, Some(Ok(last)) if last == access) {
+            state.last_fetch = None;
         }
     }
 
