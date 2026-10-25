@@ -50,6 +50,9 @@ fn split_jdbc_properties(input: &str) -> Result<(&str, Option<&str>), String> {
         }
         None => return Ok((input, None)),
     };
+    if input[..start].ends_with(';') {
+        return Err("SQL Server URL properties need a name and value".into());
+    }
     let properties = &input[start + 1..];
     if let Some((c, encoded)) = properties.chars().find_map(|c| match c {
         '/' => Some((c, "%2F")),
@@ -208,6 +211,13 @@ mod tests {
         assert_eq!(password("sqlserver://sa:a%3Bb=c@localhost/shop"), "a;b=c");
         assert_eq!(draft_from_url("sqlserver://localhost/my;db", "").unwrap().database, "my;db");
         assert_eq!(password("sqlserver://localhost;user=sa;password=a%2Fb%40c"), "a/b@c");
+    }
+
+    #[test]
+    fn an_empty_property_before_the_first_one_is_refused_after_the_host_or_the_path() {
+        for url in ["sqlserver://host;", "sqlserver://host;;database=x", "sqlserver://host/db;;encrypt=true", "sqlserver://sa:pw@host:1433/db;;authentication=ActiveDirectoryAzCli"] {
+            assert_eq!(draft_from_url(url, "").unwrap_err(), "SQL Server URL properties need a name and value", "{url}");
+        }
     }
 
     #[test]
