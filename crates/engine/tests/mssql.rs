@@ -998,8 +998,9 @@ impl Harness {
                 SELECT CONCAT(N'index ',i.name,' ',i.type,' ',i.is_unique,' ',i.is_primary_key,' ',i.is_unique_constraint,' ',i.filter_definition,' ',i.fill_factor,' ',i.is_padded,' ',i.ignore_dup_key,' ',
                               i.allow_row_locks,' ',i.allow_page_locks,' ',i.optimize_for_sequential_key,' ',i.compression_delay,' ',i.is_disabled,' ',st.no_recompute,' ',
                               (SELECT TOP 1 CONCAT(p.data_compression_desc,' ',p.xml_compression) FROM sys.partitions p WHERE p.object_id=i.object_id AND p.index_id=i.index_id ORDER BY p.partition_number),' ',
-                              (SELECT STRING_AGG(CONCAT(c.name,' ',ic.is_descending_key,' ',ic.is_included_column,' ',ic.column_store_order_ordinal),',') WITHIN GROUP (ORDER BY ic.is_included_column,ic.key_ordinal,ic.index_column_id)
-                               FROM sys.index_columns ic JOIN sys.columns c ON c.object_id=ic.object_id AND c.column_id=ic.column_id WHERE ic.object_id=i.object_id AND ic.index_id=i.index_id AND i.index_id>0))
+                              (SELECT STRING_AGG(CONCAT(c.name,' ',ic.key_ordinal,' ',ic.is_descending_key,' ',ic.is_included_column,' ',ic.column_store_order_ordinal),',') WITHIN GROUP (ORDER BY ic.is_included_column,ic.key_ordinal,ic.index_column_id)
+                               FROM sys.index_columns ic JOIN sys.columns c ON c.object_id=ic.object_id AND c.column_id=ic.column_id
+                               WHERE ic.object_id=i.object_id AND ic.index_id=i.index_id AND i.index_id>0 AND (ic.key_ordinal>0 OR ic.is_included_column=1 OR ic.partition_ordinal=0)))
                 FROM sys.indexes i LEFT JOIN sys.stats st ON st.object_id=i.object_id AND st.stats_id=i.index_id WHERE i.object_id=o.object_id AND i.type<>3
                 UNION ALL
                 SELECT CONCAT(N'foreign key ',fk.name,' ',fk.delete_referential_action,' ',fk.update_referential_action,' ',fk.is_disabled,' ',fk.is_not_trusted,' ',fk.is_not_for_replication,' ',
@@ -1072,6 +1073,7 @@ async fn hostile_object_scripts_replay_every_property_or_warn() {
                     "partition scheme [ps_hostile] on [dbo].[parted]",
                     "partition scheme [ps_hostile] for index [IX_parted] on [dbo].[parted]",
                     "STATISTICS_INCREMENTAL for index [IX_parted] on [dbo].[parted]",
+                    "partition scheme [ps_hostile] for index [IX_parted_kind] on [dbo].[parted]",
                 ],
                 "temporal_history" => vec!["history table role for [dbo].[temporal] on [dbo].[temporal_history]"],
                 "Par ent" => vec!["privileges on [we]]ird s].[Par ent] (DELETE denied to [app_reader], SELECT granted to [app_reader], UPDATE ([select]) granted with grant option to [app_reader])"],
@@ -1159,6 +1161,8 @@ async fn hostile_object_scripts_replay_every_property_or_warn() {
             unique.text,
             "ALTER TABLE [dbo].[refd] ADD CONSTRAINT [UQ_refd] UNIQUE NONCLUSTERED ([a] ASC, [b] ASC) WITH (IGNORE_DUP_KEY = ON, ALLOW_PAGE_LOCKS = OFF, DATA_COMPRESSION = PAGE);\nGO\n\nEXEC sys.sp_addextendedproperty @name = N'MS_Description', @value = N'the key', @level0type = N'SCHEMA', @level0name = N'dbo', @level1type = N'TABLE', @level1name = N'refd', @level2type = N'CONSTRAINT', @level2name = N'UQ_refd';\nGO\n"
         );
+        let parted = Box::pin(src.engine.object_script(db.clone(), ScriptTarget::Index { relation_oid: schema_oid("parted"), name: "IX_parted_kind".into() })).await.unwrap();
+        assert_eq!(parted.text, "-- L1 Data could not script: partition scheme [ps_hostile] for index [IX_parted_kind] on [dbo].[parted]\n\nCREATE NONCLUSTERED INDEX [IX_parted_kind] ON [dbo].[parted] ([kind] ASC);\nGO\n");
         let pk = src.engine.object_script(db.clone(), ScriptTarget::Index { relation_oid: schema_oid("Par ent"), name: "PK Par ent".into() }).await.unwrap();
         assert_eq!(pk.text, "ALTER TABLE [we]]ird s].[Par ent] ADD CONSTRAINT [PK Par ent] PRIMARY KEY NONCLUSTERED ([Id] DESC) WITH (FILLFACTOR = 80);\nGO\n");
         let computed = src.engine.object_script(db.clone(), ScriptTarget::Index { relation_oid: schema_oid("Par ent"), name: "IX total".into() }).await.unwrap();
