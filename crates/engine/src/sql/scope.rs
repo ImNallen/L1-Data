@@ -449,7 +449,8 @@ impl<'a> Walk<'a> {
         if let Clause::On { tree_start, target, fresh: true } = self.frames[id].clause {
             self.frames[id].clause = Clause::On { tree_start, target, fresh: false };
         }
-        if let Some(w) = self.word(i) {
+        let qualified = i.checked_sub(1).is_some_and(|p| self.sig[p].class == Class::Dot && self.sig[p].span.end == self.sig[i].span.start);
+        if let Some(w) = self.word(i).filter(|_| !qualified) {
             if let Some(next) = self.enter_clause(i, &w) {
                 return next;
             }
@@ -1632,6 +1633,13 @@ mod tests {
         assert_eq!(pg("select * from (|) x where a = 1").expect, Expect::Relation);
         let s = pg("select t1.| from t1 union select b from t2 as x");
         assert_eq!((refs(&s), s.qualifier.clone()), (vec![(Some("t1"), &table(None, "t1"))], Some(Qualifier::Relation { index: 0 })));
+    }
+
+    #[test]
+    fn a_keyword_named_column_after_a_dot_is_not_a_clause() {
+        for marked in ["select * from orders o where o.order = |", "select * from orders o where o.offset > |", "select o.from, | from orders o"] {
+            assert_eq!(pg(marked).expect, Expect::Expression, "{marked:?}");
+        }
     }
 
     #[test]
