@@ -22,7 +22,8 @@ fn text(row: &[Option<String>], i: usize) -> Result<String, DetailError> {
 
 /// Each column a server version may lack, by the catalog column that marks it.
 const FEATURES: &str = "SELECT COL_LENGTH('sys.indexes','optimize_for_sequential_key'),COL_LENGTH('sys.index_columns','column_store_order_ordinal'),
-    COL_LENGTH('sys.partitions','xml_compression'),COL_LENGTH('sys.tables','ledger_type'),COL_LENGTH('sys.tables','is_node'),COL_LENGTH('sys.tables','history_retention_period')";
+    COL_LENGTH('sys.partitions','xml_compression'),COL_LENGTH('sys.tables','ledger_type'),COL_LENGTH('sys.tables','is_node'),COL_LENGTH('sys.tables','history_retention_period'),
+    COL_LENGTH('sys.indexes','suppress_dup_key_messages')";
 
 #[derive(Debug, PartialEq, Eq)]
 struct Features {
@@ -32,6 +33,7 @@ struct Features {
     ledger: &'static str,
     graph: (&'static str, &'static str),
     retention: &'static str,
+    suppress_dup_key: &'static str,
 }
 
 impl Features {
@@ -45,6 +47,7 @@ impl Features {
             ledger: pick(3, "t.ledger_type<>0", "1=0"),
             graph: if has(4) { ("t.is_node=1", "t.is_edge=1") } else { ("1=0", "1=0") },
             retention: pick(5, "t.history_retention_period,t.history_retention_period_unit_desc", "NULL,NULL"),
+            suppress_dup_key: pick(6, "i.suppress_dup_key_messages", "0"),
         }
     }
 }
@@ -68,8 +71,8 @@ fn relation_query(oid: i32, f: &Features) -> String {
 
 fn storage_columns(f: &Features) -> String {
     format!(
-        "i.fill_factor,i.is_padded,i.ignore_dup_key,COALESCE(st.no_recompute,0),i.allow_row_locks,i.allow_page_locks,{},NULLIF(NULLIF(p.data_compression_desc,'NONE'),'COLUMNSTORE'),{},i.compression_delay,i.is_disabled,ds.type,ds.name",
-        f.sequential_key, f.xml_compression
+        "i.fill_factor,i.is_padded,i.ignore_dup_key,COALESCE(st.no_recompute,0),i.allow_row_locks,i.allow_page_locks,{},NULLIF(NULLIF(p.data_compression_desc,'NONE'),'COLUMNSTORE'),{},i.compression_delay,i.is_disabled,ds.type,ds.name,COALESCE(st.is_incremental,0),{}",
+        f.sequential_key, f.xml_compression, f.suppress_dup_key
     )
 }
 
@@ -99,6 +102,8 @@ fn storage(r: &[Option<String>], at: usize) -> Result<ddl::Storage, DetailError>
         compression_delay: r[at + 9].as_deref().and_then(|d| d.parse().ok()),
         disabled: bit(r, at + 10)?,
         place: place(r, at + 11),
+        incremental: bit(r, at + 13)?,
+        suppress_dup_key_messages: bit(r, at + 14)?,
     })
 }
 
@@ -459,12 +464,12 @@ mod tests {
 
     #[test]
     fn a_server_without_a_feature_column_reads_a_constant_in_its_place() {
-        let sql2016 = Features::from_lengths(&[None, None, None, None, None, None]);
+        let sql2016 = Features::from_lengths(&[None, None, None, None, None, None, None]);
         let query = relation_query(7, &sql2016);
         assert!(!query.contains("history_retention_period"), "{query}");
         assert!(query.contains("h.name,NULL,NULL,\n"), "{query}");
         assert!(!query.contains("ledger_type") && !query.contains("is_node"), "{query}");
-        let sql2022 = Features::from_lengths(&[Some("1".into()), Some("4".into()), Some("1".into()), Some("1".into()), Some("1".into()), Some("4".into())]);
+        let sql2022 = Features::from_lengths(&[Some("1".into()), Some("4".into()), Some("1".into()), Some("1".into()), Some("1".into()), Some("4".into()), Some("1".into())]);
         assert!(relation_query(7, &sql2022).contains("h.name,t.history_retention_period,t.history_retention_period_unit_desc,\n"));
         assert_eq!(Features::from_lengths(&[]), sql2016);
     }

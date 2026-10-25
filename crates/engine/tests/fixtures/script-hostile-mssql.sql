@@ -143,5 +143,7 @@ CREATE PARTITION SCHEME ps_hostile AS PARTITION pf_hostile ALL TO ([PRIMARY]);
 GO
 CREATE TABLE dbo.parted (id int NOT NULL) ON ps_hostile (id);
 GO
+CREATE INDEX IX_parted ON dbo.parted (id) WITH (STATISTICS_INCREMENTAL = ON) ON ps_hostile (id);
+GO
 CREATE TABLE dbo.node_t (id int) AS NODE;
 GO

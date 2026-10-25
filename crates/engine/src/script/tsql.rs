@@ -112,6 +112,8 @@ pub struct Storage {
     pub compression_delay: Option<i32>,
     pub disabled: bool,
     pub place: Option<Place>,
+    pub incremental: bool,
+    pub suppress_dup_key_messages: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -179,7 +181,7 @@ pub fn table(t: &Table) -> Ddl {
     }
     let mut with = vec![];
     if let Some(heap) = &t.heap {
-        place_warning(&heap.place, "", &name, &mut warnings);
+        storage_warnings(heap, "", &name, &mut warnings);
         with.extend(options(heap));
     }
     if let Some(v) = &t.versioning {
@@ -368,15 +370,22 @@ impl Place {
     }
 }
 
-fn place_warning(place: &Option<Place>, index: &str, table: &str, warnings: &mut Vec<String>) {
-    if let Some(place) = place {
-        let of = if index.is_empty() { String::new() } else { format!(" for index {}", ident(index)) };
+/// `STATISTICS_INCREMENTAL` fails on an index that is not partitioned, as every replayed index
+/// is, and SQL Server has no statement that sets `SUPPRESS_DUP_KEY_MESSAGES`.
+fn storage_warnings(s: &Storage, index: &str, table: &str, warnings: &mut Vec<String>) {
+    let of = if index.is_empty() { String::new() } else { format!(" for index {}", ident(index)) };
+    if let Some(place) = &s.place {
         warnings.push(format!("{}{of} on {table}", place.describe()));
+    }
+    for (on, option) in [(s.incremental, "STATISTICS_INCREMENTAL"), (s.suppress_dup_key_messages, "SUPPRESS_DUP_KEY_MESSAGES")] {
+        if on {
+            warnings.push(format!("{option}{of} on {table}"));
+        }
     }
 }
 
 fn key(k: &Key, table: &str, warnings: &mut Vec<String>) -> String {
-    place_warning(&k.storage.place, &k.name, table, warnings);
+    storage_warnings(&k.storage, &k.name, table, warnings);
     format!(
         "CONSTRAINT {} {} {} ({}){}",
         ident(&k.name),
@@ -448,7 +457,7 @@ fn index_text(i: &Index, table: &str, warnings: &mut Vec<String>) -> Option<Stri
         _ => i.storage.clone(),
     };
     out.push_str(&with_options(&storage));
-    place_warning(&i.storage.place, &i.name, table, warnings);
+    storage_warnings(&i.storage, &i.name, table, warnings);
     let set = if i.filter.is_some() || i.on_view { INDEX_OPTIONS } else { "" };
     Some(format!("{set}{out};\nGO\n"))
 }
@@ -732,6 +741,19 @@ GO
             table(&t).warnings,
             ["filegroup [LOB] for large values on [dbo].[p]", "filegroup [FG keys] for index [PK_p] on [dbo].[p]", "partition scheme [ps] on [dbo].[p]", "partition scheme [ps]]x] for index [IX_p] on [dbo].[p]"]
         );
+    }
+
+    #[test]
+    fn incremental_statistics_and_suppressed_duplicate_key_messages_warn() {
+        let t = Table {
+            keys: vec![Key { name: "PK_i".into(), primary: true, clustered: true, columns: vec![("id".into(), false)], storage: Storage { incremental: true, ..Storage::default() } }],
+            indexes: vec![Index { unique: true, storage: Storage { ignore_dup_key: true, suppress_dup_key_messages: true, ..Storage::default() }, ..index_on("UX_i", 2, &["id"]) }],
+            ..table_named("i")
+        };
+        let ddl = table(&t);
+        assert_eq!(ddl.warnings, ["STATISTICS_INCREMENTAL for index [PK_i] on [dbo].[i]", "SUPPRESS_DUP_KEY_MESSAGES for index [UX_i] on [dbo].[i]"]);
+        assert!(!ddl.text.contains("STATISTICS_INCREMENTAL") && !ddl.text.contains("SUPPRESS_DUP_KEY_MESSAGES"), "{}", ddl.text);
+        assert!(ddl.text.contains("CREATE UNIQUE NONCLUSTERED INDEX [UX_i] ON [dbo].[i] ([id] ASC) WITH (IGNORE_DUP_KEY = ON);"), "{}", ddl.text);
     }
 
     #[test]

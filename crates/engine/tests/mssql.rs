@@ -1058,7 +1058,11 @@ async fn hostile_object_scripts_replay_every_property_or_warn() {
         let warned = |name: &str| -> Vec<&str> {
             match name {
                 "warned" => vec!["ANSI_PADDING OFF on [dbo].[warned].[pad]", "XML index [IX x] on [dbo].[warned]", "extended property [Version] of type int on [dbo].[warned]"],
-                "parted" => vec!["partition scheme [ps_hostile] on [dbo].[parted]"],
+                "parted" => vec![
+                    "partition scheme [ps_hostile] on [dbo].[parted]",
+                    "partition scheme [ps_hostile] for index [IX_parted] on [dbo].[parted]",
+                    "STATISTICS_INCREMENTAL for index [IX_parted] on [dbo].[parted]",
+                ],
                 "temporal_history" => vec!["history table role for [dbo].[temporal] on [dbo].[temporal_history]"],
                 _ => vec![],
             }
