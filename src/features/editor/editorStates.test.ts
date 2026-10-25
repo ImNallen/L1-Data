@@ -170,6 +170,12 @@ it("leaves an alias being typed alone, and lists the keywords only on request", 
   expect((await completeAtEnd("select * from orders o", alias)).labels).toEqual(["ORDER BY", "WHERE"]);
 });
 
+it("opens the keywords unasked when the word after a relation starts a reserved keyword", async () => {
+  const text = "select * from orders wh";
+  const keyword = reply({ kind: "Keyword" }, [table("orders", "orders")], { keywords: ["WHERE", "ORDER BY"], from: text.length - 2 });
+  expect((await completeAtEnd(text, keyword, { explicit: false })).labels).toEqual(["WHERE", "ORDER BY"]);
+});
+
 it("stays closed after a space unless the engine says a join condition starts there", async () => {
   expect((await completeAtEnd("select * from orders o ", reply({ kind: "Keyword" }, [], { keywords: ["WHERE"] }), { explicit: false })).labels).toEqual([]);
   expect((await completeAtEnd("select 'abc", { kind: "None" })).labels).toEqual([]);

@@ -1,5 +1,6 @@
 use std::ops::Range;
 
+use super::keywords::{RESERVED, TYPE_OR_FUNCTION_NAME};
 use super::lex::{LexKind, lex};
 use super::relations::{VETTED, VETTED_SIZES};
 use super::split::split_statements;
@@ -327,6 +328,8 @@ struct Walk<'a> {
     parts: Vec<String>,
     /// The cursor's word starts its line after a lexeme a statement can end on, so it may begin the next statement.
     line_start: bool,
+    /// The part of the cursor's word before the cursor, upper case.
+    prefix: String,
     frames: Vec<Frame>,
     stack: Vec<usize>,
     snapshot: Option<Snapshot>,
@@ -377,6 +380,7 @@ impl<'a> Walk<'a> {
             typed: typed_span,
             parts,
             line_start,
+            prefix: text[from..at.max(from)].to_ascii_uppercase(),
             frames: vec![Frame::new(None, true, Origin::Statement, Clause::Start)],
             stack: vec![0],
             snapshot: None,
@@ -950,7 +954,6 @@ impl<'a> Walk<'a> {
             Clause::Relation { slot: Slot::As, .. } => (Expect::Alias, Vec::new()),
             Clause::Relation { slot: Slot::JoinWord, .. } => (Expect::Keyword, vec!["JOIN", "OUTER JOIN"]),
             Clause::Relation { role, slot: slot @ (Slot::Named | Slot::Aliased) } => {
-                let expect = if slot == Slot::Named { Expect::Alias } else { Expect::Keyword };
                 let kw = match role {
                     Role::Join => [if pg { &["ON", "USING"][..] } else { &["ON"][..] }, &self.after_from()].concat(),
                     Role::From | Role::Using => self.after_from(),
@@ -958,6 +961,7 @@ impl<'a> Walk<'a> {
                     Role::Update => vec!["SET"],
                     Role::Table => Vec::new(),
                 };
+                let expect = if slot == Slot::Named && !self.starts_reserved(&kw) { Expect::Alias } else { Expect::Keyword };
                 (expect, kw)
             }
             Clause::On { target, fresh, .. } => {
@@ -1005,6 +1009,18 @@ impl<'a> Walk<'a> {
                 (Expect::Expression, kw)
             }
         }
+    }
+
+    /// The word being typed is two or more letters of a keyword that cannot be a bare alias, such as `wh` of `WHERE`.
+    fn starts_reserved(&self, keywords: &[&str]) -> bool {
+        let reserved = |word: &str| match self.kind {
+            DatabaseKind::Postgres => {
+                let word = word.to_ascii_lowercase();
+                RESERVED.contains(&word.as_str()) || TYPE_OR_FUNCTION_NAME.contains(&word.as_str())
+            }
+            DatabaseKind::SqlServer => tsql::RESERVED.contains(&word),
+        };
+        self.prefix.len() >= 2 && keywords.iter().any(|k| k.starts_with(&self.prefix) && k.split(' ').next().is_some_and(reserved))
     }
 
     fn after_from(&self) -> Vec<&'static str> {
@@ -1458,7 +1474,23 @@ mod tests {
         assert_eq!(pg("select * from orders o|").expect, Expect::Alias);
         assert_eq!(pg("select * from orders |").expect, Expect::Alias);
         assert_eq!(pg("select * from orders as |").expect, Expect::Alias);
+        assert_eq!(pg("select * from orders as wh|").expect, Expect::Alias);
         assert_eq!(pg("select * from orders o |").expect, Expect::Keyword);
+    }
+
+    #[test]
+    fn a_word_after_a_relation_that_starts_a_reserved_keyword_offers_the_keywords() {
+        for (s, keyword) in [
+            (pg("select * from orders wh|"), "WHERE"),
+            (pg("select * from orders lim|"), "LIMIT"),
+            (pg("select * from orders o join customers c whe|"), "WHERE"),
+            (pg("select * from orders le|"), "LEFT JOIN"),
+            (ms("SELECT * FROM orders WH|"), "WHERE"),
+            (ms("SELECT * FROM orders ORD|"), "ORDER BY"),
+        ] {
+            assert_eq!((s.expect, s.keywords.contains(&keyword)), (Expect::Keyword, true), "{keyword}");
+        }
+        assert_eq!(ms("SELECT * FROM orders LIM|").expect, Expect::Alias);
     }
 
     #[test]
