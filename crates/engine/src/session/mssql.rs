@@ -114,6 +114,21 @@ fn config(p: &ConnectParams) -> Result<Config, ConnectError> {
 const LOGIN_FAILED: u32 = 18456;
 const UNTRUSTED_DOMAIN_LOGIN: u32 = 18452;
 
+/// The vendored driver follows this with advice for developers, such as `Config::trust_cert()`,
+/// which names settings the app does not have.
+const CERTIFICATE_REJECTED: &str = "the server's certificate was rejected during the TLS handshake: ";
+
+fn tls_failure(message: String, entra: bool) -> ConnectError {
+    let Some(rest) = message.strip_prefix(CERTIFICATE_REJECTED) else { return ConnectError::Tls { message: format!("TLS failed: {message}") } };
+    let reason = rest.split_once(". ").map_or(rest, |(reason, _)| reason).trim_end_matches('.');
+    let message = if entra {
+        format!("The server's certificate could not be verified, so the Microsoft Entra ID token was not sent. Entra ID sign-in needs a server with a publicly trusted certificate, such as Azure SQL. Check the host name, or ask the server's administrator for a publicly trusted certificate. Reason: {reason}.")
+    } else {
+        format!("The server's certificate could not be verified. Give the server a certificate this computer trusts, or choose Require under TLS to connect without checking it. Reason: {reason}.")
+    };
+    ConnectError::Tls { message }
+}
+
 async fn login_refused(code: u32, message: &str, entra: Option<(&AzCli, &str)>) -> Option<ConnectError> {
     if code != LOGIN_FAILED && !(entra.is_some() && code == UNTRUSTED_DOMAIN_LOGIN) {
         return None;
@@ -139,7 +154,7 @@ impl MsSession {
         let connected = tokio::time::timeout(CONNECT_TIMEOUT, connection).await.map_err(|_| ConnectError::Network { message: "SQL Server connection timed out".into() })?;
         let client = match connected {
             Ok(client) => client,
-            Err(tiberius::error::Error::Tls(message)) => return Err(ConnectError::Tls { message }),
+            Err(tiberius::error::Error::Tls(message)) => return Err(tls_failure(message, token.is_some())),
             Err(tiberius::error::Error::Server(e)) => {
                 let entra = p.entra.as_deref().zip(token.as_deref());
                 return Err(login_refused(e.code(), e.message(), entra).await.unwrap_or_else(|| ConnectError::Server(query_error(tiberius::error::Error::Server(e)))));
@@ -367,6 +382,19 @@ mod login_tests {
         }
     }
 
+    #[test]
+    fn a_rejected_certificate_names_what_the_user_can_do_and_keeps_the_reason() {
+        let rejected = "the server's certificate was rejected during the TLS handshake: invalid peer certificate: UnknownIssuer. To connect anyway you can: (1) trust a specific CA certificate with `Config::trust_cert_ca(path)`; (3) skip certificate validation entirely with `Config::trust_cert()`.".to_owned();
+        for (entra, advice) in [(true, "publicly trusted certificate"), (false, "choose Require")] {
+            let ConnectError::Tls { message } = tls_failure(rejected.clone(), entra) else { panic!("a TLS failure stays Tls") };
+            assert!(message.starts_with("The server's certificate could not be verified") && message.contains(advice), "{message}");
+            assert!(message.ends_with("Reason: invalid peer certificate: UnknownIssuer."), "{message}");
+            assert!(!message.contains("Config::") && !message.contains("trust_cert"), "{message}");
+        }
+        let ConnectError::Tls { message } = tls_failure("invalid dns name".into(), true) else { panic!("a TLS failure stays Tls") };
+        assert_eq!(message, "TLS failed: invalid dns name");
+    }
+
     #[tokio::test]
     async fn other_login_errors_keep_the_token_and_a_sql_login_keeps_trunks_mapping() {
         let fake = FakeAz::new();
@@ -475,6 +503,8 @@ mod tests {
         p.ssl_mode = SslMode::Disable;
         assert!(matches!(MsSession::open(&p).await, Err(ConnectError::Tls { .. })));
         p.ssl_mode = SslMode::VerifyFull;
+        let Err(ConnectError::Tls { message }) = MsSession::open(&p).await else { panic!("the dev server's certificate is self-signed") };
+        assert!(message.starts_with("The server's certificate could not be verified.") && message.contains("choose Require") && !message.contains("trust_cert"), "{message}");
         p.ca_cert_path = Some("not-a-real-ca.pem".into());
         assert!(matches!(MsSession::open(&p).await, Err(ConnectError::Tls { .. })));
     }

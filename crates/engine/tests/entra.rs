@@ -193,7 +193,9 @@ async fn the_dev_servers_self_signed_certificate_fails_an_entra_sign_in_before_l
     let port = std::env::var("L1_DATA_TEST_MSSQL_PORT").ok().and_then(|p| p.parse().ok()).unwrap_or(1434);
     let id = h.engine.save_connection(entra(&host, port)).await.unwrap().id;
     for _ in 0..2 {
-        assert!(matches!(h.engine.connect(id).await, Err(ConnectError::Tls { .. })));
+        let Err(ConnectError::Tls { message }) = h.engine.connect(id).await else { panic!("expected Tls") };
+        assert!(message.starts_with("The server's certificate could not be verified, so the Microsoft Entra ID token was not sent."), "{message}");
+        assert!(!message.contains("trust_cert"), "{message}");
     }
     assert_eq!(h.calls(), 1, "a login that refused the token would drop it, so the second sign-in would run az again");
 }
