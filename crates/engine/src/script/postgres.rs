@@ -69,13 +69,15 @@ pub enum Parent {
     Inherits(Vec<(String, String)>),
 }
 
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub enum ReplicaIdentity {
     #[default]
     Default,
     Nothing,
     Full,
     Index,
+    /// A partition's copy of its parent's index, which the script does not create by name.
+    AttachedIndex(String),
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -160,6 +162,7 @@ pub struct Trigger {
     pub definition: String,
     pub enabled: char,
     pub comment: Option<String>,
+    pub cloned: bool,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -280,10 +283,11 @@ fn table_statements(t: &Table, out: &mut Vec<String>, warnings: &mut Vec<String>
     }
     indexes(&t.indexes, keyword, &t.schema, &name, out, warnings);
     out.extend(late.iter().map(add));
-    match t.replica_identity {
+    match &t.replica_identity {
         _ if t.foreign.is_some() => {}
         ReplicaIdentity::Nothing => out.push(format!("ALTER TABLE {name} REPLICA IDENTITY NOTHING")),
         ReplicaIdentity::Full => out.push(format!("ALTER TABLE {name} REPLICA IDENTITY FULL")),
+        ReplicaIdentity::AttachedIndex(index) => out.push(format!("ALTER TABLE {name} REPLICA IDENTITY USING INDEX {}", ident(index))),
         ReplicaIdentity::Default | ReplicaIdentity::Index => {}
     }
     for tr in &t.triggers {
@@ -567,9 +571,12 @@ pub fn trigger(t: &Trigger, keyword: &str, table: &str) -> Vec<String> {
         'D' => Some("DISABLE"),
         'R' => Some("ENABLE REPLICA"),
         'A' => Some("ENABLE ALWAYS"),
+        _ if t.cloned => Some("ENABLE"),
         _ => None,
     };
-    std::iter::once(t.definition.clone())
+    (!t.cloned)
+        .then(|| t.definition.clone())
+        .into_iter()
         .chain(state.map(|s| format!("ALTER {} {table} {s} TRIGGER {}", if keyword == "FOREIGN TABLE" { keyword } else { "TABLE" }, ident(&t.name))))
         .chain(comment(&format!("TRIGGER {} ON {table}", ident(&t.name)), &t.comment))
         .collect()
@@ -708,7 +715,7 @@ mod tests {
                 Index { name: "t_code".into(), definition: Some("CREATE INDEX t_code ON public.t USING btree (code)".into()), clustered: true, ..Default::default() },
             ],
             replica_identity: ReplicaIdentity::Index,
-            triggers: vec![Trigger { name: "audit".into(), definition: "CREATE TRIGGER audit AFTER INSERT ON public.t FOR EACH ROW EXECUTE FUNCTION public.audit()".into(), enabled: 'D', comment: Some("tr".into()) }],
+            triggers: vec![Trigger { name: "audit".into(), definition: "CREATE TRIGGER audit AFTER INSERT ON public.t FOR EACH ROW EXECUTE FUNCTION public.audit()".into(), enabled: 'D', comment: Some("tr".into()), cloned: false }],
             rules: vec![Rule { name: "r".into(), definition: "CREATE RULE r AS\n    ON UPDATE TO public.t DO INSTEAD NOTHING;".into(), enabled: 'D', comment: None }],
             row_security: true,
             force_row_security: true,
@@ -802,6 +809,23 @@ COMMENT ON COLUMN public.t.status IS 'lifecycle';
         assert_eq!(
             table(&t).text,
             "CREATE TABLE app.tree (\n    id integer NOT NULL,\n    parent integer\n);\n\nCREATE UNIQUE INDEX tree_id ON app.tree USING btree (id);\n\nALTER TABLE app.tree ADD CONSTRAINT tree_parent FOREIGN KEY (parent) REFERENCES app.tree(id);\n"
+        );
+    }
+
+    #[test]
+    fn a_partition_keeps_its_cloned_triggers_state_and_comment_and_its_attached_replica_index() {
+        let clone = |name: &str, enabled: char, comment: Option<&str>| Trigger { name: name.into(), definition: "CREATE TRIGGER ignored".into(), enabled, comment: comment.map(Into::into), cloned: true };
+        let leaf = Table {
+            schema: "app".into(),
+            name: "ri_1".into(),
+            parent: Parent::Partition { schema: "app".into(), name: "ri".into(), bound: "FOR VALUES IN (1)".into() },
+            replica_identity: ReplicaIdentity::AttachedIndex("ri_1_id_k_idx".into()),
+            triggers: vec![clone("off", 'D', None), clone("on", 'O', Some("leaf note"))],
+            ..Default::default()
+        };
+        assert_eq!(
+            table(&leaf).text,
+            "CREATE TABLE app.ri_1 PARTITION OF app.ri\n    FOR VALUES IN (1);\n\nALTER TABLE app.ri_1 REPLICA IDENTITY USING INDEX ri_1_id_k_idx;\n\nALTER TABLE app.ri_1 DISABLE TRIGGER off;\n\nALTER TABLE app.ri_1 ENABLE TRIGGER \"on\";\n\nCOMMENT ON TRIGGER \"on\" ON app.ri_1 IS 'leaf note';\n"
         );
     }
 

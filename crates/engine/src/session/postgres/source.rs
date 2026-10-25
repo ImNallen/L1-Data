@@ -16,7 +16,9 @@ const RELATION: &str = "SELECT c.relkind::text, n.nspname, c.relname, c.relpersi
         ARRAY(SELECT hc.relname::text FROM pg_inherits h JOIN pg_class hc ON hc.oid = h.inhparent
               WHERE h.inhrelid = c.oid AND NOT c.relispartition ORDER BY h.inhseqno),
         CASE WHEN c.reloftype <> 0 THEN format_type(c.reloftype, NULL) END,
-        ARRAY(SELECT p.pubname::text FROM pg_publication_rel pr JOIN pg_publication p ON p.oid = pr.prpubid WHERE pr.prrelid = c.oid ORDER BY 1)
+        ARRAY(SELECT p.pubname::text FROM pg_publication_rel pr JOIN pg_publication p ON p.oid = pr.prpubid WHERE pr.prrelid = c.oid ORDER BY 1),
+        (SELECT ic.relname FROM pg_index ri JOIN pg_class ic ON ic.oid = ri.indexrelid
+          WHERE ri.indrelid = c.oid AND ri.indisreplident AND EXISTS (SELECT 1 FROM pg_inherits h WHERE h.inhrelid = ri.indexrelid))
      FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
      LEFT JOIN pg_inherits i ON i.inhrelid = c.oid AND c.relispartition
      LEFT JOIN pg_class p ON p.oid = i.inhparent LEFT JOIN pg_namespace pn ON pn.oid = p.relnamespace
@@ -113,10 +115,15 @@ const INDEXES: &str = "SELECT ic.relname,
      WHERE i.indrelid = $1 AND NOT EXISTS (SELECT 1 FROM pg_inherits h WHERE h.inhrelid = i.indexrelid)
      ORDER BY ic.relname";
 
-const TRIGGERS: &str = "SELECT t.tgname, pg_get_triggerdef(t.oid), t.tgenabled::text, obj_description(t.oid, 'pg_trigger') FROM pg_trigger t
-     WHERE t.tgrelid = $1 AND NOT t.tgisinternal
-       AND NOT EXISTS (SELECT 1 FROM pg_depend d WHERE d.classid = 'pg_trigger'::regclass AND d.objid = t.oid
-                       AND d.refclassid = 'pg_trigger'::regclass AND d.deptype = 'P')
+/// A partition's clone of its parent's trigger comes with the parent, so only a clone whose
+/// state or comment the replay would not reproduce is read, to set them again.
+const TRIGGERS: &str = "SELECT t.tgname, pg_get_triggerdef(t.oid), t.tgenabled::text, obj_description(t.oid, 'pg_trigger'), p.oid IS NOT NULL
+     FROM pg_trigger t
+     LEFT JOIN pg_depend d ON d.classid = 'pg_trigger'::regclass AND d.objid = t.oid AND d.refclassid = 'pg_trigger'::regclass AND d.deptype = 'P'
+     LEFT JOIN pg_trigger p ON p.oid = d.refobjid
+     WHERE t.tgrelid = $1
+       AND (p.oid IS NULL AND NOT t.tgisinternal
+            OR p.oid IS NOT NULL AND (t.tgenabled <> 'O' OR t.tgenabled <> p.tgenabled OR obj_description(t.oid, 'pg_trigger') IS NOT NULL))
      ORDER BY t.tgname";
 
 const RULES: &str = "SELECT r.rulename, pg_get_ruledef(r.oid), r.ev_enabled::text, obj_description(r.oid, 'pg_rewrite') FROM pg_rewrite r
@@ -251,7 +258,7 @@ async fn relation(tx: &Transaction<'_>, queries: &Queries, oid: u32) -> Result<O
                 comment: r.get(5),
                 columns: columns.iter().map(column).collect(),
                 indexes: indexes.iter().map(index_row).collect(),
-                triggers: triggers.iter().map(trigger_row).collect(),
+                triggers: triggers.iter().map(cloned_trigger_row).collect(),
                 rules: rules.iter().map(rule_row).collect(),
                 unscripted: unscripted(&r, &grants),
             })
@@ -315,10 +322,10 @@ async fn table(tx: &Transaction<'_>, queries: &Queries, oid: u32, r: &Row) -> Re
         replica_identity: match r.get::<_, &str>(13) {
             "n" => ddl::ReplicaIdentity::Nothing,
             "f" => ddl::ReplicaIdentity::Full,
-            "i" => ddl::ReplicaIdentity::Index,
+            "i" => r.get::<_, Option<String>>(23).map_or(ddl::ReplicaIdentity::Index, ddl::ReplicaIdentity::AttachedIndex),
             _ => ddl::ReplicaIdentity::Default,
         },
-        triggers: triggers.iter().map(trigger_row).collect(),
+        triggers: triggers.iter().map(cloned_trigger_row).collect(),
         rules: rules.iter().map(rule_row).collect(),
         row_security: r.get(11),
         force_row_security: r.get(12),
@@ -416,7 +423,11 @@ fn index_row(r: &Row) -> ddl::Index {
 }
 
 fn trigger_row(r: &Row) -> ddl::Trigger {
-    ddl::Trigger { name: r.get(0), definition: r.get(1), enabled: first(r.get(2)), comment: r.get(3) }
+    ddl::Trigger { name: r.get(0), definition: r.get(1), enabled: first(r.get(2)), comment: r.get(3), cloned: false }
+}
+
+fn cloned_trigger_row(r: &Row) -> ddl::Trigger {
+    ddl::Trigger { cloned: r.get(4), ..trigger_row(r) }
 }
 
 fn rule_row(r: &Row) -> ddl::Rule {
