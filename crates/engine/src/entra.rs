@@ -1,6 +1,7 @@
 use std::ffi::OsString;
 use std::path::PathBuf;
 use std::process::Stdio;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use crate::model::ConnectError;
@@ -16,7 +17,16 @@ pub(crate) struct AzCli {
     agent_path: AgentPath,
     binary: Option<PathBuf>,
     path: tokio::sync::OnceCell<OsString>,
-    cached: tokio::sync::Mutex<Option<Cached>>,
+    state: tokio::sync::Mutex<State>,
+    /// Counts finished az calls. A caller that saw a lower count before it waited for the lock
+    /// waited on a call in flight, and takes that call's result instead of running az again.
+    fetched: AtomicU64,
+}
+
+#[derive(Default)]
+struct State {
+    cached: Option<Cached>,
+    last: Option<Result<String, ConnectError>>,
 }
 
 struct Cached {
@@ -39,23 +49,36 @@ impl std::fmt::Debug for AzCli {
 impl AzCli {
     pub(crate) fn new(agent_path: AgentPath) -> Self {
         let binary = matches!(agent_path, AgentPath::LoginShell).then(|| std::env::var_os(AZ_BINARY_ENV).map(PathBuf::from)).flatten();
-        Self { agent_path, binary, path: tokio::sync::OnceCell::new(), cached: tokio::sync::Mutex::new(None) }
+        Self { agent_path, binary, path: tokio::sync::OnceCell::new(), state: tokio::sync::Mutex::default(), fetched: AtomicU64::new(0) }
     }
 
     pub(crate) async fn token(&self) -> Result<String, ConnectError> {
-        let mut cached = self.cached.lock().await;
-        if let Some(c) = cached.as_ref().filter(|c| SystemTime::now() < c.refresh_at) {
+        let seen = self.fetched.load(Ordering::Acquire);
+        let mut state = self.state.lock().await;
+        if let Some(c) = state.cached.as_ref().filter(|c| SystemTime::now() < c.refresh_at) {
             return Ok(c.access.clone());
         }
-        let token = self.fetch().await?;
-        *cached = token.expires_at.and_then(|at| at.checked_sub(REFRESH_BEFORE)).filter(|at| SystemTime::now() < *at).map(|refresh_at| Cached { access: token.access.clone(), refresh_at });
-        Ok(token.access)
+        if let Some(last) = state.last.as_ref().filter(|_| self.fetched.load(Ordering::Acquire) != seen) {
+            return last.clone();
+        }
+        let fetched = self.fetch().await;
+        state.cached = fetched.as_ref().ok().and_then(|token| {
+            let refresh_at = token.expires_at?.checked_sub(REFRESH_BEFORE).filter(|at| SystemTime::now() < *at)?;
+            Some(Cached { access: token.access.clone(), refresh_at })
+        });
+        let result = fetched.map(|token| token.access);
+        state.last = Some(result.clone());
+        self.fetched.fetch_add(1, Ordering::Release);
+        result
     }
 
     pub(crate) async fn forget(&self, access: &str) {
-        let mut cached = self.cached.lock().await;
-        if cached.as_ref().is_some_and(|c| c.access == access) {
-            *cached = None;
+        let mut state = self.state.lock().await;
+        if state.cached.as_ref().is_some_and(|c| c.access == access) {
+            state.cached = None;
+        }
+        if matches!(&state.last, Some(Ok(last)) if last == access) {
+            state.last = None;
         }
     }
 
@@ -136,7 +159,7 @@ mod tests {
 
     fn seeded(access: &str, refresh_at: SystemTime) -> AzCli {
         let cli = AzCli::new(AgentPath::Fixed("".into()));
-        *cli.cached.try_lock().unwrap() = Some(Cached { access: access.into(), refresh_at });
+        cli.state.try_lock().unwrap().cached = Some(Cached { access: access.into(), refresh_at });
         cli
     }
 

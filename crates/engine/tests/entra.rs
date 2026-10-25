@@ -15,12 +15,16 @@ struct Harness {
 
 impl Harness {
     async fn with_az(scenario: &str) -> Self {
+        Self::with_slow_az(scenario, 0).await
+    }
+
+    async fn with_slow_az(scenario: &str, delay_secs: u32) -> Self {
         let dir = tempfile::tempdir().unwrap();
         let bin = dir.path().join("bin");
         std::fs::create_dir(&bin).unwrap();
         let az = bin.join("az");
         let log = dir.path().join("az.log");
-        std::fs::write(&az, format!("#!/bin/sh\nexec '{FAKE_AZ}' --fake-scenario {scenario} --fake-log '{}' \"$@\"\n", log.display())).unwrap();
+        std::fs::write(&az, format!("#!/bin/sh\n/bin/sleep {delay_secs}\nexec '{FAKE_AZ}' --fake-scenario {scenario} --fake-log '{}' \"$@\"\n", log.display())).unwrap();
         std::fs::set_permissions(&az, std::fs::Permissions::from_mode(0o755)).unwrap();
         Self::open(dir, AgentPath::Fixed(bin.into())).await
     }
@@ -96,6 +100,21 @@ async fn a_token_inside_the_refresh_margin_is_fetched_again() {
         assert!(matches!(h.engine.connect(id).await, Err(ConnectError::Network { .. })));
     }
     assert_eq!(h.calls(), 2);
+}
+
+#[tokio::test]
+async fn concurrent_sign_ins_share_one_az_call_and_its_failure() {
+    let h = Harness::with_slow_az("signed-out", 1).await;
+    let draft = entra("127.0.0.1", refused_port());
+    let started = std::time::Instant::now();
+    let tries = tokio::join!(h.engine.test_connection(draft.clone()), h.engine.test_connection(draft.clone()), h.engine.test_connection(draft.clone()));
+    for result in [tries.0, tries.1, tries.2] {
+        assert!(matches!(result, Err(ConnectError::Auth { .. })), "{result:?}");
+    }
+    assert_eq!(h.calls(), 1, "waiters share the call in flight");
+    assert!(started.elapsed() < std::time::Duration::from_secs(2), "waited {:?}", started.elapsed());
+    assert!(h.engine.test_connection(draft).await.is_err());
+    assert_eq!(h.calls(), 2, "a later try runs az again");
 }
 
 #[tokio::test]
