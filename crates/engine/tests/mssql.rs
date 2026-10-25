@@ -1010,7 +1010,8 @@ impl Harness {
                 UNION ALL
                 SELECT CONCAT(N'check ',k.name,' ',k.definition,' ',k.is_disabled,' ',k.is_not_trusted,' ',k.is_not_for_replication) FROM sys.check_constraints k WHERE k.parent_object_id=o.object_id
                 UNION ALL
-                SELECT CONCAT(N'trigger ',t.name,' ',t.is_disabled,' ',m.uses_ansi_nulls,' ',m.uses_quoted_identifier,' ',TRIM(CHAR(13)+CHAR(10)+CHAR(9)+' ' FROM m.definition))
+                SELECT CONCAT(N'trigger ',t.name,' ',t.is_disabled,' ',m.uses_ansi_nulls,' ',m.uses_quoted_identifier,' ',TRIM(CHAR(13)+CHAR(10)+CHAR(9)+' ' FROM m.definition),' ',
+                              (SELECT STRING_AGG(CONCAT(te.type_desc,te.is_first,te.is_last),',') WITHIN GROUP (ORDER BY te.type) FROM sys.trigger_events te WHERE te.object_id=t.object_id))
                 FROM sys.triggers t JOIN sys.sql_modules m ON m.object_id=t.object_id WHERE t.parent_id=o.object_id AND t.name<>'enc_trg'
                 UNION ALL
                 SELECT CONCAT(N'module ',m.uses_ansi_nulls,' ',m.uses_quoted_identifier,' ',TRIM(CHAR(13)+CHAR(10)+CHAR(9)+' ' FROM m.definition))
@@ -1143,6 +1144,12 @@ async fn hostile_object_scripts_replay_every_property_or_warn() {
         let schema_oid = |name: &str| catalog.schemas.iter().flat_map(|s| &s.relations).find(|r| r.name == name).unwrap().oid;
         let xml = src.engine.object_script(db.clone(), ScriptTarget::Index { relation_oid: schema_oid("warned"), name: "IX x".into() }).await;
         assert_eq!(refusal(xml), "Only clustered, nonclustered, and columnstore indexes can be scripted, and IX x is none of these.");
+        let ordered = src.engine.object_script(db.clone(), ScriptTarget::Trigger { relation_oid: schema_oid("refr"), name: "refr_a".into() }).await.unwrap();
+        assert!(
+            ordered.text.ends_with("EXEC sys.sp_settriggerorder @triggername = N'[dbo].[refr_a]', @order = N'Last', @stmttype = N'INSERT';\nEXEC sys.sp_settriggerorder @triggername = N'[dbo].[refr_a]', @order = N'First', @stmttype = N'UPDATE';\nGO\n"),
+            "{}",
+            ordered.text
+        );
         let encrypted = src.engine.object_script(db.clone(), ScriptTarget::Trigger { relation_oid: schema_oid("warned"), name: "enc_trg".into() }).await;
         assert_eq!(refusal(encrypted), "SQL Server has no readable definition for [dbo].[enc_trg]. The module is encrypted, or this login lacks VIEW DEFINITION permission.");
         let unique = src.engine.object_script(db.clone(), ScriptTarget::Index { relation_oid: schema_oid("refd"), name: "UQ_refd".into() }).await.unwrap();

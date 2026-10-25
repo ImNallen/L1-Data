@@ -158,6 +158,8 @@ pub struct Module {
     pub ansi_nulls: bool,
     pub quoted_identifier: bool,
     pub disabled_on: Option<String>,
+    /// The events this trigger fires `First` or `Last` for, as `sp_settriggerorder` set them.
+    pub order: Vec<(String, String)>,
     pub properties: Vec<Property>,
     pub privileges: Vec<Privilege>,
 }
@@ -557,6 +559,10 @@ fn module_text(m: &Module, warnings: &mut Vec<String>) -> String {
         None => definition.to_owned(),
     };
     let mut out = format!("{}{definition}\nGO\n", set_options(m.ansi_nulls, m.quoted_identifier));
+    if !m.order.is_empty() {
+        let lines: String = m.order.iter().map(|(when, event)| format!("EXEC sys.sp_settriggerorder @triggername = {}, @order = N'{when}', @stmttype = N'{event}';\n", quote_literal(&name))).collect();
+        out.push_str(&format!("{lines}GO\n"));
+    }
     if let Some(table) = &m.disabled_on {
         out.push_str(&format!("DISABLE TRIGGER {name} ON {table};\nGO\n"));
     }
@@ -653,6 +659,7 @@ mod tests {
                 ansi_nulls: true,
                 quoted_identifier: false,
                 disabled_on: Some("[dbo].[tickets]".into()),
+                order: vec![("First".into(), "UPDATE".into())],
                 properties: vec![],
                 privileges: vec![],
             })],
@@ -682,6 +689,8 @@ GO
 SET QUOTED_IDENTIFIER OFF
 GO
 CREATE TRIGGER dbo.t ON dbo.tickets AFTER UPDATE AS SELECT 1
+GO
+EXEC sys.sp_settriggerorder @triggername = N'[dbo].[t]', @order = N'First', @stmttype = N'UPDATE';
 GO
 DISABLE TRIGGER [dbo].[t] ON [dbo].[tickets];
 GO

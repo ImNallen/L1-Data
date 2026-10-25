@@ -125,6 +125,14 @@ CREATE TABLE dbo.refr (
 GO
 ALTER TABLE dbo.refr NOCHECK CONSTRAINT FK_refr;
 GO
+CREATE TRIGGER dbo.refr_a ON dbo.refr AFTER INSERT, UPDATE AS SET NOCOUNT ON;
+GO
+CREATE TRIGGER dbo.refr_b ON dbo.refr AFTER INSERT AS SET NOCOUNT ON;
+GO
+EXEC sp_settriggerorder N'dbo.refr_b', N'First', N'INSERT';
+EXEC sp_settriggerorder N'dbo.refr_a', N'Last', N'INSERT';
+EXEC sp_settriggerorder N'dbo.refr_a', N'First', N'UPDATE';
+GO
 CREATE TABLE dbo.tree (id int NOT NULL, parent int NULL);
 CREATE UNIQUE INDEX UX_tree ON dbo.tree (id);
 ALTER TABLE dbo.tree ADD CONSTRAINT FK_tree FOREIGN KEY (parent) REFERENCES dbo.tree (id);

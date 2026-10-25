@@ -250,7 +250,9 @@ impl MsSession {
 
 fn modules_sql(filter: &str) -> String {
     format!(
-        "SELECT s.name,o.name,OBJECT_DEFINITION(o.object_id),m.uses_ansi_nulls,m.uses_quoted_identifier,tr.is_disabled,ps.name,po.name,o.object_id,o.type
+        "SELECT s.name,o.name,OBJECT_DEFINITION(o.object_id),m.uses_ansi_nulls,m.uses_quoted_identifier,tr.is_disabled,ps.name,po.name,o.object_id,o.type,
+            STUFF((SELECT ','+CASE WHEN te.is_first=1 THEN 'First' ELSE 'Last' END+' '+te.type_desc FROM sys.trigger_events te
+                   WHERE te.object_id=o.object_id AND (te.is_first=1 OR te.is_last=1) ORDER BY te.type FOR XML PATH('')),1,1,'')
          FROM sys.objects o JOIN sys.schemas s ON s.schema_id=o.schema_id
          LEFT JOIN sys.sql_modules m ON m.object_id=o.object_id
          LEFT JOIN sys.triggers tr ON tr.object_id=o.object_id
@@ -274,7 +276,8 @@ fn modules(rows: &[Row]) -> Result<Vec<(i32, Found)>, DetailError> {
                 Some("1") => Some(ddl::qualified(&text(r, 6)?, &text(r, 7)?)),
                 _ => None,
             };
-            let module = ddl::Module { schema, name, definition, ansi_nulls: bit(r, 3)?, quoted_identifier: bit(r, 4)?, disabled_on, properties: vec![], privileges: vec![] };
+            let order = r[10].as_deref().map_or(vec![], |o| o.split(',').filter_map(|e| e.split_once(' ')).map(|(when, event)| (when.to_owned(), event.to_owned())).collect());
+            let module = ddl::Module { schema, name, definition, ansi_nulls: bit(r, 3)?, quoted_identifier: bit(r, 4)?, disabled_on, order, properties: vec![], privileges: vec![] };
             Ok((oid, Found::Text(module)))
         })
         .collect()
