@@ -16,7 +16,11 @@ export const MENU_ITEM = "flex h-7 cursor-default items-center gap-2 rounded-md 
 
 export function DatabaseBadge({ databaseKind }: { databaseKind: DatabaseKind }) {
   return (
-    <span title={DATABASE_LABEL[databaseKind]} aria-label={DATABASE_LABEL[databaseKind]} className="inline-grid h-4 min-w-[18px] place-items-center rounded-[4px] bg-badge-bg px-[3px] font-mono text-ui-8.5 font-bold leading-none tracking-tight text-badge">
+    <span
+      title={DATABASE_LABEL[databaseKind]}
+      aria-label={DATABASE_LABEL[databaseKind]}
+      className="inline-grid h-4 min-w-[18px] place-items-center rounded-[4px] bg-badge-bg px-[3px] font-mono text-ui-8.5 font-bold leading-none tracking-tight text-badge"
+    >
       {databaseKind === "Postgres" ? "PG" : "MS"}
     </span>
   );
@@ -24,9 +28,7 @@ export function DatabaseBadge({ databaseKind }: { databaseKind: DatabaseKind }) 
 
 export function Kbd({ children, className }: { children: ReactNode; className?: string }) {
   return (
-    <kbd className={cx("inline-flex h-[18px] items-center rounded-[4px] px-1.5 font-sans text-ui-10.5 font-medium leading-none", className)}>
-      {children}
-    </kbd>
+    <kbd className={cx("inline-flex h-[18px] items-center rounded-[4px] px-1.5 font-sans text-ui-10.5 font-medium leading-none", className)}>{children}</kbd>
   );
 }
 
@@ -55,10 +57,7 @@ export function StatusDot({ tone }: { tone: "live" | "pending" | "off" | "error"
 
 export function Spinner() {
   return (
-    <span
-      className="inline-block size-3 rounded-full border-[1.5px] border-dim border-t-transparent"
-      style={{ animation: "spin 0.8s linear infinite" }}
-    />
+    <span className="inline-block size-3 rounded-full border-[1.5px] border-dim border-t-transparent" style={{ animation: "spin 0.8s linear infinite" }} />
   );
 }
 
@@ -121,12 +120,7 @@ export function Switch({
         checked ? "bg-run hover:bg-run-hover" : "bg-control hover:bg-handle-hover",
       )}
     >
-      <span
-        className={cx(
-          "size-[14px] rounded-full bg-run-fg shadow-[0_1px_2px_rgba(0,0,0,0.3)] transition-transform",
-          checked && "translate-x-[12px]",
-        )}
-      />
+      <span className={cx("size-[14px] rounded-full bg-run-fg shadow-[0_1px_2px_rgba(0,0,0,0.3)] transition-transform", checked && "translate-x-[12px]")} />
     </button>
   );
 }
@@ -138,11 +132,7 @@ export function DialogBackdrop() {
 export function MenuContent({ children, align = "start", className }: { children: ReactNode; align?: "start" | "end"; className?: string }) {
   return (
     <Menu.Portal>
-      <Menu.Content
-        align={align}
-        sideOffset={6}
-        className={cx(MENU_PANEL, className)}
-      >
+      <Menu.Content align={align} sideOffset={6} className={cx(MENU_PANEL, className)}>
         {children}
       </Menu.Content>
     </Menu.Portal>
@@ -188,17 +178,7 @@ export function ContextMenuArea({ menu, children }: { menu: ReactNode; children:
   );
 }
 
-export function ContextMenuItem({
-  children,
-  onSelect,
-  testId,
-  danger,
-}: {
-  children: ReactNode;
-  onSelect: () => void;
-  testId?: string;
-  danger?: boolean;
-}) {
+export function ContextMenuItem({ children, onSelect, testId, danger }: { children: ReactNode; onSelect: () => void; testId?: string; danger?: boolean }) {
   return (
     <ContextMenu.Item data-testid={testId} onSelect={onSelect} className={cx(MENU_ITEM, "pr-3", danger ? "text-danger" : "text-fg")}>
       {children}

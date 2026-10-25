@@ -30,7 +30,12 @@ const db = (name: string, over: Partial<DatabaseState> = {}): DatabaseState => (
   ...over,
 });
 
-const instance = (databases: DatabaseState[], showSystemDatabases = false): InstanceState => ({ configuredDatabase: "shop", home: "shop", showSystemDatabases, databases });
+const instance = (databases: DatabaseState[], showSystemDatabases = false): InstanceState => ({
+  configuredDatabase: "shop",
+  home: "shop",
+  showSystemDatabases,
+  databases,
+});
 
 const prod = instance([
   db("legacy_crm", { schemaCount: { kind: "Known", count: 2 } }),
@@ -49,7 +54,14 @@ const shopCatalog: Catalog = {
   db: { connectionId: "c1", database: "shop" },
   version: 3,
   defaultSchema: "public",
-  schemas: [schema("analytics_tmp", 1), schema("audit", 2), schema("billing", 3), schema("information_schema", 4, true), schema("pg_catalog", 64, true), schema("public", 13)],
+  schemas: [
+    schema("analytics_tmp", 1),
+    schema("audit", 2),
+    schema("billing", 3),
+    schema("information_schema", 4, true),
+    schema("pg_catalog", 64, true),
+    schema("public", 13),
+  ],
 };
 
 const shopState = db("shop", { shown: true, shownSchemas: ["audit", "pg_catalog", "public"], catalog: { kind: "Ready", version: 3 } });
@@ -116,7 +128,15 @@ describe("databasePicker", () => {
     const m = databasePicker(config, { ...prod, showSystemDatabases: true }, "templ");
     expect(m.showSystem).toBe(true);
     expect(m.items).toEqual([
-      { name: "template1", checked: false, isDefault: false, system: true, disabled: true, trailing: "no access", trailingTitle: "Connections are not allowed" },
+      {
+        name: "template1",
+        checked: false,
+        isDefault: false,
+        system: true,
+        disabled: true,
+        trailing: "no access",
+        trailingTitle: "Connections are not allowed",
+      },
     ]);
   });
 

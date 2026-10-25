@@ -54,10 +54,53 @@ it("lists matching tables, then views, then functions, with matching columns und
 it("carries the ranges to highlight for each matched name", () => {
   const relations = search("order id", prodOnly).connections[0]?.databases[0]?.schemas[0]?.relations;
   expect(relations?.map((r) => [r.rel.name, r.ranges, r.columns.map((c) => [c.column.name, c.ranges])])).toEqual([
-    ["order_items", null, [["order_id", [{ start: 0, end: 5 }, { start: 6, end: 8 }]]]],
-    ["payments", null, [["order_id", [{ start: 0, end: 5 }, { start: 6, end: 8 }]]]],
-    ["shipments", null, [["order_id", [{ start: 0, end: 5 }, { start: 6, end: 8 }]]]],
-    ["paid_orders", [{ start: 2, end: 4 }, { start: 5, end: 10 }], []],
+    [
+      "order_items",
+      null,
+      [
+        [
+          "order_id",
+          [
+            { start: 0, end: 5 },
+            { start: 6, end: 8 },
+          ],
+        ],
+      ],
+    ],
+    [
+      "payments",
+      null,
+      [
+        [
+          "order_id",
+          [
+            { start: 0, end: 5 },
+            { start: 6, end: 8 },
+          ],
+        ],
+      ],
+    ],
+    [
+      "shipments",
+      null,
+      [
+        [
+          "order_id",
+          [
+            { start: 0, end: 5 },
+            { start: 6, end: 8 },
+          ],
+        ],
+      ],
+    ],
+    [
+      "paid_orders",
+      [
+        { start: 2, end: 4 },
+        { start: 5, end: 10 },
+      ],
+      [],
+    ],
   ]);
 });
 

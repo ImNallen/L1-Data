@@ -16,7 +16,9 @@ it("groups entries into turns by their turn stamp, in seq order, whatever order 
   const second = snap(4, 4, ask("Only EU?"));
   const streaming = snap(5, 4, say("Filtering"));
   const turns = groupTurns(held(streaming, snap(3, 0, done), reply, second, describe, snap(0, 0, ask("Which regions grew?"))));
-  expect(turns.map((t) => ({ turn: t.turn, user: t.user && [t.user.seq, t.user.entry.text], items: t.items.map((i) => i.seq), end: t.end?.seq ?? null }))).toEqual([
+  expect(
+    turns.map((t) => ({ turn: t.turn, user: t.user && [t.user.seq, t.user.entry.text], items: t.items.map((i) => i.seq), end: t.end?.seq ?? null })),
+  ).toEqual([
     { turn: 0, user: [0, "Which regions grew?"], items: [1, 2], end: 3 },
     { turn: 4, user: [4, "Only EU?"], items: [5], end: null },
   ]);
@@ -40,7 +42,19 @@ it("says what each tool did in one line, for every status", () => {
     [DESCRIBE, { kind: "Done", result: { kind: "Described", found: ["orders"], missing: ["custmers"] } }],
     [SEARCH, { kind: "Done", result: { kind: "Found", matches: 7 } }],
     [SEARCH, { kind: "Done", result: { kind: "Found", matches: 1 } }],
-    [RUN, { kind: "Done", result: { kind: "Rows", columns: ["region"], rows: [["EU-West"], ["US-West"], ["APAC"], ["US-East"], ["LATAM"], ["EU-North"]], more: false, elapsedMs: 27 } }],
+    [
+      RUN,
+      {
+        kind: "Done",
+        result: {
+          kind: "Rows",
+          columns: ["region"],
+          rows: [["EU-West"], ["US-West"], ["APAC"], ["US-East"], ["LATAM"], ["EU-North"]],
+          more: false,
+          elapsedMs: 27,
+        },
+      },
+    ],
     [RUN, { kind: "Done", result: { kind: "Rows", columns: ["n"], rows: [["1"]], more: false, elapsedMs: 1450 } }],
     [RUN, { kind: "Done", result: { kind: "Rows", columns: ["id"], rows: Array.from({ length: 50 }, (_, i) => [String(i)]), more: true, elapsedMs: 3 } }],
     [DESCRIBE, { kind: "Running" }],

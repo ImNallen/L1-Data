@@ -21,17 +21,7 @@ export const handleLook = (line: keyof typeof LINE, lineColor: string) => ({
   ),
 });
 
-export function ResizeHandle({
-  id,
-  label,
-  line,
-  lineColor,
-}: {
-  id: string;
-  label: string;
-  line: keyof typeof LINE;
-  lineColor: string;
-}) {
+export function ResizeHandle({ id, label, line, lineColor }: { id: string; label: string; line: keyof typeof LINE; lineColor: string }) {
   const look = handleLook(line, lineColor);
   return (
     <Separator id={id} aria-label={label} className={look.root}>

@@ -73,8 +73,7 @@ function tabWithConsole(): string {
   return id;
 }
 
-const stageEdit = (id: string) =>
-  useTableEdits.getState().edit(id, (e) => setCell(e, [{ column: "id", value: "1" }], "total", "9", "1"));
+const stageEdit = (id: string) => useTableEdits.getState().edit(id, (e) => setCell(e, [{ column: "id", value: "1" }], "total", "9", "1"));
 
 it("closes a tab with nothing to lose without asking", async () => {
   const id = openSqlTab();
@@ -129,7 +128,13 @@ it("asks to save a file tab whose text differs from its file, and Don't Save clo
   const id = dirtyFileTab();
   const closing = closeTab(id);
   await vi.waitFor(() => expect(question()).toBe("Save changes to a.sql?"));
-  expect(ws().overlay).toMatchObject({ testId: "ask", choices: [{ id: "discard", label: "Don't Save" }, { id: "save", label: "Save" }] });
+  expect(ws().overlay).toMatchObject({
+    testId: "ask",
+    choices: [
+      { id: "discard", label: "Don't Save" },
+      { id: "save", label: "Save" },
+    ],
+  });
   ws().answer("discard");
   await closing;
   expect([ws().order, saves]).toEqual([[], []]);

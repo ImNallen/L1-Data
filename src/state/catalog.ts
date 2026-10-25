@@ -76,7 +76,7 @@ export const useCatalog = create<CatalogStore>()((set, get) => ({
     }
   },
   prune(keep) {
-    for (const key of [...inflight.keys()]) if (!keep.has(key)) inflight.delete(key);
+    for (const key of inflight.keys()) if (!keep.has(key)) inflight.delete(key);
     set((s) => {
       const kept = Object.entries(s.views).filter(([key]) => keep.has(key as DbKey));
       return kept.length === Object.keys(s.views).length ? {} : { views: Object.fromEntries(kept) };

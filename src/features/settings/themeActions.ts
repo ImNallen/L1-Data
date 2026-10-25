@@ -61,6 +61,10 @@ export function deleteCustomTheme(familyId: string): Promise<void> {
 }
 
 export async function confirmDeleteTheme(theme: Pick<CustomTheme, "id" | "name">): Promise<void> {
-  const ok = await confirm({ title: `Delete ${theme.name}?`, body: "The theme is removed from your themes. Modes using it go back to L1.", confirmLabel: "Delete" });
+  const ok = await confirm({
+    title: `Delete ${theme.name}?`,
+    body: "The theme is removed from your themes. Modes using it go back to L1.",
+    confirmLabel: "Delete",
+  });
   if (ok) await deleteCustomTheme(theme.id);
 }

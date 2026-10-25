@@ -20,7 +20,10 @@ const page = (over: Partial<TablePage> = {}): TablePage => ({ page: 0, pageSize:
 describe("exportMenu", () => {
   it("offers one group when the loaded rows are every row", () => {
     expect(exportMenu(meta({ kind: "Statement" }, 42), "Complete", null)).toEqual({ groups: [{ scope: "Loaded", label: "42 rows" }], note: null });
-    expect(exportMenu(meta({ kind: "Refused", reason: "may write" }, 1), "Complete", null)).toEqual({ groups: [{ scope: "Loaded", label: "1 row" }], note: null });
+    expect(exportMenu(meta({ kind: "Refused", reason: "may write" }, 1), "Complete", null)).toEqual({
+      groups: [{ scope: "Loaded", label: "1 row" }],
+      note: null,
+    });
   });
 
   it("offers All with the server's full count after a truncated read", () => {
@@ -45,7 +48,10 @@ describe("exportMenu", () => {
       { scope: "Loaded", label: "This page · 100 rows" },
       { scope: "All", label: "All rows in the table" },
     ]);
-    expect(exportMenu(meta({ kind: "Table" }, 100), "Complete", page({ exactRowCount: 25000, filtered: true })).groups[1]).toEqual({ scope: "All", label: "All 25,000 rows" });
+    expect(exportMenu(meta({ kind: "Table" }, 100), "Complete", page({ exactRowCount: 25000, filtered: true })).groups[1]).toEqual({
+      scope: "All",
+      label: "All 25,000 rows",
+    });
     expect(exportMenu(meta({ kind: "Table" }, 100), "Complete", page({ filtered: true })).groups[1]).toEqual({ scope: "All", label: "All filtered rows" });
   });
 

@@ -27,14 +27,26 @@ export function exportMenu(meta: ResultMeta, state: RowsState, table: TablePage 
     case "Table": {
       if (table && table.page === 0 && meta.rowCount < table.pageSize && !incomplete) return every;
       const all = table?.exactRowCount != null ? `All ${pluralRows(table.exactRowCount)}` : table?.filtered ? "All filtered rows" : "All rows in the table";
-      return { groups: [{ scope: "Loaded", label: `This page · ${pluralRows(meta.rowCount)}` }, { scope: "All", label: all }], note: null };
+      return {
+        groups: [
+          { scope: "Loaded", label: `This page · ${pluralRows(meta.rowCount)}` },
+          { scope: "All", label: all },
+        ],
+        note: null,
+      };
     }
     case "Statement":
     case "Confirm": {
       if (!incomplete) return every;
       // rowsSeen counts every row the server sent past the cap, but only a finished run sent them all.
       const all = state === "Complete" ? `All ${pluralRows(meta.rowsSeen)}` : "All rows";
-      return { groups: [{ scope: "Loaded", label: loaded }, { scope: "All", label: all }], note: null };
+      return {
+        groups: [
+          { scope: "Loaded", label: loaded },
+          { scope: "All", label: all },
+        ],
+        note: null,
+      };
     }
     case "Refused":
       return incomplete ? { groups: [{ scope: "Loaded", label: loaded }], note: meta.allRows.reason } : every;

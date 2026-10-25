@@ -18,9 +18,7 @@ afterEach(() => {
 
 // Static rendering reads each store's initial state, so the fixtures go there.
 function render(treeQuery: string, loaded = true, tint?: { tintConnections: boolean }) {
-  const configs = tint
-    ? { p: { ...connectionConfig("p", "prod"), color: "red" }, d: connectionConfig("d", "dev") }
-    : { p: connectionConfig("p", "prod") };
+  const configs = tint ? { p: { ...connectionConfig("p", "prod"), color: "red" }, d: connectionConfig("d", "dev") } : { p: connectionConfig("p", "prod") };
   const settings = { ...initial.workspace.settings, ...tint };
   Object.assign(useWorkspace.getInitialState(), { treeQuery, configs, settings });
   Object.assign(useLive.getInitialState(), { connections: { p: connectedState("p", [databaseState("shop", true, ["public"])]) } });

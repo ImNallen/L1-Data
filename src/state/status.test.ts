@@ -15,7 +15,12 @@ const meta = (index: number, rowCount: number, extra: Partial<ResultMeta> = {}):
   allRows: { kind: "Statement" },
   ...extra,
 });
-const stmt = (index: number, status: StatementRun["status"], outputs: RunOutput[] = []): StatementRun => ({ index, range: { from: 0, to: 1 }, status, outputs });
+const stmt = (index: number, status: StatementRun["status"], outputs: RunOutput[] = []): StatementRun => ({
+  index,
+  range: { from: 0, to: 1 },
+  status,
+  outputs,
+});
 const rows = (index: number, result: ResultMeta) => stmt(index, { kind: "Finished" }, [{ kind: "Rows", result, state: "Complete" }]);
 const command = (index: number, tag: string, elapsedMs: number) => stmt(index, { kind: "Finished" }, [{ kind: "Command", tag, elapsedMs, affectedRows: null }]);
 const finished = (statements: StatementRun[], outcome: "Ok" | "Failed" | "Cancelled" = "Ok"): RunState => ({
@@ -27,7 +32,17 @@ const finished = (statements: StatementRun[], outcome: "Ok" | "Failed" | "Cancel
 });
 
 function consoleWith(mode: "AutoCommit" | "Manual", txn: ConsoleState["txn"]): ConsoleState {
-  return { tabId: "t", rev: 1, config: { connectionId: "c", database: "shop", schema: null, mode }, session: { kind: "None" }, txnDepth: null, work: null, export: null, txn, run: { kind: "Idle" } };
+  return {
+    tabId: "t",
+    rev: 1,
+    config: { connectionId: "c", database: "shop", schema: null, mode },
+    session: { kind: "None" },
+    txnDepth: null,
+    work: null,
+    export: null,
+    txn,
+    run: { kind: "Idle" },
+  };
 }
 
 describe("hasUncommittedWork", () => {
@@ -70,11 +85,7 @@ describe("runSummary", () => {
 });
 
 describe("shownResult", () => {
-  const run = finished([
-    rows(0, meta(0, 1)),
-    command(1, "UPDATE 1", 1),
-    rows(2, meta(2, 9)),
-  ]);
+  const run = finished([rows(0, meta(0, 1)), command(1, "UPDATE 1", 1), rows(2, meta(2, 9))]);
 
   it("defaults to the last row result and honours a pick that still exists", () => {
     expect(rowResults(run).map((r) => r.index)).toEqual([0, 2]);
@@ -110,7 +121,10 @@ describe("resultView", () => {
   });
 
   it("drops an Output pick on the next run", () => {
-    expect(resultView(finishedRun(8, [rowsAt(0)]), { kind: "output", runId: 7, result: undefined }, true)).toMatchObject({ kind: "rows", result: { index: 0 } });
+    expect(resultView(finishedRun(8, [rowsAt(0)]), { kind: "output", runId: 7, result: undefined }, true)).toMatchObject({
+      kind: "rows",
+      result: { index: 0 },
+    });
   });
 
   it("prefers the grid to the log without a pick", () => {
@@ -149,7 +163,21 @@ describe("outputTone", () => {
 
 describe("workspace snapshot", () => {
   const configs: Record<string, ConnectionConfig> = {
-    c: { databaseKind: "Postgres", id: "c", name: "dev", host: "localhost", port: 5433, database: "shop", user: "l1data", sslMode: "Prefer", caCertPath: null, hasPassword: true, color: null, ssh: null, environment: null },
+    c: {
+      databaseKind: "Postgres",
+      id: "c",
+      name: "dev",
+      host: "localhost",
+      port: 5433,
+      database: "shop",
+      user: "l1data",
+      sslMode: "Prefer",
+      caCertPath: null,
+      hasPassword: true,
+      color: null,
+      ssh: null,
+      environment: null,
+    },
   };
   const tabs: Tab[] = [
     { id: "a", title: "Untitled-2.sql", console: { db: { connectionId: "c", database: "reporting" }, mode: "Manual" }, table: null, file: null },
@@ -170,7 +198,15 @@ describe("workspace snapshot", () => {
     tabs: Object.fromEntries(tabs.map((t) => [t.id, t])),
     order: ["b", "a"],
     active: "a",
-    layout: { sidebar: true, results: false, rightPanel: "Assistant" as const, resultsHeight: 280, sidebarWidth: 256, rightPanelWidth: 341, assistantChat: "c4a70000-0000-4000-8000-000000000001" },
+    layout: {
+      sidebar: true,
+      results: false,
+      rightPanel: "Assistant" as const,
+      resultsHeight: 280,
+      sidebarWidth: 256,
+      rightPanelWidth: 341,
+      assistantChat: "c4a70000-0000-4000-8000-000000000001",
+    },
   };
 
   it("round-trips every tab's text and mode, and a table tab's binding", () => {
@@ -189,7 +225,14 @@ describe("workspace snapshot", () => {
         },
         file: null,
       },
-      { id: "a", title: "Untitled-2.sql", text: "-- text of a", console: { connectionId: "c", database: "reporting", schema: null, mode: "Manual" }, table: null, file: null },
+      {
+        id: "a",
+        title: "Untitled-2.sql",
+        text: "-- text of a",
+        console: { connectionId: "c", database: "reporting", schema: null, mode: "Manual" },
+        table: null,
+        file: null,
+      },
     ]);
     expect(snap.tabs.map((t) => tabFromSnapshot(t, configs))).toEqual([tabs[1], tabs[0]]);
     expect(snap.layout).toEqual(state.layout);
@@ -244,12 +287,20 @@ describe("workspace snapshot", () => {
 });
 
 it("keeps every result ordinal from one failed batch, including empty and partial row sets", () => {
-  const run = finished([stmt(0, { kind: "Failed", error: failure }, [
-    { kind: "Rows", result: meta(0, 0, { databaseKind: "SqlServer" }), state: "Complete" },
-    { kind: "Command", tag: "UPDATE", affectedRows: null, elapsedMs: 1 },
-    { kind: "Rows", result: meta(1, 2, { databaseKind: "SqlServer" }), state: "Failed" },
-  ])], "Failed");
-  expect(rowResults(run).map((r) => [r.index, r.meta.rowCount, r.state])).toEqual([[0, 0, "Complete"], [1, 2, "Failed"]]);
+  const run = finished(
+    [
+      stmt(0, { kind: "Failed", error: failure }, [
+        { kind: "Rows", result: meta(0, 0, { databaseKind: "SqlServer" }), state: "Complete" },
+        { kind: "Command", tag: "UPDATE", affectedRows: null, elapsedMs: 1 },
+        { kind: "Rows", result: meta(1, 2, { databaseKind: "SqlServer" }), state: "Failed" },
+      ]),
+    ],
+    "Failed",
+  );
+  expect(rowResults(run).map((r) => [r.index, r.meta.rowCount, r.state])).toEqual([
+    [0, 0, "Complete"],
+    [1, 2, "Failed"],
+  ]);
   expect(shownResult(run, 0)?.meta.rowCount).toBe(0);
   expect(resultView(run, 1, true)).toMatchObject({ kind: "rows", result: { index: 1 } });
   expect(runSummary(run, 1, 0)).toEqual({ tone: "error", text: failure.message });

@@ -20,7 +20,18 @@ import { useLive } from "../../state/live";
 import { dropRowCaches } from "../../state/rowCache";
 import { canCancel, isBusy } from "../../state/status";
 import { pendingCount, toChanges, useTableEdits, type TableEdits } from "../../state/tableEdits";
-import { EMPTY_QUERY, confirm, isTableTab, nextUntitled, tabTarget, useWorkspace, type ConsoleTarget, type RelationRef, type Tab, type TableTab } from "../../state/workspace";
+import {
+  EMPTY_QUERY,
+  confirm,
+  isTableTab,
+  nextUntitled,
+  tabTarget,
+  useWorkspace,
+  type ConsoleTarget,
+  type RelationRef,
+  type Tab,
+  type TableTab,
+} from "../../state/workspace";
 import {
   applyFormatEdit,
   cursorAnchor,
@@ -84,7 +95,10 @@ export async function browseTemplate(db: DatabaseRef, schema: string, table: str
 }
 
 export function isBrowsing(tab: Tab): tab is TableTab {
-  return isTableTab(tab) && tableScripts.get(tableScriptKey(tab.console.db, tab.table.schema, tab.table.table))?.acceptedTexts.includes(textOf(tab.id).trim()) === true;
+  return (
+    isTableTab(tab) &&
+    tableScripts.get(tableScriptKey(tab.console.db, tab.table.schema, tab.table.table))?.acceptedTexts.includes(textOf(tab.id).trim()) === true
+  );
 }
 
 export function textTarget(tab: Tab): { db: DatabaseRef | null; databaseKind: DatabaseKind } {
@@ -129,7 +143,14 @@ type PageQueue = { intent: symbol; pendingNativeCount?: symbol; target?: PageTar
 
 function isCurrentCount({ tab, text, pageSize, intent }: CountContext): boolean {
   const current = ws().tabs[tab.id];
-  return queuedPages.get(tab.id)?.intent === intent && isTableTab(current) && current.console === tab.console && current.table === tab.table && textOf(tab.id) === text && ws().settings.tablePageSize === pageSize;
+  return (
+    queuedPages.get(tab.id)?.intent === intent &&
+    isTableTab(current) &&
+    current.console === tab.console &&
+    current.table === tab.table &&
+    textOf(tab.id) === text &&
+    ws().settings.tablePageSize === pageSize
+  );
 }
 
 const queuedPages = new Map<TabId, PageQueue>();
@@ -242,7 +263,8 @@ export function cancelActive(): boolean {
   const id = ws().active;
   if (!id || !canCancel(useLive.getState().consoles[id])) return false;
   queuedPages.delete(id);
-  if (databaseKindFor(tabTarget(ws().tabs[id]), ws().configs) === "SqlServer") notify("Cancelling SQL Server resets this session. Earlier commits remain committed; the last transaction outcome may be unknown.");
+  if (databaseKindFor(tabTarget(ws().tabs[id]), ws().configs) === "SqlServer")
+    notify("Cancelling SQL Server resets this session. Earlier commits remain committed; the last transaction outcome may be unknown.");
   void commands.consoleCancel(id);
   return true;
 }
@@ -313,9 +335,8 @@ function showResults() {
 }
 
 export async function openTableTab(ref: RelationRef): Promise<void> {
-  const findOpen = () => Object.values(ws().tabs).find(
-    (t) => isTableTab(t) && sameDb(t.console.db, ref.db) && t.table.schema === ref.schema && t.table.table === ref.relation,
-  );
+  const findOpen = () =>
+    Object.values(ws().tabs).find((t) => isTableTab(t) && sameDb(t.console.db, ref.db) && t.table.schema === ref.schema && t.table.table === ref.relation);
   const existing = findOpen();
   ws().select(ref);
   showResults();
@@ -347,7 +368,15 @@ export async function loadTableOnce(tabId: TabId): Promise<void> {
   const key = tableScriptKey(tab.console.db, tab.table.schema, tab.table.table);
   const template = await browseTemplate(tab.console.db, tab.table.schema, tab.table.table);
   const current = ws().tabs[tabId];
-  if (template === null || loadedTables.has(tabId) || !isTableTab(current) || !sameDb(current.console.db, tab.console.db) || key !== tableScriptKey(current.console.db, current.table.schema, current.table.table) || current.table !== tab.table) return;
+  if (
+    template === null ||
+    loadedTables.has(tabId) ||
+    !isTableTab(current) ||
+    !sameDb(current.console.db, tab.console.db) ||
+    key !== tableScriptKey(current.console.db, current.table.schema, current.table.table) ||
+    current.table !== tab.table
+  )
+    return;
   loadedTables.add(tabId);
   if (useLive.getState().consoles[tabId]?.run.kind !== "Finished") setTablePage(tabId, tab.table.page);
 }
@@ -531,7 +560,11 @@ export function installRunBehavior(): void {
   useWorkspace.subscribe((s, prev) => {
     const tab = s.active ? s.tabs[s.active] : undefined;
     const before = prev.active ? prev.tabs[prev.active] : undefined;
-    if (s.active !== prev.active || !sameDb(tabTarget(tab), tabTarget(before)) || databaseKindFor(tabTarget(tab), s.configs) !== databaseKindFor(tabTarget(before), prev.configs)) {
+    if (
+      s.active !== prev.active ||
+      !sameDb(tabTarget(tab), tabTarget(before)) ||
+      databaseKindFor(tabTarget(tab), s.configs) !== databaseKindFor(tabTarget(before), prev.configs)
+    ) {
       closeChooser();
       if (s.active) showRunTarget(s.active, null);
       refreshRunMark();

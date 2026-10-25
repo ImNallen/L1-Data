@@ -30,7 +30,15 @@ export function SqlHighlight({ sql, databaseKind, className }: { sql: string; da
   const spans = useMemo(() => sqlSpans(sql, databaseKind), [sql, databaseKind]);
   return (
     <pre className={cx("selectable font-mono text-code-sm leading-[1.6] break-words whitespace-pre-wrap text-(color:--code)", className)}>
-      {spans.map((s, i) => (s.className ? <span key={i} className={s.className}>{s.text}</span> : s.text))}
+      {spans.map((s, i) =>
+        s.className ? (
+          <span key={i} className={s.className}>
+            {s.text}
+          </span>
+        ) : (
+          s.text
+        ),
+      )}
     </pre>
   );
 }

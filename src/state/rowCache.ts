@@ -68,9 +68,7 @@ export class RowCache {
   async ensure(range: RowRange, rowCount: number): Promise<void> {
     if (this.gone) return;
     const wanted = pagesFor(range, rowCount);
-    const loads = wanted
-      .filter((p) => (this.pages.get(p)?.rows.length ?? -1) < expectedPageLength(p, rowCount))
-      .map((p) => this.load(p, rowCount));
+    const loads = wanted.filter((p) => (this.pages.get(p)?.rows.length ?? -1) < expectedPageLength(p, rowCount)).map((p) => this.load(p, rowCount));
     for (const p of wanted) this.touch(p);
     await Promise.all(loads);
     this.evict(new Set(wanted));

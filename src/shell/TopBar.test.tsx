@@ -59,7 +59,12 @@ it.each(["Local", null] satisfies (Environment | null)[])("draws no marker for a
 it("reads the run target as the environment icon and connection, then database, and leaves the tab title to the tab bar", () => {
   const html = onConnection("Production");
   const at = (pattern: RegExp) => html.search(pattern);
-  const order = [at(/data-testid="tab-connection"/), at(/data-testid="env-icon"/), at(/>prod-postgres</), at(/data-testid="tab-database"[^>]*>(<[^>]*>)*shop</)];
+  const order = [
+    at(/data-testid="tab-connection"/),
+    at(/data-testid="env-icon"/),
+    at(/>prod-postgres</),
+    at(/data-testid="tab-database"[^>]*>(<[^>]*>)*shop</),
+  ];
   expect(order.every((i) => i >= 0)).toBe(true);
   expect([...order].sort((a, b) => a - b)).toEqual(order);
   expect(html).not.toContain("Query 3");
@@ -133,7 +138,15 @@ it("shows an open transaction without claiming its depth or committability", () 
 function workingConsole(work: ConsoleWork): string {
   lostSession("None");
   const state = live.consoles.t1!;
-  live.consoles = { t1: { ...state, work, session: { kind: "Open", backendPid: 1 }, txn: "Open", run: { kind: "Finished", runId: 7, elapsedMs: 1, outcome: "Ok", statements: [] } } };
+  live.consoles = {
+    t1: {
+      ...state,
+      work,
+      session: { kind: "Open", backendPid: 1 },
+      txn: "Open",
+      run: { kind: "Finished", runId: 7, elapsedMs: 1, outcome: "Ok", statements: [] },
+    },
+  };
   return renderToStaticMarkup(<TopBar hosted={null} />);
 }
 

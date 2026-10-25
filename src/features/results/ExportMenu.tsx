@@ -11,7 +11,17 @@ import { IconButton, MenuContent, MenuItem, MenuLabel, Spinner } from "../../ui/
 import { EXPORT_FORMATS, exportMenu, FORMAT_ORDER, type TablePage } from "./exportChoices";
 import { pluralRows } from "./format";
 
-export function ExportMenu({ tab, result, table, disabled }: { tab: Tab | undefined; result: RowResult | undefined; table: TablePage | null; disabled: boolean }) {
+export function ExportMenu({
+  tab,
+  result,
+  table,
+  disabled,
+}: {
+  tab: Tab | undefined;
+  result: RowResult | undefined;
+  table: TablePage | null;
+  disabled: boolean;
+}) {
   const exporting = useLive((s) => (tab ? s.consoles[tab.id]?.export != null : false));
   const model = result ? exportMenu(result.meta, result.state, table) : null;
   return (

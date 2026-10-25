@@ -64,11 +64,7 @@ function MainArea() {
   return (
     <Group orientation="vertical" className="min-h-0 flex-1" onLayoutChanged={saveResultsHeight}>
       <Panel id="editor" minSize={80}>
-        {active ? (
-          <SqlEditor tabId={active.id} />
-        ) : (
-          <StartCommands />
-        )}
+        {active ? <SqlEditor tabId={active.id} /> : <StartCommands />}
       </Panel>
       {showResults && (
         <>

@@ -90,7 +90,13 @@ it("states every way a turn can fail, with the fix it points at", () => {
   ]);
 });
 
-const user = (context: UserEntry["context"], attachment: UserEntry["attachment"] = null): UserEntry => ({ kind: "User", atMs: 1, text: "hi", context, attachment });
+const user = (context: UserEntry["context"], attachment: UserEntry["attachment"] = null): UserEntry => ({
+  kind: "User",
+  atMs: 1,
+  text: "hi",
+  context,
+  attachment,
+});
 
 it("chips a sent message with its connection, database, tab, and attached rows, skipping what it lacks", () => {
   const db = { connectionId: "c1", database: "shop" };

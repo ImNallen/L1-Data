@@ -20,7 +20,14 @@ const DB = { connectionId: "c1", database: "shop" };
 const CLAUDE: ProviderState = {
   provider: "Claude",
   rev: 2,
-  info: { defaultName: "Claude", defaultBinary: "claude", configEnv: "CLAUDE_CONFIG_DIR", configDirDefault: "~/.claude", signInCommand: "claude auth login", ownedFlags: [] },
+  info: {
+    defaultName: "Claude",
+    defaultBinary: "claude",
+    configEnv: "CLAUDE_CONFIG_DIR",
+    configDirDefault: "~/.claude",
+    signInCommand: "claude auth login",
+    ownedFlags: [],
+  },
   ignoredFlags: [],
   checking: false,
   checkedAtMs: 1,
@@ -29,7 +36,16 @@ const CLAUDE: ProviderState = {
     version: "2.1.301",
     plan: "Claude Max",
     models: [
-      { id: "opus", label: "Opus 5.5", description: "", recommended: true, efforts: [{ id: "high", label: "High" }, { id: "max", label: "Max" }] },
+      {
+        id: "opus",
+        label: "Opus 5.5",
+        description: "",
+        recommended: true,
+        efforts: [
+          { id: "high", label: "High" },
+          { id: "max", label: "Max" },
+        ],
+      },
       { id: "haiku", label: "Haiku 4.5", description: "", recommended: false, efforts: [] },
     ],
   },
@@ -56,14 +72,29 @@ const FIRST_TURN = [
     kind: "Tool",
     call: "toolu_1",
     tool: { kind: "RunQuery", sql: "select region from customers", purpose: "List regions", relations: ["customers"] },
-    status: { kind: "Done", result: { kind: "Rows", columns: ["region"], rows: [["EU-West"], ["US-West"], ["APAC"], ["US-East"], ["LATAM"], ["EU-North"]], more: false, elapsedMs: 27 } },
+    status: {
+      kind: "Done",
+      result: {
+        kind: "Rows",
+        columns: ["region"],
+        rows: [["EU-West"], ["US-West"], ["APAC"], ["US-East"], ["LATAM"], ["EU-North"]],
+        more: false,
+        elapsedMs: 27,
+      },
+    },
   }),
   snap(2, 0, {
     kind: "Text",
     done: true,
     blocks: [
       { kind: "Markdown", text: REPLY },
-      { kind: "Sql", sql: "SELECT c.region FROM orders o JOIN customers c ON c.id = o.customer_id;", relations: ["orders", "customers"], vetted: true, complete: true },
+      {
+        kind: "Sql",
+        sql: "SELECT c.region FROM orders o JOIN customers c ON c.id = o.customer_id;",
+        relations: ["orders", "customers"],
+        vetted: true,
+        complete: true,
+      },
     ],
   }),
   snap(3, 0, { kind: "End", atMs: 2, outcome: { kind: "Completed" }, suggestions: ["Show growth as a percentage", "Only EU regions"] }),
@@ -79,7 +110,11 @@ function render(status: ChatStatus, entries: EntrySnapshot[], outcome: ProbeOutc
     status,
     entryCount: entries.length,
   };
-  const live: Partial<LiveData> = { chats: { [ID]: chat }, transcripts: { [ID]: Object.fromEntries(entries.map((e) => [e.seq, e])) }, providers: { Claude: { ...CLAUDE, outcome } } };
+  const live: Partial<LiveData> = {
+    chats: { [ID]: chat },
+    transcripts: { [ID]: Object.fromEntries(entries.map((e) => [e.seq, e])) },
+    providers: { Claude: { ...CLAUDE, outcome } },
+  };
   Object.assign(useLive.getInitialState(), live);
   Object.assign(useWorkspace.getInitialState(), { layout: { ...initialWorkspace.layout, assistantChat: ID } });
   return renderToStaticMarkup(<AssistantPanel />);
@@ -103,7 +138,7 @@ const buttonText = (html: string, id: string) => text(new RegExp(`<button[^>]*da
 it("draws a finished turn as the mockup does: bubble and context, tool line, markdown with a SQL card, and suggestion chips", () => {
   const html = render({ kind: "Idle" }, FIRST_TURN);
   expect(text(section(html, "chat-user-0", "chat-tool-1"))).toBe(
-    'Which regions grew the most compared with the 90 days before? prod-postgres / shop · orders_by_region.sql · 6 rows attached',
+    "Which regions grew the most compared with the 90 days before? prod-postgres / shop · orders_by_region.sql · 6 rows attached",
   );
   expect(text(section(html, "chat-tool-1", "chat-text-2"))).toBe("Ran query · 6 rows · 27 ms");
   const reply = section(html, "chat-text-2", "chat-end-3") ?? "";
@@ -114,7 +149,10 @@ it("draws a finished turn as the mockup does: bubble and context, tool line, mar
   expect(reply).toMatch(/<table[^>]*>.*<th[^>]*>region<\/th>.*<td[^>]*>EU-West<\/td>/);
   expect(text(/data-testid="sql-card-uses"[^>]*>(.*?)<\/span>/.exec(reply)?.[1])).toBe("Uses orders, customers");
   expect(html).toContain('data-testid="chat-end-3" data-outcome="Completed"');
-  expect([...html.matchAll(/data-testid="suggestion-chip"[^>]*>(.*?)<\/button>/g)].map(([, t]) => t)).toEqual(["Show growth as a percentage", "Only EU regions"]);
+  expect([...html.matchAll(/data-testid="suggestion-chip"[^>]*>(.*?)<\/button>/g)].map(([, t]) => t)).toEqual([
+    "Show growth as a percentage",
+    "Only EU regions",
+  ]);
   expect(html).not.toContain("Thinking");
 });
 
@@ -142,15 +180,25 @@ it("shows Starting while the CLI starts, then a waiting approval card, with Stop
     }),
   ]);
   const card = section(waiting, "chat-tool-1") ?? "";
-  expect(text(card)).toContain("Run this query? Check the link select dblink_exec('x') Calls functions L1 Data cannot verify as read-only: dblink_exec Run Deny");
-  expect([card.includes('data-testid="approval-run"'), card.includes('data-testid="approval-deny"'), waiting.includes("Thinking")]).toEqual([true, true, false]);
+  expect(text(card)).toContain(
+    "Run this query? Check the link select dblink_exec('x') Calls functions L1 Data cannot verify as read-only: dblink_exec Run Deny",
+  );
+  expect([card.includes('data-testid="approval-run"'), card.includes('data-testid="approval-deny"'), waiting.includes("Thinking")]).toEqual([
+    true,
+    true,
+    false,
+  ]);
 });
 
 it("ends a failed turn with its error and the fix, and warns above the composer when the provider is signed out", () => {
-  const failed = render({ kind: "Idle" }, [...FIRST_TURN.slice(0, 1), snap(1, 0, { kind: "End", atMs: 2, outcome: { kind: "Failed", error: { kind: "SignedOut" } }, suggestions: [] })], {
-    kind: "SignedOut",
-    version: "2.1.301",
-  });
+  const failed = render(
+    { kind: "Idle" },
+    [...FIRST_TURN.slice(0, 1), snap(1, 0, { kind: "End", atMs: 2, outcome: { kind: "Failed", error: { kind: "SignedOut" } }, suggestions: [] })],
+    {
+      kind: "SignedOut",
+      version: "2.1.301",
+    },
+  );
   expect(text(section(failed, "chat-end-1", "assistant-provider-banner"))).toBe("Claude is signed out. Run claude auth login in a terminal. Open settings");
   const banner = section(failed, "assistant-provider-banner", "assistant-input") ?? "";
   expect(text(banner)).toMatch(/^Claude is signed out\. Run claude auth login in a terminal, then refresh\b/);
@@ -159,7 +207,15 @@ it("ends a failed turn with its error and the fix, and warns above the composer 
 
 it("dots the history button while any chat waits for approval", () => {
   const OTHER = "0b7d5a52-9f1e-4c55-9d43-3c1f3c6e2a11";
-  const chat = (id: string, status: ChatStatus): ChatState => ({ id, rev: 1, title: "t", updatedAtMs: 1, options: { provider: "Claude", model: "opus", effort: "high", permission: "AskFirst" }, status, entryCount: 1 });
+  const chat = (id: string, status: ChatStatus): ChatState => ({
+    id,
+    rev: 1,
+    title: "t",
+    updatedAtMs: 1,
+    options: { provider: "Claude", model: "opus", effort: "high", permission: "AskFirst" },
+    status,
+    entryCount: 1,
+  });
   const history = (status: ChatStatus) => {
     Object.assign(useLive.getInitialState(), { chats: { [ID]: chat(ID, { kind: "Idle" }), [OTHER]: chat(OTHER, status) } });
     const html = renderToStaticMarkup(<ChatHistory />);
@@ -174,11 +230,20 @@ it("dots the history button while any chat waits for approval", () => {
   ]);
 });
 
-
 it("highlights SQL cards from saved SQL Server context after its connection is deleted", () => {
   const entries = [
-    snap(0, 0, { kind: "User", atMs: 1, text: "Show top rows", context: { db: DB, databaseKind: "SqlServer", connectionName: "removed", tabTitle: "old" }, attachment: null }),
-    snap(1, 0, { kind: "Text", done: true, blocks: [{ kind: "Sql", sql: "SELECT TOP 1 [odd name] FROM [dbo].[line items]", relations: [], vetted: false, complete: true }] }),
+    snap(0, 0, {
+      kind: "User",
+      atMs: 1,
+      text: "Show top rows",
+      context: { db: DB, databaseKind: "SqlServer", connectionName: "removed", tabTitle: "old" },
+      attachment: null,
+    }),
+    snap(1, 0, {
+      kind: "Text",
+      done: true,
+      blocks: [{ kind: "Sql", sql: "SELECT TOP 1 [odd name] FROM [dbo].[line items]", relations: [], vetted: false, complete: true }],
+    }),
   ];
   const html = render({ kind: "Idle" }, entries);
   expect(html).toContain('class="text-keyword">TOP</span>');

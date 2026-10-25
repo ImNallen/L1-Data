@@ -8,7 +8,15 @@ import { dropEditor, moveCursor, textOf } from "../editor/editorStates";
 import { openSqlTab } from "../editor/runActions";
 import { copySaved, insertSaved, openSaved, saveActiveQuery, saveHistoryQuery } from "./savedActions";
 
-const query = (id: number, name: string, sql: string, databaseKind: SavedQuery["databaseKind"] = "Postgres"): SavedQuery => ({ id, name, sql, databaseKind, excerpt: sql, createdAtMs: 1, usedAtMs: 1 });
+const query = (id: number, name: string, sql: string, databaseKind: SavedQuery["databaseKind"] = "Postgres"): SavedQuery => ({
+  id,
+  name,
+  sql,
+  databaseKind,
+  excerpt: sql,
+  createdAtMs: 1,
+  usedAtMs: 1,
+});
 const list = (rev: number, ...items: SavedQuery[]): SavedQueries => ({ rev, items });
 
 afterEach(() => {
@@ -34,7 +42,9 @@ it("saves the statement at the cursor of the active tab and opens the palette on
   const tab = openSqlTab({ text: "select 1;\nselect 2;" });
   moveCursor(tab, 12);
   await saveActiveQuery();
-  expect(calls).toEqual([{ cmd: "saved_query_save", args: { text: "select 1;\nselect 2;", target: { kind: "cursor", offset: 12 }, databaseKind: "Postgres" } }]);
+  expect(calls).toEqual([
+    { cmd: "saved_query_save", args: { text: "select 1;\nselect 2;", target: { kind: "cursor", offset: 12 }, databaseKind: "Postgres" } },
+  ]);
   expect(useWorkspace.getState().overlay).toEqual({ kind: "saved", entry: { kind: "name", id: 4 } });
   expect(useLive.getState().savedQueries).toEqual(saved.queries);
 });
@@ -109,7 +119,18 @@ it("opens a query in a new tab on the active tab's database when the dialects ma
   const ms = { ...connectionConfig("c-ms", "ms"), databaseKind: "SqlServer" as const, database: "master" };
   const idle = { ...connectionConfig("c-ms-idle", "ms idle"), databaseKind: "SqlServer" as const };
   useWorkspace.setState({ configs: { [idle.id]: idle, [pg.id]: pg, [ms.id]: ms } });
-  useLive.setState({ connections: { [ms.id]: { ...connectedState(ms.id, []), status: { kind: "Connected", server: { version: "16", versionNum: 160000, encoding: "UTF8" }, instance: { configuredDatabase: "master", home: "master", showSystemDatabases: false, databases: [] } } } } });
+  useLive.setState({
+    connections: {
+      [ms.id]: {
+        ...connectedState(ms.id, []),
+        status: {
+          kind: "Connected",
+          server: { version: "16", versionNum: 160000, encoding: "UTF8" },
+          instance: { configuredDatabase: "master", home: "master", showSystemDatabases: false, databases: [] },
+        },
+      },
+    },
+  });
   openSqlTab({ db: { connectionId: pg.id, database: "reporting" }, text: "" });
 
   openSaved(query(1, "Revenue", "select 42"));

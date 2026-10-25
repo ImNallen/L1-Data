@@ -23,7 +23,10 @@ export function rankSaved(items: readonly SavedQuery[], text: string): Ranked[] 
 
 export type SavedAction = "primary" | "open" | "copy" | "next" | "previous";
 
-export function savedKey(e: Pick<KeyboardEvent, "key" | "metaKey" | "ctrlKey" | "altKey" | "shiftKey" | "isComposing">, searchHasSelection: boolean): SavedAction | null {
+export function savedKey(
+  e: Pick<KeyboardEvent, "key" | "metaKey" | "ctrlKey" | "altKey" | "shiftKey" | "isComposing">,
+  searchHasSelection: boolean,
+): SavedAction | null {
   if (e.isComposing || e.shiftKey || e.altKey) return null;
   const mod = e.metaKey || e.ctrlKey;
   if (e.key === "Enter") return mod ? "open" : "primary";

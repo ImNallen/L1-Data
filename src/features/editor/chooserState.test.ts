@@ -17,7 +17,12 @@ it("labels a statement by its first non-empty line, whitespace collapsed and cut
 
 it("numbers the line each statement starts on", () => {
   expect(startLines(text, statements)).toEqual([1, 2, 3]);
-  expect(startLines("\n\nselect 1;\n\n\nselect 2", [{ from: 2, to: 10 }, { from: 14, to: 22 }])).toEqual([3, 6]);
+  expect(
+    startLines("\n\nselect 1;\n\n\nselect 2", [
+      { from: 2, to: 10 },
+      { from: 14, to: 22 },
+    ]),
+  ).toEqual([3, 6]);
 });
 
 it("moves through the statements and then All, wrapping at both ends", () => {

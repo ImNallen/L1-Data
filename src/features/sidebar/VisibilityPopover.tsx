@@ -144,7 +144,19 @@ function wrapTab(e: ReactKeyboardEvent<HTMLElement>) {
  * Placed by `pickerBox` beside the trigger's row. Escape and a click outside close it. It holds keyboard focus while open
  * and gives it back to the pill when it closes.
  */
-function Popover({ testId, trigger, title, subtitle, children }: { testId: string; trigger: HTMLElement; title: string; subtitle: string; children: ReactNode }) {
+function Popover({
+  testId,
+  trigger,
+  title,
+  subtitle,
+  children,
+}: {
+  testId: string;
+  trigger: HTMLElement;
+  title: string;
+  subtitle: string;
+  children: ReactNode;
+}) {
   const ref = useRef<HTMLDivElement>(null);
   const close = usePicker((s) => s.close);
 
@@ -266,9 +278,9 @@ function PickerBody({
 
   const unprobed = probe ? probe.pick(rows.flatMap((r) => model.items[r.index] ?? [])) : [];
   const unprobedKey = unprobed.join("\u0000");
-  // Keyed on the names: `probe` and `unprobed` are new on every render.
   useEffect(() => {
     if (unprobed.length > 0) probe?.send(unprobed);
+    // oxlint-disable-next-line react-hooks/exhaustive-deps -- `unprobedKey` stands in for `probe` and `unprobed`, which are new on every render
   }, [unprobedKey]);
 
   return (

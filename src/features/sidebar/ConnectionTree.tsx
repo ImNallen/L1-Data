@@ -20,7 +20,7 @@ import {
   ZapIcon,
   type LucideIcon,
 } from "lucide-react";
-import { Fragment, useCallback, useEffect, useRef, useState, type KeyboardEvent, type ReactNode, type RefObject } from "react";
+import { Fragment, useCallback, useEffect, useState, type KeyboardEvent, type ReactNode, type RefObject } from "react";
 import {
   commands,
   type ColumnInfo,
@@ -44,17 +44,7 @@ import { instanceOf, useLive } from "../../state/live";
 import { detailKey, useRelationDetail } from "../../state/relationDetail";
 import { connectionTone, type Tone } from "../../state/status";
 import { tabTarget, useWorkspace } from "../../state/workspace";
-import {
-  ContextMenuArea,
-  ContextMenuItem,
-  ContextMenuSeparator,
-  ContextSubmenu,
-  cx,
-  Highlight,
-  DatabaseBadge,
-  Spinner,
-  StatusDot,
-} from "../../ui/primitives";
+import { ContextMenuArea, ContextMenuItem, ContextMenuSeparator, ContextSubmenu, cx, Highlight, DatabaseBadge, Spinner, StatusDot } from "../../ui/primitives";
 import type { TextRange } from "../../ui/textMatch";
 import { connect, confirmDelete, disconnect, refreshCatalog, refreshConnection } from "../connections/connectionActions";
 import { ConnectionColorDot, EnvironmentIcon, connectionColor } from "../connections/connectionColors";
@@ -322,14 +312,18 @@ function detailGroups(path: string, depth: number, schema: string, rel: Relation
       label: "Indexes",
       count: detail.indexes.length,
       rows: () =>
-        detail.indexes.map((i) => <TextRow key={i.name} path={at("indexes", i.name)} depth={depth} icon={glyph(ListFilterIcon)} name={i.name} text={indexText(i)} />),
+        detail.indexes.map((i) => (
+          <TextRow key={i.name} path={at("indexes", i.name)} depth={depth} icon={glyph(ListFilterIcon)} name={i.name} text={indexText(i)} />
+        )),
     },
     {
       id: "triggers",
       label: "Triggers",
       count: detail.triggers.length,
       rows: () =>
-        detail.triggers.map((t) => <TextRow key={t.name} path={at("triggers", t.name)} depth={depth} icon={glyph(ZapIcon)} name={t.name} text={triggerText(t)} />),
+        detail.triggers.map((t) => (
+          <TextRow key={t.name} path={at("triggers", t.name)} depth={depth} icon={glyph(ZapIcon)} name={t.name} text={triggerText(t)} />
+        )),
     },
   ];
   return [columns, ...rest.filter((g) => g.count !== 0)];
@@ -355,9 +349,9 @@ function RelationGroups({
 }) {
   const key = detailKey(db, rel.oid);
   const entry = useRelationDetail((s) => s.entries[key]);
-  // `key` stands in for `db`, which is a new object on every render.
   useEffect(() => {
     void useRelationDetail.getState().ensure(db, version, rel.oid);
+    // oxlint-disable-next-line react-hooks/exhaustive-deps -- `key` stands in for `db`, which is a new object on every render
   }, [key, version, rel.oid]);
   return (
     <>
@@ -367,11 +361,7 @@ function RelationGroups({
         </Group>
       ))}
       {entry?.error && (
-        <div
-          data-testid={`detail-error-${path}`}
-          style={{ paddingLeft: 30 + depth * INDENT }}
-          className="mx-2 mb-1 pr-2 text-ui-11.5 leading-4 text-danger/90"
-        >
+        <div data-testid={`detail-error-${path}`} style={{ paddingLeft: 30 + depth * INDENT }} className="mx-2 mb-1 pr-2 text-ui-11.5 leading-4 text-danger/90">
           {entry.error}
         </div>
       )}
@@ -431,7 +421,19 @@ function RelationRow({
   );
 }
 
-export function FunctionRow({ path, depth, db, fn, ranges }: { path: string; depth: number; db: DatabaseRef; fn: FunctionInfo; ranges?: readonly TextRange[] }) {
+export function FunctionRow({
+  path,
+  depth,
+  db,
+  fn,
+  ranges,
+}: {
+  path: string;
+  depth: number;
+  db: DatabaseRef;
+  fn: FunctionInfo;
+  ranges?: readonly TextRange[];
+}) {
   return (
     <Row
       path={`${path}/${fn.name}`}
@@ -597,6 +599,7 @@ function DatabaseNode({ path, db, state, expanded }: { path: string; db: Databas
   const key = dbKey(db);
   useEffect(() => {
     if (open && idle) void commands.catalogGet(db);
+    // oxlint-disable-next-line react-hooks/exhaustive-deps -- `key` stands in for `db`, which is a new object on every render
   }, [open, idle, key]);
 
   return (
@@ -614,7 +617,10 @@ function DatabaseNode({ path, db, state, expanded }: { path: string; db: Databas
         trailing={count && <PickerPill target={target} count={count} active={picking} testId={`schema-pill-${me}`} />}
       />
       {open && state.catalog.kind === "Failed" && (
-        <div data-testid={`db-error-${path}/${db.database}`} className="mx-2 mb-1 flex items-baseline gap-2 pr-2 pl-[52px] text-ui-11.5 leading-4 text-danger/90">
+        <div
+          data-testid={`db-error-${path}/${db.database}`}
+          className="mx-2 mb-1 flex items-baseline gap-2 pr-2 pl-[52px] text-ui-11.5 leading-4 text-danger/90"
+        >
           <span className="min-w-0 flex-1 truncate" title={state.catalog.message}>
             {view ? "Refresh failed: " : ""}
             {state.catalog.message}
@@ -728,11 +734,7 @@ function ConnectionNode({ config, expanded, revealed }: { config: ConnectionConf
   const target: PickerTarget = { kind: "databases", id: config.id };
   const picking = useIsPickerOpen(target);
   const failure =
-    state?.status.kind === "Failed"
-      ? connectErrorText(state.status.error)
-      : state?.status.kind === "Lost"
-        ? `Connection lost: ${state.status.reason}`
-        : null;
+    state?.status.kind === "Failed" ? connectErrorText(state.status.error) : state?.status.kind === "Lost" ? `Connection lost: ${state.status.reason}` : null;
 
   // The first connect opens the connection and its home database, then that database's default schema once its catalog says which.
   const { toggle } = expanded;
@@ -882,7 +884,13 @@ function FilteredTree({ filter, query }: { filter: TreeFilter; query: string }) 
   if (filter.connections.length === 0) return <TreeNote>No matches for “{query}”.</TreeNote>;
   return filter.connections.map(({ config, databases }) => (
     <ConnectionGroup key={config.id} name={config.name} color={config.color}>
-      <FoldRow path={config.name} depth={0} icon={<DatabaseBadge databaseKind={config.databaseKind} />} label={<span className="font-medium">{config.name}</span>} expanded={expanded} />
+      <FoldRow
+        path={config.name}
+        depth={0}
+        icon={<DatabaseBadge databaseKind={config.databaseKind} />}
+        label={<span className="font-medium">{config.name}</span>}
+        expanded={expanded}
+      />
       {expanded.has(config.name) &&
         databases.map(({ db, schemas }) => {
           const path = `${config.name}/${db.database}`;
@@ -913,7 +921,7 @@ export function ConnectionTree({ filter, query, ref }: { filter: TreeFilter | nu
   );
   const expanded: Expanded = { has: (p) => open.has(p), toggle };
   // Held here, not in each node, so a search that swaps the nodes out does not reopen what the user closed.
-  const revealed = useRef<Revealed>(new Map()).current;
+  const [revealed] = useState<Revealed>(() => new Map());
   const list = Object.values(configs).sort((a, b) => a.name.localeCompare(b.name));
   useRovingTabStop(ref);
 

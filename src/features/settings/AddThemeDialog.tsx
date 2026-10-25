@@ -67,7 +67,10 @@ export function AddThemeDialog({ open, onOpenChange }: { open: boolean; onOpenCh
           }}
           onDragLeave={() => setDragging(false)}
           onDrop={onDrop}
-          className={cx("flex items-center justify-between gap-4 rounded-lg border border-dashed px-4 py-3", dragging ? "border-run bg-hover" : "border-control")}
+          className={cx(
+            "flex items-center justify-between gap-4 rounded-lg border border-dashed px-4 py-3",
+            dragging ? "border-run bg-hover" : "border-control",
+          )}
         >
           <div>
             <span className="block text-ui-13 text-fg">Theme file</span>

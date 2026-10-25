@@ -22,7 +22,10 @@ const TARGET_TRIGGER = "flex h-7 min-w-0 items-center gap-1 rounded-md px-1 text
 
 /** The databases the tree shows, and the tab's own even when the tree hides it or the connection is down. */
 export function databaseChoices(db: DatabaseRef, state: ConnectionState | undefined): string[] {
-  const shown = instanceOf(state)?.databases.filter((d) => d.shown).map((d) => d.name) ?? [];
+  const shown =
+    instanceOf(state)
+      ?.databases.filter((d) => d.shown)
+      .map((d) => d.name) ?? [];
   return shown.includes(db.database) ? shown : [db.database, ...shown];
 }
 
@@ -41,7 +44,12 @@ function DatabaseMenu({ tab, db }: { tab: Tab; db: DatabaseRef }) {
       <MenuContent>
         <MenuLabel>Database for this tab</MenuLabel>
         {databaseChoices(db, state).map((name) => (
-          <MenuItem key={name} testId={`tab-database-${name}`} checked={name === db.database} onSelect={() => void setTabTarget(tab.id, { connectionId: db.connectionId, database: name })}>
+          <MenuItem
+            key={name}
+            testId={`tab-database-${name}`}
+            checked={name === db.database}
+            onSelect={() => void setTabTarget(tab.id, { connectionId: db.connectionId, database: name })}
+          >
             {name}
           </MenuItem>
         ))}
@@ -121,20 +129,33 @@ export function TopBar({ hosted }: { hosted: HostedWindow | null }) {
         <Menu.Root modal={false}>
           <Menu.Trigger
             data-testid="tx-mode"
-            title={loss?.title ?? (txn === "Open" ? "Transaction open. SQL Server does not report nesting depth or committability through the protocol." : undefined)}
+            title={
+              loss?.title ?? (txn === "Open" ? "Transaction open. SQL Server does not report nesting depth or committability through the protocol." : undefined)
+            }
             className="inline-flex h-7 items-center gap-1 rounded-md pr-1.5 pl-2 text-ui-12.5 text-muted outline-none hover:bg-hover hover:text-fg data-[state=open]:bg-hover data-[state=open]:text-fg"
           >
             {MODE_LABEL[tab.console.mode]}
             {txn && txn !== "Idle" && (
-              <span className={txn === "Aborted" ? "text-danger" : "text-amber"}> · {txn === "Aborted" ? "aborted" : "in transaction"}{txnDepth !== null && txnDepth !== undefined && txnDepth > 1 ? ` (${txnDepth})` : ""}</span>
+              <span className={txn === "Aborted" ? "text-danger" : "text-amber"}>
+                {" "}
+                · {txn === "Aborted" ? "aborted" : "in transaction"}
+                {txnDepth !== null && txnDepth !== undefined && txnDepth > 1 ? ` (${txnDepth})` : ""}
+              </span>
             )}
             {loss && <span className="text-danger"> · {loss.label}</span>}
             <ChevronDownIcon size={13} />
           </Menu.Trigger>
           <MenuContent align="end">
             {(["AutoCommit", "Manual"] as const).map((m) => (
-              <MenuItem key={m} testId={`tx-mode-${m}`} checked={m === tab.console.mode} disabled={sqlServer && m === "Manual"} onSelect={() => void setTabMode(tab.id, m)}>
-                {MODE_LABEL[m]}{sqlServer && m === "Manual" ? " (unavailable for SQL Server)" : ""}
+              <MenuItem
+                key={m}
+                testId={`tx-mode-${m}`}
+                checked={m === tab.console.mode}
+                disabled={sqlServer && m === "Manual"}
+                onSelect={() => void setTabMode(tab.id, m)}
+              >
+                {MODE_LABEL[m]}
+                {sqlServer && m === "Manual" ? " (unavailable for SQL Server)" : ""}
               </MenuItem>
             ))}
             {sqlServer && <MenuLabel>Use BEGIN, COMMIT and ROLLBACK in SQL scripts.</MenuLabel>}
@@ -144,7 +165,12 @@ export function TopBar({ hosted }: { hosted: HostedWindow | null }) {
 
       {tab && hasUncommittedWork(liveConsole) && (
         <>
-          <Button data-testid="commit-btn" title={sqlServer ? "Commit all transaction nesting levels" : undefined} disabled={busy} onClick={() => void endTransaction(tab.id, "commit")}>
+          <Button
+            data-testid="commit-btn"
+            title={sqlServer ? "Commit all transaction nesting levels" : undefined}
+            disabled={busy}
+            onClick={() => void endTransaction(tab.id, "commit")}
+          >
             Commit
           </Button>
           <Button data-testid="rollback-btn" disabled={busy} onClick={() => void endTransaction(tab.id, "rollback")}>
@@ -155,17 +181,31 @@ export function TopBar({ hosted }: { hosted: HostedWindow | null }) {
 
       {tab && (
         // Format gives way to the run target in a narrow bar, and ⌘⌥L still formats.
-        <Button data-testid="format-btn" title="Format the selection or the marked statement (⌘⌥L)" className="@max-[900px]:px-2.5 @max-[520px]:hidden" onClick={() => void formatActive()}>
+        <Button
+          data-testid="format-btn"
+          title="Format the selection or the marked statement (⌘⌥L)"
+          className="@max-[900px]:px-2.5 @max-[520px]:hidden"
+          onClick={() => void formatActive()}
+        >
           <ListIndentIncreaseIcon size={14} className="text-muted" />
           <span className="@max-[900px]:sr-only">Format</span>
         </Button>
       )}
 
-      {tab && liveConsole?.work === "Count" && <span data-testid="counting-status" role="status" className="text-ui-13 text-dim">Counting…</span>}
+      {tab && liveConsole?.work === "Count" && (
+        <span data-testid="counting-status" role="status" className="text-ui-13 text-dim">
+          Counting…
+        </span>
+      )}
 
       {tab &&
         (cancellable ? (
-          <Button data-testid="cancel-btn" title={sqlServer ? "Cancel resets the SQL Server session. Earlier commits remain committed." : undefined} className="w-[104px] justify-center bg-hover" onClick={() => cancelActive()}>
+          <Button
+            data-testid="cancel-btn"
+            title={sqlServer ? "Cancel resets the SQL Server session. Earlier commits remain committed." : undefined}
+            className="w-[104px] justify-center bg-hover"
+            onClick={() => cancelActive()}
+          >
             <SquareIcon fill="currentColor" size={10} className="text-muted" />
             Cancel
             <Kbd className="bg-control text-muted">Esc</Kbd>

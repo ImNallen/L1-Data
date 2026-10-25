@@ -109,5 +109,10 @@ export function toSshDraft(fields: Fields, sshSecret: PasswordEdit): SshTunnelDr
 /** Whether the tunnel fields are complete enough to dial. An off tunnel always is. */
 export function sshValid(fields: Fields): boolean {
   if (!fields.sshEnabled) return true;
-  return fields.sshHost.trim() !== "" && parsePort(fields.sshPort) !== null && fields.sshUser.trim() !== "" && (fields.sshAuth !== "Key" || fields.sshKeyPath.trim() !== "");
+  return (
+    fields.sshHost.trim() !== "" &&
+    parsePort(fields.sshPort) !== null &&
+    fields.sshUser.trim() !== "" &&
+    (fields.sshAuth !== "Key" || fields.sshKeyPath.trim() !== "")
+  );
 }

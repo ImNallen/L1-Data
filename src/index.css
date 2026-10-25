@@ -152,7 +152,9 @@ body {
 .cm-scroller,
 .cm-tooltip-autocomplete {
   font-variant-ligatures: none;
-  font-feature-settings: "calt" 0, "liga" 0;
+  font-feature-settings:
+    "calt" 0,
+    "liga" 0;
 }
 
 input,

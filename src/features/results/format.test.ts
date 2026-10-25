@@ -27,7 +27,12 @@ describe("groupDigits", () => {
 
 describe("toTsv", () => {
   it("joins cells with tabs, rows with newlines, and empties NULL", () => {
-    expect(toTsv([["a", null, "3"], ["b", "x", "4"]])).toBe("a\t\t3\nb\tx\t4");
+    expect(
+      toTsv([
+        ["a", null, "3"],
+        ["b", "x", "4"],
+      ]),
+    ).toBe("a\t\t3\nb\tx\t4");
   });
 
   it("quotes values that contain tabs, newlines, or quotes", () => {

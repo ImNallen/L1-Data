@@ -98,7 +98,12 @@ it("paints a saved custom theme with its stored colours over the derived ones, i
         id: "custom-1",
         name: "Dusk",
         variants: [
-          { id: "custom-1-0", name: "Dusk", appearance: "dark", colors: { background: "#202020", accent: "#ff0000", keyword: "#123456", results: "#0d0d0d", bogus: "#ffffff", muted: "red" } },
+          {
+            id: "custom-1-0",
+            name: "Dusk",
+            appearance: "dark",
+            colors: { background: "#202020", accent: "#ff0000", keyword: "#123456", results: "#0d0d0d", bogus: "#ffffff", muted: "red" },
+          },
         ],
       },
     ],
@@ -134,11 +139,14 @@ function inTauriWindow(delays: Record<string, number> = {}) {
     if (cmd !== "plugin:window|set_theme") return null;
     const forced = (args as { value: "light" | "dark" | null }).value;
     return new Promise((resolve) =>
-      setTimeout(() => {
-        const dark = forced === null ? true : forced === "dark";
-        if (dark !== system.matches) setSystemDark(dark);
-        resolve(null);
-      }, delays[String(forced)] ?? 5),
+      setTimeout(
+        () => {
+          const dark = forced === null ? true : forced === "dark";
+          if (dark !== system.matches) setSystemDark(dark);
+          resolve(null);
+        },
+        delays[String(forced)] ?? 5,
+      ),
     );
   });
   const painted: string[] = [];

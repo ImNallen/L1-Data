@@ -29,7 +29,15 @@ function DensityControl({ value }: { value: Density }) {
   );
 }
 
-export function Select({ testId, label, value, options, onChange, className, disabled }: {
+export function Select({
+  testId,
+  label,
+  value,
+  options,
+  onChange,
+  className,
+  disabled,
+}: {
   testId: string;
   label: string;
   value: string;
@@ -70,8 +78,22 @@ function FontControls({ kind, font, isInstalled }: { kind: FontKind; font: FontS
   const testId = `setting-${FONT_SETTINGS[kind]}`;
   return (
     <>
-      <Select testId={`${testId}-family`} label={`${name} family`} value={font.family} options={families} onChange={(family) => void chooseFont(kind, { family })} className="w-44" />
-      <Select testId={`${testId}-size`} label={`${name} size`} value={String(font.size)} options={sizes} onChange={(size) => void chooseFont(kind, { size: Number(size) })} className="w-[84px]" />
+      <Select
+        testId={`${testId}-family`}
+        label={`${name} family`}
+        value={font.family}
+        options={families}
+        onChange={(family) => void chooseFont(kind, { family })}
+        className="w-44"
+      />
+      <Select
+        testId={`${testId}-size`}
+        label={`${name} size`}
+        value={String(font.size)}
+        options={sizes}
+        onChange={(size) => void chooseFont(kind, { size: Number(size) })}
+        className="w-[84px]"
+      />
     </>
   );
 }
@@ -82,8 +104,11 @@ function InterfaceSample({ font }: { font: FontSetting }) {
       className="mt-3 rounded-lg border border-control bg-bg px-3 py-2.5 leading-relaxed text-muted"
       style={{ fontFamily: fontStack("interface", font.family), fontSize: font.size }}
     >
-      Open <span className="inline-flex items-center gap-1 rounded-md bg-pill px-1.5 align-middle text-fg"><DatabaseBadge databaseKind="Postgres" /> shop</span> and browse{" "}
-      <span className="rounded-md bg-pill px-1.5 text-fg">public.orders</span>, then sort by total and filter to the paid ones.
+      Open{" "}
+      <span className="inline-flex items-center gap-1 rounded-md bg-pill px-1.5 align-middle text-fg">
+        <DatabaseBadge databaseKind="Postgres" /> shop
+      </span>{" "}
+      and browse <span className="rounded-md bg-pill px-1.5 text-fg">public.orders</span>, then sort by total and filter to the paid ones.
     </p>
   );
 }
@@ -106,7 +131,8 @@ function CodeSample({ font, density }: { font: FontSetting; density: Density }) 
     >
       <pre className="px-3 py-2.5 text-(color:--code)">
         {kw("select")} id, customer, total, status{"\n"}
-        {kw("from")} orders {kw("where")} status &lt;&gt; <span className="text-green">'refunded'</span>{"\n"}
+        {kw("from")} orders {kw("where")} status &lt;&gt; <span className="text-green">'refunded'</span>
+        {"\n"}
         {kw("order by")} total {kw("desc")} {kw("limit")} <span className="text-amber">3</span>;
       </pre>
       <table className="w-full border-t border-grid bg-bg tabular-nums" style={{ lineHeight: 1 }}>
@@ -144,10 +170,10 @@ function MotionPreview({ ms }: { ms: number }) {
     if (!el || ms === 0) return;
     for (const a of el.getAnimations()) a.cancel();
     const total = 2 * ms + PREVIEW_HOLD_MS;
-    el.animate(
-      [{ width: "0%" }, { width: "34%", offset: ms / total }, { width: "34%", offset: (ms + PREVIEW_HOLD_MS) / total }, { width: "0%" }],
-      { duration: total, easing: "cubic-bezier(0.2, 0, 0, 1)" },
-    );
+    el.animate([{ width: "0%" }, { width: "34%", offset: ms / total }, { width: "34%", offset: (ms + PREVIEW_HOLD_MS) / total }, { width: "0%" }], {
+      duration: total,
+      easing: "cubic-bezier(0.2, 0, 0, 1)",
+    });
   }, [ms]);
   useEffect(play, [play]);
   return (
@@ -265,7 +291,11 @@ export function InterfaceFontSetting() {
   const font = useWorkspace((s) => s.settings.interfaceFont);
   const isInstalled = useFontProbe();
   return (
-    <Row setting="interfaceFont" hint="Everything outside the SQL editor and result tables." control={<FontControls kind="interface" font={font} isInstalled={isInstalled} />}>
+    <Row
+      setting="interfaceFont"
+      hint="Everything outside the SQL editor and result tables."
+      control={<FontControls kind="interface" font={font} isInstalled={isInstalled} />}
+    >
       <InterfaceSample font={font} />
     </Row>
   );

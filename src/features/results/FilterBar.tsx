@@ -24,6 +24,7 @@ function FilterChip({
   const [op, setOp] = useState<FilterOp>(filter.op);
   const [value, setValue] = useState(filter.value);
   useEffect(() => {
+    // oxlint-disable-next-line react/set-state-in-effect -- the draft resets when the applied filter changes
     setOp(filter.op);
     setValue(filter.value);
   }, [filter.op, filter.value]);
@@ -99,10 +100,16 @@ function ClauseInput({
   className?: string;
 }) {
   const [text, setText] = useState(applied);
+  // oxlint-disable-next-line react/set-state-in-effect -- the draft resets when the applied text changes
   useEffect(() => setText(applied), [applied]);
   const dirty = text.trim() !== applied.trim();
   return (
-    <label className={cx("flex h-[26px] min-w-0 items-center gap-1.5 rounded-md px-1.5 focus-within:bg-bg focus-within:ring-1 focus-within:ring-accent-border", className)}>
+    <label
+      className={cx(
+        "flex h-[26px] min-w-0 items-center gap-1.5 rounded-md px-1.5 focus-within:bg-bg focus-within:ring-1 focus-within:ring-accent-border",
+        className,
+      )}
+    >
       <span className="shrink-0 font-mono text-ui-11.5 font-medium text-keyword">{label}</span>
       <input
         data-testid={testId}

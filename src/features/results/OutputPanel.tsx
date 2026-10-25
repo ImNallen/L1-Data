@@ -80,7 +80,8 @@ function Line({ time, runStart, kind, severity, children }: LineProps) {
       data-testid={kind && "output-line"}
       data-kind={kind}
       data-severity={severity}
-      className={cx("flex gap-4 px-5 [contain-intrinsic-size:auto_1.25rem] [content-visibility:auto]", runStart && "mt-2 border-t border-grid pt-2")}>
+      className={cx("flex gap-4 px-5 [contain-intrinsic-size:auto_1.25rem] [content-visibility:auto]", runStart && "mt-2 border-t border-grid pt-2")}
+    >
       <span className="w-[8ch] shrink-0 text-faint">{time}</span>
       <div className="min-w-0 flex-1 whitespace-pre-wrap">{children}</div>
     </div>

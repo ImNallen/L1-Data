@@ -43,7 +43,11 @@ it("paints L1 from the stylesheet with no inline palette", () => {
 
 it("duplicates a variant as its seeds plus only the colours they don't derive", () => {
   const groveDark = BUILT_IN_FAMILIES.flatMap((f) => f.variants).find((v) => v.id === "grove-dark");
-  expect(groveDark && draftOf(groveDark, "Grove copy")).toEqual({ name: "Grove copy", appearance: "dark", colors: { background: "#0c1310", accent: "#2f9e6e" } });
+  expect(groveDark && draftOf(groveDark, "Grove copy")).toEqual({
+    name: "Grove copy",
+    appearance: "dark",
+    colors: { background: "#0c1310", accent: "#2f9e6e" },
+  });
   const tuned = customVariant({ ...duskVariant, colors: { ...duskVariant.colors, keyword: "#ff00ff" } });
   expect(draftOf(tuned, "Dusk copy").colors).toEqual({ background: "#1b1824", accent: "#e0a040", keyword: "#ff00ff" });
 });

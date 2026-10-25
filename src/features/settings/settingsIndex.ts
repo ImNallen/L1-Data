@@ -22,7 +22,12 @@ export const SETTINGS_INDEX = [
         keywords: "theme palette colours colors accent custom create import vs code open vsx dracula catppuccin nord tokyo night",
       },
       { id: "density", label: "Density", group: "Layout", keywords: "compact standard spacious spacing padding row height comfortable dense layout" },
-      { id: "panelMotion", label: "Panel animations", group: "Motion", keywords: "motion animation speed duration reduce transitions sidebar panels open close" },
+      {
+        id: "panelMotion",
+        label: "Panel animations",
+        group: "Motion",
+        keywords: "motion animation speed duration reduce transitions sidebar panels open close",
+      },
       {
         id: "tintConnections",
         label: "Tint connections by color",

@@ -48,7 +48,11 @@ export async function disconnect(id: ConnectionId): Promise<void> {
 
 export async function confirmDelete(id: ConnectionId): Promise<void> {
   const name = ws().configs[id]?.name ?? "this connection";
-  const ok = await confirm({ title: `Delete ${name}?`, body: "This removes the saved connection and its stored password. Query history is kept.", confirmLabel: "Delete" });
+  const ok = await confirm({
+    title: `Delete ${name}?`,
+    body: "This removes the saved connection and its stored password. Query history is kept.",
+    confirmLabel: "Delete",
+  });
   if (!ok) return;
   const res = await commands.connectionDelete(id);
   if (res.status === "error") ws().notify(disconnectErrorText(res.error));

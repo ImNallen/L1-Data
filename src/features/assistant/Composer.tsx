@@ -1,16 +1,5 @@
 import * as Menu from "@radix-ui/react-dropdown-menu";
-import {
-  ArrowUpIcon,
-  BrainIcon,
-  ChevronDownIcon,
-  LockIcon,
-  LockOpenIcon,
-  PaperclipIcon,
-  SquareIcon,
-  TableIcon,
-  TriangleAlertIcon,
-  XIcon,
-} from "lucide-react";
+import { ArrowUpIcon, BrainIcon, ChevronDownIcon, LockIcon, LockOpenIcon, PaperclipIcon, SquareIcon, TableIcon, TriangleAlertIcon, XIcon } from "lucide-react";
 import { useLayoutEffect, useRef, useState, type ReactNode } from "react";
 import { commands, type ChatOptions, type ChatState, type ModelOption, type Permission } from "../../ipc/bindings";
 import { useLive } from "../../state/live";
@@ -69,7 +58,11 @@ function Pickers({ chat, models }: { chat: ChatState; models: ModelOption[] }) {
       {efforts.length > 0 && (
         <>
           <Divider />
-          <Picker testId="assistant-effort" label={efforts.find((e) => e.id === options.effort)?.label ?? "Effort"} icon={<BrainIcon size={13} className="shrink-0" />}>
+          <Picker
+            testId="assistant-effort"
+            label={efforts.find((e) => e.id === options.effort)?.label ?? "Effort"}
+            icon={<BrainIcon size={13} className="shrink-0" />}
+          >
             {efforts.map((e) => (
               <MenuItem key={e.id} checked={e.id === options.effort} onSelect={() => configure({ effort: e.id })}>
                 {e.label}
@@ -100,7 +93,8 @@ function bannerMessage(banner: ProviderBanner): ReactNode {
     case "SignedOut":
       return (
         <>
-          {banner.name} is signed out. Run <code className="rounded-[4px] bg-pill px-1 font-mono text-code-sm text-fg">{banner.command}</code> in a terminal, then{" "}
+          {banner.name} is signed out. Run <code className="rounded-[4px] bg-pill px-1 font-mono text-code-sm text-fg">{banner.command}</code> in a terminal,
+          then{" "}
           <button type="button" className="text-fg underline underline-offset-2 hover:text-fg/80" onClick={() => void commands.providerRefresh()}>
             refresh
           </button>
@@ -118,7 +112,10 @@ function bannerMessage(banner: ProviderBanner): ReactNode {
 
 function Banner({ banner }: { banner: ProviderBanner }) {
   return (
-    <div data-testid="assistant-provider-banner" className="mb-2 flex items-start gap-2 rounded-lg border border-control px-3 py-2 text-ui-12 leading-relaxed text-muted">
+    <div
+      data-testid="assistant-provider-banner"
+      className="mb-2 flex items-start gap-2 rounded-lg border border-control px-3 py-2 text-ui-12 leading-relaxed text-muted"
+    >
       <TriangleAlertIcon size={13} className="mt-[3px] shrink-0 text-amber" />
       <p className="min-w-0 flex-1">{bannerMessage(banner)}</p>
       <button type="button" className="shrink-0 text-fg underline-offset-2 hover:underline" onClick={() => useWorkspace.getState().openSettings("providers")}>
@@ -172,16 +169,28 @@ export function Composer({ chat }: { chat: ChatState | undefined }) {
   return (
     <div className="shrink-0 px-3 pb-3">
       {banner && <Banner banner={banner} />}
-      {sqlServer && <p data-testid="assistant-sqlserver-limit" className="mb-2 text-ui-12 leading-relaxed text-dim">The assistant can inspect SQL Server schema and suggest SQL. Its run_query tool is unavailable for SQL Server. Open suggested SQL in a tab to run it.</p>}
+      {sqlServer && (
+        <p data-testid="assistant-sqlserver-limit" className="mb-2 text-ui-12 leading-relaxed text-dim">
+          The assistant can inspect SQL Server schema and suggest SQL. Its run_query tool is unavailable for SQL Server. Open suggested SQL in a tab to run it.
+        </p>
+      )}
       <div className="rounded-xl border border-control bg-raised focus-within:border-accent-border">
         {attaching && (
           <div className="flex px-3 pt-2.5">
-            <span data-testid="assistant-attachment" className="inline-flex min-w-0 items-center gap-1.5 rounded-md bg-pill py-0.5 pr-0.5 pl-2 text-ui-12 text-muted">
+            <span
+              data-testid="assistant-attachment"
+              className="inline-flex min-w-0 items-center gap-1.5 rounded-md bg-pill py-0.5 pr-0.5 pl-2 text-ui-12 text-muted"
+            >
               <TableIcon size={12} className="shrink-0" />
               <span className="truncate">
                 {tabTitle} · {pluralRows(shown.meta.rowCount)}
               </span>
-              <button type="button" aria-label="Remove attachment" onClick={() => setAttach(false)} className="grid size-4 shrink-0 place-items-center rounded hover:bg-hover hover:text-fg">
+              <button
+                type="button"
+                aria-label="Remove attachment"
+                onClick={() => setAttach(false)}
+                className="grid size-4 shrink-0 place-items-center rounded hover:bg-hover hover:text-fg"
+              >
                 <XIcon size={11} />
               </button>
             </span>

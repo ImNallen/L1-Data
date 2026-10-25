@@ -62,11 +62,25 @@ type Recipe = (s: Seeds) => Rgba;
 const WHITE: Rgba = { r: 1, g: 1, b: 1, a: 1 };
 const BLACK: Rgba = { r: 0, g: 0, b: 0, a: 1 };
 
-const ink = (t: number): Recipe => (s) => mix(s.background, s.foreground, t);
-const tint = (t: number): Recipe => (s) => mix(s.background, s.accent, t);
-const lift = (t: number): Recipe => (s) => mix(s.accent, s.foreground, t);
-const shade = (t: number): Recipe => (s) => mix(s.background, BLACK, t);
-const glaze = (alpha: number): Recipe => (s) => ({ ...s.accent, a: alpha });
+const ink =
+  (t: number): Recipe =>
+  (s) =>
+    mix(s.background, s.foreground, t);
+const tint =
+  (t: number): Recipe =>
+  (s) =>
+    mix(s.background, s.accent, t);
+const lift =
+  (t: number): Recipe =>
+  (s) =>
+    mix(s.accent, s.foreground, t);
+const shade =
+  (t: number): Recipe =>
+  (s) =>
+    mix(s.background, BLACK, t);
+const glaze =
+  (alpha: number): Recipe =>
+  (s) => ({ ...s.accent, a: alpha });
 const fixed = (hex: string): Recipe => {
   const color = parseHex(hex) ?? BLACK;
   return () => color;
@@ -76,7 +90,10 @@ const onAccent: Recipe = (s) => {
   return contrast(WHITE, s.accent) >= 3 ? WHITE : dark;
 };
 
-const seed = (key: keyof Seeds): Recipe => (s) => s[key];
+const seed =
+  (key: keyof Seeds): Recipe =>
+  (s) =>
+    s[key];
 
 // Near-white or near-black, keeping a trace of the background's hue.
 const FOREGROUND: Record<Appearance, (background: Rgba) => Rgba> = {

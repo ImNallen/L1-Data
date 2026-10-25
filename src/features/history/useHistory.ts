@@ -19,6 +19,7 @@ export function useHistory(text: string, filter: HistoryFilter) {
 
   useEffect(() => {
     const version = ++generation.current;
+    // oxlint-disable-next-line react/set-state-in-effect -- clears the last query's results before the debounced fetch
     setList(null);
     setDetail(null);
     setError(null);
@@ -26,35 +27,59 @@ export function useHistory(text: string, filter: HistoryFilter) {
     setLoadingRuns(false);
     olderRequest.current = null;
     runRequest.current = null;
-    const timer = setTimeout(() => {
-      void commands.historyBrowse(firstPageQuery(text, filter)).then((res) => {
-        if (generation.current !== version) return;
-        if (res.status === "error") { setError(res.error.kind === "Stale" ? "History changed. Try again." : res.error.message); return; }
-        setList({ ...res.data, text: text.trim(), filter });
-        setSelectedId((id) => keepSelection(res.data.groups, id));
-      }).catch((e: unknown) => { if (generation.current === version) setError(String(e)); });
-    }, text.trim() ? 150 : 0);
-    return () => { ++generation.current; clearTimeout(timer); };
+    const timer = setTimeout(
+      () => {
+        void commands
+          .historyBrowse(firstPageQuery(text, filter))
+          .then((res) => {
+            if (generation.current !== version) return;
+            if (res.status === "error") {
+              setError(res.error.kind === "Stale" ? "History changed. Try again." : res.error.message);
+              return;
+            }
+            setList({ ...res.data, text: text.trim(), filter });
+            setSelectedId((id) => keepSelection(res.data.groups, id));
+          })
+          .catch((e: unknown) => {
+            if (generation.current === version) setError(String(e));
+          });
+      },
+      text.trim() ? 150 : 0,
+    );
+    return () => {
+      // oxlint-disable-next-line react-hooks/exhaustive-deps -- bumping the live counter drops a reply that lands after cleanup
+      ++generation.current;
+      clearTimeout(timer);
+    };
   }, [text, filter, tail, refresh]);
 
   const selected = list?.groups.find((g) => g.id === selectedId) ?? null;
   const revision = list?.revision;
   useEffect(() => {
+    // oxlint-disable-next-line react/set-state-in-effect -- clears the last selection's runs before the fetch
     setDetail(null);
     setLoadingRuns(false);
     runRequest.current = null;
     if (selectedId === null || revision === undefined) return;
     let cancelled = false;
     const version = generation.current;
-    void commands.historyGroup({ id: selectedId, beforeId: null, limit: 50, revision }).then((res) => {
-      if (cancelled || version !== generation.current) return;
-      if (res.status === "error") {
-        if (res.error.kind === "Stale") reload(); else setError(res.error.message);
-        return;
-      }
-      setDetail({ ...res.data, id: selectedId });
-    }).catch((e: unknown) => { if (!cancelled && version === generation.current) setError(String(e)); });
-    return () => { cancelled = true; };
+    void commands
+      .historyGroup({ id: selectedId, beforeId: null, limit: 50, revision })
+      .then((res) => {
+        if (cancelled || version !== generation.current) return;
+        if (res.status === "error") {
+          if (res.error.kind === "Stale") reload();
+          else setError(res.error.message);
+          return;
+        }
+        setDetail({ ...res.data, id: selectedId });
+      })
+      .catch((e: unknown) => {
+        if (!cancelled && version === generation.current) setError(String(e));
+      });
+    return () => {
+      cancelled = true;
+    };
   }, [selectedId, revision]);
 
   function loadOlder() {
@@ -64,14 +89,24 @@ export function useHistory(text: string, filter: HistoryFilter) {
     const version = generation.current;
     olderRequest.current = requested;
     setLoadingOlder(true);
-    void commands.historyBrowse(query).then((res) => {
-      if (version !== generation.current) return;
-      if (res.status === "error") {
-        if (res.error.kind === "Stale") reload(); else setError(res.error.message);
-      } else setList((current) => current && requested && appendOlder(current, requested, res.data));
-    }).catch((e: unknown) => { if (version === generation.current) setError(String(e)); }).finally(() => {
-      if (version === generation.current) { setLoadingOlder(false); olderRequest.current = null; }
-    });
+    void commands
+      .historyBrowse(query)
+      .then((res) => {
+        if (version !== generation.current) return;
+        if (res.status === "error") {
+          if (res.error.kind === "Stale") reload();
+          else setError(res.error.message);
+        } else setList((current) => current && requested && appendOlder(current, requested, res.data));
+      })
+      .catch((e: unknown) => {
+        if (version === generation.current) setError(String(e));
+      })
+      .finally(() => {
+        if (version === generation.current) {
+          setLoadingOlder(false);
+          olderRequest.current = null;
+        }
+      });
   }
 
   function loadRuns() {
@@ -80,14 +115,24 @@ export function useHistory(text: string, filter: HistoryFilter) {
     const version = generation.current;
     runRequest.current = detail;
     setLoadingRuns(true);
-    void commands.historyGroup({ id: detail.id, beforeId: detail.runs.at(-1)?.id ?? null, limit: 50, revision: detail.revision }).then((res) => {
-      if (version !== generation.current) return;
-      if (res.status === "error") {
-        if (res.error.kind === "Stale") reload(); else setError(res.error.message);
-      } else setDetail((current) => current && appendRuns(current, requested, res.data));
-    }).catch((e: unknown) => { if (version === generation.current) setError(String(e)); }).finally(() => {
-      if (version === generation.current && runRequest.current === requested) { setLoadingRuns(false); runRequest.current = null; }
-    });
+    void commands
+      .historyGroup({ id: detail.id, beforeId: detail.runs.at(-1)?.id ?? null, limit: 50, revision: detail.revision })
+      .then((res) => {
+        if (version !== generation.current) return;
+        if (res.status === "error") {
+          if (res.error.kind === "Stale") reload();
+          else setError(res.error.message);
+        } else setDetail((current) => current && appendRuns(current, requested, res.data));
+      })
+      .catch((e: unknown) => {
+        if (version === generation.current) setError(String(e));
+      })
+      .finally(() => {
+        if (version === generation.current && runRequest.current === requested) {
+          setLoadingRuns(false);
+          runRequest.current = null;
+        }
+      });
   }
 
   const currentDetail = selected && detail?.id === selected.id && detail.revision === revision ? detail : null;

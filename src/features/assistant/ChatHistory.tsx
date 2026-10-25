@@ -57,6 +57,7 @@ export function ChatHistory() {
   const current = useWorkspace((s) => s.layout.assistantChat);
   const waiting = useLive((s) => Object.values(s.chats).some(awaitsApproval));
   const label = waiting ? "Chat history, a chat is waiting for approval" : "Chat history";
+  // oxlint-disable-next-line react/purity -- relative times read the clock on each render
   const now = Date.now();
   return (
     <Menu.Root modal={false}>

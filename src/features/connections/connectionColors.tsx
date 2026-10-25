@@ -36,11 +36,27 @@ const ENVIRONMENT_ICON: Record<Environment, { Icon: LucideIcon; tone: string } |
   Production: { Icon: ShieldAlertIcon, tone: "text-danger" },
 };
 
-export function EnvironmentIcon({ environment, size = 14, testId = "env-icon", className }: { environment: Environment | null; size?: number; testId?: string; className?: string }) {
+export function EnvironmentIcon({
+  environment,
+  size = 14,
+  testId = "env-icon",
+  className,
+}: {
+  environment: Environment | null;
+  size?: number;
+  testId?: string;
+  className?: string;
+}) {
   const icon = environment && ENVIRONMENT_ICON[environment];
   if (!icon) return null;
   return (
-    <span data-testid={testId} role="img" aria-label={environment} title={environment} className={cx("inline-grid shrink-0 place-items-center", icon.tone, className)}>
+    <span
+      data-testid={testId}
+      role="img"
+      aria-label={environment}
+      title={environment}
+      className={cx("inline-grid shrink-0 place-items-center", icon.tone, className)}
+    >
       <icon.Icon size={size} aria-hidden />
     </span>
   );

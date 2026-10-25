@@ -4,11 +4,24 @@ import { appendOlder, appendRuns, firstPageQuery, historyKey, keepSelection, old
 
 const group = (id: number): HistoryGroupSummary => ({
   databaseKind: "Postgres",
-  id, latestId: id + 10, latestAtMs: 123, connectionId: "c1", database: "shop", title: "Query", excerpt: "select 1",
-  runCount: 2, failedCount: 0, isWrite: false,
+  id,
+  latestId: id + 10,
+  latestAtMs: 123,
+  connectionId: "c1",
+  database: "shop",
+  title: "Query",
+  excerpt: "select 1",
+  runCount: 2,
+  failedCount: 0,
+  isWrite: false,
   representative: { id: id + 10, atMs: 123, connectionName: "dev", elapsedMs: 20, outcome: { kind: "Rows", rows: 1 } },
 });
-const page = (groups: HistoryGroupSummary[], revision = 2): HistoryBrowsePage => ({ groups, counts: { all: 10, failed: 1, writes: 2 }, revision, hasMore: true });
+const page = (groups: HistoryGroupSummary[], revision = 2): HistoryBrowsePage => ({
+  groups,
+  counts: { all: 10, failed: 1, writes: 2 },
+  revision,
+  hasMore: true,
+});
 const list = (): HistoryList => ({ ...page([group(8), group(5)]), text: "orders", filter: "Failed" });
 
 it("pages groups with the latest id, original search, filter and revision", () => {
@@ -32,7 +45,15 @@ it("preserves exact-group selection on refresh and otherwise selects the first m
 });
 
 it("ignores run pages fetched before another group, page, or revision replaced the preview", () => {
-  const original: HistoryDetail = { databaseKind: "Postgres", id: 5, sql: "select 1", runs: [group(5).representative], hasMore: true, maxElapsedMs: 100, revision: 2 };
+  const original: HistoryDetail = {
+    databaseKind: "Postgres",
+    id: 5,
+    sql: "select 1",
+    runs: [group(5).representative],
+    hasMore: true,
+    maxElapsedMs: 100,
+    revision: 2,
+  };
   const next = { ...original, runs: [group(1).representative], hasMore: false };
   expect(appendRuns(original, original, next).runs.map((r) => r.id)).toEqual([15, 11]);
   expect(appendRuns({ ...original, id: 8 }, original, next).id).toBe(8);
@@ -40,9 +61,17 @@ it("ignores run pages fetched before another group, page, or revision replaced t
 });
 
 describe("history keys", () => {
-  const key = (key: string, modifiers: Partial<Parameters<typeof historyKey>[0]> = {}, selection = false) => historyKey({ key, metaKey: false, ctrlKey: false, altKey: false, shiftKey: false, isComposing: false, ...modifiers }, selection);
+  const key = (key: string, modifiers: Partial<Parameters<typeof historyKey>[0]> = {}, selection = false) =>
+    historyKey({ key, metaKey: false, ctrlKey: false, altKey: false, shiftKey: false, isComposing: false, ...modifiers }, selection);
   it("selects with arrows and opens, runs or inserts with the documented keys", () => {
-    expect([key("ArrowDown"), key("ArrowUp"), key("Enter"), key("Enter", { metaKey: true }), key("Enter", { ctrlKey: true }), key("Enter", { altKey: true })]).toEqual(["next", "previous", "open", "run", "run", "insert"]);
+    expect([
+      key("ArrowDown"),
+      key("ArrowUp"),
+      key("Enter"),
+      key("Enter", { metaKey: true }),
+      key("Enter", { ctrlKey: true }),
+      key("Enter", { altKey: true }),
+    ]).toEqual(["next", "previous", "open", "run", "run", "insert"]);
   });
   it("keeps normal search selection copying and composition intact", () => {
     expect(key("c", { metaKey: true })).toBe("copy");

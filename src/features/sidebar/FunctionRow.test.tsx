@@ -9,7 +9,14 @@ import { FilteredSchemaNode, FunctionRow, SchemaNode } from "./ConnectionTree";
 
 const postgres = { connectionId: "pg", database: "shop" };
 const sqlServer = { connectionId: "mssql", database: "shop" };
-const pgFunction: FunctionInfo = { oid: 12, name: "display name", args: "unparsed display arguments", returns: "int", kind: "Function", insertText: "order_count()" };
+const pgFunction: FunctionInfo = {
+  oid: 12,
+  name: "display name",
+  args: "unparsed display arguments",
+  returns: "int",
+  kind: "Function",
+  insertText: "order_count()",
+};
 const msProcedure: FunctionInfo = { ...pgFunction, kind: "Procedure", insertText: "EXEC [odd]]schema].[proc]]name] NULL, NULL" };
 const crossKindCases = [
   { source: sqlServer, destination: postgres, fn: msProcedure, label: "SQL Server" },
@@ -77,20 +84,23 @@ it.each([
   { db: sqlServer, kind: "Procedure", insertText: msProcedure.insertText, prefix: "" },
   { db: postgres, kind: "Function", insertText: "order_count()", prefix: "SELECT " },
   { db: postgres, kind: "Procedure", insertText: "touch_order()", prefix: "SELECT " },
-] satisfies { db: DatabaseRef; kind: FunctionInfo["kind"]; insertText: string; prefix: string }[])("inserts the catalog's $kind template verbatim into a same-kind tab at the active cursor", ({ db, kind, insertText, prefix }) => {
-  target({ ...db, database: "reporting" });
-  seedEditor("active", `${prefix}; -- retain suffix`);
-  moveCursor("active", prefix.length);
-  seedEditor("other", "SELECT 99");
+] satisfies { db: DatabaseRef; kind: FunctionInfo["kind"]; insertText: string; prefix: string }[])(
+  "inserts the catalog's $kind template verbatim into a same-kind tab at the active cursor",
+  ({ db, kind, insertText, prefix }) => {
+    target({ ...db, database: "reporting" });
+    seedEditor("active", `${prefix}; -- retain suffix`);
+    moveCursor("active", prefix.length);
+    seedEditor("other", "SELECT 99");
 
-  routineRow(db, { ...pgFunction, kind, insertText }).props.onDoubleClick();
+    routineRow(db, { ...pgFunction, kind, insertText }).props.onDoubleClick();
 
-  expect(textOf("active")).toBe(`${prefix}${insertText}; -- retain suffix`);
-  expect(editorStateOf("active").selection.main.head).toBe(prefix.length + insertText.length);
-  expect(textOf("other")).toBe("SELECT 99");
-  expect(useWorkspace.getState().tabs.active?.console.db).toEqual({ ...db, database: "reporting" });
-  expect(useWorkspace.getState().toast).toBeNull();
-});
+    expect(textOf("active")).toBe(`${prefix}${insertText}; -- retain suffix`);
+    expect(editorStateOf("active").selection.main.head).toBe(prefix.length + insertText.length);
+    expect(textOf("other")).toBe("SELECT 99");
+    expect(useWorkspace.getState().tabs.active?.console.db).toEqual({ ...db, database: "reporting" });
+    expect(useWorkspace.getState().toast).toBeNull();
+  },
+);
 
 it.each([
   { source: postgres, config: configs.pg, fn: pgFunction },
@@ -137,27 +147,35 @@ it("checks the destination when double-clicked after its target changes", () => 
   expectRefused(row.props.onDoubleClick);
 });
 
-it.each(crossKindCases.flatMap((test) => [{ ...test, tree: "normal" }, { ...test, tree: "filtered" }]))(
-  "carries the $label source through the $tree tree and inserts only after the target kind matches",
-  ({ source, destination, fn, tree }) => {
-    prepareEdits(destination);
-    const expanded = { has: () => true, toggle: () => {} };
-    const schema: SchemaInfo = { name: "schema", system: false, tableCount: 0, relations: [], functions: [fn] };
-    const node = tree === "normal"
+it.each(
+  crossKindCases.flatMap((test) => [
+    { ...test, tree: "normal" },
+    { ...test, tree: "filtered" },
+  ]),
+)("carries the $label source through the $tree tree and inserts only after the target kind matches", ({ source, destination, fn, tree }) => {
+  prepareEdits(destination);
+  const expanded = { has: () => true, toggle: () => {} };
+  const schema: SchemaInfo = { name: "schema", system: false, tableCount: 0, relations: [], functions: [fn] };
+  const node =
+    tree === "normal"
       ? SchemaNode({ path: "unrelated/display/path", depth: 2, db: source, schema, version: 1, expanded })
-      : FilteredSchemaNode({ path: "unrelated/display/path", db: source, match: { name: schema.name, relations: [], functions: [{ fn, ranges: [] }] }, expanded });
-    const rows = routineRows(node);
-    expect(rows).toHaveLength(1);
-    for (const row of rows) {
-      expect(row.props.db).toEqual(source);
-      const rendered: ReactElement<{ onDoubleClick: () => void }> = FunctionRow(row.props);
-      expectRefused(rendered.props.onDoubleClick);
-      useWorkspace.getState().patchConsole("active", { db: { ...source, database: "reporting" } });
-      rendered.props.onDoubleClick();
-      expect(textOf("active")).toBe(`${fn.insertText}SELECT 42; -- retain suffix`);
-      expect(editorStateOf("active").selection.main.head).toBe(fn.insertText.length);
-      expect(textOf("other")).toBe("SELECT 99");
-      expect(useWorkspace.getState().tabs.active?.console.db).toEqual({ ...source, database: "reporting" });
-    }
-  },
-);
+      : FilteredSchemaNode({
+          path: "unrelated/display/path",
+          db: source,
+          match: { name: schema.name, relations: [], functions: [{ fn, ranges: [] }] },
+          expanded,
+        });
+  const rows = routineRows(node);
+  expect(rows).toHaveLength(1);
+  for (const row of rows) {
+    expect(row.props.db).toEqual(source);
+    const rendered: ReactElement<{ onDoubleClick: () => void }> = FunctionRow(row.props);
+    expectRefused(rendered.props.onDoubleClick);
+    useWorkspace.getState().patchConsole("active", { db: { ...source, database: "reporting" } });
+    rendered.props.onDoubleClick();
+    expect(textOf("active")).toBe(`${fn.insertText}SELECT 42; -- retain suffix`);
+    expect(editorStateOf("active").selection.main.head).toBe(fn.insertText.length);
+    expect(textOf("other")).toBe("SELECT 99");
+    expect(useWorkspace.getState().tabs.active?.console.db).toEqual({ ...source, database: "reporting" });
+  }
+});

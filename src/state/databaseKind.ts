@@ -3,5 +3,5 @@ import type { ConnectionConfig, DatabaseKind, DatabaseRef } from "../ipc/binding
 export const DATABASE_LABEL: Record<DatabaseKind, string> = { Postgres: "PostgreSQL", SqlServer: "SQL Server" };
 
 export function databaseKindFor(db: DatabaseRef | null, configs: Record<string, ConnectionConfig>): DatabaseKind {
-  return db ? configs[db.connectionId]?.databaseKind ?? "Postgres" : "Postgres";
+  return db ? (configs[db.connectionId]?.databaseKind ?? "Postgres") : "Postgres";
 }

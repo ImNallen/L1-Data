@@ -79,7 +79,17 @@ function TextField({
   );
 }
 
-function ProviderRow({ config, state, selected, onSelect }: { config: ProviderConfig; state: ProviderState | undefined; selected: boolean; onSelect: () => void }) {
+function ProviderRow({
+  config,
+  state,
+  selected,
+  onSelect,
+}: {
+  config: ProviderConfig;
+  state: ProviderState | undefined;
+  selected: boolean;
+  onSelect: () => void;
+}) {
   const kind = config.provider;
   const Icon = PROVIDER_ICONS[kind];
   const version = outcomeVersion(state?.outcome);

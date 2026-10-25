@@ -22,7 +22,13 @@ describe("workspace.upsertConfig", () => {
   it("binds tabs that have no connection and leaves bound tabs alone", () => {
     const ws = useWorkspace.getState();
     ws.addTab({ id: "free", title: "Untitled-1.sql", console: { db: null, mode: "AutoCommit" }, table: null, file: null });
-    ws.addTab({ id: "bound", title: "Untitled-2.sql", console: { db: { connectionId: "old", database: "reporting" }, mode: "Manual" }, table: null, file: null });
+    ws.addTab({
+      id: "bound",
+      title: "Untitled-2.sql",
+      console: { db: { connectionId: "old", database: "reporting" }, mode: "Manual" },
+      table: null,
+      file: null,
+    });
     ws.upsertConfig(config("new"));
     const tabs = useWorkspace.getState().tabs;
     expect(tabs.free?.console.db).toEqual({ connectionId: "new", database: "shop" });
@@ -58,7 +64,8 @@ describe("workspace.upsertConfig", () => {
 describe("file tabs", () => {
   afterEach(() => useWorkspace.setState(useWorkspace.getInitialState(), true));
   const saved: FileSaved = { binding: { path: "/q/report.sql", stamp: "s1", format: { bom: true, crlf: true } }, name: "report.sql" };
-  const scratch = () => useWorkspace.getState().addTab({ id: "t", title: "Untitled-1.sql", console: { db: null, mode: "AutoCommit" }, table: null, file: null });
+  const scratch = () =>
+    useWorkspace.getState().addTab({ id: "t", title: "Untitled-1.sql", console: { db: null, mode: "AutoCommit" }, table: null, file: null });
 
   it("names a tab after the file it binds to, and refuses to rename it", () => {
     scratch();

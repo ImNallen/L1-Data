@@ -7,7 +7,13 @@ const TAB_A = "a0000000-0000-4000-8000-00000000000a";
 const TAB_B = "b0000000-0000-4000-8000-00000000000b";
 const CHAT = "c0000000-0000-4000-8000-00000000000c";
 
-const state = (status: UpdateStatus, currentVersion = "0.1.0"): UpdateState => ({ rev: 1, track: "Stable", currentVersion, status, checkedAtMs: NOW - 5 * 60_000 });
+const state = (status: UpdateStatus, currentVersion = "0.1.0"): UpdateState => ({
+  rev: 1,
+  track: "Stable",
+  currentVersion,
+  status,
+  checkedAtMs: NOW - 5 * 60_000,
+});
 
 const EVERY: UpdateStatus[] = [
   { kind: "Disabled", reason: "DevBuild" },
@@ -79,7 +85,12 @@ describe("Settings > About", () => {
 describe("the restart dialog", () => {
   const titles: Record<string, string> = { [TAB_A]: "orders.sql", [TAB_B]: "fix-prices.sql", [CHAT]: "Top customers" };
   const body = (impact: Partial<RestartImpact>, staged: string[] = []) =>
-    restartBody({ running: [], transactions: [], chats: [], ...impact }, staged, (id) => titles[id] ?? id, (id) => titles[id] ?? id);
+    restartBody(
+      { running: [], transactions: [], chats: [], ...impact },
+      staged,
+      (id) => titles[id] ?? id,
+      (id) => titles[id] ?? id,
+    );
 
   it("says only that the app reopens when nothing would be interrupted", () => {
     expect(body({})).toBe("L1 Data will close and reopen.");
@@ -89,8 +100,12 @@ describe("the restart dialog", () => {
     expect(body({ running: [TAB_A], transactions: [{ tabId: TAB_B, hasWrites: true }], chats: [CHAT] })).toBe(
       "Restarting cancels the query running in “orders.sql”, rolls back the uncommitted changes in “fix-prices.sql”, and stops the assistant in “Top customers”. L1 Data will close and reopen.",
     );
-    expect(body({ running: [TAB_A, TAB_B] })).toBe("Restarting cancels the queries running in “orders.sql” and “fix-prices.sql”. L1 Data will close and reopen.");
-    expect(body({ transactions: [{ tabId: TAB_A, hasWrites: false }] })).toBe("Restarting ends the open transaction in “orders.sql”. L1 Data will close and reopen.");
+    expect(body({ running: [TAB_A, TAB_B] })).toBe(
+      "Restarting cancels the queries running in “orders.sql” and “fix-prices.sql”. L1 Data will close and reopen.",
+    );
+    expect(body({ transactions: [{ tabId: TAB_A, hasWrites: false }] })).toBe(
+      "Restarting ends the open transaction in “orders.sql”. L1 Data will close and reopen.",
+    );
     expect(body({}, [TAB_A])).toBe("Restarting discards the changes in “orders.sql” that haven't been submitted. L1 Data will close and reopen.");
     expect(body({ running: [TAB_A] }, [TAB_A, TAB_B])).toBe(
       "Restarting cancels the query running in “orders.sql” and discards the changes in “orders.sql” and “fix-prices.sql” that haven't been submitted. L1 Data will close and reopen.",

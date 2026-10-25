@@ -69,11 +69,7 @@ it.each([
   expect(hosted?.chrome).toBe("custom");
 
   const topBar = renderToStaticMarkup(<TopBar hosted={hosted} />);
-  expect(controlOrder(topBar)).toEqual([
-    'data-testid="window-minimize"',
-    'data-testid="window-maximize"',
-    'data-testid="window-close"',
-  ]);
+  expect(controlOrder(topBar)).toEqual(['data-testid="window-minimize"', 'data-testid="window-maximize"', 'data-testid="window-close"']);
   expect(topBar.indexOf('data-testid="toggle-right-panel"')).toBeLessThan(topBar.indexOf('data-testid="window-controls"'));
 
   expect(renderToStaticMarkup(<AppLayout />)).toContain('data-testid="window-resize-North"');
@@ -94,11 +90,7 @@ it("labels the maximize button Restore once the window is maximized", () => {
   expect(restored).toContain("hover:bg-danger");
 
   const maximized = renderToStaticMarkup(<WindowControlButtons hosted={fakeHost} maximized={true} />);
-  expect(controlOrder(maximized)).toEqual([
-    'data-testid="window-minimize"',
-    'data-testid="window-maximize"',
-    'data-testid="window-close"',
-  ]);
+  expect(controlOrder(maximized)).toEqual(['data-testid="window-minimize"', 'data-testid="window-maximize"', 'data-testid="window-close"']);
   expect(maximized).toContain('aria-label="Restore"');
 });
 
@@ -144,7 +136,9 @@ it("heads the right panel with Assistant, new chat, and chat history before the 
   withLayout({ rightPanel: "Assistant" });
   const panel = renderToStaticMarkup(<RightPanel hosted={null} />);
   expect(panel).toContain(">Assistant</span>");
-  const order = ['data-testid="assistant-new"', 'data-testid="assistant-history"', RESULTS, TOGGLE, 'data-testid="assistant-panel"'].map((id) => panel.indexOf(id));
+  const order = ['data-testid="assistant-new"', 'data-testid="assistant-history"', RESULTS, TOGGLE, 'data-testid="assistant-panel"'].map((id) =>
+    panel.indexOf(id),
+  );
   expect(order.every((at, i) => at > (order[i - 1] ?? 0))).toBe(true);
   expect(panel).toMatch(/<textarea[^>]*data-testid="assistant-input"[^>]*placeholder="Ask about your data, send follow-ups, or attach a result"/);
   expect(panel).not.toContain("coming soon");
@@ -221,8 +215,7 @@ it("drops the sidebar resize handle while the sidebar is hidden", () => {
   expect(html).not.toContain('aria-label="Resize sidebar"');
 });
 
-const handle = (html: string, id: string) =>
-  html.match(new RegExp(`<div[^>]*data-testid="${id}"[^>]*>(.*?)</div></div>`));
+const handle = (html: string, id: string) => html.match(new RegExp(`<div[^>]*data-testid="${id}"[^>]*>(.*?)</div></div>`));
 
 function withQueryTab() {
   const tab: Tab = { id: "t1", title: "Untitled-1.sql", console: { db: null, mode: "AutoCommit" }, table: null, file: null };
@@ -284,9 +277,7 @@ it("makes the open right panel a resizable panel after the main area, behind its
   expect(right?.[0]).toContain('role="separator"');
   expect(right?.[0]).toContain('aria-label="Resize right panel"');
   expect(right?.[1]).toContain("h-8 w-[5px]");
-  const order = ['data-testid="main"', 'data-testid="right-panel-resize"', 'data-testid="right"', 'data-testid="right-panel"'].map((m) =>
-    html.indexOf(m),
-  );
+  const order = ['data-testid="main"', 'data-testid="right-panel-resize"', 'data-testid="right"', 'data-testid="right-panel"'].map((m) => html.indexOf(m));
   expect(order.every((at) => at >= 0)).toBe(true);
   expect(order).toEqual([...order].sort((a, b) => a - b));
 });
@@ -316,7 +307,7 @@ function withTableTab(mode: TxnMode = "AutoCommit", color: string | null = null)
     user: "l1data",
     sslMode: "Prefer",
     caCertPath: null,
-  databaseKind: "Postgres",
+    databaseKind: "Postgres",
     hasPassword: true,
     color,
     ssh: null,
@@ -344,5 +335,7 @@ it("gives a table tab the connection, database, and transaction mode menus a que
 it("marks the tab's connection with its color in the top bar", () => {
   withTableTab("AutoCommit", "red");
   const html = renderToStaticMarkup(<TopBar hosted={null} />);
-  expect(html).toMatch(/data-testid="tab-connection"[^>]*><span aria-hidden="true" class="[^"]*" style="background-color:#ef4444"><\/span><span class="truncate">dev</);
+  expect(html).toMatch(
+    /data-testid="tab-connection"[^>]*><span aria-hidden="true" class="[^"]*" style="background-color:#ef4444"><\/span><span class="truncate">dev</,
+  );
 });

@@ -58,14 +58,16 @@ export function WindowControls({ hosted }: { hosted: CustomChrome }) {
     void hosted.maximized().then((value) => {
       if (current) setMaximized(value);
     });
-    void hosted.onResize(() => {
-      void hosted.maximized().then((value) => {
-        if (current) setMaximized(value);
+    void hosted
+      .onResize(() => {
+        void hosted.maximized().then((value) => {
+          if (current) setMaximized(value);
+        });
+      })
+      .then((unlisten) => {
+        if (current) stop = unlisten;
+        else unlisten();
       });
-    }).then((unlisten) => {
-      if (current) stop = unlisten;
-      else unlisten();
-    });
     return () => {
       current = false;
       stop();

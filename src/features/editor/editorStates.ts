@@ -161,7 +161,9 @@ const runTargetLayer = layer({
   class: "cm-runTargetLayer",
   markers: statementBoxes,
   update: (u) =>
-    u.geometryChanged || u.startState.field(runTargetField) !== u.state.field(runTargetField) || u.startState.field(previewField) !== u.state.field(previewField),
+    u.geometryChanged ||
+    u.startState.field(runTargetField) !== u.state.field(runTargetField) ||
+    u.startState.field(previewField) !== u.state.field(previewField),
 });
 
 // The selection layer paints behind the text, so the active line's background would hide it.
