@@ -562,6 +562,28 @@ pub(crate) fn relation_names(text: &str) -> Vec<NameRef> {
     found
 }
 
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) struct ModuleName {
+    pub parts: Vec<String>,
+    pub span: std::ops::Range<usize>,
+}
+
+pub(crate) fn module_name(text: &str) -> Option<ModuleName> {
+    let tokens = significant(text).ok()?;
+    if !word_at(&tokens, 0, "CREATE") {
+        return None;
+    }
+    let mut at = 1;
+    if word_at(&tokens, at, "OR") && word_at(&tokens, at + 1, "ALTER") {
+        at += 2;
+    }
+    if !["PROC", "PROCEDURE", "FUNCTION", "VIEW", "TRIGGER"].iter().any(|w| word_at(&tokens, at, w)) {
+        return None;
+    }
+    let (parts, after) = name_path(&tokens, at + 1)?;
+    (parts.len() <= 2).then(|| ModuleName { parts, span: tokens[at + 1].start..tokens[after - 1].end })
+}
+
 pub(crate) fn quote_ident(name: &str) -> String {
     format!("[{}]", name.replace(']', "]]"))
 }
@@ -963,6 +985,20 @@ mod tests {
             let _ = split_batches(text);
             let _ = validate_expression(text, false);
             let _ = format(text);
+        }
+    }
+
+    #[test]
+    fn module_name_finds_the_created_name_past_comments() {
+        let name = |text: &'static str| module_name(text).map(|n| (n.parts, &text[n.span]));
+        let parts = |names: &[&str]| names.iter().map(|n| n.to_string()).collect::<Vec<_>>();
+        assert_eq!(name("-- note\n/* CREATE VIEW x */ CREATE PROCEDURE oldname AS SELECT 1"), Some((parts(&["oldname"]), "oldname")));
+        assert_eq!(name("CREATE OR ALTER PROC [we]]ird s].[p]]q] AS SELECT 1"), Some((parts(&["we]ird s", "p]q"]), "[we]]ird s].[p]]q]")));
+        assert_eq!(name("create function \"a\"\"b\" . \"c\" () RETURNS int AS BEGIN RETURN 1 END"), Some((parts(&["a\"b", "c"]), "\"a\"\"b\" . \"c\"")));
+        assert_eq!(name("CREATE TRIGGER dbo.t ON dbo.x AFTER INSERT AS SELECT 1"), Some((parts(&["dbo", "t"]), "dbo.t")));
+        assert_eq!(name("CREATE VIEW dbo./* gap */v AS SELECT 1"), Some((parts(&["dbo", "v"]), "dbo./* gap */v")));
+        for text in ["ALTER VIEW dbo.v AS SELECT 1", "CREATE TABLE dbo.t (a int)", "CREATE PROCEDURE a.b.c AS SELECT 1", "CREATE PROCEDURE 'x' AS SELECT 1", "CREATE PROCEDURE p AS SELECT 'unclosed"] {
+            assert_eq!(module_name(text), None, "{text}");
         }
     }
 }
