@@ -61,6 +61,7 @@ const SQL_SERVER_AUTHS: { value: SqlServerAuth; label: string; hint: ReactNode }
       </>
     ),
   },
+  { value: "Unknown", label: "Set by a newer version", hint: "A newer version of L1 Data saved this sign-in method. Update L1 Data, or choose another method." },
 ];
 
 const SSH_AUTHS: { value: SshAuthKind; label: string }[] = [
@@ -360,7 +361,7 @@ function ConnectionForm({
   const shownUrlError = urlError !== null && (urlBlurred || url.includes("://") || url.includes("=")) ? urlError : null;
 
   const port = parsePort(fields.port);
-  const valid = fields.host.trim() !== "" && port !== null && sshValid(fields);
+  const valid = fields.host.trim() !== "" && port !== null && sshValid(fields) && toSqlServerAuth(fields) !== "Unknown";
   const fallbackName = `${fields.host.trim()} / ${fields.database.trim()}`;
 
   const draft = (): ConnectionDraft => ({
@@ -567,8 +568,8 @@ function ConnectionForm({
                   if (choice) update({ sqlServerAuth: choice.value });
                 }}
               >
-                {SQL_SERVER_AUTHS.map((a) => (
-                  <option key={a.value} value={a.value}>
+                {SQL_SERVER_AUTHS.filter((a) => a.value !== "Unknown" || fields.sqlServerAuth === "Unknown").map((a) => (
+                  <option key={a.value} value={a.value} disabled={a.value === "Unknown"}>
                     {a.label}
                   </option>
                 ))}

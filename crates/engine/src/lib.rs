@@ -105,6 +105,7 @@ const DB_FILE: &str = "l1-data.sqlite3";
 const KV_WORKSPACE: &str = "workspace";
 const KV_SETTINGS: &str = "settings";
 const BOOT_CHATS: u32 = 200;
+const NEWER_SIGN_IN: &str = "This connection signs in with a method from a newer version of L1 Data.";
 
 impl Shared {
     pub(crate) fn emit(&self, ev: AppEvent) {
@@ -167,6 +168,7 @@ impl Shared {
     }
 
     fn params(&self, config: &ConnectionConfig, database: &str) -> Result<ConnectParams, ConnectError> {
+        let entra = self.entra(config.database_kind, config.sql_server_auth)?;
         let password = if config.has_password { self.saved_secret(config.id, SecretSlot::Database)? } else { None };
         let via = match &config.ssh {
             Some(t) => {
@@ -175,11 +177,14 @@ impl Shared {
             }
             None => None,
         };
-        Ok(ConnectParams::for_database(config, database, password, via, self.entra(config.database_kind, config.sql_server_auth)))
+        Ok(ConnectParams::for_database(config, database, password, via, entra))
     }
 
-    fn entra(&self, kind: DatabaseKind, auth: Option<SqlServerAuth>) -> Option<Arc<entra::AzCli>> {
-        connection::uses_entra(kind, auth).then(|| self.az.clone())
+    fn entra(&self, kind: DatabaseKind, auth: Option<SqlServerAuth>) -> Result<Option<Arc<entra::AzCli>>, ConnectError> {
+        match (kind, auth) {
+            (DatabaseKind::SqlServer, Some(SqlServerAuth::Unknown)) => Err(ConnectError::Auth { message: format!("{NEWER_SIGN_IN} Update L1 Data, or edit the connection and choose a sign-in method.") }),
+            _ => Ok(connection::uses_entra(kind, auth).then(|| self.az.clone())),
+        }
     }
 
     /// Parameters for a console session on `database`, from the config as saved now.
@@ -800,6 +805,9 @@ impl Engine {
             return Err(invalid("database is required"));
         }
         let sql_server_auth = d.sql_server_auth.filter(|_| d.database_kind == DatabaseKind::SqlServer);
+        if sql_server_auth == Some(SqlServerAuth::Unknown) {
+            return Err(SaveError::Invalid { message: format!("{NEWER_SIGN_IN} Choose SQL login or Microsoft Entra ID.") });
+        }
         let entra = connection::uses_entra(d.database_kind, sql_server_auth);
         if !entra && d.user.trim().is_empty() {
             return Err(invalid("user is required"));
@@ -910,6 +918,7 @@ impl Engine {
 
     pub async fn test_connection(&self, d: ConnectionDraft) -> Result<ServerInfo, ConnectError> {
         let s = &self.shared;
+        let entra = s.entra(d.database_kind, d.sql_server_auth)?;
         let password = match (&d.password, d.id) {
             (PasswordInput::Set(pw), _) => Some(pw.clone()),
             (PasswordInput::Clear, _) | (PasswordInput::Keep, None) => None,
@@ -927,7 +936,7 @@ impl Engine {
             }
             None => None,
         };
-        let session = Session::open(&ConnectParams::from_draft(&d, password, via, s.entra(d.database_kind, d.sql_server_auth)), None, &s.timezone).await?;
+        let session = Session::open(&ConnectParams::from_draft(&d, password, via, entra), None, &s.timezone).await?;
         Ok(session.server)
     }
 
@@ -1675,6 +1684,22 @@ mod tests {
             environment: None,
             sql_server_auth: None,
         }
+    }
+
+    #[tokio::test]
+    async fn a_sign_in_method_from_a_newer_build_loads_but_never_connects_or_saves() {
+        let (engine, _dir) = engine().await;
+        let login = ConnectionDraft { database_kind: DatabaseKind::SqlServer, port: 1, password: PasswordInput::Clear, sql_server_auth: Some(SqlServerAuth::SqlLogin), ..draft("newer") };
+        let saved = engine.save_connection(login.clone()).await.unwrap();
+        engine.shared.store.upsert_connection(&ConnectionConfig { sql_server_auth: Some(SqlServerAuth::Unknown), ..saved.clone() }).unwrap();
+        assert_eq!(engine.boot().connections.iter().map(|c| c.sql_server_auth).collect::<Vec<_>>(), [Some(SqlServerAuth::Unknown)]);
+        let Err(ConnectError::Auth { message }) = engine.connect(saved.id).await else { panic!("a newer method must not connect as another one") };
+        assert!(message.contains("newer version of L1 Data"), "{message}");
+        let newer = ConnectionDraft { id: Some(saved.id), sql_server_auth: Some(SqlServerAuth::Unknown), ..login };
+        let Err(ConnectError::Auth { message }) = engine.test_connection(newer.clone()).await else { panic!("a newer method must not test as another one") };
+        assert!(message.contains("newer version of L1 Data"), "{message}");
+        let Err(SaveError::Invalid { message }) = engine.save_connection(newer).await else { panic!("a newer method must not be rewritten") };
+        assert!(message.contains("newer version of L1 Data"), "{message}");
     }
 
     #[tokio::test]

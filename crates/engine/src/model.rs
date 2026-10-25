@@ -94,11 +94,23 @@ pub struct ConnectionConfig {
 }
 
 /// How a SQL Server connection signs in. `EntraAzureCli` sends an access token from the user's
-/// `az login` and saves no password.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Type)]
+/// `az login` and saves no password. `Unknown` is a method a newer build saved. Connect and save
+/// refuse it, so the row keeps its method until the user picks one this build knows.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Type)]
 pub enum SqlServerAuth {
     SqlLogin,
     EntraAzureCli,
+    Unknown,
+}
+
+impl<'de> Deserialize<'de> for SqlServerAuth {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        Ok(match String::deserialize(d)?.as_str() {
+            "SqlLogin" => Self::SqlLogin,
+            "EntraAzureCli" => Self::EntraAzureCli,
+            _ => Self::Unknown,
+        })
+    }
 }
 
 /// What the user says the connection points at. The UI marks `Production` and asks before a run on it writes.
@@ -2913,7 +2925,7 @@ mod database_compatibility_tests {
     }
 
     #[test]
-    fn each_sql_server_auth_round_trips_and_unknown_ones_fail() {
+    fn each_sql_server_auth_round_trips_and_a_newer_one_loads_as_unknown() {
         let mut saved = serde_json::json!({"databaseKind":"SqlServer", "id":Uuid::nil(), "name":"azure", "host":"db.example.net", "port":1433, "database":"shop", "user":"", "sslMode":"VerifyFull", "caCertPath":null, "hasPassword":false, "color":null, "ssh":null, "environment":null, "sqlServerAuth":null});
         for (wire, auth) in [(serde_json::Value::Null, None), ("SqlLogin".into(), Some(SqlServerAuth::SqlLogin)), ("EntraAzureCli".into(), Some(SqlServerAuth::EntraAzureCli))] {
             saved["sqlServerAuth"] = wire;
@@ -2921,8 +2933,8 @@ mod database_compatibility_tests {
             assert_eq!(config.sql_server_auth, auth);
             assert_eq!(serde_json::to_value(&config).unwrap(), saved);
         }
-        saved["sqlServerAuth"] = "Kerberos".into();
-        assert!(serde_json::from_value::<ConnectionConfig>(saved).is_err());
+        saved["sqlServerAuth"] = "EntraDeviceCode".into();
+        assert_eq!(serde_json::from_value::<ConnectionConfig>(saved).unwrap().sql_server_auth, Some(SqlServerAuth::Unknown));
     }
 
     /// The hand-written reader defaults these fields for old rows; the wire type must still require them.

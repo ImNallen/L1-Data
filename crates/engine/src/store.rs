@@ -153,9 +153,17 @@ impl Store {
 
     pub fn connections(&self) -> Result<Vec<ConnectionConfig>, StoreError> {
         self.with(|c| {
-            let mut stmt = c.prepare("SELECT json FROM connections ORDER BY rowid")?;
-            let rows = stmt.query_map([], |r| r.get::<_, String>(0))?;
-            rows.map(|json| Ok(serde_json::from_str(&json?)?)).collect()
+            let mut stmt = c.prepare("SELECT id, json FROM connections ORDER BY rowid")?;
+            let rows = stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?;
+            let mut connections = Vec::new();
+            for row in rows {
+                let (id, json) = row?;
+                match serde_json::from_str(&json) {
+                    Ok(config) => connections.push(config),
+                    Err(e) => eprintln!("connection {id} is skipped because it does not parse: {e}"),
+                }
+            }
+            Ok(connections)
         })
     }
 
@@ -457,6 +465,17 @@ mod tests {
             elapsed_ms: 2,
             outcome: HistoryOutcome::Rows { rows: 1 },
         }
+    }
+
+    #[test]
+    fn a_connection_row_that_fails_to_parse_is_skipped_and_the_rest_load() {
+        let (s, _dir) = store();
+        let config = |name: &str| ConnectionConfig { database_kind: crate::model::DatabaseKind::Postgres, id: ConnectionId(uuid::Uuid::new_v4()), name: name.into(), host: "localhost".into(), port: 5432, database: "shop".into(), user: "u".into(), ssl_mode: SslMode::Prefer, ca_cert_path: None, has_password: false, color: None, ssh: None, environment: None, sql_server_auth: None };
+        let (first, last) = (config("first"), config("last"));
+        s.upsert_connection(&first).unwrap();
+        s.with(|c| Ok(c.execute(r#"INSERT INTO connections (id, json) VALUES ('newer', '{"sslMode":"VerifyPinned"}')"#, [])?)).unwrap();
+        s.upsert_connection(&last).unwrap();
+        assert_eq!(s.connections().unwrap().iter().map(|c| c.id).collect::<Vec<_>>(), [first.id, last.id]);
     }
 
     #[test]

@@ -1226,9 +1226,10 @@ export type SourceLimits = {
 
 /**
  *  How a SQL Server connection signs in. `EntraAzureCli` sends an access token from the user's
- *  `az login` and saves no password.
+ *  `az login` and saves no password. `Unknown` is a method a newer build saved. Connect and save
+ *  refuse it, so the row keeps its method until the user picks one this build knows.
  */
-export type SqlServerAuth = "SqlLogin" | "EntraAzureCli";
+export type SqlServerAuth = "SqlLogin" | "EntraAzureCli" | "Unknown";
 
 export type SqlTypeRef = {
 	/**  `"bigint"`, `"integer[]"`, `"order_status"`. */
