@@ -205,6 +205,12 @@ impl Session {
             Driver::SqlServer(s) => s.detail(db, oid, version).await,
         }
     }
+    pub async fn script(&mut self, target: &ScriptTarget) -> Result<ObjectScript, DetailError> {
+        match &mut self.driver {
+            Driver::Postgres(p) => p.script(target).await,
+            Driver::SqlServer(s) => s.script(target).await,
+        }
+    }
     pub async fn count(&mut self, sql: &str) -> Result<u64, QueryError> {
         match &mut self.driver {
             Driver::Postgres(p) => p.count(sql).await,

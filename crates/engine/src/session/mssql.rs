@@ -1,5 +1,6 @@
 mod catalog;
 mod detail;
+mod source;
 mod values;
 
 use super::{QueryEvent, QueryStream, error};

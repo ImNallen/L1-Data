@@ -461,18 +461,19 @@ pub fn classify(text: &str, kind: DatabaseKind) -> StmtKind { match kind { Datab
 pub fn is_write(text: &str, kind: DatabaseKind) -> bool { match kind { DatabaseKind::Postgres => sql::history_is_write(text), DatabaseKind::SqlServer => sql::tsql::is_write(text) } }
 
 
-pub fn table_script(kind: DatabaseKind, schema: &str, table: &str) -> TableScript {
-    fn postgres_ident(name: &str) -> String {
-        let mut chars = name.chars();
-        let simple = chars.next().is_some_and(|c| c.is_ascii_lowercase() || c == '_')
-            && chars.all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_' || c == '$');
-        if simple && !sql::RESERVED.contains(&name) && !sql::TYPE_OR_FUNCTION_NAME.contains(&name) {
-            name.to_owned()
-        } else {
-            quote_ident(name)
-        }
+pub fn quote_ident_if_needed(name: &str) -> String {
+    let mut chars = name.chars();
+    let simple = chars.next().is_some_and(|c| c.is_ascii_lowercase() || c == '_')
+        && chars.all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_' || c == '$');
+    if simple && !sql::RESERVED.contains(&name) && !sql::TYPE_OR_FUNCTION_NAME.contains(&name) {
+        name.to_owned()
+    } else {
+        quote_ident(name)
     }
-    let quote = match kind { DatabaseKind::Postgres => postgres_ident, DatabaseKind::SqlServer => sql::tsql::quote_ident };
+}
+
+pub fn table_script(kind: DatabaseKind, schema: &str, table: &str) -> TableScript {
+    let quote = match kind { DatabaseKind::Postgres => quote_ident_if_needed, DatabaseKind::SqlServer => sql::tsql::quote_ident };
     let text = format!("SELECT * FROM {}.{}", quote(schema), quote(table));
     let mut accepted_texts = vec![text.clone()];
     if kind == DatabaseKind::Postgres { accepted_texts.push(format!("{text};")); }

@@ -431,6 +431,26 @@ pub struct RelationDetail {
     pub triggers: Vec<TriggerInfo>,
 }
 
+/// An object the tree can script. `oid` is the catalog's `Relation.oid` or `FunctionInfo.oid`.
+/// An index or trigger is named within its relation, as `RelationDetail` lists it.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Type)]
+#[serde(tag = "kind", rename_all_fields = "camelCase")]
+pub enum ScriptTarget {
+    Relation { oid: u32 },
+    Routine { oid: u32 },
+    Index { relation_oid: u32, name: String },
+    Trigger { relation_oid: u32, name: String },
+}
+
+/// The DDL that creates one object, with every name schema-qualified.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct ObjectScript {
+    /// The tab title: the object's name and `.sql`.
+    pub title: String,
+    pub text: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Type)]
 #[serde(rename_all = "camelCase")]
 pub struct ColumnDefault {
@@ -1731,7 +1751,7 @@ pub enum CatalogError {
 #[serde(tag = "kind", rename_all_fields = "camelCase")]
 pub enum DetailError {
     Catalog { error: CatalogError },
-    /// The relation was dropped after the catalog the caller holds was read.
+    /// The object was dropped after the catalog the caller holds was read.
     Gone,
     Failed { message: String },
 }
