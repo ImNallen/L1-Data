@@ -58,13 +58,15 @@ fn relation_query(oid: i32, f: &Features) -> String {
         "SELECT s.name,o.name,o.type,t.uses_ansi_nulls,t.lock_escalation_desc,hs.name,h.name,{},
             ts.name,tt.name,lds.type,lds.name,COL_NAME(pe.object_id,pe.start_column_id),COL_NAME(pe.object_id,pe.end_column_id),
             CASE WHEN t.is_memory_optimized=1 THEN 'Memory-optimized tables' WHEN {} THEN 'Ledger tables' WHEN {} THEN 'Graph node tables'
-                 WHEN {} THEN 'Graph edge tables' WHEN t.is_filetable=1 THEN 'FileTables' WHEN t.is_external=1 THEN 'External tables' END
+                 WHEN {} THEN 'Graph edge tables' WHEN t.is_filetable=1 THEN 'FileTables' WHEN t.is_external=1 THEN 'External tables' END,
+            NULLIF(t.text_in_row_limit,0),t.large_value_types_out_of_row,ct.is_track_columns_updated_on
          FROM sys.objects o JOIN sys.schemas s ON s.schema_id=o.schema_id
          LEFT JOIN sys.tables t ON t.object_id=o.object_id
          LEFT JOIN sys.objects h ON h.object_id=t.history_table_id LEFT JOIN sys.schemas hs ON hs.schema_id=h.schema_id
          LEFT JOIN sys.tables tt ON tt.history_table_id=o.object_id LEFT JOIN sys.schemas ts ON ts.schema_id=tt.schema_id
          LEFT JOIN sys.data_spaces lds ON lds.data_space_id=t.lob_data_space_id
          LEFT JOIN sys.periods pe ON pe.object_id=o.object_id
+         LEFT JOIN sys.change_tracking_tables ct ON ct.object_id=o.object_id
          WHERE o.object_id={oid}",
         f.retention, f.ledger, f.graph.0, f.graph.1
     )
@@ -227,6 +229,9 @@ impl MsSession {
                     heap: sets[heap].first().map(|r| storage(r, 0)).transpose()?,
                     large_values: place(r, 11),
                     lock_escalation: text(r, 4)?,
+                    text_in_row: r[16].as_deref().and_then(|n| n.parse().ok()),
+                    large_values_out_of_row: bit(r, 17)?,
+                    change_tracking: r[18].as_deref().map(|on| on == "1"),
                     period: r[13].clone().zip(r[14].clone()),
                     versioning,
                     history_of: r[9].clone().zip(r[10].clone()),

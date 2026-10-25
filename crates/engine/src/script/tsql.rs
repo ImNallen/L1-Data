@@ -15,6 +15,11 @@ pub struct Table {
     pub heap: Option<Storage>,
     pub large_values: Option<Place>,
     pub lock_escalation: String,
+    /// The `sp_tableoption` in-row limit for text, ntext, and image values.
+    pub text_in_row: Option<i32>,
+    pub large_values_out_of_row: bool,
+    /// Change tracking, and whether it tracks which columns changed.
+    pub change_tracking: Option<bool>,
     pub period: Option<(String, String)>,
     pub versioning: Option<Versioning>,
     pub history_of: Option<(String, String)>,
@@ -267,8 +272,21 @@ pub fn table(t: &Table) -> Ddl {
     if !states.is_empty() {
         parts.push(format!("{}\nGO\n", states.join("\n")));
     }
+    let mut settings = vec![];
+    if let Some(limit) = t.text_in_row {
+        settings.push(format!("EXEC sys.sp_tableoption @TableNamePattern = {}, @OptionName = N'text in row', @OptionValue = N'{limit}';", quote_literal(&name)));
+    }
+    if t.large_values_out_of_row {
+        settings.push(format!("EXEC sys.sp_tableoption @TableNamePattern = {}, @OptionName = N'large value types out of row', @OptionValue = N'1';", quote_literal(&name)));
+    }
+    if let Some(columns) = t.change_tracking {
+        settings.push(format!("ALTER TABLE {name} ENABLE CHANGE_TRACKING{};", if columns { " WITH (TRACK_COLUMNS_UPDATED = ON)" } else { "" }));
+    }
     if t.lock_escalation != "TABLE" {
-        parts.push(format!("ALTER TABLE {name} SET (LOCK_ESCALATION = {});\nGO\n", t.lock_escalation));
+        settings.push(format!("ALTER TABLE {name} SET (LOCK_ESCALATION = {});", t.lock_escalation));
+    }
+    if !settings.is_empty() {
+        parts.push(format!("{}\nGO\n", settings.join("\n")));
     }
     if !t.classifications.is_empty() {
         parts.push(format!("{}GO\n", t.classifications.iter().map(|c| classification(&name, c)).collect::<String>()));
@@ -960,6 +978,27 @@ GO
 "
             ))
         );
+    }
+
+    #[test]
+    fn table_options_and_change_tracking_replay_after_the_table() {
+        let t = Table { text_in_row: Some(500), large_values_out_of_row: true, change_tracking: Some(true), lock_escalation: "AUTO".into(), ..table_named("o]x") };
+        assert!(
+            table(&t).text.ends_with(
+                "GO
+
+EXEC sys.sp_tableoption @TableNamePattern = N'[dbo].[o]]x]', @OptionName = N'text in row', @OptionValue = N'500';
+EXEC sys.sp_tableoption @TableNamePattern = N'[dbo].[o]]x]', @OptionName = N'large value types out of row', @OptionValue = N'1';
+ALTER TABLE [dbo].[o]]x] ENABLE CHANGE_TRACKING WITH (TRACK_COLUMNS_UPDATED = ON);
+ALTER TABLE [dbo].[o]]x] SET (LOCK_ESCALATION = AUTO);
+GO
+"
+            ),
+            "{}",
+            table(&t).text
+        );
+        let plain = Table { change_tracking: Some(false), ..table_named("p") };
+        assert!(table(&plain).text.ends_with("GO\n\nALTER TABLE [dbo].[p] ENABLE CHANGE_TRACKING;\nGO\n"), "{}", table(&plain).text);
     }
 
     #[test]
