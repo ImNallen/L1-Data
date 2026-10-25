@@ -7,7 +7,6 @@ pub struct Table {
     pub name: String,
     pub unlogged: bool,
     pub foreign: Option<Foreign>,
-    /// The composite type of a typed table, which supplies its columns.
     pub of_type: Option<String>,
     pub access_method: Option<String>,
     pub options: Vec<String>,

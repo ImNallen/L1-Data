@@ -152,7 +152,6 @@ fn grants_query(changes: &[String]) -> String {
     )
 }
 
-/// The privileges on a relation, its columns, and the sequences its script creates.
 fn relation_grants_query() -> String {
     grants_query(&[
         acl_changes("pg_class c", "c.relacl", "acldefault('r', c.relowner)", "c.oid = $1 AND c.relacl IS NOT NULL", "NULL::text, NULL::text, NULL::text"),
