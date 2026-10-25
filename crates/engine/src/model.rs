@@ -105,9 +105,9 @@ pub enum SqlServerAuth {
 
 impl<'de> Deserialize<'de> for SqlServerAuth {
     fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
-        Ok(match String::deserialize(d)?.as_str() {
-            "SqlLogin" => Self::SqlLogin,
-            "EntraAzureCli" => Self::EntraAzureCli,
+        Ok(match serde_json::Value::deserialize(d)?.as_str() {
+            Some("SqlLogin") => Self::SqlLogin,
+            Some("EntraAzureCli") => Self::EntraAzureCli,
             _ => Self::Unknown,
         })
     }
@@ -2933,8 +2933,10 @@ mod database_compatibility_tests {
             assert_eq!(config.sql_server_auth, auth);
             assert_eq!(serde_json::to_value(&config).unwrap(), saved);
         }
-        saved["sqlServerAuth"] = "EntraDeviceCode".into();
-        assert_eq!(serde_json::from_value::<ConnectionConfig>(saved).unwrap().sql_server_auth, Some(SqlServerAuth::Unknown));
+        for newer in [serde_json::json!("EntraDeviceCode"), serde_json::json!({"EntraServicePrincipal":{"clientId":"x"}}), serde_json::json!(7)] {
+            saved["sqlServerAuth"] = newer.clone();
+            assert_eq!(serde_json::from_value::<ConnectionConfig>(saved.clone()).unwrap().sql_server_auth, Some(SqlServerAuth::Unknown), "{newer}");
+        }
     }
 
     /// The hand-written reader defaults these fields for old rows; the wire type must still require them.
