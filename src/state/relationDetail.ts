@@ -18,31 +18,44 @@ export function detailKey(db: DatabaseRef, oid: number): DetailKey {
 
 type DetailStore = {
   entries: Record<DetailKey, DetailEntry>;
-  /** Fetches `relation_detail` unless an entry at `version` or newer is held or in flight. A failed entry refetches. */
+  /**
+   * Fetches `relation_detail` unless an entry at `version` or newer is held or in flight. A failed entry refetches.
+   * Resolves once the detail for the entry it found or started has arrived.
+   */
   ensure(db: DatabaseRef, version: number, oid: number): Promise<void>;
   /** Drops every entry whose relation the held catalogs no longer list: a dropped table, or a pruned database. */
   prune(views: Record<DbKey, CatalogView>): void;
 };
+
+const inflight = new Map<DetailKey, Promise<void>>();
 
 export const useRelationDetail = create<DetailStore>()((set, get) => ({
   entries: {},
   async ensure(db, version, oid) {
     const key = detailKey(db, oid);
     const held = get().entries[key];
-    if (held && held.version >= version && held.error === null) return;
+    if (held && held.version >= version && held.error === null) return inflight.get(key);
     const put = (entry: DetailEntry) => set((s) => ({ entries: { ...s.entries, [key]: entry } }));
     put({ version, detail: held?.detail ?? null, error: null });
-    let next: DetailEntry;
+    const fetch = (async () => {
+      let next: DetailEntry;
+      try {
+        const res = await commands.relationDetail(db, oid);
+        next =
+          res.status === "ok"
+            ? { version: Math.max(version, res.data.catalogVersion), detail: res.data, error: null }
+            : { version, detail: null, error: detailErrorText(res.error) };
+      } catch (e) {
+        next = { version, detail: null, error: e instanceof Error ? e.message : String(e) };
+      }
+      if (get().entries[key]?.version === version) put(next);
+    })();
+    inflight.set(key, fetch);
     try {
-      const res = await commands.relationDetail(db, oid);
-      next =
-        res.status === "ok"
-          ? { version: Math.max(version, res.data.catalogVersion), detail: res.data, error: null }
-          : { version, detail: null, error: detailErrorText(res.error) };
-    } catch (e) {
-      next = { version, detail: null, error: e instanceof Error ? e.message : String(e) };
+      await fetch;
+    } finally {
+      if (inflight.get(key) === fetch) inflight.delete(key);
     }
-    if (get().entries[key]?.version === version) put(next);
   },
   prune(views) {
     set((s) => {

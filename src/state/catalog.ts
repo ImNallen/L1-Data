@@ -6,7 +6,6 @@ import { dbKey, type DbKey } from "./dbKey";
 export type CatalogView = {
   catalog: Catalog;
   qualifiedTables: Completion[];
-  /** Functions, aggregates, and window functions, named bare in the default schema and qualified elsewhere. */
   functions: Completion[];
   relationsById: Map<number, { schema: string; rel: Relation }>;
 };
@@ -15,7 +14,6 @@ export function isViewKind(kind: RelKind): boolean {
   return kind === "View" || kind === "MaterializedView";
 }
 
-/** A catalog name as completion inserts it: bare when it is a plain identifier, else quoted. */
 export function quoteName(kind: DatabaseKind, name: string): string {
   if (kind === "SqlServer") return /^[A-Za-z_][\w@$#]*$/.test(name) ? name : `[${name.replaceAll("]", "]]")}]`;
   return /^[a-z_][a-z0-9_$]*$/.test(name) ? name : `"${name.replaceAll('"', '""')}"`;

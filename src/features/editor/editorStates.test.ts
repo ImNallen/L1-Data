@@ -160,6 +160,12 @@ it("reads a foreign key from the joined relation to one already in scope", async
   expect(labels[0]).toBe("o.customer_id = c.id");
 });
 
+it("leaves an alias being typed alone, and lists the keywords only on request", async () => {
+  const alias = reply({ kind: "Alias" }, [table("orders", "orders")], { keywords: ["ORDER BY", "WHERE"] });
+  expect((await completeAtEnd("select * from orders o", alias, {}, false)).labels).toEqual([]);
+  expect((await completeAtEnd("select * from orders o", alias)).labels).toEqual(["ORDER BY", "WHERE"]);
+});
+
 it("stays closed after a space unless the engine says a join condition starts there", async () => {
   expect((await completeAtEnd("select * from orders o ", reply({ kind: "Keyword" }, [], { keywords: ["WHERE"] }), {}, false)).labels).toEqual([]);
   expect((await completeAtEnd("select 'abc", { kind: "None" })).labels).toEqual([]);

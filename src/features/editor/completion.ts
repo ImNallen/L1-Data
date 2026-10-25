@@ -11,8 +11,9 @@ type Column = { name: string; detail: string };
 
 const BOOST = { join: 99, column: 4, reference: 3, relation: 2, function: 1, keyword: -1 };
 
-/** Inserts a call and leaves the cursor inside its parentheses. */
-function callApply(text: string) {
+const JOIN_DETAIL_WAIT_MS = 250;
+
+function insertCallWithCursorInside(text: string) {
   return (view: EditorView, _c: Completion, from: number, to: number) => {
     const open = text.indexOf("(");
     const anchor = open >= 0 && text.endsWith(")") ? from + open + 1 : from + text.length;
@@ -59,10 +60,7 @@ function keywordOptions(reply: Complete): Completion[] {
   return reply.keywords.map((k) => ({ label: k, type: "keyword", boost: BOOST.keyword }));
 }
 
-/**
- * The conditions from the foreign keys between the joined relation and each other table in scope, the joined
- * relation's columns first. Details load per relation, so the catalog never reads every key in the database.
- */
+/** Keys load per relation in scope, so a catalog refresh never reads every key in the database. */
 async function joinConditions(view: CatalogView, reply: Complete, target: number, kind: DatabaseKind): Promise<Completion[]> {
   const resolve = (r: ScopeRelation | undefined) =>
     r?.source.kind === "Table" && r.reference ? resolveTable(view, r.source.schema, r.source.name) : undefined;
@@ -77,7 +75,8 @@ async function joinConditions(view: CatalogView, reply: Complete, target: number
   if (!others.length) return [];
   const { db, version } = view.catalog;
   const details = useRelationDetail.getState();
-  await Promise.all([t, ...others].map((r) => details.ensure(db, version, r.rel.oid)));
+  const loaded = Promise.all([t, ...others].map((r) => details.ensure(db, version, r.rel.oid)));
+  await Promise.race([loaded, new Promise((resolve) => setTimeout(resolve, JOIN_DETAIL_WAIT_MS))]);
   const keysOf = (oid: number) => useRelationDetail.getState().entries[detailKey(db, oid)]?.detail?.keys ?? [];
   const col = (ref: string, name: string) => `${ref}.${quoteName(kind, name)}`;
   const conditions: string[] = [];
@@ -85,13 +84,13 @@ async function joinConditions(view: CatalogView, reply: Complete, target: number
     for (const key of keysOf(t.rel.oid)) {
       if (key.kind.kind === "Foreign" && key.kind.refSchema === o.schema && key.kind.refTable === o.rel.name) {
         const refs = key.kind.refColumns;
-        conditions.push(key.columns.map((c, i) => `${col(ref, c)} = ${col(o.ref, refs[i] ?? "")}`).join(" AND "));
+        conditions.push(key.columns.map((c, i) => `${col(ref, c)} = ${col(o.ref, refs[i]!)}`).join(" AND "));
       }
     }
     for (const key of keysOf(o.rel.oid)) {
       if (key.kind.kind === "Foreign" && key.kind.refSchema === t.schema && key.kind.refTable === t.rel.name) {
         const refs = key.kind.refColumns;
-        conditions.push(key.columns.map((c, i) => `${col(ref, refs[i] ?? "")} = ${col(o.ref, c)}`).join(" AND "));
+        conditions.push(key.columns.map((c, i) => `${col(ref, refs[i]!)} = ${col(o.ref, c)}`).join(" AND "));
       }
     }
   }
@@ -121,17 +120,16 @@ function qualifiedOptions(view: CatalogView | undefined, reply: Complete, kind: 
       label: f.name,
       detail: `(${f.args})`,
       type: "function",
-      apply: callApply(kind === "SqlServer" ? `${quoteName(kind, f.name)}()` : f.insertText),
+      apply: insertCallWithCursorInside(kind === "SqlServer" ? `${quoteName(kind, f.name)}()` : f.insertText),
       boost: BOOST.function,
     }));
   return [...relations, ...functions];
 }
 
-/** What completion offers for one engine reply. */
 export async function completionOptions(view: CatalogView | undefined, reply: Complete, kind: DatabaseKind): Promise<Completion[]> {
   if (reply.qualifier) return qualifiedOptions(view, reply, kind);
   const expect = reply.expect;
-  if (expect.kind === "Keyword") return keywordOptions(reply);
+  if (expect.kind === "Keyword" || expect.kind === "Alias") return keywordOptions(reply);
   if (expect.kind === "Relation") {
     const schema = view?.catalog.defaultSchema;
     const local = view?.catalog.schemas.find((s) => s.name === schema)?.relations.map((r) => relationOption(r, kind)) ?? [];
@@ -143,26 +141,25 @@ export async function completionOptions(view: CatalogView | undefined, reply: Co
   const references = reply.relations.flatMap((r): Completion[] => (r.reference ? [{ label: r.reference, type: "variable", boost: BOOST.reference }] : []));
   const catalogFunctions = (view?.functions ?? []).map((f) => ({
     ...f,
-    apply: typeof f.apply === "string" ? callApply(f.apply) : f.apply,
+    apply: typeof f.apply === "string" ? insertCallWithCursorInside(f.apply) : f.apply,
     boost: BOOST.function,
   }));
-  const builtins = reply.functions.map((name): Completion => ({ label: name, type: "function", apply: callApply(`${name}()`) }));
+  const builtins = reply.functions.map((name): Completion => ({ label: name, type: "function", apply: insertCallWithCursorInside(`${name}()`) }));
   return [...joins, ...columns, ...references, ...catalogFunctions, ...builtins, ...keywordOptions(reply)];
 }
 
-/**
- * One source for every completion. The engine reads the statement at the cursor, so the editor never parses SQL.
- * It opens on its own for a word, after a `.`, and right after the `ON` of a join.
- */
+function opensUnasked(ctx: EditorContext, expect: Complete["expect"]): boolean {
+  if (ctx.explicit) return true;
+  if (expect.kind === "Alias") return false;
+  return ctx.matchBefore(/[\w$#]+/) !== null || ctx.state.sliceDoc(ctx.pos - 1, ctx.pos) === "." || expect.kind === "JoinCondition";
+}
+
 export function engineCompletion(view: CatalogView | undefined, kind: DatabaseKind): CompletionSource {
   return async (ctx: EditorContext): Promise<CompletionResult | null> => {
-    const word = ctx.matchBefore(/[\w$#]+/);
     const before = ctx.state.sliceDoc(ctx.pos - 1, ctx.pos);
-    const spaced = /\s/.test(before);
-    if (!word && !ctx.explicit && before !== "." && !spaced) return null;
+    if (!ctx.explicit && !/[\w$#.\s]/.test(before)) return null;
     const reply = await commands.completionContext(ctx.state.doc.toString(), ctx.pos, kind);
-    if (ctx.aborted || reply.kind === "None") return null;
-    if (!word && !ctx.explicit && before !== "." && reply.expect.kind !== "JoinCondition") return null;
+    if (ctx.aborted || reply.kind === "None" || !opensUnasked(ctx, reply.expect)) return null;
     const options = await completionOptions(view, reply, kind);
     if (ctx.aborted || !options.length) return null;
     return { from: reply.from, options, validFor: /^[\w$#]*$/ };
