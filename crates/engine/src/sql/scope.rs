@@ -1,6 +1,6 @@
 use std::ops::Range;
 
-use super::keywords::{RESERVED, TYPE_OR_FUNCTION_NAME};
+use super::keywords::{NEVER_A_FUNCTION, RESERVED, TYPE_OR_FUNCTION_NAME};
 use super::lex::{LexKind, lex};
 use super::relations::{VETTED, VETTED_SIZES};
 use super::split::split_statements;
@@ -986,7 +986,7 @@ impl<'a> Walk<'a> {
         }
         let functions = match expect {
             Expect::Expression | Expect::JoinCondition { .. } => match self.kind {
-                DatabaseKind::Postgres => VETTED.iter().chain(VETTED_SIZES).copied().collect(),
+                DatabaseKind::Postgres => VETTED.iter().chain(VETTED_SIZES).copied().filter(|f| !PG_TYPE_CALLS.contains(f)).collect(),
                 DatabaseKind::SqlServer => TSQL_FUNCTIONS.to_vec(),
             },
             Expect::Keyword | Expect::Alias | Expect::Relation => Vec::new(),
@@ -1203,6 +1203,9 @@ const EXPRESSION_WORDS: &[&str] = &["CASE", "WHEN", "THEN", "ELSE", "END", "AND"
 
 const PG_EXPRESSION_WORDS: &[&str] = &["TRUE", "FALSE", "ILIKE", "GREATEST", "LEAST", "EXTRACT", "INTERVAL", "CURRENT_DATE", "CURRENT_TIMESTAMP"];
 
+/// Built-ins named like a type, so a bare `time(x)` reads as a type and only a quoted `"time"(x)` calls them.
+const PG_TYPE_CALLS: &[&str] = &["interval", "numeric", "time", "timestamp", "varchar"];
+
 const TSQL_EXPRESSION_WORDS: &[&str] = &["CURRENT_TIMESTAMP"];
 
 const TSQL_FUNCTIONS: &[&str] = &[
@@ -1311,6 +1314,14 @@ mod tests {
         assert!(pg("select * from |").functions.is_empty());
         assert!(pg("|").functions.is_empty());
         assert!(ms("SELECT DATE|").functions.contains(&"DATEADD"));
+    }
+
+    #[test]
+    fn every_offered_built_in_is_called_by_its_bare_name() {
+        let offered = pg("select |").functions;
+        assert!(!offered.iter().any(|f| PG_TYPE_CALLS.contains(f)));
+        let keywords: Vec<_> = offered.iter().filter(|f| NEVER_A_FUNCTION.contains(f)).collect();
+        assert_eq!(keywords, [&"json_object"], "a keyword-named built-in needs quoting unless it has its own call syntax");
     }
 
     #[test]
