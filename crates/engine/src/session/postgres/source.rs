@@ -17,8 +17,10 @@ const RELATION: &str = "SELECT c.relkind::text, n.nspname, c.relname, c.relpersi
               WHERE h.inhrelid = c.oid AND NOT c.relispartition ORDER BY h.inhseqno),
         CASE WHEN c.reloftype <> 0 THEN format_type(c.reloftype, NULL) END,
         ARRAY(SELECT p.pubname::text FROM pg_publication_rel pr JOIN pg_publication p ON p.oid = pr.prpubid WHERE pr.prrelid = c.oid ORDER BY 1),
-        (SELECT ic.relname FROM pg_index ri JOIN pg_class ic ON ic.oid = ri.indexrelid
-          WHERE ri.indrelid = c.oid AND ri.indisreplident AND EXISTS (SELECT 1 FROM pg_inherits h WHERE h.inhrelid = ri.indexrelid))
+        (SELECT ic.relname FROM pg_index ri JOIN pg_class ic ON ic.oid = ri.indexrelid JOIN pg_inherits h ON h.inhrelid = ri.indexrelid
+          WHERE ri.indrelid = c.oid AND ri.indisreplident),
+        (SELECT h.inhparent::regclass::text FROM pg_index ri JOIN pg_inherits h ON h.inhrelid = ri.indexrelid
+          WHERE ri.indrelid = c.oid AND ri.indisreplident)
      FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
      LEFT JOIN pg_inherits i ON i.inhrelid = c.oid AND c.relispartition
      LEFT JOIN pg_class p ON p.oid = i.inhparent LEFT JOIN pg_namespace pn ON pn.oid = p.relnamespace
@@ -322,7 +324,10 @@ async fn table(tx: &Transaction<'_>, queries: &Queries, oid: u32, r: &Row) -> Re
         replica_identity: match r.get::<_, &str>(13) {
             "n" => ddl::ReplicaIdentity::Nothing,
             "f" => ddl::ReplicaIdentity::Full,
-            "i" => r.get::<_, Option<String>>(23).map_or(ddl::ReplicaIdentity::Index, ddl::ReplicaIdentity::AttachedIndex),
+            "i" => match (r.get::<_, Option<String>>(23), r.get::<_, Option<String>>(24)) {
+                (Some(name), Some(parent)) => ddl::ReplicaIdentity::AttachedIndex { name, parent },
+                _ => ddl::ReplicaIdentity::Index,
+            },
             _ => ddl::ReplicaIdentity::Default,
         },
         triggers: triggers.iter().map(cloned_trigger_row).collect(),

@@ -76,8 +76,9 @@ pub enum ReplicaIdentity {
     Nothing,
     Full,
     Index,
-    /// A partition's copy of its parent's index, which the script does not create by name.
-    AttachedIndex(String),
+    /// A partition's copy of its parent's index, which the replay creates under a name PostgreSQL
+    /// chooses, so the script finds it by `parent`, the parent's index, and gives it back `name`.
+    AttachedIndex { name: String, parent: String },
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -292,7 +293,7 @@ fn table_statements(t: &Table, out: &mut Vec<String>, warnings: &mut Vec<String>
         _ if t.foreign.is_some() => {}
         ReplicaIdentity::Nothing => out.push(format!("ALTER TABLE {name} REPLICA IDENTITY NOTHING")),
         ReplicaIdentity::Full => out.push(format!("ALTER TABLE {name} REPLICA IDENTITY FULL")),
-        ReplicaIdentity::AttachedIndex(index) => out.push(format!("ALTER TABLE {name} REPLICA IDENTITY USING INDEX {}", ident(index))),
+        ReplicaIdentity::AttachedIndex { name: index, parent } => out.push(attached_replica_identity(&t.schema, &name, index, parent)),
         ReplicaIdentity::Default | ReplicaIdentity::Index => {}
     }
     for tr in &t.triggers {
@@ -371,6 +372,23 @@ fn column_options(c: &Column, schema: &str, table: &str) -> String {
         out.push_str(" NOT NULL");
     }
     out
+}
+
+fn attached_replica_identity(schema: &str, table: &str, index: &str, parent: &str) -> String {
+    let (schema, table, index, parent) = (quote_literal(schema), quote_literal(table), quote_literal(index), quote_literal(parent));
+    format!(
+        "DO $l1$
+DECLARE
+    attached name := (SELECT c.relname FROM pg_catalog.pg_inherits h JOIN pg_catalog.pg_index i ON i.indexrelid = h.inhrelid JOIN pg_catalog.pg_class c ON c.oid = h.inhrelid
+                      WHERE h.inhparent = {parent}::regclass AND i.indrelid = {table}::regclass);
+BEGIN
+    IF attached <> {index} THEN
+        EXECUTE format('ALTER INDEX %I.%I RENAME TO %I', {schema}, attached, {index});
+    END IF;
+    EXECUTE format('ALTER TABLE %s REPLICA IDENTITY USING INDEX %I', {table}, {index});
+END
+$l1$"
+    )
 }
 
 fn generation(kind: Generated, expr: &str) -> String {
@@ -877,13 +895,13 @@ COMMENT ON COLUMN public.t.status IS 'lifecycle';
             schema: "app".into(),
             name: "ri_1".into(),
             parent: Parent::Partition { schema: "app".into(), name: "ri".into(), bound: "FOR VALUES IN (1)".into() },
-            replica_identity: ReplicaIdentity::AttachedIndex("ri_1_id_k_idx".into()),
+            replica_identity: ReplicaIdentity::AttachedIndex { name: "ri_1_custom".into(), parent: "app.ri_id_k".into() },
             triggers: vec![clone("off", 'D', None), clone("on", 'O', Some("leaf note"))],
             ..Default::default()
         };
         assert_eq!(
             table(&leaf).text,
-            "CREATE TABLE app.ri_1 PARTITION OF app.ri\n    FOR VALUES IN (1);\n\nALTER TABLE app.ri_1 REPLICA IDENTITY USING INDEX ri_1_id_k_idx;\n\nALTER TABLE app.ri_1 DISABLE TRIGGER off;\n\nALTER TABLE app.ri_1 ENABLE TRIGGER \"on\";\n\nCOMMENT ON TRIGGER \"on\" ON app.ri_1 IS 'leaf note';\n"
+            "CREATE TABLE app.ri_1 PARTITION OF app.ri\n    FOR VALUES IN (1);\n\nDO $l1$\nDECLARE\n    attached name := (SELECT c.relname FROM pg_catalog.pg_inherits h JOIN pg_catalog.pg_index i ON i.indexrelid = h.inhrelid JOIN pg_catalog.pg_class c ON c.oid = h.inhrelid\n                      WHERE h.inhparent = 'app.ri_id_k'::regclass AND i.indrelid = 'app.ri_1'::regclass);\nBEGIN\n    IF attached <> 'ri_1_custom' THEN\n        EXECUTE format('ALTER INDEX %I.%I RENAME TO %I', 'app', attached, 'ri_1_custom');\n    END IF;\n    EXECUTE format('ALTER TABLE %s REPLICA IDENTITY USING INDEX %I', 'app.ri_1', 'ri_1_custom');\nEND\n$l1$;\n\nALTER TABLE app.ri_1 DISABLE TRIGGER off;\n\nALTER TABLE app.ri_1 ENABLE TRIGGER \"on\";\n\nCOMMENT ON TRIGGER \"on\" ON app.ri_1 IS 'leaf note';\n"
         );
     }
 
