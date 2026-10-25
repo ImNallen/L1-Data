@@ -64,7 +64,12 @@ A passing typecheck does not show that a UI change works. Drive the real UI agai
 3. Select elements by `data-testid`. Add a `data-testid` to any new control you need to reach.
 4. Connect to `postgres://l1data:l1data@localhost:5433/shop` and exercise the change. Tree rows have `data-testid="tree-node-<connection>/<database>/<schema>/..."`. The count pills that open the database and schema pickers are `db-pill-<connection>` and `schema-pill-<connection>/<database>`.
 
-To compare a command's latency on two bridges, such as one built from `main` and one from your branch, run `node dev/perf/invoke.mjs <bridge-a> <bridge-b> <command> <json or @file> <runs>`. It alternates the calls between the bridges and prints the p50 and p95 of each in milliseconds as JSON. It fails on any reply that is not a successful command.
+To compare a command's latency on two bridges, such as one built from `main` and one from your branch, run `node dev/perf/invoke.mjs <bridge-a> <bridge-b> <command> <json or @file> <runs>`. It calls each bridge once to warm up, then alternates the calls between the bridges and prints the p50 and p95 of each in milliseconds as JSON. It fails on any reply that is not a successful command. These options adapt it to commands that need more:
+
+- `--body-a` and `--body-b` give each bridge its own body, because each bridge has its own connection and tab IDs. With both, leave out the shared body.
+- `--wait untimed` waits after each call for the run's `Finished` event on `/events`, so the next `console_run` on the tab does not return `Busy`. The sample is still the call alone, which is the time to accept the run. `--wait timed` measures from the call to the `Finished` event. Both fail when the run's outcome is not `Ok`.
+- `--teardown <command>` calls a command after each sample, untimed, with `--teardown-body`, or `--teardown-body-a` and `--teardown-body-b`. A `connection_connect` probe needs `--teardown connection_disconnect` with `{"id":"<id>","force":true}`, or every sample after the first times a connection that is already open.
+- `--raw <path>` also writes every sample, in milliseconds, to a JSON file.
 
 Chromium has no native dialogs, so `src/dev/dialogShim.ts` answers the dialog plugin's `open` and `save` in the page. Queue the answers before the action that opens the dialog, in agent-browser's `eval`:
 

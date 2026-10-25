@@ -11,7 +11,7 @@
     "tauri": "tauri",
     "bridge": "concurrently -k -n bridge,vite -c cyan,magenta \"cargo run -q -p dev-bridge\" \"vite\"",
     "build": "vite build",
-    "test": "vitest run && node --test 'scripts/*.test.mjs'",
+    "test": "vitest run && node --test 'scripts/*.test.mjs' 'dev/perf/*.test.mjs'",
     "typecheck": "tsc --noEmit",
     "lint": "oxlint",
     "fmt": "oxfmt",
