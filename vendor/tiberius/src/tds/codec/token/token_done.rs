@@ -73,9 +73,8 @@ impl TokenDone {
         self.status.contains(DoneStatus::Attention)
     }
 
-    /// The statement's row count, when the server sent one. A `SELECT` that
-    /// sent no result set, such as `SET @x = 1`, counts one row, which
-    /// SqlClient also drops.
+    /// A `SELECT` that sent no result set, such as `SET @x = 1`, counts one
+    /// row, which SqlClient also drops.
     pub(crate) fn row_count(&self, after_result: bool) -> Option<u64> {
         if self.cur_cmd == SELECT_COMMAND && !after_result {
             return None;

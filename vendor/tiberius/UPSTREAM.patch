@@ -209,13 +209,12 @@
  
  #[derive(Debug, Default)]
  pub struct TokenDone {
-@@ -71,6 +73,16 @@
+@@ -71,6 +73,15 @@
          self.status.contains(DoneStatus::Attention)
      }
  
-+    /// The statement's row count, when the server sent one. A `SELECT` that
-+    /// sent no result set, such as `SET @x = 1`, counts one row, which
-+    /// SqlClient also drops.
++    /// A `SELECT` that sent no result set, such as `SET @x = 1`, counts one
++    /// row, which SqlClient also drops.
 +    pub(crate) fn row_count(&self, after_result: bool) -> Option<u64> {
 +        if self.cur_cmd == SELECT_COMMAND && !after_result {
 +            return None;
@@ -226,7 +225,7 @@
      pub(crate) fn rows(&self) -> u64 {
          // The row count is only meaningful when the DONE_COUNT status bit is
          // set (MS-TDS §2.2.7.6); otherwise the field is not a valid count.
-@@ -148,6 +160,20 @@
+@@ -148,6 +159,20 @@
          assert!(format!("{}", done).contains("5 rows left"));
      }
  
@@ -436,20 +435,21 @@
          }
      }
  
-@@ -330,6 +316,12 @@
+@@ -330,6 +316,13 @@
      Row(Row),
      /// Information of the upcoming row data.
      Metadata(ResultMetadata),
 +    /// A message from `PRINT`, a low-severity `RAISERROR`, or the server, in
 +    /// stream order.
 +    Info(TokenInfo),
-+    /// The end of a statement, with its row count when the server sent one.
-+    /// `SET NOCOUNT ON` and statements that touch no rows send no count.
++    /// The end of a statement, with the rows it returned or changed. `None`
++    /// under `SET NOCOUNT ON`, for statements that count no rows, such as DDL,
++    /// and for a `SELECT` that sent no result set, such as `SET @x = 1`.
 +    Done(Option<u64>),
  }
  
  impl QueryItem {
-@@ -343,8 +335,8 @@
+@@ -343,8 +336,8 @@
      /// Returns a reference to the metadata, if the item is of a correct variant.
      pub fn as_metadata(&self) -> Option<&ResultMetadata> {
          match self {
@@ -459,7 +459,7 @@
          }
      }
  
-@@ -352,15 +344,15 @@
+@@ -352,15 +345,15 @@
      pub fn as_row(&self) -> Option<&Row> {
          match self {
              QueryItem::Row(ref row) => Some(row),
@@ -477,7 +477,7 @@
          }
      }
  
-@@ -368,7 +360,7 @@
+@@ -368,7 +361,7 @@
      pub fn into_row(self) -> Option<Row> {
          match self {
              QueryItem::Row(row) => Some(row),
@@ -486,7 +486,7 @@
          }
      }
  }
-@@ -398,6 +390,7 @@
+@@ -398,6 +391,7 @@
  
                      let column_meta = Arc::new(column_meta);
                      this.columns = Some(column_meta.clone());
@@ -494,7 +494,7 @@
  
                      this.result_set_index = this.result_set_index.map(|i| i + 1);
  
-@@ -423,6 +416,11 @@
+@@ -423,6 +417,11 @@
  
                      Poll::Ready(Some(Ok(QueryItem::Row(row))))
                  }
@@ -506,7 +506,7 @@
                  _ => continue,
              };
          }
-@@ -687,6 +685,44 @@
+@@ -687,6 +686,44 @@
      }
  
      #[tokio::test]

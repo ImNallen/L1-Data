@@ -319,8 +319,9 @@ pub enum QueryItem {
     /// A message from `PRINT`, a low-severity `RAISERROR`, or the server, in
     /// stream order.
     Info(TokenInfo),
-    /// The end of a statement, with its row count when the server sent one.
-    /// `SET NOCOUNT ON` and statements that touch no rows send no count.
+    /// The end of a statement, with the rows it returned or changed. `None`
+    /// under `SET NOCOUNT ON`, for statements that count no rows, such as DDL,
+    /// and for a `SELECT` that sent no result set, such as `SET @x = 1`.
     Done(Option<u64>),
 }
 
