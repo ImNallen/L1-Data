@@ -163,14 +163,51 @@ function opensUnasked(ctx: EditorContext, expect: Complete["expect"]): boolean {
   return ctx.matchBefore(/[\w$#]+/) !== null || ctx.state.sliceDoc(ctx.pos - 1, ctx.pos) === "." || expect.kind === "JoinCondition";
 }
 
+/**
+ * Each request sends the whole document, so on a large file the replies fall behind the typing. One request stays in
+ * flight, a request made meanwhile waits, and a newer one replaces it, so only the newest document is sent next.
+ */
+function oneInFlight<T>(send: (ctx: EditorContext) => Promise<T>): (ctx: EditorContext) => Promise<T | null> {
+  let busy = false;
+  let waiting: { ctx: EditorContext; resolve: (reply: Promise<T | null>) => void } | null = null;
+  const start = (ctx: EditorContext): Promise<T> => {
+    busy = true;
+    const reply = send(ctx);
+    void reply
+      .catch(() => {})
+      .finally(() => {
+        busy = false;
+        const next = waiting;
+        waiting = null;
+        next?.resolve(start(next.ctx));
+      });
+    return reply;
+  };
+  return (ctx) => {
+    if (!busy) return start(ctx);
+    waiting?.resolve(Promise.resolve(null));
+    return new Promise((resolve) => (waiting = { ctx, resolve }));
+  };
+}
+
+/**
+ * Declines to open without returning null. When a request returns null, CodeMirror never asks again for a word typed
+ * while it was in flight, so typing `wh` quickly after a table would never offer `WHERE`.
+ */
+function declined(ctx: EditorContext): CompletionResult {
+  return { from: ctx.pos, options: [], validFor: () => false };
+}
+
 export function engineCompletion(view: CatalogView | undefined, kind: DatabaseKind): CompletionSource {
+  const ask = oneInFlight((ctx) => commands.completionContext(ctx.state.doc.toString(), ctx.pos, kind));
   return async (ctx: EditorContext): Promise<CompletionResult | null> => {
     const before = ctx.state.sliceDoc(ctx.pos - 1, ctx.pos);
     if (!ctx.explicit && !/[\w$#.\s]/.test(before)) return null;
-    const reply = await commands.completionContext(ctx.state.doc.toString(), ctx.pos, kind);
-    if (ctx.aborted || reply.kind === "None" || !opensUnasked(ctx, reply.expect)) return null;
+    const reply = await ask(ctx);
+    if (!reply || ctx.aborted) return null;
+    if (reply.kind === "None" || !opensUnasked(ctx, reply.expect)) return declined(ctx);
     const options = await completionOptions(view, reply);
-    if (ctx.aborted || !options.length) return null;
-    return { from: reply.from, options, validFor: /^[\w$#]*$/ };
+    if (ctx.aborted) return null;
+    return options.length ? { from: reply.from, options, validFor: /^[\w$#]*$/ } : declined(ctx);
   };
 }

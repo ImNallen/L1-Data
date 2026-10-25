@@ -1,12 +1,14 @@
 // @vitest-environment jsdom
 import { syntaxTree } from "@codemirror/language";
-import { CompletionContext, type CompletionResult } from "@codemirror/autocomplete";
+import { CompletionContext, currentCompletions, type CompletionResult } from "@codemirror/autocomplete";
+import { EditorView } from "@codemirror/view";
 import { clearMocks, mockIPC } from "@tauri-apps/api/mocks";
-import { afterEach, expect, it } from "vitest";
+import { afterEach, expect, it, vi } from "vitest";
 import type { Catalog, CompletionContext as EngineContext, DatabaseKind, Expect, KeyInfo, ScopeRelation } from "../../ipc/bindings";
 import { buildCatalogView } from "../../state/catalog";
 import { useRelationDetail } from "../../state/relationDetail";
 import { shopCatalog } from "../../testing/shopCatalog";
+import { completionOptions } from "./completion";
 import {
   configureSql,
   docOf,
@@ -231,6 +233,83 @@ it("matches a name in another case only where the server would", async () => {
   expect((await completeAtEnd("select * from orders o where o.", qualified, { catalog })).labels).toEqual([]);
   const msCatalog = { ...catalog, databaseKind: "SqlServer" as const };
   expect((await completeAtEnd("SELECT * FROM orders o WHERE o.", qualified, { catalog: msCatalog })).labels).toContain("customer_id");
+});
+
+it("asks again when a word typed during a declined request now opens a list", async () => {
+  const pending: (() => void)[] = [];
+  mockIPC(async (cmd, args) => {
+    if (cmd !== "completion_context") return null;
+    const { text } = args as { text: string };
+    await new Promise<void>((resolve) => pending.push(resolve));
+    const typed = text.slice(text.lastIndexOf(" ") + 1);
+    return reply(typed.length < 2 ? { kind: "Alias" } : { kind: "Keyword" }, [], { keywords: ["WHERE"], from: text.length - typed.length });
+  });
+  seedEditor("t1", "select * from orders ");
+  configureSql("t1", buildCatalogView(shopCatalog("c1", 1)));
+  const view = new EditorView({ state: editorStateOf("t1"), parent: document.body });
+  try {
+    const type = (text: string) => view.dispatch({ changes: { from: view.state.doc.length, insert: text }, selection: { anchor: view.state.doc.length + text.length }, userEvent: "input.type" });
+    const settle = () => new Promise((resolve) => setTimeout(resolve, 150));
+    type("w");
+    await settle();
+    type("h");
+    pending.shift()!();
+    await settle();
+    pending.shift()?.();
+    await settle();
+    expect(currentCompletions(view.state).map((c) => c.label)).toEqual(["WHERE"]);
+  } finally {
+    view.destroy();
+  }
+});
+
+it("keeps one completion request in flight and sends only the newest one that waited", async () => {
+  const sent: string[] = [];
+  const pending: (() => void)[] = [];
+  mockIPC(async (cmd, args) => {
+    if (cmd !== "completion_context") return null;
+    sent.push((args as { text: string }).text);
+    await new Promise<void>((resolve) => pending.push(resolve));
+    return reply({ kind: "Keyword" }, [], { keywords: ["SELECT"], from: 0 });
+  });
+  seedEditor("t1", "");
+  configureSql("t1", buildCatalogView(shopCatalog("c1", 1)));
+  const base = editorStateOf("t1");
+  const [source] = base.languageDataAt<(c: CompletionContext) => Promise<CompletionResult | null>>("autocomplete", 0);
+  const ask = (text: string) => source!(new CompletionContext(base.update({ changes: { from: 0, insert: text } }).state, text.length, true));
+  const settle = () => new Promise((resolve) => setTimeout(resolve, 0));
+  const [first, second, third] = [ask("s"), ask("se"), ask("sel")];
+  await settle();
+  expect(sent).toEqual(["s"]);
+  expect(await second).toBeNull();
+  pending.shift()!();
+  expect((await first)?.options.map((o) => o.label)).toEqual(["SELECT"]);
+  await settle();
+  expect(sent).toEqual(["s", "sel"]);
+  pending.shift()!();
+  expect((await third)?.options.map((o) => o.label)).toEqual(["SELECT"]);
+});
+
+it("drops the join conditions when the relation details take longer than 250 ms", async () => {
+  vi.useFakeTimers();
+  try {
+    mockIPC((cmd) => (cmd === "relation_detail" ? new Promise(() => {}) : null));
+    const options = completionOptions(
+      buildCatalogView(shopCatalog("c1", 1)),
+      reply({ kind: "JoinCondition", target: 1 }, [table("o", "orders"), table("c", "customers")]),
+    );
+    await vi.advanceTimersByTimeAsync(249);
+    let settled = false;
+    void options.then(() => (settled = true));
+    await Promise.resolve();
+    expect(settled).toBe(false);
+    await vi.advanceTimersByTimeAsync(1);
+    const labels = (await options).map((o) => o.label);
+    expect(labels).not.toContain("c.id = o.customer_id");
+    expect(labels).toContain("email");
+  } finally {
+    vi.useRealTimers();
+  }
 });
 
 it("changes to SQL Server syntax before a catalog arrives while retaining the document", () => {
