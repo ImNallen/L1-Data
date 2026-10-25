@@ -41,6 +41,9 @@ EXEC sys.sp_addextendedproperty N'MS_Description', N'audit', N'SCHEMA', N'we]ird
 GO
 ALTER TABLE [we]]ird s].[Par ent] SET (LOCK_ESCALATION = AUTO);
 GO
+ADD SENSITIVITY CLASSIFICATION TO [we]]ird s].[Par ent].[masked] WITH (LABEL = N'Highly ''Confidential', LABEL_ID = N'b8b3c1b5-1d4c-4ab4-9c1c-0f4d6e2a3b11', INFORMATION_TYPE = N'Financial', INFORMATION_TYPE_ID = N'c44193e1-0e58-4b2a-9001-f7d6e7bc1373', RANK = HIGH);
+ADD SENSITIVITY CLASSIFICATION TO [we]]ird s].[Par ent].[unicode ü] WITH (LABEL = N'Public');
+GO
 CREATE VIEW dbo.v_bound WITH SCHEMABINDING AS SELECT [Id], [select] FROM [we]]ird s].[Par ent] WHERE [Id] > 0
 GO
 CREATE UNIQUE CLUSTERED INDEX IX_v_bound ON dbo.v_bound ([Id]) WITH (FILLFACTOR = 90);

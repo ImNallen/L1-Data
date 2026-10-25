@@ -19,6 +19,17 @@ pub struct Table {
     pub versioning: Option<Versioning>,
     pub history_of: Option<(String, String)>,
     pub properties: Vec<Property>,
+    pub classifications: Vec<Classification>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Classification {
+    pub column: String,
+    pub label: Option<String>,
+    pub label_id: Option<String>,
+    pub information_type: Option<String>,
+    pub information_type_id: Option<String>,
+    pub rank: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -203,6 +214,9 @@ pub fn table(t: &Table) -> Ddl {
     if t.lock_escalation != "TABLE" {
         parts.push(format!("ALTER TABLE {name} SET (LOCK_ESCALATION = {});\nGO\n", t.lock_escalation));
     }
+    if !t.classifications.is_empty() {
+        parts.push(format!("{}GO\n", t.classifications.iter().map(|c| classification(&name, c)).collect::<String>()));
+    }
     let disabled_keys = t.keys.iter().filter(|k| k.storage.disabled).map(|k| k.name.as_str());
     parts.extend(dependents(&name, disabled_keys, &t.indexes, &t.triggers, &t.properties, &mut warnings));
     Ddl { text: parts.join("\n"), warnings }
@@ -315,6 +329,15 @@ fn column(c: &Column, table: &str, warnings: &mut Vec<String>) -> String {
         out.push_str(&format!(" CONSTRAINT {} DEFAULT {definition}", ident(constraint)));
     }
     out
+}
+
+fn classification(table: &str, c: &Classification) -> String {
+    let mut options: Vec<String> = [("LABEL", &c.label), ("LABEL_ID", &c.label_id), ("INFORMATION_TYPE", &c.information_type), ("INFORMATION_TYPE_ID", &c.information_type_id)]
+        .into_iter()
+        .filter_map(|(option, value)| value.as_ref().map(|v| format!("{option} = {}", quote_literal(v))))
+        .collect();
+    options.extend(c.rank.as_ref().map(|rank| format!("RANK = {rank}")));
+    format!("ADD SENSITIVITY CLASSIFICATION TO {table}.{} WITH ({});\n", ident(&c.column), options.join(", "))
 }
 
 fn sorted(columns: &[(String, bool)]) -> String {
@@ -740,6 +763,36 @@ GO
         assert_eq!(
             table(&t).warnings,
             ["filegroup [LOB] for large values on [dbo].[p]", "filegroup [FG keys] for index [PK_p] on [dbo].[p]", "partition scheme [ps] on [dbo].[p]", "partition scheme [ps]]x] for index [IX_p] on [dbo].[p]"]
+        );
+    }
+
+    #[test]
+    fn sensitivity_classifications_replay_with_each_set_option() {
+        let t = Table {
+            classifications: vec![
+                Classification {
+                    column: "id".into(),
+                    label: Some("Highly 'Confidential".into()),
+                    label_id: Some("b8b3c1b5-1d4c-4ab4-9c1c-0f4d6e2a3b11".into()),
+                    information_type: Some("Financial".into()),
+                    information_type_id: Some("c44193e1-0e58-4b2a-9001-f7d6e7bc1373".into()),
+                    rank: Some("HIGH".into()),
+                },
+                Classification { column: "b]x".into(), label: Some("Public".into()), ..Classification::default() },
+            ],
+            ..table_named("sc")
+        };
+        assert!(
+            table(&t).text.ends_with(
+                "GO
+
+ADD SENSITIVITY CLASSIFICATION TO [dbo].[sc].[id] WITH (LABEL = N'Highly ''Confidential', LABEL_ID = N'b8b3c1b5-1d4c-4ab4-9c1c-0f4d6e2a3b11', INFORMATION_TYPE = N'Financial', INFORMATION_TYPE_ID = N'c44193e1-0e58-4b2a-9001-f7d6e7bc1373', RANK = HIGH);
+ADD SENSITIVITY CLASSIFICATION TO [dbo].[sc].[b]]x] WITH (LABEL = N'Public');
+GO
+"
+            ),
+            "{}",
+            table(&t).text
         );
     }
 

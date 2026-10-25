@@ -1020,6 +1020,9 @@ impl Harness {
                                                                   WHEN 2 THEN (SELECT name FROM sys.parameters WHERE object_id=ep.major_id AND parameter_id=ep.minor_id)
                                                                   ELSE COL_NAME(ep.major_id,ep.minor_id) END,' ',ep.name,' ',CONVERT(nvarchar(max),ep.value),' ',CONVERT(sysname,SQL_VARIANT_PROPERTY(ep.value,'BaseType')))
                 FROM sys.extended_properties ep WHERE ep.class IN (1,2,7) AND ep.major_id=o.object_id AND SQL_VARIANT_PROPERTY(ep.value,'BaseType') IN ('nvarchar','varchar')
+                UNION ALL
+                SELECT CONCAT(N'classification ',COL_NAME(sc.major_id,sc.minor_id),' ',sc.label,' ',sc.label_id,' ',sc.information_type,' ',sc.information_type_id,' ',sc.rank)
+                FROM sys.sensitivity_classifications sc WHERE sc.class=1 AND sc.major_id=o.object_id
              ) f(fact)
              WHERE o.is_ms_shipped=0 AND o.type IN ('U','V','P','FN','IF','TF','TR','C','F','PK','UQ','D') AND o.name NOT IN ('enc','node_t')
              ORDER BY 1",

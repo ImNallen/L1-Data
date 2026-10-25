@@ -23,7 +23,7 @@ fn text(row: &[Option<String>], i: usize) -> Result<String, DetailError> {
 /// Each column a server version may lack, by the catalog column that marks it.
 const FEATURES: &str = "SELECT COL_LENGTH('sys.indexes','optimize_for_sequential_key'),COL_LENGTH('sys.index_columns','column_store_order_ordinal'),
     COL_LENGTH('sys.partitions','xml_compression'),COL_LENGTH('sys.tables','ledger_type'),COL_LENGTH('sys.tables','is_node'),COL_LENGTH('sys.tables','history_retention_period'),
-    COL_LENGTH('sys.indexes','suppress_dup_key_messages')";
+    COL_LENGTH('sys.indexes','suppress_dup_key_messages'),COL_LENGTH('sys.sensitivity_classifications','label'),COL_LENGTH('sys.sensitivity_classifications','rank')";
 
 #[derive(Debug, PartialEq, Eq)]
 struct Features {
@@ -34,6 +34,7 @@ struct Features {
     graph: (&'static str, &'static str),
     retention: &'static str,
     suppress_dup_key: &'static str,
+    classifications: Option<&'static str>,
 }
 
 impl Features {
@@ -48,6 +49,7 @@ impl Features {
             graph: if has(4) { ("t.is_node=1", "t.is_edge=1") } else { ("1=0", "1=0") },
             retention: pick(5, "t.history_retention_period,t.history_retention_period_unit_desc", "NULL,NULL"),
             suppress_dup_key: pick(6, "i.suppress_dup_key_messages", "0"),
+            classifications: has(7).then(|| pick(8, "sc.rank_desc", "NULL")),
         }
     }
 }
@@ -185,6 +187,7 @@ impl MsSession {
                     versioning,
                     history_of: r[9].clone().zip(r[10].clone()),
                     properties: self.properties(&format!("o.object_id={oid}")).await?,
+                    classifications: self.classifications(oid, f).await?,
                 };
                 Ok(script::object_script(&name, ddl::table(&table)))
             }
@@ -260,6 +263,21 @@ impl MsSession {
                 }
                 Ok(ddl::Property { name: text(r, 0)?, value: r[1].clone(), base_type: r[2].clone(), levels })
             })
+            .collect()
+    }
+
+    async fn classifications(&mut self, oid: i32, f: &Features) -> Result<Vec<ddl::Classification>, DetailError> {
+        let Some(rank) = f.classifications else { return Ok(vec![]) };
+        let rows = self
+            .rows(&format!(
+                "SELECT c.name,sc.label,CONVERT(nvarchar(36),sc.label_id),sc.information_type,CONVERT(nvarchar(36),sc.information_type_id),{rank}
+                 FROM sys.sensitivity_classifications sc JOIN sys.columns c ON c.object_id=sc.major_id AND c.column_id=sc.minor_id
+                 WHERE sc.class=1 AND sc.major_id={oid} ORDER BY c.column_id"
+            ))
+            .await
+            .map_err(failed)?;
+        rows.iter()
+            .map(|r| Ok(ddl::Classification { column: text(r, 0)?, label: r[1].clone(), label_id: r[2].clone(), information_type: r[3].clone(), information_type_id: r[4].clone(), rank: r[5].clone() }))
             .collect()
     }
 
@@ -464,12 +482,12 @@ mod tests {
 
     #[test]
     fn a_server_without_a_feature_column_reads_a_constant_in_its_place() {
-        let sql2016 = Features::from_lengths(&[None, None, None, None, None, None, None]);
+        let sql2016 = Features::from_lengths(&[None, None, None, None, None, None, None, None, None]);
         let query = relation_query(7, &sql2016);
         assert!(!query.contains("history_retention_period"), "{query}");
         assert!(query.contains("h.name,NULL,NULL,\n"), "{query}");
         assert!(!query.contains("ledger_type") && !query.contains("is_node"), "{query}");
-        let sql2022 = Features::from_lengths(&[Some("1".into()), Some("4".into()), Some("1".into()), Some("1".into()), Some("1".into()), Some("4".into()), Some("1".into())]);
+        let sql2022 = Features::from_lengths(&[Some("1".into()), Some("4".into()), Some("1".into()), Some("1".into()), Some("1".into()), Some("4".into()), Some("1".into()), Some("256".into()), Some("4".into())]);
         assert!(relation_query(7, &sql2022).contains("h.name,t.history_retention_period,t.history_retention_period_unit_desc,\n"));
         assert_eq!(Features::from_lengths(&[]), sql2016);
     }
