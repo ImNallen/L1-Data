@@ -32,6 +32,7 @@ COMMENT ON TABLE "Weird ""S""".parent IS E'quote '' backslash \\ newline\nend';
 COMMENT ON COLUMN "Weird ""S""".parent."a""b c" IS 'col comment';
 COMMENT ON CONSTRAINT "Chk ""x""" ON "Weird ""S""".parent IS 'constraint comment';
 COMMENT ON INDEX "Weird ""S""".parent_pkey IS 'pkey comment';
+COMMENT ON CONSTRAINT parent_pkey ON "Weird ""S""".parent IS 'pkey constraint comment';
 CREATE INDEX "Idx One" ON "Weird ""S""".parent ("between", "int");
 COMMENT ON INDEX "Weird ""S"""."Idx One" IS 'index comment';
 CREATE TRIGGER "Trg ""1""" BEFORE INSERT ON "Weird ""S""".parent FOR EACH ROW EXECUTE FUNCTION app."Trg Fn"();

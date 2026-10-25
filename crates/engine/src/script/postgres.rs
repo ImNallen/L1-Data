@@ -514,6 +514,9 @@ pub fn routine(definition: &str, procedure: bool, signature: &str, description: 
 pub fn index_script(i: &Index, constraint: Option<&Constraint>, keyword: &str, schema: &str, relation: &str) -> Ddl {
     let mut statements: Vec<String> = constraint.map(|k| format!("ALTER {keyword} {relation} ADD CONSTRAINT {} {}", ident(&k.name), k.definition)).into_iter().collect();
     indexes(std::slice::from_ref(i), keyword, schema, relation, &mut statements);
+    if let Some(k) = constraint {
+        statements.extend(comment(&format!("CONSTRAINT {} ON {relation}", ident(&k.name)), &k.comment));
+    }
     Ddl::complete(script(statements))
 }
 
@@ -927,10 +930,10 @@ ALTER FOREIGN TABLE public.e2 ALTER COLUMN v OPTIONS (ADD column_name 'vv');
     #[test]
     fn an_index_a_constraint_creates_scripts_as_the_constraint() {
         let pkey = Index { name: "orders_pkey".into(), comment: Some("pk".into()), ..Default::default() };
-        let constraint = Constraint { name: "orders_pkey".into(), definition: "PRIMARY KEY (id)".into(), comment: None };
+        let constraint = Constraint { name: "orders_pkey".into(), definition: "PRIMARY KEY (id)".into(), comment: Some("the key".into()) };
         assert_eq!(
             index_script(&pkey, Some(&constraint), "TABLE", "public", "public.orders").text,
-            "ALTER TABLE public.orders ADD CONSTRAINT orders_pkey PRIMARY KEY (id);\n\nCOMMENT ON INDEX public.orders_pkey IS 'pk';\n"
+            "ALTER TABLE public.orders ADD CONSTRAINT orders_pkey PRIMARY KEY (id);\n\nCOMMENT ON INDEX public.orders_pkey IS 'pk';\n\nCOMMENT ON CONSTRAINT orders_pkey ON public.orders IS 'the key';\n"
         );
         let plain = Index { name: "i".into(), definition: Some("CREATE INDEX i ON ONLY public.t USING btree (a)".into()), tablespace: Some("fast".into()), ..Default::default() };
         assert_eq!(index_script(&plain, None, "TABLE", "public", "public.t").text, "CREATE INDEX i ON public.t USING btree (a);\n\nALTER INDEX public.i SET TABLESPACE fast;\n");

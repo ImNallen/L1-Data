@@ -2837,7 +2837,10 @@ async fn hostile_object_scripts_replay_every_property_or_warn() {
         let child = script(ScriptTarget::Relation { oid: oid("app.child").await }).await.text;
         assert!(child.contains(") INHERITS (app.base);\n"), "{child}");
         let pkey = script(ScriptTarget::Index { relation_oid: oid("\"Weird \"\"S\"\"\".parent").await, name: "parent_pkey".into() }).await.text;
-        assert_eq!(pkey, "ALTER TABLE \"Weird \"\"S\"\"\".parent ADD CONSTRAINT parent_pkey PRIMARY KEY (\"Id\");\n\nCOMMENT ON INDEX \"Weird \"\"S\"\"\".parent_pkey IS 'pkey comment';\n");
+        assert_eq!(
+            pkey,
+            "ALTER TABLE \"Weird \"\"S\"\"\".parent ADD CONSTRAINT parent_pkey PRIMARY KEY (\"Id\");\n\nCOMMENT ON INDEX \"Weird \"\"S\"\"\".parent_pkey IS 'pkey comment';\n\nCOMMENT ON CONSTRAINT parent_pkey ON \"Weird \"\"S\"\"\".parent IS 'pkey constraint comment';\n"
+        );
     }))
     .await;
     drop((original, replay));
