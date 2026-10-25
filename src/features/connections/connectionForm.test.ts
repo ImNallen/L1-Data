@@ -1,6 +1,16 @@
 import { expect, it } from "vitest";
 import type { ConnectionConfig } from "../../ipc/bindings";
-import { initialFields, initialSshSecret, isDirty, sshValid, toSshDraft, type FormState, type PasswordEdit } from "./connectionForm";
+import {
+  initialFields,
+  initialSshSecret,
+  isDirty,
+  signsInWithEntra,
+  sshValid,
+  toSqlServerAuth,
+  toSshDraft,
+  type FormState,
+  type PasswordEdit,
+} from "./connectionForm";
 
 const saved: ConnectionConfig = {
   id: "c1",
@@ -28,6 +38,7 @@ const savedFields = {
   port: "5433",
   database: "shop",
   user: "l1data",
+  sqlServerAuth: "SqlLogin",
   sslMode: "Require",
   color: "red",
   sshEnabled: false,
@@ -48,6 +59,7 @@ const newFields = {
   port: "5432",
   database: "postgres",
   user: "postgres",
+  sqlServerAuth: "SqlLogin",
   sslMode: "Prefer",
   color: null,
   sshEnabled: false,
@@ -104,6 +116,25 @@ it("starts SQL Server with SQL login, master and verified TLS", () => {
   const fields = initialFields({ ...saved, databaseKind: "SqlServer", port: 1434, database: "reporting", sslMode: "Require" });
   expect(fields).toMatchObject({ databaseKind: "SqlServer", port: "1434", database: "reporting", sslMode: "Require" });
   expect(isDirty(undefined, { fields: initialFields(undefined, "SqlServer"), password: { kind: "clear" }, sshSecret: { kind: "clear" }, url: "" })).toBe(true);
+});
+
+it("opens a connection saved before Entra as a SQL login, and a saved Entra one as Entra", () => {
+  const sqlServer: ConnectionConfig = { ...saved, databaseKind: "SqlServer", sqlServerAuth: null };
+  expect(initialFields(sqlServer).sqlServerAuth).toBe("SqlLogin");
+  expect(isDirty(sqlServer, { fields: initialFields(sqlServer), password: { kind: "keep" }, sshSecret: { kind: "clear" }, url: "" })).toBe(false);
+  const azure: ConnectionConfig = { ...sqlServer, sqlServerAuth: "EntraAzureCli", hasPassword: false, user: "" };
+  expect(signsInWithEntra(initialFields(azure))).toBe(true);
+  expect(
+    isDirty(azure, { fields: { ...initialFields(azure), sqlServerAuth: "SqlLogin" }, password: { kind: "clear" }, sshSecret: { kind: "clear" }, url: "" }),
+  ).toBe(true);
+});
+
+it("sends a sign-in choice only for SQL Server", () => {
+  const entra = { ...initialFields(undefined, "SqlServer"), sqlServerAuth: "EntraAzureCli" } as const;
+  expect(toSqlServerAuth(entra)).toBe("EntraAzureCli");
+  expect(toSqlServerAuth(initialFields(undefined, "SqlServer"))).toBe("SqlLogin");
+  expect(toSqlServerAuth({ ...entra, databaseKind: "Postgres" })).toBeNull();
+  expect(signsInWithEntra({ ...entra, databaseKind: "Postgres" })).toBe(false);
 });
 
 const tunneled: ConnectionConfig = {

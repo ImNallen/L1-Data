@@ -1,7 +1,15 @@
 import * as Dialog from "@radix-ui/react-dialog";
 import { CheckIcon, ChevronsUpDownIcon, CircleAlertIcon, EyeIcon, EyeOffIcon, KeyIcon, LockIcon, PlusIcon, XIcon } from "lucide-react";
 import { useEffect, useId, useRef, useState, type ReactNode } from "react";
-import { commands, type ConnectionConfig, type ConnectionDraft, type ConnectionId, type Environment, type SslMode } from "../../ipc/bindings";
+import {
+  commands,
+  type ConnectionConfig,
+  type ConnectionDraft,
+  type ConnectionId,
+  type Environment,
+  type SqlServerAuth,
+  type SslMode,
+} from "../../ipc/bindings";
 import { connectErrorText } from "../../ipc/errors";
 import { DATABASE_LABEL } from "../../state/databaseKind";
 import { useLive } from "../../state/live";
@@ -16,8 +24,10 @@ import {
   initialSshSecret,
   isDirty,
   parsePort,
+  signsInWithEntra,
   sshValid,
   toPasswordInput,
+  toSqlServerAuth,
   toSshDraft,
   type Fields,
   type PasswordEdit,
@@ -38,6 +48,11 @@ const ENVIRONMENTS: { value: Environment | null; label: string }[] = [
   { value: "Local", label: "Local" },
   { value: "Staging", label: "Staging" },
   { value: "Production", label: "Production" },
+];
+
+const SQL_SERVER_AUTHS: { value: SqlServerAuth; label: string; hint: string }[] = [
+  { value: "SqlLogin", label: "SQL login", hint: "A SQL Server login and password. Windows authentication is not supported." },
+  { value: "EntraAzureCli", label: "Microsoft Entra ID (Azure CLI)", hint: "Signs in as the account of `az login`. No password is saved." },
 ];
 
 const SSH_AUTHS: { value: SshAuthKind; label: string }[] = [
@@ -328,6 +343,7 @@ function ConnectionForm({
       port: String(d.port),
       database: d.database,
       user: d.user,
+      sqlServerAuth: d.sqlServerAuth ?? "SqlLogin",
       sslMode: d.sslMode,
     });
     setPassword(typeof d.password === "object" ? { kind: "set", value: d.password.Set } : initialPassword(existing));
@@ -347,6 +363,7 @@ function ConnectionForm({
     port: port ?? 0,
     database: fields.database.trim(),
     user: fields.user.trim(),
+    sqlServerAuth: toSqlServerAuth(fields),
     sslMode: fields.sslMode,
     caCertPath: fields.caCertPath.trim() || null,
     password: toPasswordInput(password),
@@ -410,6 +427,7 @@ function ConnectionForm({
       onToggle={() => editSshSecret(sshSecret.kind === "clear" ? { kind: "keep" } : { kind: "clear" })}
     />
   );
+  const entra = signsInWithEntra(fields);
   const sslModes = fields.databaseKind === "SqlServer" ? SSL_MODES.filter((m) => m.value === "VerifyFull" || m.value === "Require") : SSL_MODES;
   const sslHint = sslModes.find((m) => m.value === fields.sslMode)?.hint;
 
@@ -446,8 +464,8 @@ function ConnectionForm({
               ++urlRequest.current;
               setUrl("");
               setUrlError(null);
-              const { port, database, user, sslMode, caCertPath } = initialFields(undefined, databaseKind);
-              update({ databaseKind, port, database, user, sslMode, caCertPath });
+              const { port, database, user, sqlServerAuth, sslMode, caCertPath } = initialFields(undefined, databaseKind);
+              update({ databaseKind, port, database, user, sqlServerAuth, sslMode, caCertPath });
               setPassword({ kind: "clear" });
             }}
           >
@@ -519,15 +537,44 @@ function ConnectionForm({
         <FormRow label="Database" htmlFor={`${ids}-database`} hint="Opens first in the tree. You can show the server's other databases later.">
           <input id={`${ids}-database`} data-testid="conn-database" className={inputClass} value={fields.database} onChange={set("database")} />
         </FormRow>
-        <FormRow
-          label={fields.databaseKind === "SqlServer" ? "SQL login" : "Sign in"}
-          htmlFor={`${ids}-user`}
-          hint={
-            <>
-              {fields.databaseKind === "SqlServer" && (
-                <span className="block">SQL login over TCP. Windows and Microsoft Entra authentication are not supported.</span>
-              )}
-              {existing?.hasPassword && (
+        {fields.databaseKind === "SqlServer" && (
+          <FormRow
+            label="Authentication"
+            htmlFor={`${ids}-auth`}
+            hint={
+              <>
+                {SQL_SERVER_AUTHS.find((a) => a.value === fields.sqlServerAuth)?.hint}
+                {entra && existing?.hasPassword && <span className="block">Saving removes the saved password.</span>}
+              </>
+            }
+          >
+            <div className="relative">
+              <select
+                id={`${ids}-auth`}
+                data-testid="conn-auth"
+                className={cx(inputClass, "appearance-none pr-8")}
+                value={fields.sqlServerAuth}
+                onChange={(e) => {
+                  const choice = SQL_SERVER_AUTHS.find((a) => a.value === e.target.value);
+                  if (choice) update({ sqlServerAuth: choice.value });
+                }}
+              >
+                {SQL_SERVER_AUTHS.map((a) => (
+                  <option key={a.value} value={a.value}>
+                    {a.label}
+                  </option>
+                ))}
+              </select>
+              <ChevronsUpDownIcon size={14} className="pointer-events-none absolute top-1/2 right-2.5 -translate-y-1/2 text-dim" />
+            </div>
+          </FormRow>
+        )}
+        {!entra && (
+          <FormRow
+            label={fields.databaseKind === "SqlServer" ? "SQL login" : "Sign in"}
+            htmlFor={`${ids}-user`}
+            hint={
+              existing?.hasPassword && (
                 <ClearSecretButton
                   testId="conn-password-clear"
                   noun="password"
@@ -537,24 +584,24 @@ function ConnectionForm({
                     setPassword(password.kind === "clear" ? { kind: "keep" } : { kind: "clear" });
                   }}
                 />
-              )}
-            </>
-          }
-        >
-          <div className="flex gap-2">
-            <input id={`${ids}-user`} data-testid="conn-user" className={inputClass} value={fields.user} onChange={set("user")} placeholder="user" />
-            <SecretInput
-              testId="conn-password"
-              label="Password"
-              value={password.kind === "set" ? password.value : ""}
-              placeholder={secretPlaceholder(password, existing?.hasPassword ?? false, "password", "password")}
-              onChange={(value) => {
-                resetProbe();
-                setPassword(value ? { kind: "set", value } : initialPassword(existing));
-              }}
-            />
-          </div>
-        </FormRow>
+              )
+            }
+          >
+            <div className="flex gap-2">
+              <input id={`${ids}-user`} data-testid="conn-user" className={inputClass} value={fields.user} onChange={set("user")} placeholder="user" />
+              <SecretInput
+                testId="conn-password"
+                label="Password"
+                value={password.kind === "set" ? password.value : ""}
+                placeholder={secretPlaceholder(password, existing?.hasPassword ?? false, "password", "password")}
+                onChange={(value) => {
+                  resetProbe();
+                  setPassword(value ? { kind: "set", value } : initialPassword(existing));
+                }}
+              />
+            </div>
+          </FormRow>
+        )}
         <FormRow label="TLS" htmlFor={`${ids}-ssl`} hint={sslHint}>
           <div className="relative">
             <select
