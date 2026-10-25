@@ -144,7 +144,7 @@ pnpm test                # vitest, then the release scripts' node tests
 pnpm build               # production frontend bundle
 pnpm self-check          # boots the engine inside the Tauri binary, connects to the Docker database, prints JSON, exits
 cargo build -p dev-bridge && dev/bridge-smoke.sh   # drives the bridge over HTTP against the Docker database
-cargo build -p dev-bridge -p engine && python3 dev/mssql-smoke.py   # mixed PostgreSQL/SQL Server bridge checks; needs both databases and a free :7077
+cargo build -p dev-bridge -p engine && python3 dev/mssql-smoke.py   # mixed PostgreSQL/SQL Server bridge checks; needs both databases and a free bridge port
 cargo test -p engine --features claude-smoke --test claude_smoke -- --nocapture   # the assistant through your installed claude CLI
 pnpm bindings            # rewrites src/ipc/bindings.ts after an IPC type or command changes
 pnpm icons               # rewrites src-tauri/icons from src-tauri/app-icon.svg
@@ -174,6 +174,8 @@ The `claude-smoke` test needs the `claude` CLI installed and signed in, and the 
 | `L1_DATA_TEST_MSSQL_HOST` | Host for the SQL Server Rust integration tests. Default `localhost`. |
 | `L1_DATA_TEST_MSSQL_PORT` | Port for the SQL Server Rust integration tests. Default `1434`. |
 | `L1_DATA_TEST_MSSQL_PASSWORD` | The `sa` password for the SQL Server Rust integration tests. Default is the development fixture password above. |
+| `L1_DATA_BRIDGE_PORT` | The port the dev-bridge listens on, and the port vite gives the page for it. `dev/bridge-smoke.sh` and `dev/mssql-smoke.py` use it too. Default `7077`. |
+| `L1_DATA_VITE_PORT` | The port vite serves the UI on, and the only port the dev-bridge accepts requests from. Default `5173`. `pnpm tauri dev` needs the default. |
 | `L1_DATA_UPDATE_SCENARIO` | The scripted update feed the dev-bridge serves: `current` (the default), `available`, `nightly-build`, `offline`, `bad-signature`, `install-fails`, or `off`. AGENTS.md describes each. |
 | `UPDATE_BINDINGS=1` | Makes the bindings drift test rewrite `src/ipc/bindings.ts` instead of failing. |
 

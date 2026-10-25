@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-BRIDGE=http://127.0.0.1:7077
+BRIDGE="http://127.0.0.1:${L1_DATA_BRIDGE_PORT:-7077}"
 DATA_DIR=$(mktemp -d)
 SSE_LOG=$(mktemp)
 SSE_PID=

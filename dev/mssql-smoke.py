@@ -295,8 +295,9 @@ def check(bridge, work, assistant=True):
 
 
 def main():
+    port = int(os.environ.get("L1_DATA_BRIDGE_PORT", "7077"))
     parser = argparse.ArgumentParser(description="Exercise PostgreSQL and SQL Server through the real dev bridge.")
-    parser.add_argument("--bridge", help="Use an existing bridge instead of starting a temporary engine on :7077.")
+    parser.add_argument("--bridge", help=f"Use an existing bridge instead of starting a temporary engine on :{port}.")
     parser.add_argument("--skip-assistant", action="store_true", help="Skip fake-provider configuration and assistant turns.")
     args = parser.parse_args()
     with tempfile.TemporaryDirectory(prefix="l1data-mssql-smoke-") as directory:
@@ -306,20 +307,20 @@ def main():
         try:
             if not args.bridge:
                 try:
-                    occupied = socket.create_connection(("127.0.0.1", 7077), timeout=1)
+                    occupied = socket.create_connection(("127.0.0.1", port), timeout=1)
                 except ConnectionRefusedError:
                     pass
                 else:
                     occupied.close()
-                    raise RuntimeError("port 7077 is in use; stop the bridge or pass --bridge explicitly")
+                    raise RuntimeError(f"port {port} is in use; stop the bridge or pass --bridge explicitly")
                 log = (work / "bridge.log").open("w")
                 process = subprocess.Popen(["./target/debug/dev-bridge"],
                     env={**os.environ, "L1_DATA_DATA_DIR": directory}, stdout=log, stderr=log)
-            bridge = Bridge(args.bridge or "http://127.0.0.1:7077")
+            bridge = Bridge(args.bridge or f"http://127.0.0.1:{port}")
             deadline = time.monotonic() + 15
             while True:
                 if process is not None and process.poll() is not None:
-                    raise RuntimeError("temporary bridge exited; stop any bridge already on :7077")
+                    raise RuntimeError(f"temporary bridge exited; stop any bridge already on :{port}")
                 try:
                     bridge.invoke("app_boot")
                     break
