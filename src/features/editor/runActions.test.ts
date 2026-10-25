@@ -1052,7 +1052,7 @@ describe("staged edits the engine asks about", () => {
     const done = submitEdits(id);
     await vi.waitFor(() => expect(question()).not.toBeNull());
     expect(question()).toMatchObject({
-      body: "This sends 1 update and 1 delete to public.orders on prod-postgres / shop. A write to prod-postgres / shop ran on this tab before the connection was marked Production. If it is still in this tab's transaction, applying these changes can commit it.",
+      body: "This sends 1 update and 1 delete to public.orders on prod-postgres / shop. A write to prod-postgres / shop ran on this tab before the connection was marked Production. If it is still in this tab's transaction, confirming covers it, so a later commit does not ask about it again.",
       statements: ["insert into t values (1)"],
     });
     useWorkspace.getState().close();
