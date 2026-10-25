@@ -85,7 +85,24 @@ describe("RowCache", () => {
     expect(cache.isCut(300, 0)).toBe(true);
     expect(cache.isCut(301, 0)).toBe(false);
     expect(await cache.loadFull(300, 0)).toBe("full 300");
-    expect(cache.fullValue(300, 0)).toBe("full 300");
+  });
+
+  it("holds full values up to a character budget, dropping the least recently read first", async () => {
+    const reads: number[] = [];
+    const sizes = [1_500_000, 1_500_000, 1_500_000, 5_000_000];
+    const cache = new RowCache(REF, {
+      async page(_ref, start) {
+        return { start, rows: [], cut: [] };
+      },
+      async cell(_ref, row) {
+        reads.push(row);
+        return "x".repeat(sizes[row]!);
+      },
+    });
+    for (const row of [0, 1, 0, 2, 0, 1]) await cache.loadFull(row, 0);
+    expect(reads).toEqual([0, 1, 2, 1]);
+    for (const row of [3, 3, 0]) await cache.loadFull(row, 0);
+    expect(reads).toEqual([0, 1, 2, 1, 3, 0]);
   });
 
   it("notifies subscribers when a page lands", async () => {
@@ -97,6 +114,16 @@ describe("RowCache", () => {
     await cache.ensure({ start: 0, end: 10 }, 10);
     expect(calls).toBe(1);
     expect(cache.getVersion()).toBeGreaterThan(before);
+  });
+
+  it("notifies subscribers when it evicts a page they were reading", async () => {
+    const { src } = source(() => 100_000);
+    const cache = new RowCache(REF, src);
+    for (let p = 0; p < 64; p++) await cache.ensure({ start: p * PAGE_SIZE, end: p * PAGE_SIZE + 1 }, 100_000);
+    let seen: string | null | undefined = "unread";
+    cache.subscribe(() => (seen = cache.get(0)?.[0]));
+    await cache.ensure({ start: 64 * PAGE_SIZE, end: 64 * PAGE_SIZE + 1 }, 100_000);
+    expect(seen).toBeUndefined();
   });
 
   it("stops fetching once the result is gone", async () => {

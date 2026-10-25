@@ -2,7 +2,16 @@ import * as ContextMenu from "@radix-ui/react-context-menu";
 import * as Dialog from "@radix-ui/react-dialog";
 import * as Menu from "@radix-ui/react-dropdown-menu";
 import { CheckIcon, ChevronRightIcon, XIcon } from "lucide-react";
-import { useLayoutEffect, useRef, type ButtonHTMLAttributes, type ComponentProps, type ReactElement, type ReactNode, type RefObject } from "react";
+import {
+  useLayoutEffect,
+  useRef,
+  type ButtonHTMLAttributes,
+  type ComponentProps,
+  type KeyboardEvent,
+  type ReactElement,
+  type ReactNode,
+  type RefObject,
+} from "react";
 import type { DatabaseKind } from "../ipc/bindings";
 import { DATABASE_LABEL } from "../state/databaseKind";
 import type { TextRange } from "./textMatch";
@@ -178,9 +187,29 @@ export function ContextMenuArea({ menu, children }: { menu: ReactNode; children:
   );
 }
 
-export function ContextMenuItem({ children, onSelect, testId, danger }: { children: ReactNode; onSelect: () => void; testId?: string; danger?: boolean }) {
+export function ContextMenuItem({
+  children,
+  onSelect,
+  testId,
+  danger,
+  disabled,
+  keyShortcuts,
+}: {
+  children: ReactNode;
+  onSelect: () => void;
+  testId?: string;
+  danger?: boolean;
+  disabled?: boolean;
+  keyShortcuts?: string;
+}) {
   return (
-    <ContextMenu.Item data-testid={testId} onSelect={onSelect} className={cx(MENU_ITEM, "pr-3", danger ? "text-danger" : "text-fg")}>
+    <ContextMenu.Item
+      data-testid={testId}
+      aria-keyshortcuts={keyShortcuts}
+      onSelect={onSelect}
+      disabled={disabled}
+      className={cx(MENU_ITEM, "pr-3 data-[disabled]:opacity-40", danger ? "text-danger" : "text-fg")}
+    >
       {children}
     </ContextMenu.Item>
   );
@@ -219,6 +248,7 @@ export function Modal({
   width = 440,
   testId,
   initialFocus,
+  onKeyDown,
 }: {
   open: boolean;
   onOpenChange: (open: boolean) => void;
@@ -229,6 +259,7 @@ export function Modal({
   testId?: string;
   /** Radix focuses the first control (the close button) unless this names another. */
   initialFocus?: RefObject<HTMLElement | null>;
+  onKeyDown?: (e: KeyboardEvent) => void;
 }) {
   // Radix returns focus to a Dialog.Trigger on close. A Modal has none, so it returns focus to whatever had it at open.
   const opener = useRef<Element | null>(null);
@@ -242,6 +273,7 @@ export function Modal({
         <Dialog.Content
           data-testid={testId}
           style={{ width }}
+          onKeyDown={onKeyDown}
           onOpenAutoFocus={
             initialFocus &&
             ((e) => {

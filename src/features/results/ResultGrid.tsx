@@ -41,9 +41,11 @@ import {
 } from "../../state/tableEdits";
 import { useWorkspace } from "../../state/workspace";
 import { fontStack } from "../../themes/fonts";
-import { ContextMenuArea, ContextMenuItem, cx } from "../../ui/primitives";
+import { ContextMenuArea, ContextMenuItem, ContextMenuSeparator, cx } from "../../ui/primitives";
+import { openTableTab } from "../editor/runActions";
+import { useKeyLinks, type KeyLink } from "./foreignKeys";
 import { groupDigits, isNumeric, toTsv } from "./format";
-import type { SortKey } from "./tableQuery";
+import { referencedRows, type SortKey } from "./tableQuery";
 
 const HEADER_H = 28;
 const ROWNUM_W = 36;
@@ -297,7 +299,7 @@ export function ResultGrid({
   actionsRef?: Ref<GridActions | null>;
 }) {
   const cache = rowCacheFor(meta.ref);
-  useSyncExternalStore(cache.subscribe, cache.getVersion);
+  const cacheVersion = useSyncExternalStore(cache.subscribe, cache.getVersion);
   const scroller = useRef<HTMLDivElement>(null);
   const viewport = useElementWidth(scroller);
   const [selection, setSelection] = useState<Selection>(null);
@@ -319,13 +321,17 @@ export function ResultGrid({
     if (!values || row >= rowCount || !hasKey) return null;
     return pkIdx.map((index, i) => ({ column: pkColumns[i]!, value: values[index] ?? null }));
   };
-  const cellValue = (row: number, col: number): CellValue | typeof DEFAULT | undefined => {
+  const stagedValue = (row: number, col: number): CellValue | typeof DEFAULT | undefined => {
     const name = columns[col]!.name;
     const added = newRowAt(row);
     if (added) return name in added.values ? added.values[name]! : DEFAULT;
     const id = rowIdOf(row);
     const changed = id ? edits.updates[rowKey(id)]?.values : undefined;
-    return changed && name in changed ? changed[name]! : cache.get(row)?.[col];
+    return changed && name in changed ? changed[name]! : undefined;
+  };
+  const cellValue = (row: number, col: number): CellValue | typeof DEFAULT | undefined => {
+    const staged = stagedValue(row, col);
+    return staged !== undefined ? staged : cache.get(row)?.[col];
   };
   const codeFont = useWorkspace((s) => s.settings.codeFont);
   const interfaceFont = useWorkspace((s) => s.settings.interfaceFont);
@@ -392,7 +398,7 @@ export function ResultGrid({
   const lastRow = virtualRows.at(-1)?.index ?? 0;
   useEffect(() => {
     void cache.ensure({ start: Math.max(0, firstRow - PREFETCH), end: lastRow + 1 + PREFETCH }, rowCount);
-  }, [cache, firstRow, lastRow, rowCount]);
+  }, [cache, cacheVersion, firstRow, lastRow, rowCount]);
 
   useEffect(() => {
     const up = () => (dragging.current = null);
@@ -400,11 +406,26 @@ export function ResultGrid({
     return () => window.removeEventListener("mouseup", up);
   }, []);
 
+  const fullValue = async (row: number, col: number) => {
+    const staged = stagedValue(row, col);
+    if (staged !== undefined) return staged === DEFAULT ? null : staged;
+    return cache.isCut(row, col) ? await cache.loadFull(row, col) : cache.get(row)?.[col];
+  };
   const openCell = async (row: number, col: number) => {
-    const shown = cellValue(row, col);
-    const value = row < rowCount && cache.isCut(row, col) ? await cache.loadFull(row, col) : shown === DEFAULT ? null : shown;
+    const value = await fullValue(row, col);
     if (value === undefined) return;
     useWorkspace.getState().open({ kind: "cell", title: `${columns[col]?.name ?? ""} · row ${row + 1}`, value });
+  };
+  const links = useKeyLinks(meta);
+  const follow = async (row: number, link: KeyLink) => {
+    const values = await Promise.all(link.resultColumns.map((col) => fullValue(row, col)));
+    if (!values.every((v) => typeof v === "string")) return;
+    await openTableTab({ db: meta.db, schema: link.schema, relation: link.table }, referencedRows(link.refColumns, values));
+  };
+  const openRecord = (row: number) => {
+    if (row >= rowCount) return;
+    scroller.current?.focus();
+    useWorkspace.getState().open({ kind: "record", meta, row });
   };
 
   const [editingCell, setEditingCell] = useState<(Cell & { draft: string; initial: string; stored: CellValue }) | null>(null);
@@ -496,6 +517,19 @@ export function ResultGrid({
     return { addRow: () => void useTableEdits.getState().addRow(tabId), deleteSelectedRows: () => void deleteSelectedRows() };
   });
 
+  const openMenuAt = (cell: Cell) => {
+    const open = () => {
+      const target = document.getElementById(cellId(cell.row, cell.col));
+      if (!target) return;
+      const box = target.getBoundingClientRect();
+      target.dispatchEvent(new MouseEvent("contextmenu", { bubbles: true, cancelable: true, clientX: box.left + 4, clientY: box.bottom }));
+    };
+    if (document.getElementById(cellId(cell.row, cell.col))) return open();
+    rows.scrollToIndex(cell.row);
+    cols.scrollToIndex(cell.col);
+    requestAnimationFrame(open);
+  };
+
   const onKeyDown = (e: KeyboardEvent) => {
     const mod = e.metaKey || e.ctrlKey;
     if (editable && mod && e.key === "Backspace" && selection) {
@@ -510,11 +544,15 @@ export function ResultGrid({
     } else if (mod && e.key.toLowerCase() === "c" && selection) {
       e.preventDefault();
       void copySelection(cache, selection, rowCount, total, (r, c) => {
-        const shown = cellValue(r, c);
-        if (shown === DEFAULT) return null;
-        const id = rowIdOf(r);
-        return newRowAt(r) || (id && edits.updates[rowKey(id)]?.values[columns[c]!.name] !== undefined) ? shown : undefined;
+        const staged = stagedValue(r, c);
+        return staged === DEFAULT ? null : staged;
       });
+    } else if (((e.shiftKey && e.key === "F10") || e.key === "ContextMenu") && selection) {
+      e.preventDefault();
+      openMenuAt(selection.focus);
+    } else if (mod && e.key.toLowerCase() === "i" && selection) {
+      e.preventDefault();
+      openRecord(selection.focus.row);
     } else if (mod && e.key.toLowerCase() === "a") {
       e.preventDefault();
       setSelection({ anchor: { row: 0, col: 0 }, focus: { row: total - 1, col: columns.length - 1 } });
@@ -543,6 +581,12 @@ export function ResultGrid({
   const menuRowId = menuCell ? rowIdOf(menuCell.row) : null;
   const menuRowDeleted = menuRowId ? rowKey(menuRowId) in edits.deletes : false;
   const shortValue = (v: string) => (v.length > 24 ? `${v.slice(0, 24)}…` : v);
+  const menuLinks = menuCell ? links.filter((link) => link.resultColumns.includes(menuCell.col)) : [];
+  const linkLabel = (link: KeyLink) => {
+    const sameTable = menuLinks.filter((other) => other.schema === link.schema && other.table === link.table).length > 1;
+    return `Go to referenced row in ${link.table}${sameTable ? ` (${link.columns.join(", ")})` : ""}`;
+  };
+  const hasValue = (row: number, col: number) => typeof cellValue(row, col) === "string";
 
   const grid = (
     <div
@@ -785,29 +829,49 @@ export function ResultGrid({
       </div>
     </div>
   );
-  if (!query) return grid;
   return (
     <ContextMenuArea
       menu={
         menuCell &&
         menuColumn !== undefined && (
           <>
-            {menuValue !== undefined && (
+            {query && (
               <>
-                <ContextMenuItem testId="grid-menu-filter-eq" onSelect={() => query.onFilterValue(menuColumn, menuValue, false)}>
-                  {menuValue === null ? `Filter ${menuColumn} is null` : `Filter ${menuColumn} = ${shortValue(menuValue)}`}
+                {menuValue !== undefined && (
+                  <>
+                    <ContextMenuItem testId="grid-menu-filter-eq" onSelect={() => query.onFilterValue(menuColumn, menuValue, false)}>
+                      {menuValue === null ? `Filter ${menuColumn} is null` : `Filter ${menuColumn} = ${shortValue(menuValue)}`}
+                    </ContextMenuItem>
+                    <ContextMenuItem testId="grid-menu-filter-ne" onSelect={() => query.onFilterValue(menuColumn, menuValue, true)}>
+                      {menuValue === null ? `Filter ${menuColumn} is not null` : `Filter ${menuColumn} ≠ ${shortValue(menuValue)}`}
+                    </ContextMenuItem>
+                  </>
+                )}
+                <ContextMenuItem testId="grid-menu-filter-column" onSelect={() => query.onFilterColumn(menuColumn)}>
+                  Filter {menuColumn}…
                 </ContextMenuItem>
-                <ContextMenuItem testId="grid-menu-filter-ne" onSelect={() => query.onFilterValue(menuColumn, menuValue, true)}>
-                  {menuValue === null ? `Filter ${menuColumn} is not null` : `Filter ${menuColumn} ≠ ${shortValue(menuValue)}`}
-                </ContextMenuItem>
+                <ContextMenuSeparator />
               </>
             )}
-            <ContextMenuItem testId="grid-menu-filter-column" onSelect={() => query.onFilterColumn(menuColumn)}>
-              Filter {menuColumn}…
+            {menuLinks.map((link) => (
+              <ContextMenuItem
+                key={`${link.name}:${link.resultColumns.join(",")}`}
+                testId={`grid-menu-follow-${link.name}`}
+                disabled={!link.resultColumns.every((col) => hasValue(menuCell.row, col))}
+                onSelect={() => void follow(menuCell.row, link)}
+              >
+                {linkLabel(link)}
+              </ContextMenuItem>
+            ))}
+            <ContextMenuItem testId="grid-menu-record" keyShortcuts="Meta+I" disabled={menuCell.row >= rowCount} onSelect={() => openRecord(menuCell.row)}>
+              View as record
+              <span aria-hidden className="ml-auto pl-6 text-ui-12 text-dim">
+                ⌘I
+              </span>
             </ContextMenuItem>
             {editable && (
               <>
-                <div className="my-1 h-px bg-control" />
+                <ContextMenuSeparator />
                 {!menuRowDeleted && canWrite(menuCell.col) && (
                   <>
                     <ContextMenuItem testId="grid-menu-edit" onSelect={() => startEdit(menuCell.row, menuCell.col)}>

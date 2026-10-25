@@ -19,7 +19,7 @@ import { homeDb, resolveDb, sameDb } from "../../state/dbKey";
 import { useLive } from "../../state/live";
 import { dropRowCaches } from "../../state/rowCache";
 import { canCancel, isBusy } from "../../state/status";
-import { pendingCount, toChanges, useTableEdits, type TableEdits } from "../../state/tableEdits";
+import { NO_EDITS, pendingCount, toChanges, useTableEdits, type TableEdits } from "../../state/tableEdits";
 import {
   EMPTY_QUERY,
   confirm,
@@ -339,27 +339,31 @@ function showResults() {
   if (!ws().layout.results) ws().setLayout({ results: true });
 }
 
-export async function openTableTab(ref: RelationRef): Promise<void> {
+export async function openTableTab(ref: RelationRef, query?: TableQuery): Promise<void> {
+  const reusable = (t: TableTab) => query === undefined || (pendingCount(useTableEdits.getState().byTab[t.id] ?? NO_EDITS) === 0 && isBrowsing(t));
   const findOpen = () =>
-    Object.values(ws().tabs).find((t) => isTableTab(t) && sameDb(t.console.db, ref.db) && t.table.schema === ref.schema && t.table.table === ref.relation);
+    Object.values(ws().tabs).find(
+      (t): t is TableTab => isTableTab(t) && sameDb(t.console.db, ref.db) && t.table.schema === ref.schema && t.table.table === ref.relation && reusable(t),
+    );
+  const show = (tab: TableTab) => {
+    ws().setActive(tab.id);
+    if (query) updateTableQuery(tab.id, () => query);
+  };
   const existing = findOpen();
   ws().select(ref);
   showResults();
-  if (existing) {
-    ws().setActive(existing.id);
-    return;
-  }
+  if (existing) return show(existing);
   const template = await browseTemplate(ref.db, ref.schema, ref.relation);
   if (template === null) return;
   const opened = findOpen();
-  if (opened) return ws().setActive(opened.id);
+  if (opened) return show(opened);
   const id = crypto.randomUUID();
   seedEditor(id, template);
   ws().addTab({
     id,
     title: ref.relation,
     console: { db: ref.db, mode: "AutoCommit" },
-    table: { schema: ref.schema, table: ref.relation, page: 0, query: EMPTY_QUERY },
+    table: { schema: ref.schema, table: ref.relation, page: 0, query: query ?? EMPTY_QUERY },
     file: null,
   });
 }

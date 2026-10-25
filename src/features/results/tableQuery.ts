@@ -3,7 +3,7 @@ import { create } from "zustand";
 import { commands, type ColumnFilter, type FilterOp, type TabId, type TableOrderView, type TableQuery, type TableSortKey } from "../../ipc/bindings";
 import { useCatalog, viewFor } from "../../state/catalog";
 import { sameDb } from "../../state/dbKey";
-import { isTableTab, useWorkspace, type TableTab } from "../../state/workspace";
+import { EMPTY_QUERY, isTableTab, useWorkspace, type TableTab } from "../../state/workspace";
 import { updateTableQuery } from "../editor/runActions";
 
 export type SortKey = TableSortKey;
@@ -92,6 +92,10 @@ export function cycleTableOrder(tab: TableTab, column: string, additive: boolean
 export function filterForValue(column: string, value: string | null, negate: boolean): ColumnFilter {
   if (value === null) return { column, op: negate ? "NotNull" : "IsNull", value: "" };
   return { column, op: negate ? "Ne" : "Eq", value };
+}
+
+export function referencedRows(refColumns: string[], values: string[]): TableQuery {
+  return { ...EMPTY_QUERY, filters: refColumns.map((column, i) => ({ column, op: "Eq", value: values[i]! })) };
 }
 
 export type FilterDraft = ColumnFilter & { id: number };

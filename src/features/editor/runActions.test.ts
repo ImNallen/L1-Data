@@ -131,6 +131,39 @@ it("writes settings one at a time, so the write that lands last carries every ch
   expect({ overlapped, persisted }).toMatchObject({ overlapped: false, persisted: { maxRows: 5, colorScheme: "Dark" } });
 });
 
+it("shows a query in the table's open tab, or in a second tab while the first holds staged edits or edited text", async () => {
+  const pages: unknown[] = [];
+  mockIPC((cmd, args) => {
+    if (cmd === "table_script") return ordersScript;
+    if (cmd === "console_run") pages.push((args as { request: unknown }).request);
+    return null;
+  });
+  const byId: TableQuery = { orderBy: "", where: "", filters: [{ column: "id", op: "Eq", value: "7" }] };
+  const tables = () => Object.values(useWorkspace.getState().tabs).map((t) => t.table?.query);
+
+  await openTableTab(orders, byId);
+  const first = useWorkspace.getState().active!;
+  expect(tables()).toEqual([byId]);
+
+  const byTwo: TableQuery = { ...byId, filters: [{ column: "id", op: "Eq", value: "2" }] };
+  await openTableTab(orders, byTwo);
+  await vi.waitFor(() => expect(pages).toContainEqual({ kind: "tablePage", schema: "public", table: "orders", page: 0, query: byTwo }));
+  expect([useWorkspace.getState().active, tables()]).toEqual([first, [byTwo]]);
+
+  useTableEdits.getState().addRow(first);
+  await openTableTab(orders, byId);
+  const second = useWorkspace.getState().active!;
+  expect([second !== first, tables()]).toEqual([true, [byTwo, byId]]);
+  expect(pendingCount(useTableEdits.getState().byTab[first]!)).toBe(1);
+
+  insertAtCursor(second, " WHERE true");
+  await openTableTab(orders, byTwo);
+  expect(tables()).toEqual([byTwo, byId, byTwo]);
+
+  await openTableTab(orders);
+  expect([useWorkspace.getState().active, tables()]).toEqual([first, [byTwo, byId, byTwo]]);
+});
+
 async function openWithConsole(mode: "AutoCommit" | "Manual" = "AutoCommit") {
   await openTableTab(orders);
   const id = useWorkspace.getState().active!;

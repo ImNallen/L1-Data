@@ -7,6 +7,7 @@ import type {
   FileBinding,
   FileSaved,
   Layout,
+  ResultMeta,
   SavedQueryId,
   Settings,
   TabId,
@@ -58,6 +59,7 @@ export type Overlay =
   | { kind: "saved"; entry: SavedEntry }
   | { kind: "connection"; editing: ConnectionId | null }
   | { kind: "cell"; title: string; value: string | null }
+  | { kind: "record"; meta: ResultMeta; row: number }
   | ({ kind: "ask"; seq: number; settle: (choice: string | null) => void } & Required<Question<string>>);
 
 export type Choice<C extends string> = { id: C; label: string; variant: "primary" | "danger" | "ghost" };
