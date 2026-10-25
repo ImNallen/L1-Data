@@ -1,4 +1,4 @@
-use super::Ddl;
+use super::{Ddl, Grant, privileges};
 use crate::text::{quote_ident_if_needed as ident, quote_literal};
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -28,9 +28,11 @@ pub struct Table {
     pub unscripted: Unscripted,
 }
 
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Unscripted {
-    pub privileges: bool,
+    pub privileges: Vec<Grant>,
+    /// The privileges on each sequence the script creates for the table, by schema and name.
+    pub sequence_privileges: Vec<((String, String), Vec<Grant>)>,
     pub security_labels: bool,
 }
 
@@ -285,7 +287,7 @@ fn table_statements(t: &Table, out: &mut Vec<String>, warnings: &mut Vec<String>
     for c in &t.columns {
         out.extend(comment(&format!("COLUMN {name}.{}", ident(&c.name)), &c.comment));
     }
-    warnings.extend(unscripted(t.unscripted, &name));
+    warnings.extend(unscripted(&t.unscripted, &name));
     if !in_replay_order(&t.columns) {
         warnings.push(format!("the column order of {name}, because a replay puts inherited columns first"));
     }
@@ -299,11 +301,9 @@ fn in_replay_order(columns: &[Column]) -> bool {
     positions.windows(2).all(|w| w[0] <= w[1])
 }
 
-fn unscripted(u: Unscripted, name: &str) -> Vec<String> {
-    let mut out = vec![];
-    if u.privileges {
-        out.push(format!("privileges on {name}"));
-    }
+fn unscripted(u: &Unscripted, name: &str) -> Vec<String> {
+    let mut out: Vec<String> = privileges(name, &u.privileges).into_iter().collect();
+    out.extend(u.sequence_privileges.iter().filter_map(|((schema, sequence), grants)| privileges(&qualified(schema, sequence), grants)));
     if u.security_labels {
         out.push(format!("security labels on {name}"));
     }
@@ -492,13 +492,13 @@ pub fn view(v: &View) -> Ddl {
     for c in &v.columns {
         statements.extend(comment(&format!("COLUMN {name}.{}", ident(&c.name)), &c.comment));
     }
-    Ddl { text: script(statements), warnings: unscripted(v.unscripted, &name) }
+    Ddl { text: script(statements), warnings: unscripted(&v.unscripted, &name) }
 }
 
-pub fn routine(definition: &str, procedure: bool, signature: &str, description: &Option<String>) -> Ddl {
+pub fn routine(definition: &str, procedure: bool, signature: &str, description: &Option<String>, grants: &[Grant]) -> Ddl {
     let mut statements = vec![definition.trim_end().to_owned()];
     statements.extend(comment(&format!("{} {signature}", if procedure { "PROCEDURE" } else { "FUNCTION" }), description));
-    Ddl::complete(script(statements))
+    Ddl { text: script(statements), warnings: privileges(signature, grants).into_iter().collect() }
 }
 
 pub fn index_script(i: &Index, constraint: Option<&Constraint>, keyword: &str, schema: &str, relation: &str) -> Ddl {
@@ -625,6 +625,11 @@ impl Walk {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::script::Change;
+
+    fn grant(privilege: &str, column: Option<&str>, grantee: &str, change: Change) -> Grant {
+        Grant { privilege: privilege.into(), column: column.map(Into::into), grantee: grantee.into(), change }
+    }
 
     fn sequence(start: i64, increment: i64, min: i64, max: i64) -> Sequence {
         Sequence { schema: "public".into(), name: "t_id_seq".into(), column: "id".into(), type_name: "bigint".into(), start, increment, min, max, cache: 1, cycle: false }
@@ -816,12 +821,24 @@ ALTER FOREIGN TABLE public.e2 ALTER COLUMN v OPTIONS (ADD column_name 'vv');
                 Column { declared: false, inherited: from_base(3), ..col("late", "integer") },
             ],
             parent: Parent::Inherits(vec![("app".into(), "base".into()), ("app".into(), "Other".into())]),
-            unscripted: Unscripted { privileges: true, security_labels: true },
+            unscripted: Unscripted {
+                privileges: vec![grant("SELECT", None, "app", Change::Granted), grant("UPDATE", Some("\"Mixed\""), "PUBLIC", Change::GrantedWithGrantOption)],
+                sequence_privileges: vec![(("app".into(), "child_id_seq".into()), vec![grant("USAGE", None, "app", Change::Granted)])],
+                security_labels: true,
+            },
             ..Default::default()
         };
         let ddl = table(&t);
         assert_eq!(ddl.text, "CREATE TABLE app.child (\n    note text,\n    extra text\n) INHERITS (app.base, app.\"Other\");\n\nALTER TABLE app.child ALTER COLUMN id SET DEFAULT 2;\n");
-        assert_eq!(ddl.warnings, ["privileges on app.child", "security labels on app.child", "the column order of app.child, because a replay puts inherited columns first"]);
+        assert_eq!(
+            ddl.warnings,
+            [
+                "privileges on app.child (SELECT granted to app, UPDATE (\"Mixed\") granted with grant option to PUBLIC)",
+                "privileges on app.child_id_seq (USAGE granted to app)",
+                "security labels on app.child",
+                "the column order of app.child, because a replay puts inherited columns first",
+            ]
+        );
     }
 
     #[test]
@@ -848,14 +865,14 @@ ALTER FOREIGN TABLE public.e2 ALTER COLUMN v OPTIONS (ADD column_name 'vv');
             comment: Some("paid only".into()),
             columns: vec![Column { default: Some("42".into()), comment: Some("the id".into()), ..col("id", "integer") }],
             rules: vec![Rule { name: "ins".into(), definition: "CREATE RULE ins AS\n    ON INSERT TO public.paid DO INSTEAD NOTHING;".into(), enabled: 'O', comment: None }],
-            unscripted: Unscripted { privileges: true, security_labels: false },
+            unscripted: Unscripted { privileges: vec![grant("SELECT", None, "PUBLIC", Change::Revoked)], ..Default::default() },
             ..Default::default()
         };
         assert_eq!(
             view(&v),
             Ddl {
                 text: "CREATE VIEW public.paid WITH (security_barrier=true) AS\n SELECT orders.id\n   FROM public.orders\n  WITH CASCADED CHECK OPTION;\n\nALTER VIEW public.paid ALTER COLUMN id SET DEFAULT 42;\n\nCREATE RULE ins AS\n    ON INSERT TO public.paid DO INSTEAD NOTHING;\n\nCOMMENT ON VIEW public.paid IS 'paid only';\n\nCOMMENT ON COLUMN public.paid.id IS 'the id';\n".into(),
-                warnings: vec!["privileges on public.paid".into()],
+                warnings: vec!["privileges on public.paid (SELECT revoked from PUBLIC)".into()],
             }
         );
         let m = View {
@@ -877,9 +894,10 @@ ALTER FOREIGN TABLE public.e2 ALTER COLUMN v OPTIONS (ADD column_name 'vv');
     fn a_routine_ends_its_definition_and_comments_on_its_signature() {
         let def = "CREATE OR REPLACE PROCEDURE public.p(a integer)\n LANGUAGE sql\nAS $procedure$ SELECT 1 $procedure$\n";
         assert_eq!(
-            routine(def, true, "public.p(a integer)", &Some("x".into())).text,
-            "CREATE OR REPLACE PROCEDURE public.p(a integer)\n LANGUAGE sql\nAS $procedure$ SELECT 1 $procedure$;\n\nCOMMENT ON PROCEDURE public.p(a integer) IS 'x';\n"
+            routine(def, true, "public.p(a integer)", &Some("x".into()), &[]),
+            Ddl::complete("CREATE OR REPLACE PROCEDURE public.p(a integer)\n LANGUAGE sql\nAS $procedure$ SELECT 1 $procedure$;\n\nCOMMENT ON PROCEDURE public.p(a integer) IS 'x';\n".into())
         );
+        assert_eq!(routine(def, true, "public.p(integer)", &None, &[grant("EXECUTE", None, "PUBLIC", Change::Revoked)]).warnings, ["privileges on public.p(integer) (EXECUTE revoked from PUBLIC)"]);
     }
 
     #[test]

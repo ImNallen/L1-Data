@@ -2777,9 +2777,15 @@ async fn hostile_object_scripts_replay_every_property_or_warn() {
         let oid = async |name: &str| oids(&format!("select '{name}'::regclass::oid")).await[0];
 
         let mut texts = vec![];
+        let mut warned = std::collections::BTreeMap::new();
         for oid in oids("select p.oid from pg_proc p join pg_namespace n on n.oid = p.pronamespace where n.nspname = 'app' order by p.oid").await {
-            texts.push(script(ScriptTarget::Routine { oid }).await.text);
+            let s = script(ScriptTarget::Routine { oid }).await;
+            if !s.warnings.is_empty() {
+                warned.insert(s.title.clone(), s.warnings.clone());
+            }
+            texts.push(s.text);
         }
+        assert_eq!(warned, std::collections::BTreeMap::from([("sec_def.sql".to_owned(), vec!["privileges on app.sec_def(integer) (EXECUTE revoked from PUBLIC)".to_owned()])]));
         replay_in_dependency_order(&replay, texts).await;
 
         let mut texts = vec![];
@@ -2797,7 +2803,8 @@ async fn hostile_object_scripts_replay_every_property_or_warn() {
             warned,
             std::collections::BTreeMap::from([
                 ("child.sql".to_owned(), vec!["the column order of app.child, because a replay puts inherited columns first".to_owned()]),
-                ("select.sql".to_owned(), vec!["privileges on app.\"select\"".to_owned()]),
+                ("ren.sql".to_owned(), vec!["privileges on app.ren_custom_seq (USAGE granted to pg_read_all_data)".to_owned()]),
+                ("select.sql".to_owned(), vec!["privileges on app.\"select\" (SELECT granted to pg_read_all_data, UPDATE (\"Mixed\") granted to pg_read_all_data)".to_owned()]),
             ])
         );
         let reordered = |facts: Vec<String>| facts.into_iter().filter(|f| !f.starts_with("app.child column")).collect::<Vec<_>>();

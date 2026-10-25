@@ -2,13 +2,13 @@ use tokio_postgres::types::ToSql;
 use tokio_postgres::{Client, Row, Transaction};
 
 use crate::model::{DetailError, ObjectScript, ScriptTarget};
-use crate::script::{self, postgres as ddl};
+use crate::script::{self, Change, Grant, postgres as ddl};
+use crate::text::quote_ident_if_needed as ident;
 
 const RELATION: &str = "SELECT c.relkind::text, n.nspname, c.relname, c.relpersistence = 'u',
         coalesce(c.reloptions, '{}')::text[] || ARRAY(SELECT 'toast.' || o FROM pg_class t, unnest(t.reloptions) o WHERE t.oid = c.reltoastrelid),
         obj_description(c.oid, 'pg_class'), pg_get_partkeydef(c.oid), pg_get_expr(c.relpartbound, c.oid), pn.nspname, p.relname, c.relispopulated,
         c.relrowsecurity, c.relforcerowsecurity, c.relreplident::text, ts.spcname, CASE WHEN am.amname <> 'heap' THEN am.amname END,
-        c.relacl IS NOT NULL OR EXISTS (SELECT 1 FROM pg_attribute a WHERE a.attrelid = c.oid AND a.attacl IS NOT NULL),
         EXISTS (SELECT 1 FROM pg_seclabel l WHERE l.classoid = 'pg_class'::regclass AND l.objoid = c.oid),
         fs.srvname, coalesce(ft.ftoptions, '{}'),
         ARRAY(SELECT hn.nspname::text FROM pg_inherits h JOIN pg_class hc ON hc.oid = h.inhparent JOIN pg_namespace hn ON hn.oid = hc.relnamespace
@@ -109,6 +109,70 @@ const ROUTINE: &str = "SELECT p.prokind::text, p.proname, CASE WHEN p.prokind <>
         obj_description(p.oid, 'pg_proc'), n.nspname, pg_get_function_identity_arguments(p.oid)
      FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace WHERE p.oid = $1";
 
+/// The changes an ACL makes to its default, one row per privilege, keyed by `keys`. A NULL ACL is
+/// the default, so `filter` leaves it out.
+fn acl_changes(from: &str, acl: &str, default: &str, filter: &str, keys: &str) -> String {
+    let side = |acl: &str, granted: bool| format!("SELECT {keys}, a.grantee, a.privilege_type, a.is_grantable, {granted} FROM {from} CROSS JOIN LATERAL aclexplode({acl}) a WHERE {filter}");
+    format!("({} EXCEPT {}) UNION ALL ({} EXCEPT {})", side(acl, true), side(default, true), side(default, false), side(acl, false))
+}
+
+fn grants_query(changes: &[String]) -> String {
+    format!(
+        "SELECT k.s, k.n, k.col, k.privilege_type, CASE WHEN k.grantee = 0 THEN NULL ELSE pg_get_userbyid(k.grantee)::text END, k.is_grantable, k.granted
+         FROM ({}) k(s, n, col, grantee, privilege_type, is_grantable, granted)
+         ORDER BY 1 NULLS FIRST, 2 NULLS FIRST, 3 NULLS FIRST, 5 NULLS FIRST, 4, 7",
+        changes.join(" UNION ALL ")
+    )
+}
+
+/// The privileges on a relation, its columns, and the sequences its script creates.
+fn relation_grants_query() -> String {
+    grants_query(&[
+        acl_changes("pg_class c", "c.relacl", "acldefault('r', c.relowner)", "c.oid = $1 AND c.relacl IS NOT NULL", "NULL::text, NULL::text, NULL::text"),
+        acl_changes(
+            "pg_attribute at JOIN pg_class ac ON ac.oid = at.attrelid",
+            "at.attacl",
+            "acldefault('c', ac.relowner)",
+            "at.attrelid = $1 AND at.attnum > 0 AND NOT at.attisdropped AND at.attacl IS NOT NULL",
+            "NULL::text, NULL::text, at.attname::text",
+        ),
+        acl_changes(
+            "pg_depend dep JOIN pg_class sc ON sc.oid = dep.objid AND sc.relkind = 'S' JOIN pg_namespace sn ON sn.oid = sc.relnamespace",
+            "sc.relacl",
+            "acldefault('s', sc.relowner)",
+            "dep.classid = 'pg_class'::regclass AND dep.refclassid = 'pg_class'::regclass AND dep.refobjid = $1 AND dep.deptype IN ('a', 'i') AND sc.relacl IS NOT NULL",
+            "sn.nspname::text, sc.relname::text, NULL::text",
+        ),
+    ])
+}
+
+fn routine_grants_query() -> String {
+    grants_query(&[acl_changes("pg_proc p", "p.proacl", "acldefault('f', p.proowner)", "p.oid = $1 AND p.proacl IS NOT NULL", "NULL::text, NULL::text, NULL::text")])
+}
+
+fn grant_row(r: &Row) -> Grant {
+    let change = match (r.get::<_, bool>(6), r.get::<_, bool>(5)) {
+        (false, _) => Change::Revoked,
+        (true, true) => Change::GrantedWithGrantOption,
+        (true, false) => Change::Granted,
+    };
+    Grant { privilege: r.get(3), column: r.get::<_, Option<&str>>(2).map(ident), grantee: r.get::<_, Option<&str>>(4).map_or("PUBLIC".into(), ident), change }
+}
+
+fn unscripted(r: &Row, grants: &[Row]) -> ddl::Unscripted {
+    let mut u = ddl::Unscripted { security_labels: r.get(16), ..Default::default() };
+    for g in grants {
+        match (g.get::<_, Option<String>>(0), g.get::<_, Option<String>>(1)) {
+            (Some(schema), Some(name)) => match u.sequence_privileges.last_mut() {
+                Some((key, list)) if key.0 == schema && key.1 == name => list.push(grant_row(g)),
+                _ => u.sequence_privileges.push(((schema, name), vec![grant_row(g)])),
+            },
+            _ => u.privileges.push(grant_row(g)),
+        }
+    }
+    u
+}
+
 /// With `search_path` only `pg_catalog`, the server qualifies every name it prints in an
 /// expression or a view, index, constraint, or trigger definition. Routine bodies stay as written.
 pub async fn load(client: &mut Client, target: &ScriptTarget) -> Result<ObjectScript, DetailError> {
@@ -139,9 +203,16 @@ async fn relation(tx: &Transaction<'_>, oid: u32) -> Result<ObjectScript, Detail
         "r" | "p" | "f" => ddl::table(&table(tx, oid, &r).await?),
         kind @ ("v" | "m") => {
             let params: &[&(dyn ToSql + Sync)] = &[&oid];
-            let (query, columns, indexes, triggers, rules) =
-                tokio::try_join!(tx.query_one("SELECT pg_get_viewdef($1::oid, true)", params), tx.query(COLUMNS, params), tx.query(INDEXES, params), tx.query(TRIGGERS, params), tx.query(RULES, params))
-                    .map_err(failed)?;
+            let grants = relation_grants_query();
+            let (query, columns, indexes, triggers, rules, grants) = tokio::try_join!(
+                tx.query_one("SELECT pg_get_viewdef($1::oid, true)", params),
+                tx.query(COLUMNS, params),
+                tx.query(INDEXES, params),
+                tx.query(TRIGGERS, params),
+                tx.query(RULES, params),
+                tx.query(&grants, params)
+            )
+            .map_err(failed)?;
             ddl::view(&ddl::View {
                 schema: r.get(1),
                 name: name.clone(),
@@ -156,7 +227,7 @@ async fn relation(tx: &Transaction<'_>, oid: u32) -> Result<ObjectScript, Detail
                 indexes: indexes.iter().map(index_row).collect(),
                 triggers: triggers.iter().map(trigger_row).collect(),
                 rules: rules.iter().map(rule_row).collect(),
-                unscripted: unscripted(&r),
+                unscripted: unscripted(&r, &grants),
             })
         }
         _ => return Err(refused("Only tables and views can be scripted.")),
@@ -164,13 +235,10 @@ async fn relation(tx: &Transaction<'_>, oid: u32) -> Result<ObjectScript, Detail
     Ok(script::object_script(&name, ddl))
 }
 
-fn unscripted(r: &Row) -> ddl::Unscripted {
-    ddl::Unscripted { privileges: r.get(16), security_labels: r.get(17) }
-}
-
 async fn table(tx: &Transaction<'_>, oid: u32, r: &Row) -> Result<ddl::Table, DetailError> {
     let params: &[&(dyn ToSql + Sync)] = &[&oid];
-    let (columns, sequences, constraints, indexes, triggers, rules, policies, statistics, partitions) = tokio::try_join!(
+    let grants = relation_grants_query();
+    let (columns, sequences, constraints, indexes, triggers, rules, policies, statistics, partitions, grants) = tokio::try_join!(
         tx.query(COLUMNS, params),
         tx.query(OWNED_SEQUENCES, params),
         tx.query(CONSTRAINTS, params),
@@ -180,6 +248,7 @@ async fn table(tx: &Transaction<'_>, oid: u32, r: &Row) -> Result<ddl::Table, De
         tx.query(POLICIES, params),
         tx.query(STATISTICS, params),
         tx.query(PARTITIONS, params),
+        tx.query(&grants, params),
     )
     .map_err(failed)?;
     let schema: String = r.get(1);
@@ -187,7 +256,7 @@ async fn table(tx: &Transaction<'_>, oid: u32, r: &Row) -> Result<ddl::Table, De
     let parent = match r.get::<_, Option<String>>(7) {
         Some(bound) => ddl::Parent::Partition { schema: r.get(8), name: r.get(9), bound },
         None => {
-            let (schemas, names): (Vec<String>, Vec<String>) = (r.get(20), r.get(21));
+            let (schemas, names): (Vec<String>, Vec<String>) = (r.get(19), r.get(20));
             if schemas.is_empty() { ddl::Parent::None } else { ddl::Parent::Inherits(schemas.into_iter().zip(names).collect()) }
         }
     };
@@ -200,7 +269,7 @@ async fn table(tx: &Transaction<'_>, oid: u32, r: &Row) -> Result<ddl::Table, De
     Ok(ddl::Table {
         name: r.get(2),
         unlogged: r.get(3),
-        foreign: r.get::<_, Option<String>>(18).map(|server| ddl::Foreign { server, options: r.get(19) }),
+        foreign: r.get::<_, Option<String>>(17).map(|server| ddl::Foreign { server, options: r.get(18) }),
         access_method: r.get(15),
         options: r.get(4),
         tablespace: r.get(14),
@@ -231,7 +300,7 @@ async fn table(tx: &Transaction<'_>, oid: u32, r: &Row) -> Result<ddl::Table, De
             .map(|p| ddl::Policy { name: p.get(0), permissive: p.get(1), command: first(p.get(2)), roles: p.get(3), using: p.get(4), check: p.get(5), comment: p.get(6) })
             .collect(),
         statistics: statistics.iter().map(|s| ddl::Statistics { schema: s.get(0), name: s.get(1), definition: s.get(2), target: s.get(3), comment: s.get(4) }).collect(),
-        unscripted: unscripted(r),
+        unscripted: unscripted(r, &grants),
         schema,
     })
 }
@@ -325,14 +394,17 @@ fn keyword(relkind: &str) -> &'static str {
 }
 
 async fn routine(tx: &Transaction<'_>, oid: u32) -> Result<ObjectScript, DetailError> {
-    let r = tx.query_opt(ROUTINE, &[&oid]).await.map_err(failed)?.ok_or(DetailError::Gone)?;
+    let grants = routine_grants_query();
+    let params: &[&(dyn ToSql + Sync)] = &[&oid];
+    let (r, grants) = tokio::try_join!(tx.query_opt(ROUTINE, params), tx.query(&grants, params)).map_err(failed)?;
+    let r = r.ok_or(DetailError::Gone)?;
     let kind: &str = r.get(0);
     let name: String = r.get(1);
     let Some(definition) = r.get::<_, Option<String>>(2) else {
         return Err(refused("Aggregates cannot be scripted yet."));
     };
     let signature = format!("{}({})", ddl::qualified(r.get(4), &name), r.get::<_, &str>(5));
-    Ok(script::object_script(&name, ddl::routine(&definition, kind == "p", &signature, &r.get(3))))
+    Ok(script::object_script(&name, ddl::routine(&definition, kind == "p", &signature, &r.get(3), &grants.iter().map(grant_row).collect::<Vec<_>>())))
 }
 
 async fn index(tx: &Transaction<'_>, relation: u32, name: &str) -> Result<ObjectScript, DetailError> {

@@ -116,6 +116,11 @@ COMMENT ON FUNCTION app.f_out(int) IS 'outs';
 -- a table named with a reserved word, with privileges no script grants
 CREATE TABLE app."select" ("from" int, "Mixed" int);
 GRANT SELECT ON app."select" TO pg_read_all_data;
+GRANT UPDATE ("Mixed") ON app."select" TO pg_read_all_data;
+GRANT USAGE ON SEQUENCE app.ren_custom_seq TO pg_read_all_data;
+-- a SECURITY DEFINER function nobody but its owner may run
+CREATE FUNCTION app.sec_def(int) RETURNS int LANGUAGE sql SECURITY DEFINER AS 'SELECT 1';
+REVOKE EXECUTE ON FUNCTION app.sec_def(int) FROM PUBLIC;
 -- matview not populated, with a clustered index and column statistics
 CREATE MATERIALIZED VIEW app.mv WITH (fillfactor = 50) AS SELECT 1 AS x WITH NO DATA;
 CREATE UNIQUE INDEX mv_x ON app.mv (x);
