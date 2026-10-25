@@ -34,7 +34,7 @@ impl MsSession {
                 let table = table.first().ok_or(DetailError::Gone)?;
                 let indexes = self.indexes(oid, &format!("i.name={}", quote_literal(name))).await?;
                 let index = indexes.first().ok_or(DetailError::Gone)?;
-                Ok(ObjectScript { title: script::title(name), text: ddl::index(index, &ddl::qualified(&text(table, 0)?, &text(table, 1)?)) })
+                Ok(script::object_script(name, script::Ddl::complete(ddl::index(index, &ddl::qualified(&text(table, 0)?, &text(table, 1)?)))))
             }
         }
     }
@@ -57,7 +57,7 @@ impl MsSession {
                     indexes: self.indexes(oid, "i.is_primary_key=0 AND i.is_unique_constraint=0 AND i.type IN (1,2)").await?,
                     triggers: self.modules(&format!("o.parent_object_id={oid} AND o.type='TR'")).await?.into_iter().map(|(_, m)| m).collect(),
                 };
-                Ok(ObjectScript { title: script::title(&name), text: ddl::table(&table) })
+                Ok(script::object_script(&name, script::Ddl::complete(ddl::table(&table))))
             }
             _ => Err(refused("Only tables and views can be scripted.")),
         }
@@ -65,7 +65,7 @@ impl MsSession {
 
     async fn module_script(&mut self, filter: &str) -> Result<ObjectScript, DetailError> {
         let (name, module) = self.modules(filter).await?.into_iter().next().ok_or(DetailError::Gone)?;
-        Ok(ObjectScript { title: script::title(&name), text: ddl::module(&module) })
+        Ok(script::object_script(&name, script::Ddl::complete(ddl::module(&module))))
     }
 
     async fn modules(&mut self, filter: &str) -> Result<Vec<(String, ddl::Module)>, DetailError> {

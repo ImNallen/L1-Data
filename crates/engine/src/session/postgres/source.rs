@@ -134,7 +134,7 @@ async fn relation(tx: &Transaction<'_>, oid: u32) -> Result<ObjectScript, Detail
         "f" => return Err(refused("Foreign tables cannot be scripted yet.")),
         _ => return Err(refused("Only tables and views can be scripted.")),
     };
-    Ok(ObjectScript { title: script::title(&name), text })
+    Ok(script::object_script(&name, script::Ddl::complete(text)))
 }
 
 fn column(r: &Row) -> ddl::Column {
@@ -172,13 +172,13 @@ async fn routine(tx: &Transaction<'_>, oid: u32) -> Result<ObjectScript, DetailE
         return Err(refused("Aggregates cannot be scripted yet."));
     };
     let signature = format!("{}({})", ddl::qualified(r.get(4), &name), r.get::<_, &str>(5));
-    Ok(ObjectScript { title: script::title(&name), text: ddl::routine(&definition, kind == "p", &signature, &r.get(3)) })
+    Ok(script::object_script(&name, script::Ddl::complete(ddl::routine(&definition, kind == "p", &signature, &r.get(3)))))
 }
 
 async fn index(tx: &Transaction<'_>, relation: u32, name: &str) -> Result<ObjectScript, DetailError> {
     let sql = "SELECT pg_get_indexdef(i.indexrelid) FROM pg_index i JOIN pg_class ic ON ic.oid = i.indexrelid WHERE i.indrelid = $1 AND ic.relname = $2";
     let r = tx.query_opt(sql, &[&relation, &name]).await.map_err(failed)?.ok_or(DetailError::Gone)?;
-    Ok(ObjectScript { title: script::title(name), text: ddl::script(vec![ddl::index(r.get(0))]) })
+    Ok(script::object_script(name, script::Ddl::complete(ddl::script(vec![ddl::index(r.get(0))]))))
 }
 
 async fn trigger(tx: &Transaction<'_>, relation: u32, name: &str) -> Result<ObjectScript, DetailError> {
@@ -187,5 +187,5 @@ async fn trigger(tx: &Transaction<'_>, relation: u32, name: &str) -> Result<Obje
                WHERE t.tgrelid = $1 AND t.tgname = $2";
     let r = tx.query_opt(sql, &[&relation, &name]).await.map_err(failed)?.ok_or(DetailError::Gone)?;
     let table = ddl::qualified(r.get(3), r.get(4));
-    Ok(ObjectScript { title: script::title(name), text: ddl::script(ddl::trigger(&trigger_row(&r), &table)) })
+    Ok(script::object_script(name, script::Ddl::complete(ddl::script(ddl::trigger(&trigger_row(&r), &table)))))
 }

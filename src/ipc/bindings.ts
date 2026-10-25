@@ -864,11 +864,14 @@ export type ModelOption = {
 	recommended: boolean,
 };
 
-/**  The DDL that creates one object, with every name schema-qualified. */
+/**  The DDL that creates one object. */
 export type ObjectScript = {
 	/**  The tab title: the object's name and `.sql`. */
 	title: string,
+	/**  Starts with one `-- L1 Data could not script: ...` line per warning. */
 	text: string,
+	/**  The properties of the object that `text` does not recreate. */
+	warnings: string[],
 };
 
 /**  A console whose transaction would be lost by a disconnect, a close, or a restart. */

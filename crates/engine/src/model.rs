@@ -442,13 +442,16 @@ pub enum ScriptTarget {
     Trigger { relation_oid: u32, name: String },
 }
 
-/// The DDL that creates one object, with every name schema-qualified.
+/// The DDL that creates one object.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Type)]
 #[serde(rename_all = "camelCase")]
 pub struct ObjectScript {
     /// The tab title: the object's name and `.sql`.
     pub title: String,
+    /// Starts with one `-- L1 Data could not script: ...` line per warning.
     pub text: String,
+    /// The properties of the object that `text` does not recreate.
+    pub warnings: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Type)]

@@ -203,6 +203,7 @@ export async function openObjectScript(db: DatabaseRef, target: ScriptTarget): P
   const res = await commands.objectScript(db, target);
   if (res.status === "error") return useWorkspace.getState().notify(detailErrorText(res.error));
   openSqlTab({ db, text: res.data.text, title: res.data.title });
+  if (res.data.warnings.length > 0) useWorkspace.getState().notify(`L1 Data could not script: ${res.data.warnings.join("; ")}.`);
 }
 
 function ScriptMenuItem({ db, target, label }: { db: DatabaseRef; target: ScriptTarget; label: string }) {
