@@ -807,6 +807,11 @@ impl<'a> Walk<'a> {
         let name = |k: usize| Item::Named(fold(self.kind, self.text, self.sig[item[k]]));
         let n = item.len();
         let pg = self.kind == DatabaseKind::Postgres;
+        if let Some(k) = (0..n).rev().find(|&k| class(k) == Class::Other && text(k) == "::")
+            && k + 1 + self.cast_type_len(&item[k + 1..]) == n
+        {
+            return self.item(&item[..k]);
+        }
         match n {
             0 => Item::Unnamed,
             _ if !pg && n >= 3 && named(0) && text(1) == "=" => name(0),
@@ -814,11 +819,40 @@ impl<'a> Walk<'a> {
             _ if class(n - 1) == Class::Star && n >= 3 && class(n - 2) == Class::Dot && named(n - 3) => Item::Star(Some(fold(self.kind, self.text, self.sig[item[n - 3]]))),
             _ if named(n - 1) && self.word(item[n - 1]).is_some_and(|w| ["END", "NULL", "TRUE", "FALSE"].contains(&w.as_str())) => Item::Unnamed,
             1 if named(0) => name(0),
-            _ if named(n - 1) && text(n - 2) == "::" => self.item(&item[..n - 2]),
             _ if named(n - 1) && (self.is_word(item[n - 2], "AS") || matches!(class(n - 2), Class::Dot | Class::Word | Class::Name | Class::Close | Class::Str | Class::Number)) => name(n - 1),
             3 if pg && named(0) && class(1) == Class::Open && class(2) == Class::Close => name(0),
             _ => Item::Unnamed,
         }
+    }
+
+    fn cast_type_len(&self, tail: &[usize]) -> usize {
+        let word = |j: usize| tail.get(j).and_then(|&i| self.word(i));
+        let is = |j: usize, class: Class| tail.get(j).is_some_and(|&i| self.sig[i].class == class);
+        let text = |j: usize| tail.get(j).map_or("", |&i| &self.text[self.sig[i].span.clone()]);
+        if !is(0, Class::Word) && !is(0, Class::Name) {
+            return 0;
+        }
+        let mut j = 1;
+        while is(j, Class::Dot) && (is(j + 1, Class::Word) || is(j + 1, Class::Name)) {
+            j += 2;
+        }
+        let first = word(j - 1).unwrap_or_default();
+        let then = |j: usize, words: &[&str]| words.iter().enumerate().all(|(k, w)| word(j + k).as_deref() == Some(w));
+        match first.as_str() {
+            "DOUBLE" if then(j, &["PRECISION"]) => j += 1,
+            "CHARACTER" | "CHAR" | "BIT" if then(j, &["VARYING"]) => j += 1,
+            _ => {}
+        }
+        if is(j, Class::Open) && is(j + 1, Class::Close) {
+            j += 2;
+        }
+        if matches!(first.as_str(), "TIME" | "TIMESTAMP") && (then(j, &["WITH", "TIME", "ZONE"]) || then(j, &["WITHOUT", "TIME", "ZONE"])) {
+            j += 3;
+        }
+        while text(j) == "[" && text(j + 1) == "]" {
+            j += 2;
+        }
+        j
     }
 
     fn output(&self, id: usize) -> Output {
@@ -1575,6 +1609,8 @@ mod tests {
         assert_eq!(derived("with x as (select distinct * from orders) select * from x where |", Postgres), (vec![], vec!["orders".into()]));
         assert_eq!(derived("with x as (select distinct on (id) * from orders) select * from x where |", Postgres), (vec![], vec!["orders".into()]));
         assert_eq!(derived("with x as (select id::text, count(*), a + b, total n from orders) select * from x where |", Postgres).0, ["id", "count", "n"]);
+        let casts = "with x as (select total::double precision, id::numeric(10,2), t::timestamp(3) with time zone, a::int[], b::pg_catalog.int4, c::text d, e::numeric as f from orders) select * from x where |";
+        assert_eq!(derived(casts, Postgres).0, ["total", "id", "t", "a", "b", "d", "f"]);
         assert_eq!(derived("WITH x AS (SELECT TOP 5 amount = o.total, o.id FROM orders o) SELECT * FROM x WHERE |", SqlServer).0, ["amount", "id"]);
         assert_eq!(derived("with x as (select id, name from a union select id, title from b) select * from x where |", Postgres).0, ["id", "name"]);
         assert_eq!(derived("with x as (update orders set total = 0 returning id) select * from x where |", Postgres), (vec![], vec![]));
