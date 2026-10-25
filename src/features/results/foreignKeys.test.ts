@@ -35,12 +35,12 @@ const column = (name: string, attnum?: number): ColumnMeta => ({
 });
 
 it("links each foreign key whose columns are all in the result, by result column index in key order", () => {
-  const someColumns = tableColumns(view, { db: catalog.db, columns: [column("customer_id", 2), column("n")] }, null);
+  const someColumns = tableColumns(view, { db: catalog.db, columns: [column("customer_id", 2), column("n")] });
   expect(keyLinks(someColumns, () => detail)).toEqual([
     { name: "orders_customer_id_fkey", columns: ["customer_id"], schema: "public", table: "customers", resultColumns: [0], refColumns: ["id"] },
   ]);
 
-  const allColumns = tableColumns(view, { db: catalog.db, columns: [column("status", 3), column("id", 1), column("customer_id", 2)] }, null);
+  const allColumns = tableColumns(view, { db: catalog.db, columns: [column("status", 3), column("id", 1), column("customer_id", 2)] });
   expect(keyLinks(allColumns, () => detail).map((l) => [l.table, l.resultColumns])).toEqual([
     ["customers", [2]],
     ["addresses", [2, 0]],
@@ -48,7 +48,7 @@ it("links each foreign key whose columns are all in the result, by result column
 });
 
 it("gives each copy of a single-column key its own link", () => {
-  const twoCopies = tableColumns(view, { db: catalog.db, columns: [column("customer_id", 2), column("id", 1), column("customer_id", 2)] }, null);
+  const twoCopies = tableColumns(view, { db: catalog.db, columns: [column("customer_id", 2), column("id", 1), column("customer_id", 2)] });
   expect(keyLinks(twoCopies, () => detail).map((l) => [l.name, l.resultColumns])).toEqual([
     ["orders_customer_id_fkey", [0]],
     ["orders_customer_id_fkey", [2]],
@@ -56,21 +56,22 @@ it("gives each copy of a single-column key its own link", () => {
 });
 
 it("refuses a multi-column key when the result holds a column of its table twice, as a self-join does", () => {
-  const selfJoin = tableColumns(view, { db: catalog.db, columns: [column("id", 1), column("customer_id", 2), column("id", 1), column("status", 3)] }, null);
+  const selfJoin = tableColumns(view, { db: catalog.db, columns: [column("id", 1), column("customer_id", 2), column("id", 1), column("status", 3)] });
   expect(keyLinks(selfJoin, () => detail).map((l) => [l.name, l.resultColumns])).toEqual([["orders_customer_id_fkey", [1]]]);
 });
 
-it("matches a column without a source by name only on a browsing table tab, and only in the catalog's database", () => {
-  const result = { db: catalog.db, columns: [column("id"), column("customer_id")] };
-  expect(tableColumns(view, result, null)).toEqual([null, null]);
-  expect(tableColumns(view, result, { schema: "public", table: "orders" })).toEqual([
+it("maps only columns that name a table column, and only in the catalog of the database the rows came from", () => {
+  const unsourced = { db: catalog.db, columns: [column("id"), column("customer_id")] };
+  expect(tableColumns(view, unsourced)).toEqual([null, null]);
+  const sourced = { db: catalog.db, columns: [column("id", 1), column("customer_id", 2)] };
+  expect(tableColumns(view, sourced)).toEqual([
     { oid: orders.oid, name: "id", fk: false },
     { oid: orders.oid, name: "customer_id", fk: true },
   ]);
-  expect(tableColumns(view, { ...result, db: { connectionId: "c1", database: "reporting" } }, { schema: "public", table: "orders" })).toEqual([null, null]);
+  expect(tableColumns(view, { ...sourced, db: { connectionId: "c1", database: "reporting" } })).toEqual([null, null]);
 });
 
 it("reads keys only for relations that have a foreign key column in the result", () => {
-  expect(keyedRelations(tableColumns(view, { db: catalog.db, columns: [column("id", 1), column("status", 3)] }, null))).toEqual([]);
-  expect(keyedRelations(tableColumns(view, { db: catalog.db, columns: [column("id", 1), column("customer_id", 2)] }, null))).toEqual([orders.oid]);
+  expect(keyedRelations(tableColumns(view, { db: catalog.db, columns: [column("id", 1), column("status", 3)] }))).toEqual([]);
+  expect(keyedRelations(tableColumns(view, { db: catalog.db, columns: [column("id", 1), column("customer_id", 2)] }))).toEqual([orders.oid]);
 });

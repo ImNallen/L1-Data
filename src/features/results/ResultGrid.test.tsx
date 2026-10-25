@@ -10,7 +10,7 @@ import { dbKey } from "../../state/dbKey";
 import { useRelationDetail } from "../../state/relationDetail";
 import { dropRowCaches, PAGE_SIZE, rowCacheFor } from "../../state/rowCache";
 import { markDeleted, NO_EDITS, setCell, useTableEdits } from "../../state/tableEdits";
-import { EMPTY_QUERY, useWorkspace } from "../../state/workspace";
+import { useWorkspace } from "../../state/workspace";
 import { Overlays } from "../../shell/Overlays";
 import { shopCatalog } from "../../testing/shopCatalog";
 import { dropEditor } from "../editor/editorStates";
@@ -211,6 +211,8 @@ const ORDER_COLUMNS = [
   { name: "customer_id", attnum: 2 },
 ];
 
+let detailReads = 0;
+
 function queryResult(rows: (string | null)[][], spec: ResultSpec = {}): ResultMeta {
   const catalog = shopCatalog("c1", 1);
   const orders = catalog.schemas[1]!.relations.find((r) => r.name === "orders")!;
@@ -233,7 +235,10 @@ function queryResult(rows: (string | null)[][], spec: ResultSpec = {}): ResultMe
       const a = args as { row: number; col: number };
       return spec.cell!(a.row, a.col);
     }
-    if (cmd === "relation_detail") return ordersDetail(orders.oid, spec.keys ?? []);
+    if (cmd === "relation_detail") {
+      detailReads++;
+      return ordersDetail(orders.oid, spec.keys ?? []);
+    }
     if (cmd === "table_script") return { text: "SELECT * FROM public.customers", acceptedTexts: ["SELECT * FROM public.customers"] };
     return null;
   });
@@ -257,6 +262,7 @@ function queryResult(rows: (string | null)[][], spec: ResultSpec = {}): ResultMe
 afterEach(() => {
   cleanup();
   clearMocks();
+  detailReads = 0;
   dropRowCaches("q1");
   for (const id of useWorkspace.getState().order) dropEditor(id);
   useWorkspace.setState(useWorkspace.getInitialState(), true);
@@ -322,32 +328,26 @@ const lastOpened = (table: string) =>
     .filter((t) => t.table?.table === table)
     .at(-1)?.table?.query.filters;
 const byId = (value: string) => [{ column: "id", op: "Eq", value }];
-const settle = () => new Promise((resolve) => setTimeout(resolve, 50));
 
 async function followFrom(user: ReturnType<typeof userEvent.setup>, cell: HTMLElement, key = "orders_customer_id_fkey") {
   await user.pointer({ keys: "[MouseRight]", target: cell });
   await user.click(await screen.findByTestId(`grid-menu-follow-${key}`));
 }
 
-it.each([
-  { databaseKind: "SqlServer" as const, allRows: "Table" as const, offered: true },
-  { databaseKind: "SqlServer" as const, allRows: "Statement" as const, offered: false },
-  { databaseKind: "Postgres" as const, allRows: "Table" as const, offered: false },
-])("matches columns by name only on a SQL Server page of the tab's table: $databaseKind $allRows", async ({ databaseKind, allRows, offered }) => {
+it("follows a key from a SQL Server table page, whose columns carry their table column", async () => {
   const user = userEvent.setup();
-  const meta = queryResult([["1", "42"]], { databaseKind, allRows: { kind: allRows }, columns: ORDER_COLUMNS.map((c) => ({ ...c, attnum: null })) });
-  useWorkspace.getState().addTab({
-    id: "q1",
-    title: "orders",
-    console: { db: shopDb, mode: "AutoCommit" },
-    table: { schema: "public", table: "orders", page: 0, query: EMPTY_QUERY },
-    file: null,
-  });
+  render(<ResultGrid meta={queryResult([["1", "42"]], { databaseKind: "SqlServer", allRows: { kind: "Table" } })} done query={null} editing={null} />);
+  await followFrom(user, await screen.findByText("42"));
+  await vi.waitFor(() => expect(lastOpened("customers")).toEqual(byId("42")));
+});
+
+it("offers no follow and reads no keys for columns without a table column, as a SQL Server statement result has", async () => {
+  const user = userEvent.setup();
+  const meta = queryResult([["1", "42"]], { databaseKind: "SqlServer", columns: ORDER_COLUMNS.map((c) => ({ ...c, attnum: null })) });
   render(<ResultGrid meta={meta} done query={null} editing={null} />);
   await user.pointer({ keys: "[MouseRight]", target: await screen.findByText("42") });
   await screen.findByTestId("grid-menu-record");
-  await settle();
-  expect(screen.queryByTestId("grid-menu-follow-orders_customer_id_fkey") !== null).toBe(offered);
+  expect([screen.queryByTestId("grid-menu-follow-orders_customer_id_fkey"), detailReads]).toEqual([null, 0]);
 });
 
 it("disables View as record on a staged new row", async () => {

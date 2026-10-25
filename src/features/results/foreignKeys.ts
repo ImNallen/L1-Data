@@ -1,23 +1,18 @@
 import { useEffect, useMemo } from "react";
 import type { RelationDetail, ResultMeta } from "../../ipc/bindings";
-import { findRelation, sourceColumn, useCatalog, viewFor, type CatalogView } from "../../state/catalog";
+import { sourceColumn, useCatalog, viewFor, type CatalogView } from "../../state/catalog";
 import { sameDb } from "../../state/dbKey";
 import { detailKey, useRelationDetail } from "../../state/relationDetail";
-import { isTableTab, useWorkspace } from "../../state/workspace";
-
-export type BrowsedTable = { schema: string; table: string };
 
 type TableColumn = { oid: number; name: string; fk: boolean };
 
 export type KeyLink = { name: string; columns: string[]; schema: string; table: string; resultColumns: number[]; refColumns: string[] };
 
-export function tableColumns(view: CatalogView | undefined, meta: Pick<ResultMeta, "db" | "columns">, table: BrowsedTable | null): (TableColumn | null)[] {
+export function tableColumns(view: CatalogView | undefined, meta: Pick<ResultMeta, "db" | "columns">): (TableColumn | null)[] {
   if (!view || !sameDb(view.catalog.db, meta.db)) return meta.columns.map(() => null);
-  const browsed = table ? findRelation(view, table.schema, table.table) : undefined;
   return meta.columns.map((c) => {
-    const hit = c.source ? sourceColumn(view, c.source) : browsed?.columns.find((column) => column.name === c.name);
-    const oid = c.source ? c.source.tableOid : browsed?.oid;
-    return hit && oid !== undefined ? { oid, name: hit.name, fk: hit.fk } : null;
+    const hit = sourceColumn(view, c.source);
+    return hit && c.source ? { oid: c.source.tableOid, name: hit.name, fk: hit.fk } : null;
   });
 }
 
@@ -43,16 +38,7 @@ export function keyLinks(columns: (TableColumn | null)[], detailOf: (oid: number
 
 export function useKeyLinks(meta: ResultMeta): KeyLink[] {
   const view = useCatalog((s) => viewFor(s.views, meta.db));
-  const sqlServerTablePage = useWorkspace((s) => {
-    const tab = s.tabs[meta.ref.tabId];
-    return meta.databaseKind === "SqlServer" && meta.allRows.kind === "Table" && tab && isTableTab(tab) ? tab.table : null;
-  });
-  const schema = sqlServerTablePage?.schema;
-  const name = sqlServerTablePage?.table;
-  const columns = useMemo(
-    () => tableColumns(view, meta, schema !== undefined && name !== undefined ? { schema, table: name } : null),
-    [view, meta, schema, name],
-  );
+  const columns = useMemo(() => tableColumns(view, meta), [view, meta]);
   const relations = useMemo(() => keyedRelations(columns), [columns]);
   const version = view?.catalog.version;
   useEffect(() => {
