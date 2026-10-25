@@ -1,6 +1,6 @@
 use crate::model::{DatabaseKind, ExecutionUnitKind, TableOrderEdit, TableOrderView, TableSortKey, TableScript, Relation};
 use crate::model::{
-    CellWrite, ColumnFilter, DocOffset, DocRange, FilterOp, FormatEdit, FormatError, RunTarget, ScriptOutline, TableQuery,
+    CellWrite, ColumnFilter, CompletionContext, DocOffset, DocRange, FilterOp, FormatEdit, FormatError, RunTarget, ScriptOutline, TableQuery,
 };
 use crate::sql::{self, ByteTarget, DmlVerb, StmtKind, StmtSpan};
 
@@ -69,6 +69,22 @@ pub fn script_outline(text: &str, cursor: DocOffset, database_kind: DatabaseKind
     ScriptOutline { unit_kind: crate::model::ExecutionUnitKind::Statement,
         statements: spans.iter().map(|s| map.range(s)).collect(),
         at_cursor: picked.first().and_then(|p| spans.iter().position(|s| s == p)).and_then(|i| u16::try_from(i).ok()),
+    }
+}
+
+pub fn completion_context(text: &str, cursor: DocOffset, database_kind: DatabaseKind) -> CompletionContext {
+    let map = OffsetMap::new(text);
+    let Some(scope) = sql::scope_at(text, map.from_utf16(cursor), database_kind) else {
+        return CompletionContext::None;
+    };
+    CompletionContext::Complete {
+        from: map.to_utf16(scope.from),
+        expect: scope.expect,
+        qualifier: scope.qualifier,
+        relations: scope.relations,
+        ctes: scope.ctes,
+        keywords: scope.keywords.into_iter().map(str::to_owned).collect(),
+        functions: scope.functions.into_iter().map(str::to_owned).collect(),
     }
 }
 
@@ -295,6 +311,17 @@ mod tests {
     fn script_outline_ranges_and_cursor_are_utf16() {
         let text = "-- 😀é\nselect 1;\nselect 2;";
         assert_eq!(script_outline(text, DocOffset(18)), ScriptOutline { unit_kind: crate::model::ExecutionUnitKind::Statement, statements: vec![r(0, 15), r(17, 25)], at_cursor: Some(1) });
+    }
+
+    #[test]
+    fn completion_context_reads_and_reports_utf16_offsets() {
+        let text = "select '😀' as e, o.cu from orders o";
+        let CompletionContext::Complete { from, qualifier, .. } = completion_context(text, DocOffset(22), DatabaseKind::Postgres) else {
+            panic!("a column after o. completes");
+        };
+        assert_eq!(from, DocOffset(20));
+        assert_eq!(qualifier, Some(crate::model::Qualifier::Relation { index: 0 }));
+        assert_eq!(completion_context(text, DocOffset(10), DatabaseKind::Postgres), CompletionContext::None);
     }
 
     fn writes(text: &str, target: RunTarget, kind: DatabaseKind) -> Vec<&str> {

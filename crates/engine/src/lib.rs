@@ -915,6 +915,11 @@ impl Engine {
         text::script_outline(text, cursor, database_kind)
     }
 
+    /// The editor's completion. Pure, so the sync command never needs the runtime.
+    pub fn completion_context(&self, text: &str, cursor: DocOffset, database_kind: DatabaseKind) -> CompletionContext {
+        text::completion_context(text, cursor, database_kind)
+    }
+
     /// The editor's format action. Pure, so the sync command never needs the runtime.
     pub fn editor_format(&self, text: &str, target: RunTarget, database_kind: DatabaseKind) -> Result<FormatEdit, FormatError> {
         text::format_edit(text, target, database_kind)
