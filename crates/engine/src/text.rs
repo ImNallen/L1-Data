@@ -6,19 +6,24 @@ use crate::sql::{self, ByteTarget, DmlVerb, StmtKind, StmtSpan};
 
 pub struct OffsetMap<'a> {
     text: &'a str,
+    /// One code unit per byte, so a conversion of a script's every statement stays linear.
+    ascii: bool,
 }
 
 impl<'a> OffsetMap<'a> {
     pub fn new(text: &'a str) -> Self {
-        Self { text }
+        Self { text, ascii: text.is_ascii() }
     }
 
     pub fn to_utf16(&self, byte: usize) -> DocOffset {
         let byte = byte.min(self.text.len());
-        DocOffset(self.text[..byte].encode_utf16().count() as u32)
+        DocOffset(if self.ascii { byte } else { self.text[..byte].encode_utf16().count() } as u32)
     }
 
     pub fn from_utf16(&self, off: DocOffset) -> usize {
+        if self.ascii {
+            return (off.0 as usize).min(self.text.len());
+        }
         let mut units = 0u32;
         for (byte, ch) in self.text.char_indices() {
             if units + ch.len_utf16() as u32 > off.0 {
