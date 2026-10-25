@@ -6,6 +6,7 @@ use std::sync::{Arc, Mutex, RwLock};
 use std::time::Duration;
 
 
+use crate::entra::AzCli;
 use crate::model::*;
 use crate::session::Session;
 use crate::tunnel::SshRoute;
@@ -25,11 +26,18 @@ pub struct ConnectParams {
     pub ssl_mode: SslMode,
     pub ca_cert_path: Option<String>,
     pub via: Option<SshRoute>,
+    /// Set for a SQL Server connection that signs in with Microsoft Entra ID. `user` and
+    /// `password` are then unused.
+    pub entra: Option<Arc<AzCli>>,
+}
+
+pub fn uses_entra(kind: DatabaseKind, auth: Option<SqlServerAuth>) -> bool {
+    kind == DatabaseKind::SqlServer && auth == Some(SqlServerAuth::EntraAzureCli)
 }
 
 impl ConnectParams {
     /// The one place that chooses which database a session targets.
-    pub fn for_database(c: &ConnectionConfig, database: &str, password: Option<String>, via: Option<SshRoute>) -> Self {
+    pub fn for_database(c: &ConnectionConfig, database: &str, password: Option<String>, via: Option<SshRoute>, entra: Option<Arc<AzCli>>) -> Self {
         Self {
             database_kind: c.database_kind,
             host: c.host.clone(),
@@ -40,10 +48,11 @@ impl ConnectParams {
             ssl_mode: c.ssl_mode,
             ca_cert_path: c.ca_cert_path.clone(),
             via,
+            entra,
         }
     }
 
-    pub fn from_draft(d: &ConnectionDraft, password: Option<String>, via: Option<SshRoute>) -> Self {
+    pub fn from_draft(d: &ConnectionDraft, password: Option<String>, via: Option<SshRoute>, entra: Option<Arc<AzCli>>) -> Self {
         Self {
             database_kind: d.database_kind,
             host: d.host.clone(),
@@ -54,6 +63,7 @@ impl ConnectParams {
             ssl_mode: d.ssl_mode,
             ca_cert_path: d.ca_cert_path.clone(),
             via,
+            entra,
         }
     }
 }
@@ -406,6 +416,7 @@ mod tests {
             color: None,
             ssh: None,
             environment: None,
+            sql_server_auth: None,
         };
         let databases = ["Shop", "shop"].map(|name| DatabaseInfo { name: name.into(), system: false, access: DbAccess::Ok });
         let home = DbSlot::new(DatabaseRef { connection_id: id, database: "Shop".into() });

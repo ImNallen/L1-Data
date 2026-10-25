@@ -312,6 +312,7 @@ function withTableTab(mode: TxnMode = "AutoCommit", color: string | null = null)
     color,
     ssh: null,
     environment: null,
+    sqlServerAuth: null,
   };
   Object.assign(useWorkspace.getInitialState(), { tabs: { t2: tab }, active: "t2", configs: { c: config } });
 }

@@ -341,6 +341,8 @@ export type ConnectionConfig = {
 	 */
 	ssh: SshTunnel | null,
 	environment: Environment | null,
+	/**  `None` is a SQL login, as on every connection saved before this field existed. */
+	sqlServerAuth: SqlServerAuth | null,
 };
 
 export type ConnectionDraft = {
@@ -358,6 +360,7 @@ export type ConnectionDraft = {
 	color: string | null,
 	ssh: SshTunnelDraft | null,
 	environment: Environment | null,
+	sqlServerAuth: SqlServerAuth | null,
 };
 
 export type ConnectionId = string;
@@ -1220,6 +1223,12 @@ export type SourceLimits = {
 	name: string,
 	outcome: LimitsOutcome,
 };
+
+/**
+ *  How a SQL Server connection signs in. `EntraAzureCli` sends an access token from the user's
+ *  `az login` and saves no password.
+ */
+export type SqlServerAuth = "SqlLogin" | "EntraAzureCli";
 
 export type SqlTypeRef = {
 	/**  `"bigint"`, `"integer[]"`, `"order_status"`. */

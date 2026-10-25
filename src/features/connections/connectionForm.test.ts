@@ -16,6 +16,7 @@ const saved: ConnectionConfig = {
   color: "red",
   ssh: null,
   environment: null,
+  sqlServerAuth: null,
 };
 
 const savedFields = {

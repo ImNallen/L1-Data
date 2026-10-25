@@ -43,6 +43,7 @@ impl Harness {
             color: None,
             ssh: None,
             environment: None,
+            sql_server_auth: None,
         }).await.unwrap().id;
         engine.connect(connection).await.unwrap();
         let prefix = format!("l1_opaque_{}", uuid::Uuid::new_v4().simple());

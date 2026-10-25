@@ -42,6 +42,7 @@ impl Harness {
                 color: None,
                 ssh: None,
                 environment: None,
+                sql_server_auth: None,
             },
         };
         let config = engine.save_connection(draft).await.unwrap();

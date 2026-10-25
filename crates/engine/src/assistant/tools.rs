@@ -489,7 +489,7 @@ mod pg_tests {
             PasswordInput::Set(p) => Some(p.clone()),
             _ => None,
         };
-        ConnectParams::from_draft(&draft, password, None)
+        ConnectParams::from_draft(&draft, password, None, None)
     }
 
     async fn query(shared: &Shared, sql: &str) -> Result<RowsOut, String> {

@@ -91,6 +91,7 @@ mod tests {
             ssl_mode: SslMode::Require,
             ca_cert_path: None,
             via: None,
+            entra: None,
         };
         let mut session = Session::open(&params, None, "UTC").await.unwrap();
         let table = format!("l1_typed_count_{}", uuid::Uuid::new_v4().simple());

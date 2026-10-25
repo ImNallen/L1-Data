@@ -39,6 +39,7 @@ impl Harness {
                 color: None,
                 ssh: None,
                 environment: None,
+                sql_server_auth: None,
             })
             .await
             .unwrap();

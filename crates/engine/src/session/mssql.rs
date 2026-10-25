@@ -81,14 +81,17 @@ pub(super) fn query_error(e: tiberius::error::Error) -> QueryError {
     }
 }
 
-fn config(p: &ConnectParams) -> Result<Config, ConnectError> {
+fn config(p: &ConnectParams, token: Option<&str>) -> Result<Config, ConnectError> {
     let mut config = Config::new();
     config.host(&p.host);
     config.port(p.port);
     config.database(&p.database);
     config.application_name("L1 Data");
     config.command_timeout(None);
-    config.authentication(AuthMethod::sql_server(&p.user, p.password.as_deref().unwrap_or("")));
+    config.authentication(match token {
+        Some(token) => AuthMethod::aad_token(token),
+        None => AuthMethod::sql_server(&p.user, p.password.as_deref().unwrap_or("")),
+    });
     config.encryption(EncryptionLevel::Required);
     match (p.ssl_mode, &p.ca_cert_path) {
         (SslMode::Require, None) => config.trust_cert(),
@@ -109,14 +112,25 @@ fn config(p: &ConnectParams) -> Result<Config, ConnectError> {
 
 impl MsSession {
     pub(super) async fn open(p: &ConnectParams) -> Result<Self, ConnectError> {
-        let cfg = config(p)?;
+        let token = match &p.entra {
+            Some(az) => Some(az.token().await?),
+            None => None,
+        };
+        let cfg = config(p, token.as_deref())?;
         let stream = p.dial().await?;
         let connection = Client::connect(cfg, stream.compat_write());
-        let client = tokio::time::timeout(CONNECT_TIMEOUT, connection).await.map_err(|_| ConnectError::Network { message: "SQL Server connection timed out".into() })?.map_err(|e| match e {
-            tiberius::error::Error::Tls(message) => ConnectError::Tls { message },
-            tiberius::error::Error::Server(e) if e.code() == 18456 => ConnectError::Auth { message: e.message().to_owned() },
-            e => ConnectError::Server(query_error(e)),
-        })?;
+        let connected = tokio::time::timeout(CONNECT_TIMEOUT, connection).await.map_err(|_| ConnectError::Network { message: "SQL Server connection timed out".into() })?;
+        let client = match connected {
+            Ok(client) => client,
+            Err(tiberius::error::Error::Tls(message)) => return Err(ConnectError::Tls { message }),
+            Err(tiberius::error::Error::Server(e)) if e.code() == 18456 => {
+                if let (Some(az), Some(token)) = (&p.entra, &token) {
+                    az.forget(token).await;
+                }
+                return Err(ConnectError::Auth { message: e.message().to_owned() });
+            }
+            Err(e) => return Err(ConnectError::Server(query_error(e))),
+        };
         let state = client.session_state().map_err(|e| ConnectError::Server(query_error(e)))?;
         let backend_pid = i32::from(state.server_process_id);
         let (major, minor, build) = state.server_version;
@@ -315,6 +329,7 @@ mod tests {
             ssl_mode: SslMode::Require,
             ca_cert_path: None,
             via: None,
+            entra: None,
         }
     }
 

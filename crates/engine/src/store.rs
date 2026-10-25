@@ -476,6 +476,7 @@ mod tests {
             color: None,
             ssh: None,
             environment: None,
+            sql_server_auth: None,
         };
         {
             let s = Store::open(&path).unwrap();

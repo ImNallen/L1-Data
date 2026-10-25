@@ -41,6 +41,7 @@ impl Harness {
             color: None,
             ssh: None,
             environment: None,
+            sql_server_auth: None,
         }).await.unwrap().id;
         engine.connect(connection).await.unwrap();
         let tab = TabId(uuid::Uuid::new_v4());

@@ -2,6 +2,7 @@ mod assistant;
 mod catalog;
 mod connection;
 mod console;
+mod entra;
 mod export;
 mod files;
 mod history;
@@ -90,6 +91,7 @@ pub(crate) struct Shared {
     next_chat_rev: AtomicU64,
     tunnels: tunnel::Tunnels,
     updates: update::Updates,
+    az: Arc<entra::AzCli>,
 }
 
 /// A saved SSH secret applies only to the auth kind it was saved for.
@@ -173,7 +175,11 @@ impl Shared {
             }
             None => None,
         };
-        Ok(ConnectParams::for_database(config, database, password, via))
+        Ok(ConnectParams::for_database(config, database, password, via, self.entra(config.database_kind, config.sql_server_auth)))
+    }
+
+    fn entra(&self, kind: DatabaseKind, auth: Option<SqlServerAuth>) -> Option<Arc<entra::AzCli>> {
+        connection::uses_entra(kind, auth).then(|| self.az.clone())
     }
 
     /// Parameters for a console session on `database`, from the config as saved now.
@@ -720,6 +726,7 @@ impl Engine {
             view_edits: tokio::sync::Mutex::new(()),
             timezone: iana_time_zone::get_timezone().unwrap_or_else(|_| "UTC".into()),
             runtime: tokio::runtime::Handle::current(),
+            az: Arc::new(entra::AzCli::new(cfg.agent_path.clone())),
             providers: provider::Providers::new(cfg.agent_path),
             assistant: assistant::Assistant::new(),
             process_groups: Arc::new(provider::agent::ProcessGroups::default()),
@@ -792,7 +799,9 @@ impl Engine {
         if d.database.trim().is_empty() {
             return Err(invalid("database is required"));
         }
-        if d.user.trim().is_empty() {
+        let sql_server_auth = d.sql_server_auth.filter(|_| d.database_kind == DatabaseKind::SqlServer);
+        let entra = connection::uses_entra(d.database_kind, sql_server_auth);
+        if !entra && d.user.trim().is_empty() {
             return Err(invalid("user is required"));
         }
         if let Some(t) = &d.ssh {
@@ -815,7 +824,8 @@ impl Engine {
         }
         let id = d.id.unwrap_or_else(|| ConnectionId(uuid::Uuid::new_v4()));
         let store = |e: StoreError| SaveError::Store { message: e.to_string() };
-        let has_password = match &d.password {
+        let password = if entra { &PasswordInput::Clear } else { &d.password };
+        let has_password = match password {
             PasswordInput::Set(pw) => {
                 let sealed = s.vault.seal(id, SecretSlot::Database, pw).map_err(|e| SaveError::Keychain { message: e.to_string() })?;
                 s.store.set_secret(id, SecretSlot::Database, &sealed).map_err(store)?;
@@ -849,6 +859,7 @@ impl Engine {
             color: d.color,
             ssh,
             environment: d.environment,
+            sql_server_auth,
         };
         s.store.upsert_connection(&config).map_err(store)?;
         Ok(config)
@@ -916,7 +927,7 @@ impl Engine {
             }
             None => None,
         };
-        let session = Session::open(&ConnectParams::from_draft(&d, password, via), None, &s.timezone).await?;
+        let session = Session::open(&ConnectParams::from_draft(&d, password, via, s.entra(d.database_kind, d.sql_server_auth)), None, &s.timezone).await?;
         Ok(session.server)
     }
 
@@ -1662,6 +1673,7 @@ mod tests {
             color: None,
             ssh: None,
             environment: None,
+            sql_server_auth: None,
         }
     }
 

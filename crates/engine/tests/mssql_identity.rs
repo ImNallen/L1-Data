@@ -21,6 +21,7 @@ fn draft(database: &str) -> ConnectionDraft {
         color: None,
         ssh: None,
         environment: None,
+        sql_server_auth: None,
     }
 }
 

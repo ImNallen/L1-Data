@@ -38,6 +38,7 @@ fn main() {
                 color: None,
                 ssh: None,
                 environment: None,
+                sql_server_auth: None,
             })
             .await;
         println!("{}", serde_json::to_string(&result).unwrap());

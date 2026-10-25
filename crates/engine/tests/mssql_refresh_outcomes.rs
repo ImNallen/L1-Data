@@ -47,6 +47,7 @@ impl Harness {
                 color: None,
                 ssh: None,
                 environment: None,
+                sql_server_auth: None,
             },
         };
         assert_eq!(draft.database, "shop", "Refresh regressions only create disposable objects in shop");

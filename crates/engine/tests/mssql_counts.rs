@@ -34,6 +34,7 @@ impl Harness {
             database: "shop".into(), user: "sa".into(),
             password: PasswordInput::Set(std::env::var("L1_DATA_TEST_MSSQL_PASSWORD").unwrap_or_else(|_| "L1Data_dev_Str0ng".into())),
             ssl_mode: SslMode::Require, ca_cert_path: None, color: None, ssh: None, environment: None,
+            sql_server_auth: None,
         }).await.unwrap();
         engine.connect(connection.id).await.unwrap();
         let h = Self {

@@ -92,6 +92,7 @@ fn postgres(ssh: SshTunnelDraft) -> ConnectionDraft {
         color: None,
         ssh: Some(ssh),
         environment: None,
+        sql_server_auth: None,
     }
 }
 

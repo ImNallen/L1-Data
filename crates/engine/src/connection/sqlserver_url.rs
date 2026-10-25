@@ -1,4 +1,4 @@
-use crate::model::{ConnectionDraft, DatabaseKind, PasswordInput, SslMode};
+use crate::model::{ConnectionDraft, DatabaseKind, PasswordInput, SqlServerAuth, SslMode};
 use percent_encoding::percent_decode_str;
 
 fn decode(value: &str) -> Result<String, String> {
@@ -9,6 +9,19 @@ fn decode(value: &str) -> Result<String, String> {
     Ok(decoded.into_owned())
 }
 
+fn authentication(value: &str) -> Result<SqlServerAuth, String> {
+    if value.eq_ignore_ascii_case("ActiveDirectoryAzCli") {
+        Ok(SqlServerAuth::EntraAzureCli)
+    } else if value.eq_ignore_ascii_case("SqlPassword") {
+        Ok(SqlServerAuth::SqlLogin)
+    } else {
+        Err("SQL Server Authentication must be SqlPassword or ActiveDirectoryAzCli".into())
+    }
+}
+
+/// Reads `scheme://host[:port][/database][?sslmode=...&Authentication=...]`, optionally followed by
+/// JDBC-style `;key=value` properties, as in `sqlserver://host;database=shop;Authentication=ActiveDirectoryAzCli`.
+/// The first `;` starts the properties, so a `;` in the user or password must be percent-encoded.
 pub(super) fn parse(input: &str, name: &str) -> Result<ConnectionDraft, String> {
     if input.chars().any(char::is_control) {
         return Err("SQL Server URL cannot contain control characters".into());
@@ -18,6 +31,10 @@ pub(super) fn parse(input: &str, name: &str) -> Result<ConnectionDraft, String> 
             return Err("SQL Server URL contains invalid percent encoding".into());
         }
     }
+    let (input, properties) = match input.split_once(';') {
+        Some((url, properties)) => (url, Some(properties)),
+        None => (input, None),
+    };
     let (_, authority) = input.split_once("://").ok_or("Use mssql:// or sqlserver:// with a TCP host")?;
     let raw_path = authority.split(['?', '#']).next().unwrap_or_default().split_once('/').map(|(_, p)| p).unwrap_or_default();
     if raw_path.contains('/') || matches!(raw_path, "." | "..") {
@@ -36,42 +53,66 @@ pub(super) fn parse(input: &str, name: &str) -> Result<ConnectionDraft, String> 
     if port == 0 {
         return Err("SQL Server port must be between 1 and 65535".into());
     }
-    let mut ssl_mode = SslMode::VerifyFull;
-    let mut seen_ssl = false;
+    let mut ssl_mode = None;
+    let mut sql_server_auth = None;
     if let Some(query) = url.query().filter(|q| !q.is_empty()) {
         for pair in query.split('&') {
             let (key, value) = pair.split_once('=').ok_or("SQL Server URL options need a name and value")?;
             let key = decode(&key.replace('+', " "))?;
             let value = decode(&value.replace('+', " "))?;
-            if key != "sslmode" {
+            if key == "sslmode" {
+                let mode = match value.as_str() {
+                    "require" => SslMode::Require,
+                    "verify-full" => SslMode::VerifyFull,
+                    _ => return Err("SQL Server sslmode must be require or verify-full".into()),
+                };
+                if ssl_mode.replace(mode).is_some() {
+                    return Err("SQL Server URL repeats sslmode".into());
+                }
+            } else if key.eq_ignore_ascii_case("authentication") {
+                if sql_server_auth.replace(authentication(&value)?).is_some() {
+                    return Err("SQL Server URL repeats Authentication".into());
+                }
+            } else {
                 return Err(format!("Unsupported SQL Server URL option: {key}"));
             }
-            if seen_ssl {
-                return Err("SQL Server URL repeats sslmode".into());
-            }
-            seen_ssl = true;
-            ssl_mode = match value.as_str() {
-                "require" => SslMode::Require,
-                "verify-full" => SslMode::VerifyFull,
-                _ => return Err("SQL Server sslmode must be require or verify-full".into()),
-            };
         }
     }
-    let database = if raw_path.is_empty() { "master".into() } else { decode(raw_path)? };
+    let mut database = (!raw_path.is_empty()).then(|| decode(raw_path)).transpose()?;
+    let mut user = decode(url.username())?;
+    let mut password = url.password().map(decode).transpose()?;
+    for property in properties.into_iter().flat_map(|p| p.split(';')).filter(|p| !p.is_empty()) {
+        let (key, value) = property.split_once('=').ok_or("SQL Server URL properties need a name and value")?;
+        let value = decode(value)?;
+        let repeated = match key.to_ascii_lowercase().as_str() {
+            "database" | "databasename" => database.replace(value).is_some(),
+            "user" => !std::mem::replace(&mut user, value).is_empty(),
+            "password" => password.replace(value).is_some(),
+            "authentication" => sql_server_auth.replace(authentication(&value)?).is_some(),
+            _ => return Err(format!("Unsupported SQL Server URL property: {key}")),
+        };
+        if repeated {
+            return Err(format!("SQL Server URL repeats {key}"));
+        }
+    }
+    if sql_server_auth == Some(SqlServerAuth::EntraAzureCli) {
+        password = None;
+    }
     Ok(ConnectionDraft {
         id: None,
         database_kind: DatabaseKind::SqlServer,
         name: name.into(),
         host,
         port,
-        database,
-        user: decode(url.username())?,
-        password: url.password().map(decode).transpose()?.map_or(PasswordInput::Clear, PasswordInput::Set),
-        ssl_mode,
+        database: database.unwrap_or_else(|| "master".into()),
+        user,
+        password: password.map_or(PasswordInput::Clear, PasswordInput::Set),
+        ssl_mode: ssl_mode.unwrap_or(SslMode::VerifyFull),
         ca_cert_path: None,
         color: None,
         ssh: None,
         environment: None,
+        sql_server_auth,
     })
 }
 
@@ -97,6 +138,21 @@ mod tests {
     }
 
     #[test]
+    fn authentication_selects_entra_from_a_query_or_jdbc_properties() {
+        let draft = draft_from_url("sqlserver://db.example.net;database=shop;Authentication=ActiveDirectoryAzCli", "").unwrap();
+        assert_eq!((draft.host.as_str(), draft.port, draft.database.as_str()), ("db.example.net", 1433, "shop"));
+        assert_eq!(draft.sql_server_auth, Some(SqlServerAuth::EntraAzureCli));
+        assert!(matches!(draft.password, PasswordInput::Clear));
+        let draft = draft_from_url("mssql://me:secret@db.example.net:1444/shop?sslmode=require&authentication=activedirectoryazcli", "").unwrap();
+        assert_eq!((draft.port, draft.ssl_mode, draft.sql_server_auth), (1444, SslMode::Require, Some(SqlServerAuth::EntraAzureCli)));
+        assert!(matches!(draft.password, PasswordInput::Clear), "an Entra draft carries no password");
+        let draft = draft_from_url("sqlserver://localhost:1434;databaseName=shop%3Bx;user=sa;password=p%3Bw;Authentication=SqlPassword", "").unwrap();
+        assert_eq!((draft.database.as_str(), draft.user.as_str(), draft.sql_server_auth), ("shop;x", "sa", Some(SqlServerAuth::SqlLogin)));
+        assert!(matches!(draft.password, PasswordInput::Set(p) if p == "p;w"));
+        assert_eq!(draft_from_url("sqlserver://localhost/shop", "").unwrap().sql_server_auth, None);
+    }
+
+    #[test]
     fn unsupported_or_unrepresentable_options_are_rejected() {
         for url in [
             "mssql://localhost/shop?sslmode=disable",
@@ -116,6 +172,13 @@ mod tests {
             "mssql://localhost,other/shop",
             "mssql://localhost/shop?sslmode",
             "mssql:shop",
+            "mssql://localhost/shop?Authentication=ActiveDirectoryPassword",
+            "mssql://localhost/shop?authentication=ActiveDirectoryAzCli&Authentication=SqlPassword",
+            "mssql://localhost/shop;database=other",
+            "mssql://localhost;database=a;databaseName=b",
+            "mssql://sa@localhost;user=other",
+            "mssql://localhost;encrypt=false",
+            "mssql://localhost;database",
         ] {
             assert!(draft_from_url(url, "").is_err(), "{url}");
         }
