@@ -120,14 +120,14 @@ it("toasts once when a download finishes, and never for a failure", () => {
   const stop = startUpdateSync();
   const at = (rev: number, status: UpdateStatus): UpdateState => ({ rev, track: "Stable", currentVersion: "0.1.0", status, checkedAtMs: null });
   const apply = (state: UpdateState) => useLive.getState().apply({ kind: "UpdateChanged", ...state });
-  apply(at(1, { kind: "Downloading", version: "0.2.0", downgrade: false, percent: 99 }));
+  apply(at(1, { kind: "Downloading", version: "0.2.0", downgrade: false, percent: 99, changes: [] }));
   apply(at(2, { kind: "Failed", failure: { kind: "BadSignature" } }));
   expect(ws().toast).toBeNull();
-  apply(at(3, { kind: "Downloading", version: "0.2.0", downgrade: false, percent: 99 }));
-  apply(at(4, { kind: "Downloaded", version: "0.2.0", downgrade: false }));
+  apply(at(3, { kind: "Downloading", version: "0.2.0", downgrade: false, percent: 99, changes: [] }));
+  apply(at(4, { kind: "Downloaded", version: "0.2.0", downgrade: false, changes: [] }));
   const toast = ws().toast;
   expect(toast?.text).toBe("L1 Data 0.2.0 is ready. Click the update button in the sidebar to restart into it.");
-  apply(at(5, { kind: "Downloaded", version: "0.2.0", downgrade: false }));
+  apply(at(5, { kind: "Downloaded", version: "0.2.0", downgrade: false, changes: [] }));
   expect(ws().toast).toBe(toast);
   stop();
 });

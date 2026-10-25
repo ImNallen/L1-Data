@@ -72,6 +72,10 @@ impl Release for TauriRelease {
         &self.0.version
     }
 
+    fn feed(&self) -> &serde_json::Value {
+        &self.0.raw_json
+    }
+
     fn download(self: Box<Self>, mut progress: Progress) -> BoxFuture<'static, Result<Box<dyn Verified>, UpdateFailure>> {
         Box::pin(async move {
             let mut received = 0;

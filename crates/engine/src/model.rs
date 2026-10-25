@@ -1611,14 +1611,31 @@ pub enum UpdateStatus {
     Checking,
     UpToDate,
     /// `downgrade` means the release is older than the running build, which happens only for a
-    /// nightly build on the Stable track.
-    Available { version: String, downgrade: bool },
+    /// nightly build on the Stable track. `changes` lists each release after the running build up
+    /// to `version`, newest first.
+    Available { version: String, downgrade: bool, changes: Vec<ReleaseChanges> },
     /// `percent` is `None` while the server sends no length.
-    Downloading { version: String, downgrade: bool, percent: Option<u8> },
+    Downloading { version: String, downgrade: bool, percent: Option<u8>, changes: Vec<ReleaseChanges> },
     /// Verified against the built-in key. The engine holds the bytes.
-    Downloaded { version: String, downgrade: bool },
+    Downloaded { version: String, downgrade: bool, changes: Vec<ReleaseChanges> },
     Installing { version: String },
     Failed { failure: UpdateFailure },
+}
+
+/// What one release changed, as the feed lists it. Display only.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct ReleaseChanges {
+    pub version: String,
+    pub items: Vec<ChangeItem>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct ChangeItem {
+    pub title: String,
+    pub author: Option<String>,
+    pub pr: Option<u32>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Type)]
@@ -2780,10 +2797,18 @@ mod tests {
     fn update_changed_keeps_its_own_tag() {
         let state = |status| UpdateState { rev: 3, track: UpdateTrack::Nightly, current_version: "0.1.1-nightly.20261023.5".into(), status, checked_at_ms: Some(1700) };
         assert_eq!(
-            serde_json::to_value(AppEvent::UpdateChanged(state(UpdateStatus::Downloading { version: "0.1.0".into(), downgrade: true, percent: Some(40) }))).unwrap(),
+            serde_json::to_value(AppEvent::UpdateChanged(state(UpdateStatus::Downloading {
+                version: "0.1.0".into(),
+                downgrade: true,
+                percent: Some(40),
+                changes: vec![ReleaseChanges { version: "0.1.0".into(), items: vec![ChangeItem { title: "fix(ui): x".into(), author: None, pr: Some(7) }] }],
+            }))).unwrap(),
             json!({
                 "kind": "UpdateChanged", "rev": 3, "track": "Nightly", "currentVersion": "0.1.1-nightly.20261023.5", "checkedAtMs": 1700,
-                "status": { "kind": "Downloading", "version": "0.1.0", "downgrade": true, "percent": 40 }
+                "status": {
+                    "kind": "Downloading", "version": "0.1.0", "downgrade": true, "percent": 40,
+                    "changes": [{ "version": "0.1.0", "items": [{ "title": "fix(ui): x", "author": null, "pr": 7 }] }]
+                }
             })
         );
         assert_eq!(

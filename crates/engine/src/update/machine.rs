@@ -1,7 +1,9 @@
 use semver::Version;
+use serde::Deserialize;
+use serde_json::Value;
 
 use super::Installed;
-use crate::model::{RestartImpact, UpdateError, UpdateFailure, UpdateState, UpdateStatus, UpdateTrack, UpdatesOff};
+use crate::model::{ChangeItem, ReleaseChanges, RestartImpact, UpdateError, UpdateFailure, UpdateState, UpdateStatus, UpdateTrack, UpdatesOff};
 
 const CHECK_EVERY_MS: i64 = 4 * 60 * 60 * 1000;
 const RETRY_AFTER_MS: i64 = 60 * 60 * 1000;
@@ -50,6 +52,48 @@ pub(crate) fn percent(received: u64, total: Option<u64>) -> Option<u8> {
     total.filter(|&t| t > 0).map(|t| (received.min(t) * 100 / t) as u8)
 }
 
+#[derive(Deserialize)]
+struct FeedRelease {
+    version: String,
+    items: Vec<FeedItem>,
+}
+
+#[derive(Deserialize)]
+struct FeedItem {
+    title: String,
+    author: Option<String>,
+    pr: Option<u32>,
+}
+
+/// The feed's `changes`. It is display only, so an entry this build cannot read is dropped and
+/// never fails the check.
+pub(crate) fn feed_changes(feed: &Value) -> Vec<(Version, ReleaseChanges)> {
+    let Some(entries) = feed.get("changes").and_then(Value::as_array) else { return Vec::new() };
+    entries
+        .iter()
+        .filter_map(|entry| {
+            let release = FeedRelease::deserialize(entry).ok()?;
+            let version = Version::parse(&release.version).ok()?;
+            let items = release.items.into_iter().map(|i| ChangeItem { title: i.title, author: i.author, pr: i.pr }).collect();
+            Some((version.clone(), ReleaseChanges { version: version.to_string(), items }))
+        })
+        .collect()
+}
+
+/// The releases a user moving from `installed` to `offered` gets, newest first. A downgrade gets none.
+fn changes_between(installed: &Version, offered: &Version, mut changes: Vec<(Version, ReleaseChanges)>) -> Vec<ReleaseChanges> {
+    changes.retain(|(v, _)| installed < v && v <= offered);
+    changes.sort_by(|(a, _), (b, _)| b.cmp(a));
+    changes.into_iter().map(|(_, c)| c).collect()
+}
+
+/// What a check found, before the policy judges it.
+pub(crate) struct Found<R> {
+    pub version: String,
+    pub changes: Vec<(Version, ReleaseChanges)>,
+    pub release: R,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct Ticket(u64);
 
@@ -61,12 +105,13 @@ pub(crate) struct Check {
 struct Offer<T> {
     version: Version,
     downgrade: bool,
+    changes: Vec<ReleaseChanges>,
     held: T,
 }
 
 impl<T> Offer<T> {
     fn with<U>(&self, held: U) -> Offer<U> {
-        Offer { version: self.version.clone(), downgrade: self.downgrade, held }
+        Offer { version: self.version.clone(), downgrade: self.downgrade, changes: self.changes.clone(), held }
     }
 }
 
@@ -122,9 +167,11 @@ impl<R, V> Machine<R, V> {
             Phase::Idle => UpdateStatus::Idle,
             Phase::Checking(_) => UpdateStatus::Checking,
             Phase::UpToDate => UpdateStatus::UpToDate,
-            Phase::Available(o) => UpdateStatus::Available { version: o.version.to_string(), downgrade: o.downgrade },
-            Phase::Downloading(o, percent) => UpdateStatus::Downloading { version: o.version.to_string(), downgrade: o.downgrade, percent: *percent },
-            Phase::Downloaded(o) => UpdateStatus::Downloaded { version: o.version.to_string(), downgrade: o.downgrade },
+            Phase::Available(o) => UpdateStatus::Available { version: o.version.to_string(), downgrade: o.downgrade, changes: o.changes.clone() },
+            Phase::Downloading(o, percent) => {
+                UpdateStatus::Downloading { version: o.version.to_string(), downgrade: o.downgrade, percent: *percent, changes: o.changes.clone() }
+            }
+            Phase::Downloaded(o) => UpdateStatus::Downloaded { version: o.version.to_string(), downgrade: o.downgrade, changes: o.changes.clone() },
             Phase::Installing(version) => UpdateStatus::Installing { version: version.to_string() },
             Phase::Failed(failure) => UpdateStatus::Failed { failure: failure.clone() },
         }
@@ -153,15 +200,15 @@ impl<R, V> Machine<R, V> {
         matches!(self.phase, Phase::Idle | Phase::UpToDate | Phase::Failed(_)).then(|| self.start_check())
     }
 
-    pub(crate) fn finish_check(&mut self, ticket: Ticket, fetched: Result<Option<(String, R)>, UpdateFailure>, now_ms: i64) {
+    pub(crate) fn finish_check(&mut self, ticket: Ticket, fetched: Result<Option<Found<R>>, UpdateFailure>, now_ms: i64) {
         let (Phase::Checking(current), Ok(installed)) = (&self.phase, &self.installed) else { return };
         if *current != ticket {
             return;
         }
         let offered = fetched.and_then(|found| match found {
             None => Ok(None),
-            Some((version, release)) => match Version::parse(&version) {
-                Ok(version) => Ok(Some((version, release))),
+            Some(Found { version, changes, release }) => match Version::parse(&version) {
+                Ok(version) => Ok(Some((version, changes, release))),
                 Err(e) => Err(UpdateFailure::Other { message: format!("the feed offers version {version:?}: {e}") }),
             },
         });
@@ -172,7 +219,12 @@ impl<R, V> Machine<R, V> {
             }
             Ok(found) => {
                 self.checked_at_ms = Some(now_ms);
-                match found.and_then(|(version, held)| wanted(installed, &version, self.track).map(|direction| Offer { version, downgrade: direction == Direction::Downgrade, held })) {
+                let offer = found.and_then(|(version, changes, held)| {
+                    let direction = wanted(installed, &version, self.track)?;
+                    let changes = changes_between(installed, &version, changes);
+                    Some(Offer { version, downgrade: direction == Direction::Downgrade, changes, held })
+                });
+                match offer {
                     Some(offer) => Phase::Available(offer),
                     None => Phase::UpToDate,
                 }
@@ -283,7 +335,11 @@ mod tests {
     }
 
     fn offer<T>(held: T) -> Offer<T> {
-        Offer { version: v("0.2.0"), downgrade: false, held }
+        Offer { version: v("0.2.0"), downgrade: false, changes: vec![], held }
+    }
+
+    fn found(version: &str) -> Result<Option<Found<()>>, UpdateFailure> {
+        Ok(Some(Found { version: version.into(), changes: vec![], release: () }))
     }
 
     fn at(phase: Phase<(), ()>) -> Machine<(), ()> {
@@ -323,13 +379,13 @@ mod tests {
     }
 
     fn available(version: &str, downgrade: bool) -> UpdateStatus {
-        UpdateStatus::Available { version: version.into(), downgrade }
+        UpdateStatus::Available { version: version.into(), downgrade, changes: vec![] }
     }
     fn downloading(percent: Option<u8>) -> UpdateStatus {
-        UpdateStatus::Downloading { version: "0.2.0".into(), downgrade: false, percent }
+        UpdateStatus::Downloading { version: "0.2.0".into(), downgrade: false, percent, changes: vec![] }
     }
     fn downloaded() -> UpdateStatus {
-        UpdateStatus::Downloaded { version: "0.2.0".into(), downgrade: false }
+        UpdateStatus::Downloaded { version: "0.2.0".into(), downgrade: false, changes: vec![] }
     }
     fn installing() -> UpdateStatus {
         UpdateStatus::Installing { version: "0.2.0".into() }
@@ -354,8 +410,8 @@ mod tests {
 
     #[test]
     fn only_the_check_in_flight_takes_its_result() {
-        let found = |m: &mut Machine<(), ()>| m.finish_check(Ticket(1), Ok(Some(("0.2.0".into(), ()))), 5);
-        assert_eq!(changed(table(found)), [(UpdateStatus::Checking, available("0.2.0", false))]);
+        let offered = |m: &mut Machine<(), ()>| m.finish_check(Ticket(1), found("0.2.0"), 5);
+        assert_eq!(changed(table(offered)), [(UpdateStatus::Checking, available("0.2.0", false))]);
         let nothing = |m: &mut Machine<(), ()>| m.finish_check(Ticket(1), Ok(None), 5);
         assert_eq!(changed(table(nothing)), [(UpdateStatus::Checking, UpdateStatus::UpToDate)]);
         let offline = |m: &mut Machine<(), ()>| m.finish_check(Ticket(1), Err(UpdateFailure::Offline), 5);
@@ -368,9 +424,9 @@ mod tests {
         let stale = m.begin_check().unwrap();
         let fresh = m.set_track(UpdateTrack::Nightly).unwrap().unwrap();
         assert_eq!(fresh.feed, feed(UpdateTrack::Nightly));
-        m.finish_check(stale.ticket, Ok(Some(("0.2.0".into(), ()))), 5);
+        m.finish_check(stale.ticket, found("0.2.0"), 5);
         assert_eq!(m.status(), UpdateStatus::Checking);
-        m.finish_check(fresh.ticket, Ok(Some(("0.2.1-nightly.20261024.6".into(), ()))), 6);
+        m.finish_check(fresh.ticket, found("0.2.1-nightly.20261024.6"), 6);
         assert_eq!(m.status(), available("0.2.1-nightly.20261024.6", false));
         assert_eq!(m.state().checked_at_ms, Some(6));
     }
@@ -396,6 +452,72 @@ mod tests {
         }
     }
 
+    fn entry(version: &str) -> Value {
+        serde_json::json!({ "version": version, "items": [{ "title": format!("feat(app): ship {version}"), "author": "ImNallen", "pr": 50 }] })
+    }
+
+    fn versions(status: &UpdateStatus) -> Vec<&str> {
+        let changes = match status {
+            UpdateStatus::Available { changes, .. } | UpdateStatus::Downloading { changes, .. } | UpdateStatus::Downloaded { changes, .. } => changes,
+            other => panic!("no changes in {other:?}"),
+        };
+        changes.iter().map(|c| c.version.as_str()).collect()
+    }
+
+    fn check(running: &str, track: UpdateTrack, offered: &str, feed: Value) -> Machine<(), ()> {
+        let mut m = Machine::new(installed(running), track);
+        let check = m.begin_check().unwrap();
+        m.finish_check(check.ticket, Ok(Some(Found { version: offered.into(), changes: feed_changes(&feed), release: () })), 5);
+        m
+    }
+
+    #[test]
+    fn an_offer_lists_each_release_after_the_running_build_newest_first_until_it_installs() {
+        let feed = serde_json::json!({ "version": "0.2.0", "changes": [entry("0.1.1"), entry("0.3.0"), entry("0.2.0"), entry("0.1.0"), entry("0.0.9")] });
+        let mut m = check("0.1.0", UpdateTrack::Stable, "0.2.0", feed);
+        assert_eq!(versions(&m.status()), ["0.2.0", "0.1.1"]);
+        let UpdateStatus::Available { changes, .. } = m.status() else { panic!() };
+        assert_eq!(changes[0].items, [ChangeItem { title: "feat(app): ship 0.2.0".into(), author: Some("ImNallen".into()), pr: Some(50) }]);
+        m.begin_download("0.2.0").unwrap();
+        m.progress(Some(40));
+        assert_eq!(versions(&m.status()), ["0.2.0", "0.1.1"]);
+        m.finish_download(Ok(()), 6);
+        assert_eq!(versions(&m.status()), ["0.2.0", "0.1.1"]);
+    }
+
+    #[test]
+    fn an_older_stable_offered_to_a_nightly_lists_no_changes() {
+        let feed = serde_json::json!({ "version": "0.1.0", "changes": [entry("0.1.0"), entry("0.0.9")] });
+        let m = check("0.1.1-nightly.20261023.5", UpdateTrack::Stable, "0.1.0", feed);
+        assert_eq!(m.status(), UpdateStatus::Available { version: "0.1.0".into(), downgrade: true, changes: vec![] });
+    }
+
+    #[test]
+    fn a_change_list_this_build_cannot_read_drops_only_what_it_cannot_read() {
+        assert_eq!(feed_changes(&serde_json::json!({ "version": "0.2.0" })), []);
+        assert_eq!(feed_changes(&serde_json::json!({ "version": "0.2.0", "changes": { "0.2.0": [] } })), []);
+        let feed = serde_json::json!({ "version": "0.2.0", "changes": [
+            { "version": "0.2.0", "items": [{ "title": "fix(ui): keep the caret", "author": null, "pr": null }, { "title": "docs: say why" }] },
+            { "version": "next", "items": [] },
+            { "version": "0.1.9", "items": [{ "title": "feat(app): x", "pr": "50" }] },
+            { "version": "0.1.8" },
+            "0.1.7",
+            { "version": "0.1.6", "items": [], "date": "2026-10-20" },
+        ] });
+        let read = feed_changes(&feed);
+        let shown: Vec<_> = read.iter().map(|(_, c)| c.clone()).collect();
+        let item = |title: &str| ChangeItem { title: title.into(), author: None, pr: None };
+        assert_eq!(
+            shown,
+            [
+                ReleaseChanges { version: "0.2.0".into(), items: vec![item("fix(ui): keep the caret"), item("docs: say why")] },
+                ReleaseChanges { version: "0.1.6".into(), items: vec![] },
+            ]
+        );
+        let m = check("0.1.0", UpdateTrack::Stable, "0.2.0", feed);
+        assert_eq!(versions(&m.status()), ["0.2.0", "0.1.6"], "an unreadable list never blocks the offer");
+    }
+
     #[test]
     fn a_build_follows_the_track_its_version_implies() {
         assert_eq!(implied_track("0.1.1-nightly.20261023.5"), UpdateTrack::Nightly);
@@ -406,7 +528,7 @@ mod tests {
     #[test]
     fn an_unparsable_offer_fails_and_is_not_offered() {
         let mut m = at(Phase::Checking(Ticket(1)));
-        m.finish_check(Ticket(1), Ok(Some(("latest".into(), ()))), 5);
+        m.finish_check(Ticket(1), found("latest"), 5);
         assert!(matches!(m.status(), UpdateStatus::Failed { failure: UpdateFailure::Other { .. } }), "{:?}", m.status());
         assert_eq!(m.state().checked_at_ms, None);
     }

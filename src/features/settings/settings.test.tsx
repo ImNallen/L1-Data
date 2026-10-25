@@ -116,7 +116,7 @@ it("shows the running version and the engine's track in About, and locks the tra
   expect(idle).toMatch(/<button[^>]*data-testid="update-action"[^>]*>Check for updates<\/button>/);
   expect(idle).toContain('data-testid="update-status" class="mt-1.5 text-ui-12 text-dim">Not checked yet.<');
   const downloading = render(settingsOpen("about"), {
-    updates: updates({ kind: "Downloading", version: "0.1.1-nightly.20261024.6", downgrade: false, percent: 40 }),
+    updates: updates({ kind: "Downloading", version: "0.1.1-nightly.20261024.6", downgrade: false, percent: 40, changes: [] }),
   });
   expect(downloading).toMatch(/<select[^>]*data-testid="update-track"[^>]*disabled=""/);
   expect(downloading).toMatch(/<button[^>]*data-testid="update-action"[^>]*disabled=""[^>]*>Downloading…<\/button>/);
@@ -124,7 +124,7 @@ it("shows the running version and the engine's track in About, and locks the tra
 
 it("puts the update button in the sidebar footer only while this build can update", () => {
   const status = (s: UpdateStatus): Partial<LiveData> => ({ updates: { rev: 1, track: "Stable", currentVersion: "0.1.0", status: s, checkedAtMs: null } });
-  const offered = render({ screen: { kind: "workspace" } }, status({ kind: "Available", version: "0.2.0", downgrade: false }));
+  const offered = render({ screen: { kind: "workspace" } }, status({ kind: "Available", version: "0.2.0", downgrade: false, changes: [] }));
   expect(offered).toMatch(/<button[^>]*data-testid="update-button" data-status="Available" aria-label="Download L1 Data 0.2.0"/);
   expect(render({ screen: { kind: "workspace" } }, status({ kind: "Disabled", reason: "DevBuild" }))).not.toContain('data-testid="update-button"');
 });
@@ -134,7 +134,7 @@ it("covers the window while an update installs, and only then", () => {
   const installing = render({ screen: { kind: "workspace" } }, status({ kind: "Installing", version: "0.2.0" }));
   expect(installing).toMatch(/<div[^>]*data-testid="update-installing"[^>]*>.*Installing L1 Data 0\.2\.0… L1 Data will restart\.<\/div><\/div>/);
   for (const s of [
-    { kind: "Downloaded", version: "0.2.0", downgrade: false },
+    { kind: "Downloaded", version: "0.2.0", downgrade: false, changes: [] },
     { kind: "Failed", failure: { kind: "BadSignature" } },
     { kind: "Idle" },
   ] satisfies UpdateStatus[]) {
