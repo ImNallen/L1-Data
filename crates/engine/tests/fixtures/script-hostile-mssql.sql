@@ -155,3 +155,11 @@ CREATE INDEX IX_parted ON dbo.parted (id) WITH (STATISTICS_INCREMENTAL = ON) ON 
 GO
 CREATE TABLE dbo.node_t (id int) AS NODE;
 GO
+CREATE USER app_reader WITHOUT LOGIN;
+GO
+GRANT SELECT ON [we]]ird s].[Par ent] TO app_reader;
+DENY DELETE ON [we]]ird s].[Par ent] TO app_reader;
+GRANT UPDATE ([select]) ON [we]]ird s].[Par ent] TO app_reader WITH GRANT OPTION;
+GRANT SELECT ON dbo.v_bound TO public;
+GRANT EXECUTE ON dbo.f_scalar TO app_reader;
+GO

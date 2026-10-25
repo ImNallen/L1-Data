@@ -1,8 +1,8 @@
 use super::catalog::display;
 use super::{MsSession, native_object_id, number, required};
 use crate::model::*;
-use crate::script::{self, tsql as ddl};
-use crate::sql::tsql::quote_literal;
+use crate::script::{self, Change, Grant, tsql as ddl};
+use crate::sql::tsql::{quote_ident, quote_literal};
 
 fn failed(e: QueryError) -> DetailError {
     DetailError::Failed { message: e.message }
@@ -151,7 +151,13 @@ impl MsSession {
             "V" => {
                 let (_, module) = self.modules(&format!("o.object_id={oid}")).await?.into_iter().next().ok_or(DetailError::Gone)?;
                 let module = module.text()?;
-                let view = ddl::View { indexes: self.indexes(oid, "1=1", f).await?, triggers: self.triggers(oid).await?, properties: self.properties(&format!("o.object_id={oid}")).await?, module };
+                let view = ddl::View {
+                    indexes: self.indexes(oid, "1=1", f).await?,
+                    triggers: self.triggers(oid).await?,
+                    properties: self.properties(&format!("o.object_id={oid}")).await?,
+                    grants: self.grants(oid).await?,
+                    module,
+                };
                 Ok(script::object_script(&view.module.name, ddl::view(&view)))
             }
             "U" => {
@@ -189,6 +195,7 @@ impl MsSession {
                     history_of: r[9].clone().zip(r[10].clone()),
                     properties: self.properties(&format!("o.object_id={oid}")).await?,
                     classifications: self.classifications(oid, f).await?,
+                    grants: self.grants(oid).await?,
                 };
                 Ok(script::object_script(&name, ddl::table(&table)))
             }
@@ -200,6 +207,7 @@ impl MsSession {
         let (oid, module) = self.modules(filter).await?.into_iter().next().ok_or(DetailError::Gone)?;
         let mut module = module.text()?;
         module.properties = self.properties(&format!("ep.class IN (1,2) AND ep.major_id={oid}")).await?;
+        module.grants = self.grants(oid).await?;
         Ok(script::object_script(&module.name, ddl::module(&module)))
     }
 
@@ -241,7 +249,7 @@ impl MsSession {
                     Some("1") => Some(ddl::qualified(&text(r, 6)?, &text(r, 7)?)),
                     _ => None,
                 };
-                let module = ddl::Module { schema, name, definition, ansi_nulls: bit(r, 3)?, quoted_identifier: bit(r, 4)?, disabled_on, properties: vec![] };
+                let module = ddl::Module { schema, name, definition, ansi_nulls: bit(r, 3)?, quoted_identifier: bit(r, 4)?, disabled_on, properties: vec![], grants: vec![] };
                 Ok((oid, Found::Text(module)))
             })
             .collect()
@@ -273,6 +281,28 @@ impl MsSession {
                     levels.push((level, text(r, 7)?));
                 }
                 Ok(ddl::Property { name: text(r, 0)?, value: r[1].clone(), base_type: r[2].clone(), levels })
+            })
+            .collect()
+    }
+
+    async fn grants(&mut self, oid: i32) -> Result<Vec<Grant>, DetailError> {
+        let rows = self
+            .rows(&format!(
+                "SELECT p.permission_name,COL_NAME(p.major_id,p.minor_id),dp.name,p.state
+                 FROM sys.database_permissions p JOIN sys.database_principals dp ON dp.principal_id=p.grantee_principal_id
+                 WHERE p.class=1 AND p.major_id={oid} ORDER BY dp.name,p.permission_name,p.minor_id"
+            ))
+            .await
+            .map_err(failed)?;
+        rows.iter()
+            .map(|r| {
+                let change = match required(r, 3).map_err(failed)?.trim() {
+                    "W" => Change::GrantedWithGrantOption,
+                    "D" => Change::Denied,
+                    "R" => Change::Revoked,
+                    _ => Change::Granted,
+                };
+                Ok(Grant { privilege: text(r, 0)?, column: r[1].as_deref().map(quote_ident), grantee: quote_ident(&text(r, 2)?), change })
             })
             .collect()
     }

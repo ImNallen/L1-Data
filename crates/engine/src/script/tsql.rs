@@ -1,4 +1,4 @@
-use super::Ddl;
+use super::{Ddl, Grant, privileges};
 use crate::sql::tsql::{module_name, quote_ident as ident, quote_literal};
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -20,6 +20,7 @@ pub struct Table {
     pub history_of: Option<(String, String)>,
     pub properties: Vec<Property>,
     pub classifications: Vec<Classification>,
+    pub grants: Vec<Grant>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -149,6 +150,7 @@ pub struct Module {
     pub quoted_identifier: bool,
     pub disabled_on: Option<String>,
     pub properties: Vec<Property>,
+    pub grants: Vec<Grant>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -165,6 +167,7 @@ pub struct View {
     pub indexes: Vec<Index>,
     pub triggers: Vec<Trigger>,
     pub properties: Vec<Property>,
+    pub grants: Vec<Grant>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -227,6 +230,7 @@ pub fn table(t: &Table) -> Ddl {
     }
     let disabled_keys = t.keys.iter().filter(|k| k.storage.disabled).map(|k| k.name.as_str());
     parts.extend(dependents(&name, disabled_keys, &t.indexes, &t.triggers, &t.properties, &mut warnings));
+    warnings.extend(privileges(&name, &t.grants));
     Ddl { text: parts.join("\n"), warnings }
 }
 
@@ -235,6 +239,7 @@ pub fn view(v: &View) -> Ddl {
     let name = qualified(&v.module.schema, &v.module.name);
     let mut parts = vec![module_text(&v.module, &mut warnings)];
     parts.extend(dependents(&name, std::iter::empty(), &v.indexes, &v.triggers, &v.properties, &mut warnings));
+    warnings.extend(privileges(&name, &v.grants));
     Ddl { text: parts.join("\n"), warnings }
 }
 
@@ -269,6 +274,7 @@ pub fn module(m: &Module) -> Ddl {
         text.push('\n');
         text.push_str(&properties);
     }
+    warnings.extend(privileges(&qualified(&m.schema, &m.name), &m.grants));
     Ddl { text, warnings }
 }
 
@@ -572,6 +578,7 @@ fn set_options(ansi_nulls: bool, quoted_identifier: bool) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::script::Change;
 
     fn col(name: &str, type_name: &str) -> Column {
         Column { name: name.into(), type_name: type_name.into(), ..Default::default() }
@@ -625,6 +632,7 @@ mod tests {
                 quoted_identifier: false,
                 disabled_on: Some("[dbo].[tickets]".into()),
                 properties: vec![],
+                grants: vec![],
             })],
             ..table_named("tickets")
         };
@@ -993,6 +1001,17 @@ GO
     }
 
     #[test]
+    fn privileges_warn_for_tables_views_and_modules() {
+        let grant = |privilege: &str, column: Option<&str>, change: Change| Grant { privilege: privilege.into(), column: column.map(Into::into), grantee: "[app]".into(), change };
+        let t = Table { grants: vec![grant("SELECT", None, Change::Granted), grant("UPDATE", Some("[qty]"), Change::Denied)], ..table_named("t") };
+        assert_eq!(table(&t).warnings, ["privileges on [dbo].[t] (SELECT granted to [app], UPDATE ([qty]) denied to [app])"]);
+        let v = View { module: procedure("CREATE VIEW dbo.newname AS SELECT 1"), grants: vec![grant("SELECT", None, Change::Revoked)], ..View::default() };
+        assert_eq!(view(&v).warnings, ["privileges on [dbo].[newname] (SELECT revoked from [app])"]);
+        let m = Module { grants: vec![grant("EXECUTE", None, Change::GrantedWithGrantOption)], ..procedure("CREATE PROCEDURE dbo.newname AS SELECT 1") };
+        assert_eq!(module(&m).warnings, ["privileges on [dbo].[newname] (EXECUTE granted with grant option to [app])"]);
+    }
+
+    #[test]
     fn a_renamed_or_moved_module_replays_under_its_current_name() {
         let text = |definition: &str, schema: &str| module(&Module { schema: schema.into(), ..procedure(definition) });
         assert_eq!(text("CREATE PROCEDURE oldname AS SELECT 1", "dbo"), Ddl::complete(format!("{HEAD}CREATE PROCEDURE [dbo].[newname] AS SELECT 1\nGO\n")));
@@ -1015,6 +1034,7 @@ GO
             indexes: vec![Index { unique: true, on_view: true, storage: Storage { fill_factor: 90, ..Storage::default() }, ..index_on("IX_v", 1, &["id"]) }],
             triggers: vec![Trigger::Text(module("v_ins", "CREATE TRIGGER dbo.v_ins ON dbo.v INSTEAD OF INSERT AS SELECT 1"))],
             properties: vec![property("MS_Description", "bound", &[("SCHEMA", "dbo"), ("VIEW", "v")])],
+            grants: vec![],
         };
         assert_eq!(
             view(&v),

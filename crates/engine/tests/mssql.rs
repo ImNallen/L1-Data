@@ -1073,6 +1073,9 @@ async fn hostile_object_scripts_replay_every_property_or_warn() {
                     "STATISTICS_INCREMENTAL for index [IX_parted] on [dbo].[parted]",
                 ],
                 "temporal_history" => vec!["history table role for [dbo].[temporal] on [dbo].[temporal_history]"],
+                "Par ent" => vec!["privileges on [we]]ird s].[Par ent] (DELETE denied to [app_reader], SELECT granted to [app_reader], UPDATE ([select]) granted with grant option to [app_reader])"],
+                "v_bound" => vec!["privileges on [dbo].[v_bound] (SELECT granted to [public])"],
+                "f_scalar" => vec!["privileges on [dbo].[f_scalar] (EXECUTE granted to [app_reader])"],
                 _ => vec![],
             }
         };
@@ -1103,7 +1106,7 @@ async fn hostile_object_scripts_replay_every_property_or_warn() {
                     continue;
                 }
                 let script = result.unwrap();
-                assert_eq!(script.warnings, Vec::<String>::new(), "{}", f.name);
+                assert_eq!(script.warnings, warned(&f.name), "{}", f.name);
                 scripted.push(f.name.clone());
                 modules.push(script.text);
             }
