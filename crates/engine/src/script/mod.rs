@@ -15,6 +15,41 @@ impl Ddl {
     }
 }
 
+/// One privilege a replay would not recreate. The script warns about privileges and grants none,
+/// because the grantees may not exist where it replays.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Grant {
+    pub privilege: String,
+    pub column: Option<String>,
+    pub grantee: String,
+    pub change: Change,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Change {
+    Granted,
+    GrantedWithGrantOption,
+    Revoked,
+    Denied,
+}
+
+pub fn privileges(object: &str, grants: &[Grant]) -> Option<String> {
+    let list: Vec<String> = grants
+        .iter()
+        .map(|g| {
+            let column = g.column.as_ref().map_or(String::new(), |c| format!(" ({c})"));
+            let change = match g.change {
+                Change::Granted => "granted to",
+                Change::GrantedWithGrantOption => "granted with grant option to",
+                Change::Revoked => "revoked from",
+                Change::Denied => "denied to",
+            };
+            format!("{}{column} {change} {}", g.privilege, g.grantee)
+        })
+        .collect();
+    (!list.is_empty()).then(|| format!("privileges on {object} ({})", list.join(", ")))
+}
+
 pub fn object_script(name: &str, ddl: Ddl) -> ObjectScript {
     let warnings: Vec<String> = ddl.warnings.iter().map(|w| w.replace(['\r', '\n'], " ")).collect();
     let mut text: String = warnings.iter().map(|w| format!("-- L1 Data could not script: {w}\n")).collect();
@@ -36,5 +71,24 @@ mod tests {
         assert_eq!(s.text, "-- L1 Data could not script: privileges on public.t\n-- L1 Data could not script: rules on public.\"a b\"\n\nCREATE TABLE t ();\n");
         assert_eq!(s.warnings, ["privileges on public.t", "rules on public.\"a b\""]);
         assert_eq!(object_script("t", Ddl::complete("SELECT 1;\n".into())).text, "SELECT 1;\n");
+    }
+
+    #[test]
+    fn privileges_list_each_change_with_its_column_and_grantee() {
+        let grant = |privilege: &str, column: Option<&str>, grantee: &str, change: Change| Grant { privilege: privilege.into(), column: column.map(Into::into), grantee: grantee.into(), change };
+        assert_eq!(
+            privileges(
+                "[dbo].[t]",
+                &[
+                    grant("SELECT", None, "[app]", Change::Granted),
+                    grant("UPDATE", Some("[qty]"), "[app]", Change::GrantedWithGrantOption),
+                    grant("EXECUTE", None, "PUBLIC", Change::Revoked),
+                    grant("DELETE", None, "[app]", Change::Denied),
+                ]
+            )
+            .as_deref(),
+            Some("privileges on [dbo].[t] (SELECT granted to [app], UPDATE ([qty]) granted with grant option to [app], EXECUTE revoked from PUBLIC, DELETE denied to [app])")
+        );
+        assert_eq!(privileges("[dbo].[t]", &[]), None);
     }
 }
