@@ -110,6 +110,11 @@ fn config(p: &ConnectParams) -> Result<Config, ConnectError> {
     Ok(config)
 }
 
+/// 18456 is a failed login, and 18452 is a login from an untrusted domain.
+fn refuses_login(code: u32, entra: bool) -> bool {
+    code == 18456 || (entra && code == 18452)
+}
+
 impl MsSession {
     pub(super) async fn open(p: &ConnectParams) -> Result<Self, ConnectError> {
         let mut cfg = config(p)?;
@@ -126,7 +131,7 @@ impl MsSession {
         let client = match connected {
             Ok(client) => client,
             Err(tiberius::error::Error::Tls(message)) => return Err(ConnectError::Tls { message }),
-            Err(tiberius::error::Error::Server(e)) if e.code() == 18456 => {
+            Err(tiberius::error::Error::Server(e)) if refuses_login(e.code(), token.is_some()) => {
                 if let (Some(az), Some(token)) = (&p.entra, &token) {
                     az.forget(token).await;
                 }
@@ -314,6 +319,19 @@ impl MsSession {
     pub(super) fn retire(&mut self, reason: String) {
         self.closed.send_replace(Some(reason));
         self.client.take();
+    }
+}
+
+#[cfg(test)]
+mod login_tests {
+    use super::refuses_login;
+
+    #[test]
+    fn a_failed_login_refuses_and_an_untrusted_domain_refuses_only_entra() {
+        assert!(refuses_login(18456, false) && refuses_login(18456, true));
+        assert!(refuses_login(18452, true));
+        assert!(!refuses_login(18452, false), "a SQL login keeps trunk's mapping");
+        assert!(!refuses_login(4060, true), "a missing database is not a refused token");
     }
 }
 
