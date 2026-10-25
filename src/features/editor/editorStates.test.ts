@@ -1,6 +1,13 @@
 // @vitest-environment jsdom
 import { syntaxTree } from "@codemirror/language";
-import { acceptCompletion, CompletionContext, currentCompletions, moveCompletionSelection, type CompletionResult } from "@codemirror/autocomplete";
+import {
+  acceptCompletion,
+  CompletionContext,
+  completionStatus,
+  currentCompletions,
+  moveCompletionSelection,
+  type CompletionResult,
+} from "@codemirror/autocomplete";
 import { EditorView } from "@codemirror/view";
 import { clearMocks, mockIPC } from "@tauri-apps/api/mocks";
 import { afterEach, expect, it, vi } from "vitest";
@@ -236,7 +243,7 @@ it("matches a name in another case only where the server would", async () => {
   expect((await completeAtEnd("SELECT * FROM orders o WHERE o.", qualified, { catalog: msCatalog })).labels).toContain("customer_id");
 });
 
-it("asks again when a word typed during a declined request now opens a list", async () => {
+it("opens the list for a word typed while a declined request was out", async () => {
   const pending: (() => void)[] = [];
   mockIPC(async (cmd, args) => {
     if (cmd !== "completion_context") return null;
@@ -263,7 +270,7 @@ it("asks again when a word typed during a declined request now opens a list", as
     await settle();
     pending.shift()?.();
     await settle();
-    expect(currentCompletions(view.state).map((c) => c.label)).toEqual(["WHERE"]);
+    expect(currentCompletions(view.state).map((c) => c.label)).toEqual(["wh", "WHERE"]);
   } finally {
     view.destroy();
   }
@@ -336,13 +343,15 @@ it("picks a keyword after a table once the arrow keys move to it", async () => {
   }
 });
 
-it("asks again when a word typed during a request that found no options now has some", async () => {
+it("settles a reply with no options that came back after more typing", async () => {
+  const asked: string[] = [];
   const pending: (() => void)[] = [];
   const { view, type } = mountWith(
     "select * from ",
     async (text) => {
+      asked.push(text);
       await new Promise<void>((resolve) => pending.push(resolve));
-      return reply({ kind: "Relation" }, [], { ctes: text.endsWith("xy") ? ["xyz"] : [], from: text.length - (text.endsWith("xy") ? 2 : 1) });
+      return reply({ kind: "Relation" }, [], { from: 14 });
     },
     null,
   );
@@ -352,9 +361,8 @@ it("asks again when a word typed during a request that found no options now has 
     type("y");
     pending.shift()!();
     await settle();
-    pending.shift()?.();
-    await settle();
-    expect(currentCompletions(view.state).map((c) => c.label)).toContain("xyz");
+    expect(asked).toEqual(["select * from x"]);
+    expect(completionStatus(view.state)).toBeNull();
   } finally {
     view.destroy();
   }
@@ -383,10 +391,30 @@ it("sends no request for a waiting completion that CodeMirror already cancelled"
   const cancelled = context("se");
   const second = source!(cancelled);
   (cancelled as unknown as { abortListeners: null }).abortListeners = null;
+  await new Promise((resolve) => setTimeout(resolve, 0));
   pending.shift()!();
   await first;
   expect(await second).toBeNull();
   expect(sent).toEqual(["s"]);
+});
+
+it("waits for a pause in typing before it sends a large document", async () => {
+  const asked: string[] = [];
+  const base = `select 1;\n${"-- filler line\n".repeat(80_000)}select * from orders where `;
+  const { view, type } = mountWith(base, (text) => {
+    asked.push(text.slice(base.length));
+    return reply({ kind: "Expression" }, [table("orders", "orders")], { from: base.length });
+  });
+  try {
+    type("s");
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    type("t");
+    await new Promise((resolve) => setTimeout(resolve, 400));
+    expect(asked).toEqual(["st"]);
+    expect(currentCompletions(view.state).map((c) => c.label)).toContain("status");
+  } finally {
+    view.destroy();
+  }
 });
 
 it("keeps one completion request in flight and sends only the newest one that waited", async () => {
@@ -406,10 +434,12 @@ it("keeps one completion request in flight and sends only the newest one that wa
   const settle = () => new Promise((resolve) => setTimeout(resolve, 0));
   const [first, second, third] = [ask("s"), ask("se"), ask("sel")];
   await settle();
+  await settle();
   expect(sent).toEqual(["s"]);
   expect(await second).toBeNull();
   pending.shift()!();
   expect((await first)?.options.map((o) => o.label)).toEqual(["SELECT"]);
+  await settle();
   await settle();
   expect(sent).toEqual(["s", "sel"]);
   pending.shift()!();

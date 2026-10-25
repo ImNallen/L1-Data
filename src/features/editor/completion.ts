@@ -19,6 +19,13 @@ const ASKS_AFTER = /[\p{L}\p{N}_$#@.\s]/u;
 
 const JOIN_DETAIL_WAIT_MS = 250;
 
+/**
+ * Each request copies the whole document across IPC, which on a document this large costs tens of milliseconds of the
+ * main thread. So past this size a request asked while typing waits for a pause, as CodeMirror's default typing delay did.
+ */
+const LARGE_DOC_CHARS = 1_000_000;
+const LARGE_DOC_PAUSE_MS = 150;
+
 function insertCallWithCursorInside(text: string) {
   return (view: EditorView, _c: Completion, from: number, to: number) => {
     const open = text.indexOf("(");
@@ -156,6 +163,12 @@ function aliasOptions(reply: Complete, typed: string): Completion[] {
 }
 
 export async function completionOptions(view: CatalogView | undefined, reply: Complete, typed = ""): Promise<Completion[]> {
+  const joins = reply.expect.kind === "JoinCondition" && !reply.qualifier && view ? await joinConditions(view, reply, reply.expect.target) : [];
+  return [...joins, ...optionsFor(view, reply, typed)];
+}
+
+/** The options a reply gives, apart from join conditions, which wait on relation details. */
+function optionsFor(view: CatalogView | undefined, reply: Complete, typed: string): Completion[] {
   if (reply.qualifier) return qualifiedOptions(view, reply);
   const expect = reply.expect;
   if (expect.kind === "Alias") return aliasOptions(reply, typed);
@@ -166,7 +179,6 @@ export async function completionOptions(view: CatalogView | undefined, reply: Co
     const ctes = reply.ctes.map((name): Completion => ({ label: name, type: "type", detail: "CTE", boost: BOOST.relation }));
     return [...ctes, ...local, ...(view?.qualifiedTables ?? []), ...keywordOptions(reply)];
   }
-  const joins = expect.kind === "JoinCondition" && view ? await joinConditions(view, reply, expect.target) : [];
   const columns = reply.relations.flatMap((r) => columnOptions(view, r));
   const references = reply.relations.flatMap((r): Completion[] => (r.reference ? [{ label: r.reference, type: "variable", boost: BOOST.reference }] : []));
   const catalogFunctions = (view?.functions ?? []).map((f) => ({
@@ -175,14 +187,17 @@ export async function completionOptions(view: CatalogView | undefined, reply: Co
     boost: BOOST.function,
   }));
   const builtins = reply.functions.map((name): Completion => ({ label: name, type: "function", apply: insertCallWithCursorInside(`${name}()`) }));
-  return [...joins, ...columns, ...references, ...catalogFunctions, ...builtins, ...keywordOptions(reply)];
+  return [...columns, ...references, ...catalogFunctions, ...builtins, ...keywordOptions(reply)];
 }
 
 function opensUnasked(ctx: EditorContext, reply: Complete, typed: string): boolean {
   if (ctx.explicit) return true;
   if (reply.expect.kind === "Alias") return startsKeyword(typed, reply.keywords);
-  return ctx.matchBefore(TYPED) !== null || ctx.state.sliceDoc(ctx.pos - 1, ctx.pos) === "." || reply.expect.kind === "JoinCondition";
+  return typed !== "" || ctx.state.sliceDoc(ctx.pos - 1, ctx.pos) === "." || reply.expect.kind === "JoinCondition";
 }
+
+/** The next task, so a request's copy of a large document never shares a task with the keystroke that asked for it. */
+const nextTask = () => new Promise((resolve) => setTimeout(resolve, 0));
 
 function inFlightThenNewest<T>(send: (ctx: EditorContext) => Promise<T>): (ctx: EditorContext) => Promise<T | null> {
   let busy = false;
@@ -209,28 +224,46 @@ function inFlightThenNewest<T>(send: (ctx: EditorContext) => Promise<T>): (ctx: 
 
 /**
  * Declines to open without returning null. When a request returns null, CodeMirror never asks again for a word typed
- * while it was in flight, so typing `wh` quickly after a table would never offer `WHERE`. `validFor` names the further
- * typing that cannot change the answer, such as more letters inside a string, so it asks no new request for them.
+ * while it was in flight, so typing `wh` quickly after a table would never offer `WHERE`.
  */
-function declined(from: number, validFor: (text: string) => boolean = () => false): CompletionResult {
-  return { from, options: [], validFor };
+function declined(from: number, validFor: (text: string) => boolean = () => false, update?: CompletionResult["update"]): CompletionResult {
+  return { from, options: [], validFor, update };
+}
+
+/**
+ * A reply holds for any word typed at its `from`, since the engine skips the word being typed. So a word typed where a
+ * reply declined opens from that reply, with no new request for a large document.
+ */
+function declinedReply(view: CatalogView | undefined, reply: Complete): CompletionResult {
+  const update: CompletionResult["update"] = (_current, from, to, ctx) => {
+    const typed = ctx.state.sliceDoc(from, to);
+    if (!typed || !WORD.test(typed)) return null;
+    if (!opensUnasked(ctx, reply, typed)) return declinedReply(view, reply);
+    const options = optionsFor(view, reply, typed);
+    return options.length ? { from, options, validFor: WORD } : declinedReply(view, reply);
+  };
+  return declined(reply.from, () => false, update);
 }
 
 export function engineCompletion(view: CatalogView | undefined, kind: DatabaseKind): CompletionSource {
-  const ask = inFlightThenNewest((ctx) => commands.completionContext(docText(ctx.state.doc), ctx.pos, kind));
+  const ask = inFlightThenNewest(async (ctx) => {
+    await nextTask();
+    return ctx.aborted ? null : commands.completionContext(docText(ctx.state.doc), ctx.pos, kind);
+  });
   return async (ctx: EditorContext): Promise<CompletionResult | null> => {
     const before = ctx.state.sliceDoc(ctx.pos - 1, ctx.pos);
     if (!ctx.explicit && !ASKS_AFTER.test(before)) return null;
+    if (!ctx.explicit && ctx.state.doc.length > LARGE_DOC_CHARS) {
+      await new Promise((resolve) => setTimeout(resolve, LARGE_DOC_PAUSE_MS));
+      if (ctx.aborted || (ctx.view && ctx.view.state.doc !== ctx.state.doc)) return declined(ctx.pos);
+    }
     const reply = await ask(ctx);
     if (!reply || ctx.aborted) return null;
     if (reply.kind === "None") return declined(ctx.matchBefore(TYPED)?.from ?? ctx.pos, (text) => WORD.test(text));
     const typed = ctx.state.sliceDoc(reply.from, ctx.pos);
-    if (!opensUnasked(ctx, reply, typed)) {
-      const stillAlias = (text: string) => WORD.test(text) && !startsKeyword(text, reply.keywords);
-      return declined(reply.from, reply.expect.kind === "Alias" ? stillAlias : undefined);
-    }
+    if (!opensUnasked(ctx, reply, typed)) return declinedReply(view, reply);
     const options = await completionOptions(view, reply, typed);
     if (ctx.aborted) return null;
-    return options.length ? { from: reply.from, options, validFor: WORD } : declined(reply.from);
+    return options.length ? { from: reply.from, options, validFor: WORD } : declinedReply(view, reply);
   };
 }
