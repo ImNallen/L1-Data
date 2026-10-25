@@ -13,7 +13,7 @@ use crate::sql::{Invalidates, StmtKind, StmtSpan};
 use crate::store::HistoryInsert;
 use crate::text::{OffsetMap, synthesize_tag};
 use crate::txn::{StmtOutcome, TransactionPlan, txn_after};
-use crate::writes::UnaskedWrites;
+use crate::writes::Checked;
 
 pub(crate) const STREAM_EMIT_INTERVAL: Duration = Duration::from_millis(100);
 const OUTPUT_COALESCE: Duration = Duration::from_millis(5);
@@ -66,7 +66,7 @@ pub struct ConsoleInner {
     pub session: SessionSlot,
     pub txn: TxnState,
     pub txn_depth: Option<u32>,
-    pub unasked: UnaskedWrites,
+    pub unasked: WriteList,
     pub run: RunState,
     pub rev: u64,
     refreshes: Option<PendingRefreshes>,
@@ -138,12 +138,14 @@ impl ConsoleInner {
 
 /// What holds a tab's session while it is out of its slot. `ConsoleState.work` and
 /// `ConsoleState.export` both derive from this one value, so an export's progress leaves the
-/// snapshot on every path out of `Busy`: return, close, and disconnect.
+/// snapshot on every path out of `Busy`: return, close, and disconnect. Work that can write or
+/// commit carries the proof that the Production check passed.
 pub enum Work {
-    Run,
+    Run(Checked),
     Count,
-    Transaction,
-    Edit,
+    Commit(Checked),
+    Rollback,
+    Edit(Checked),
     Probe,
     Export(ExportProgress),
 }
@@ -151,19 +153,40 @@ pub enum Work {
 impl Work {
     pub fn kind(&self) -> ConsoleWork {
         match self {
-            Work::Run => ConsoleWork::Run,
+            Work::Run(_) => ConsoleWork::Run,
             Work::Count => ConsoleWork::Count,
-            Work::Transaction => ConsoleWork::Transaction,
-            Work::Edit => ConsoleWork::Edit,
+            Work::Commit(_) | Work::Rollback => ConsoleWork::Transaction,
+            Work::Edit(_) => ConsoleWork::Edit,
             Work::Probe => ConsoleWork::Probe,
             Work::Export(_) => ConsoleWork::Export,
         }
     }
 }
 
+/// A tab's open session and the connection config it opened from. Its fields are private, so
+/// `Console::take_session` is the only way to take the session out.
+pub struct IdleSession {
+    session: Session,
+    opened: ConnectionConfig,
+}
+
+impl IdleSession {
+    pub fn new(session: Session, opened: ConnectionConfig) -> Self {
+        Self { session, opened }
+    }
+
+    pub fn opened(&self) -> &ConnectionConfig {
+        &self.opened
+    }
+
+    pub fn database_kind(&self) -> DatabaseKind {
+        self.session.database_kind()
+    }
+}
+
 pub enum SessionSlot {
     Empty,
-    Idle { session: Session, opened: ConnectionConfig },
+    Idle(IdleSession),
     Busy {
         opened: ConnectionConfig,
         run_id: RunId,
@@ -190,7 +213,7 @@ impl Console {
             session: SessionSlot::Empty,
             txn: TxnState::Idle,
             txn_depth: None,
-            unasked: UnaskedWrites::default(),
+            unasked: WriteList::default(),
             run: RunState::Idle,
             rev: 0,
             refreshes: None,
@@ -226,7 +249,7 @@ impl Console {
             config: inner.config.clone(),
             session: match &inner.session {
                 SessionSlot::Empty => SessionState::None,
-                SessionSlot::Idle { session, .. } => SessionState::Open { backend_pid: session.backend_pid },
+                SessionSlot::Idle(idle) => SessionState::Open { backend_pid: idle.session.backend_pid },
                 SessionSlot::Busy { backend_pid, .. } => SessionState::Open { backend_pid: *backend_pid },
                 SessionSlot::Lost { reason, transaction } => SessionState::Lost { reason: reason.clone(), transaction: *transaction },
             },
@@ -270,8 +293,11 @@ impl Console {
     }
 
     pub fn take_session(&self, inner: &mut ConsoleInner, run_id: RunId, work: Work) -> Option<(Session, Arc<AtomicBool>)> {
-        let SessionSlot::Idle { .. } = inner.session else { return None };
-        let SessionSlot::Idle { session, opened } = std::mem::replace(&mut inner.session, SessionSlot::Empty) else { unreachable!() };
+        let SessionSlot::Idle(_) = inner.session else { return None };
+        let SessionSlot::Idle(IdleSession { session, opened }) = std::mem::replace(&mut inner.session, SessionSlot::Empty) else { unreachable!() };
+        if let Work::Run(checked) | Work::Commit(checked) | Work::Edit(checked) = &work {
+            checked.settle(&mut inner.unasked);
+        }
         let stop = Arc::new(AtomicBool::new(false));
         inner.session = SessionSlot::Busy {
             opened,
@@ -311,12 +337,12 @@ impl Console {
                 inner.finish_refreshes(false)
             }
             None => {
-                inner.session = SessionSlot::Idle { session, opened };
+                inner.session = SessionSlot::Idle(IdleSession { session, opened });
                 None
             }
         };
         if inner.txn == TxnState::Idle {
-            inner.unasked = UnaskedWrites::default();
+            inner.unasked = WriteList::default();
         }
         due
     }
@@ -332,7 +358,7 @@ impl Console {
         }
         inner.txn = TxnState::Idle;
         inner.txn_depth = None;
-        inner.unasked = UnaskedWrites::default();
+        inner.unasked = WriteList::default();
         let due = inner.finish_refreshes(false);
         if let RunState::Running { run_id, started_at_ms, statements } = &mut inner.run {
             let mut in_flight = true;
@@ -392,6 +418,8 @@ pub struct RunPlan {
     pub database: String,
     pub connection: ConnectionConfig,
     pub page: Option<TablePage>,
+    /// The session is off Production, so the writes this run leaves in the open transaction stay unasked.
+    pub writes_stay_unasked: bool,
 }
 
 pub struct TablePage {
@@ -479,10 +507,18 @@ pub async fn run_task(console: Arc<Console>, shared: Arc<Shared>, mut session: S
             Err(_) if cancelled => (StmtStatus::Cancelled, HistoryOutcome::Cancelled),
             Err(error) => (StmtStatus::Failed { error: error.clone() }, HistoryOutcome::Error { message: error.message.clone() }),
         };
+        let unasked_write = plan.writes_stay_unasked && crate::text::is_write(sql, plan.connection.database_kind);
+        let ended = txn == TxnState::Idle || (result.is_ok() && matches!(stmt.kind, StmtKind::CommitAndChain | StmtKind::RollbackAndChain));
         let due = console.edit(&shared, run_id, |inner| {
             let committed = result.is_ok() && inner.txn != TxnState::Aborted && stmt.kind != crate::sql::StmtKind::Rollback;
             inner.txn = txn;
             inner.txn_depth = session.txn_depth();
+            if unasked_write {
+                inner.unasked.add(sql);
+            }
+            if ended {
+                inner.unasked = WriteList::default();
+            }
             Console::statements_mut(inner)[index].status = status;
             if plan.connection.database_kind == DatabaseKind::Postgres && result.is_ok() {
                 inner.invalidate(DatabaseKind::Postgres, stmt.kind.invalidates());

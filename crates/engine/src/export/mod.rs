@@ -211,10 +211,10 @@ async fn run_again(shared: &Arc<Shared>, set: Arc<ResultSet>, format: ExportForm
     let (session, stop, txn, fence) = {
         let mut inner = console.inner.lock().await;
         let fence = check(&inner)?;
-        if let Some((session, opened)) = fresh
+        if let Some(idle) = fresh
             && matches!(inner.session, SessionSlot::Empty | SessionSlot::Lost { .. })
         {
-            inner.session = SessionSlot::Idle { session, opened };
+            inner.session = SessionSlot::Idle(idle);
         }
         let progress = ExportProgress { result: set.r#ref, format, rows: 0, bytes: 0, write_error: None };
         let (session, stop) = console.take_session(&mut inner, run_id, Work::Export(progress)).ok_or(ExportError::Busy)?;

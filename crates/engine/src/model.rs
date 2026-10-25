@@ -1805,11 +1805,20 @@ pub struct WriteConfirmation {
     pub connection: String,
     pub database: String,
     pub unit: ExecutionUnitKind,
-    pub writes: u32,
-    /// The first three statements, or SQL Server batches, that write, trimmed and cut at 2,000 characters. For a
-    /// commit, the first three of the writes it would keep.
-    pub statements: Vec<String>,
+    /// The writes this action sends.
+    pub sends: WriteList,
+    /// The writes the tab's open transaction holds that ran before its session counted as Production. Any run on
+    /// the tab, and Commit, can commit them.
+    pub holds: WriteList,
     pub digest: WriteDigest,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct WriteList {
+    pub count: u32,
+    /// The first three statements, or SQL Server batches, trimmed and cut at 2,000 characters.
+    pub statements: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Type)]
@@ -1819,7 +1828,7 @@ pub enum TxnError {
     NoTransaction,
     RolledBack,
     Query(QueryError),
-    /// Commit would keep writes that ran before the connection counted as Production. Nothing was sent.
+    /// Commit would keep writes that ran before the tab's session counted as Production. Nothing was sent.
     ConfirmWrites { confirmation: WriteConfirmation },
 }
 

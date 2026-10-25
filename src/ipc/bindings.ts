@@ -1419,7 +1419,7 @@ export type TurnPhase = "Starting" | "Working" | "AwaitingApproval";
 export type TxnError = ({ kind: "Busy" }) & { confirmation?: never } | ({ kind: "NoTransaction" }) & { confirmation?: never } | ({ kind: "RolledBack" }) & { confirmation?: never } | {
 	kind: "Query",
 } & QueryError | 
-/**  Commit would keep writes that ran before the connection counted as Production. Nothing was sent. */
+/**  Commit would keep writes that ran before the tab's session counted as Production. Nothing was sent. */
 { kind: "ConfirmWrites"; confirmation: WriteConfirmation };
 
 export type TxnMode = "AutoCommit" | "Manual";
@@ -1503,12 +1503,13 @@ export type WriteConfirmation = {
 	connection: string,
 	database: string,
 	unit: ExecutionUnitKind,
-	writes: number,
+	/**  The writes this action sends. */
+	sends: WriteList,
 	/**
-	 *  The first three statements, or SQL Server batches, that write, trimmed and cut at 2,000 characters. For a
-	 *  commit, the first three of the writes it would keep.
+	 *  The writes the tab's open transaction holds that ran before its session counted as Production. Any run on
+	 *  the tab, and Commit, can commit them.
 	 */
-	statements: string[],
+	holds: WriteList,
 	digest: WriteDigest,
 };
 
@@ -1518,6 +1519,12 @@ export type WriteConfirmation = {
  *  refuses a write on Production and accepts it back only while all of that is unchanged.
  */
 export type WriteDigest = string;
+
+export type WriteList = {
+	count: number,
+	/**  The first three statements, or SQL Server batches, trimmed and cut at 2,000 characters. */
+	statements: string[],
+};
 
 /* Tauri Specta runtime */
 async function typedError<T, E>(result: Promise<T>): Promise<{ status: "ok"; data: T } | { status: "error"; error: E }> {

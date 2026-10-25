@@ -169,16 +169,34 @@ function deferPageForPendingWork(tabId: TabId, target: PageTarget | undefined): 
   return true;
 }
 
+function heldWrites(asked: WriteConfirmation): string {
+  const h = asked.holds.count;
+  return `This transaction holds ${h === 1 ? "a write" : `${h} writes`} to ${asked.connection} / ${asked.database} that ran before the connection was marked Production.`;
+}
+
+/** The engine sends the first few writes of each list, held writes first. */
+function shownWrites(asked: WriteConfirmation): { statements: string[]; note: string } {
+  const statements = [...asked.holds.statements, ...asked.sends.statements];
+  const total = asked.holds.count + asked.sends.count;
+  return { statements, note: total > statements.length ? `${statements.length} of ${total} are shown.` : "" };
+}
+
 /** The answer holds only for the target it named, so a target changed meanwhile drops the run. */
 async function writesConfirmed(tab: Tab, asked: WriteConfirmation): Promise<boolean> {
-  const n = asked.writes;
+  const n = asked.sends.count;
+  const h = asked.holds.count;
   const unit = asked.unit === "Batch" ? (n === 1 ? "batch" : "batches") : n === 1 ? "statement" : "statements";
-  const rest = n > asked.statements.length ? ` The first ${asked.statements.length} are shown.` : "";
+  const { statements, note } = shownWrites(asked);
+  const body = [
+    n > 0 && `This run sends ${n} ${unit} that ${n === 1 ? "writes" : "write"} to ${asked.connection} / ${asked.database}.`,
+    h > 0 && `${heldWrites(asked)} Any run can commit ${h === 1 ? "it" : "them"}.`,
+    note,
+  ];
   const ok = await confirm({
-    title: `Run ${plural(n, "write")} on Production?`,
-    body: `This run sends ${n} ${unit} that ${n === 1 ? "writes" : "write"} to ${asked.connection} / ${asked.database}.${rest}`,
-    statements: asked.statements,
-    confirmLabel: "Run writes",
+    title: n > 0 ? `Run ${plural(n, "write")} on Production?` : "Run on Production?",
+    body: body.filter(Boolean).join(" "),
+    statements,
+    confirmLabel: n > 0 ? "Run writes" : "Run",
   });
   return ok && ws().tabs[tab.id]?.console === tab.console;
 }
@@ -268,12 +286,11 @@ export function cancelActive(): boolean {
 }
 
 async function commitConfirmed(tab: Tab, asked: WriteConfirmation): Promise<boolean> {
-  const n = asked.writes;
-  const rest = n > asked.statements.length ? ` The first ${asked.statements.length} are shown.` : "";
+  const { statements, note } = shownWrites(asked);
   const ok = await confirm({
-    title: `Commit ${plural(n, "write")} on Production?`,
-    body: `This transaction holds ${n === 1 ? "a write" : `${n} writes`} to ${asked.connection} / ${asked.database} that ran before the connection was marked Production.${rest}`,
-    statements: asked.statements,
+    title: `Commit ${plural(asked.holds.count, "write")} on Production?`,
+    body: [heldWrites(asked), note].filter(Boolean).join(" "),
+    statements,
     confirmLabel: "Commit writes",
   });
   return ok && ws().tabs[tab.id]?.console === tab.console;
@@ -481,8 +498,14 @@ async function editsConfirmed(tab: TableTab, edits: TableEdits, asked: WriteConf
   ].filter((p): p is string => p !== false);
   const what = parts.length > 1 ? `${parts.slice(0, -1).join(", ")} and ${parts.at(-1)}` : parts[0];
   const ok = await confirm({
-    title: `Apply ${plural(asked.writes, "change")} on Production?`,
-    body: `This sends ${what} to ${tab.table.schema}.${tab.table.table} on ${asked.connection} / ${asked.database}.`,
+    title: `Apply ${plural(asked.sends.count, "change")} on Production?`,
+    body: [
+      `This sends ${what} to ${tab.table.schema}.${tab.table.table} on ${asked.connection} / ${asked.database}.`,
+      asked.holds.count > 0 && heldWrites(asked),
+    ]
+      .filter(Boolean)
+      .join(" "),
+    statements: asked.holds.statements,
     confirmLabel: "Apply changes",
   });
   const now = ws().tabs[tab.id];

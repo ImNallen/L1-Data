@@ -2142,8 +2142,8 @@ async fn a_write_on_production_runs_only_with_the_digest_of_the_same_work_and_ta
 
     let one = format!("insert into public.{table} values (1)");
     let asked = asked_to_run(&h, tab, script(&format!("select 1;\n{one};")), None).await;
-    assert_eq!((asked.connection.as_str(), asked.database.as_str(), asked.writes), ("dev", "shop", 1));
-    assert_eq!(asked.statements, [one.as_str()]);
+    assert_eq!((asked.connection.as_str(), asked.database.as_str(), asked.sends.count), ("dev", "shop", 1));
+    assert_eq!(asked.sends.statements, [one.as_str()]);
     assert_eq!(count(&oracle, &table).await, 0, "a refused run sends nothing");
     assert!(matches!(h.console(tab).run, RunState::Idle), "{:?}", h.console(tab).run);
 
@@ -2167,7 +2167,7 @@ async fn a_write_on_production_runs_only_with_the_digest_of_the_same_work_and_ta
     let to = from + one.len() as u32 + 1;
     let selection = RunRequest::Script { text: selected.clone(), target: RunTarget::Selection { from: DocOffset(from), to: DocOffset(to) } };
     let asked = asked_to_run(&h, tab, selection, None).await;
-    assert_eq!((asked.writes, asked.statements.as_slice()), (1, [one.clone()].as_slice()));
+    assert_eq!((asked.sends.count, asked.sends.statements.as_slice()), (1, [one.clone()].as_slice()));
 
     asked_to_run(&h, tab, script(&one), None).await;
     set_environment(&h, Some(Environment::Staging)).await;
@@ -2222,9 +2222,9 @@ async fn staged_edits_on_production_apply_only_with_the_digest_of_the_same_edits
         Err(ApplyError::ConfirmWrites { confirmation }) => confirmation,
         other => panic!("expected ConfirmWrites, got {other:?}"),
     };
-    assert_eq!(asked.writes, 2);
+    assert_eq!(asked.sends.count, 2);
     assert_eq!(
-        asked.statements,
+        asked.sends.statements,
         [format!("UPDATE \"public\".\"{table}\" SET \"note\" = 'x' WHERE \"id\" = '1'"), format!("INSERT INTO \"public\".\"{table}\" (\"name\") VALUES ('d')")]
     );
     assert_eq!(rows_of(&mut h, tab, &table).await, "1:a:NULL 2:b:NULL 3:c:NULL");
@@ -2264,7 +2264,7 @@ async fn a_session_opened_on_production_still_asks_after_the_connection_moves_el
     };
     h.engine.save_connection(moved).await.unwrap();
     let asked = asked_to_run(&h, tab, script(&format!("insert into public.{table} values (1)")), None).await;
-    assert_eq!(asked.writes, 1);
+    assert_eq!(asked.sends.count, 1);
     assert_eq!(count(&oracle, &table).await, 0, "the live session still points where it was opened as Production");
     oracle.batch_execute(&format!("drop table public.{table}")).await.unwrap();
 }
@@ -2309,7 +2309,7 @@ async fn a_session_opened_on_production_asks_after_the_connection_moves_away_and
     resave(&h, &home, Some(Environment::Local)).await;
 
     let asked = asked_to_run(&h, tab, script(&format!("insert into public.{table} values (1)")), None).await;
-    assert_eq!(asked.writes, 1);
+    assert_eq!(asked.sends.count, 1);
     assert_eq!(count(&oracle, &table).await, 0, "the tab's session was opened as Production");
     oracle.batch_execute(&format!("drop table public.{table}")).await.unwrap();
 }
@@ -2333,7 +2333,7 @@ async fn a_session_opened_on_production_asks_after_the_instance_reconnects_as_lo
     h.wait_status(|s| !matches!(s, ConnStatus::Connected { .. })).await;
 
     let asked = asked_to_run(&h, tab, script(&format!("insert into public.{table} values (1)")), None).await;
-    assert_eq!(asked.writes, 1);
+    assert_eq!(asked.sends.count, 1);
     assert!(matches!(h.status(), ConnStatus::Connected { .. }), "the run reconnected the instance from the Local config");
     assert!(matches!(h.console(tab).session, SessionState::Open { backend_pid } if backend_pid == console_pid), "the tab kept the session it opened as Production");
     assert_eq!(count(&role.oracle, &table).await, 0);
@@ -2357,9 +2357,9 @@ async fn commit_on_production_asks_for_writes_that_ran_before_the_connection_was
         Err(TxnError::ConfirmWrites { confirmation }) => confirmation,
         other => panic!("expected ConfirmWrites, got {other:?}"),
     };
-    assert_eq!((asked.writes, asked.statements.as_slice()), (1, [one.clone()].as_slice()));
+    assert_eq!((asked.sends.count, asked.holds.count, asked.holds.statements.as_slice()), (0, 1, [one.clone()].as_slice()));
     let typed = asked_to_run(&h, tab, script("commit"), None).await;
-    assert_eq!(typed.statements, ["commit"]);
+    assert_eq!((typed.sends.count, typed.holds.statements.as_slice()), (0, [one.clone()].as_slice()), "a typed COMMIT names the writes it keeps");
     assert_eq!(h.console(tab).txn, TxnState::Active, "a refused commit sends nothing");
     assert_eq!(count(&oracle, &table).await, 0);
 
@@ -2390,8 +2390,10 @@ async fn every_run_on_production_asks_while_the_transaction_holds_writes_that_ra
     oracle.batch_execute(&format!("create table public.{table} (n int)")).await.unwrap();
     let tab = staging_writes_held_then_production(&mut h, &table).await;
 
-    for text in ["select 1", "select 1;\ncommit", "end", "prepare transaction 'l1_held'"] {
-        asked_to_run(&h, tab, script(text), None).await;
+    let held = format!("insert into public.{table} values (1)");
+    for (text, sends) in [("select 1", 0), ("select 1;\ncommit", 0), ("end", 0), ("prepare transaction 'l1_held'", 1)] {
+        let asked = asked_to_run(&h, tab, script(text), None).await;
+        assert_eq!((asked.sends.count, asked.holds.count, asked.holds.statements.as_slice()), (sends, 1, [held.clone()].as_slice()), "{text}");
         assert_eq!(h.console(tab).txn, TxnState::Active, "{text}: a refused run sends nothing");
     }
     assert_eq!(count(&oracle, &table).await, 0);
@@ -2458,5 +2460,6 @@ async fn prepared_transactions_on_production_wait_for_the_digest() {
     asked_to_run(&h, other, script(&format!("commit prepared '{gid}'")), None).await;
     asked_to_run(&h, other, script(&format!("rollback prepared '{gid}'")), None).await;
     assert_eq!((prepared().await, count(&oracle, &table).await), (1, 0));
-    oracle.batch_execute(&format!("rollback prepared '{gid}'; drop table public.{table}")).await.unwrap();
+    oracle.batch_execute(&format!("rollback prepared '{gid}'")).await.unwrap();
+    oracle.batch_execute(&format!("drop table public.{table}")).await.unwrap();
 }

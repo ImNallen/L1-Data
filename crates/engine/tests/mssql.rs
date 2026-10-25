@@ -815,8 +815,8 @@ async fn a_batch_that_runs_exec_on_production_waits_for_the_digest() {
     let text = "CREATE TABLE #p1_guard(id int)\nGO\nSELECT 1\nGO\nEXEC sp_who";
     let request = || RunRequest::Script { text: text.into(), target: RunTarget::All };
     let asked = asked_to_run(&h, text, None).await;
-    assert_eq!((asked.connection.as_str(), asked.database.as_str(), asked.writes), ("SQL Server test", "shop", 2));
-    assert_eq!(asked.statements, ["CREATE TABLE #p1_guard(id int)", "EXEC sp_who"]);
+    assert_eq!((asked.connection.as_str(), asked.database.as_str(), asked.sends.count), ("SQL Server test", "shop", 2));
+    assert_eq!(asked.sends.statements, ["CREATE TABLE #p1_guard(id int)", "EXEC sp_who"]);
     let state = h.ok("SELECT OBJECT_ID('tempdb..#p1_guard')").await;
     assert_eq!(h.rows(Harness::rowsets(&state)[0])[0][0], None, "a refused batch runs nothing");
 

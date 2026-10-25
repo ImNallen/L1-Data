@@ -190,13 +190,13 @@ impl Shared {
         }
     }
 
-    async fn open_tab_session(&self, console: &ConsoleConfigView) -> Result<(Session, ConnectionConfig), ConnectError> {
+    async fn open_tab_session(&self, console: &ConsoleConfigView) -> Result<console::IdleSession, ConnectError> {
         let saved = self.config(console.connection_id).ok_or_else(|| ConnectError::Network { message: "unknown connection".into() })?;
         let instance = self.instance(saved.id);
         let database = instance.as_ref().map_or(console.database.as_str(), |instance| instance.canonical_database(&console.database));
         let params = self.params(&saved, database)?;
         let session = Session::open(&params, console.schema.as_deref(), &self.timezone).await?;
-        Ok((session, saved))
+        Ok(console::IdleSession::new(session, saved))
     }
 
     fn next_catalog_version(&self) -> u64 {
@@ -646,27 +646,26 @@ impl Shared {
 
     async fn console_txn_command(self: &Arc<Self>, tab: TabId, commit: bool, confirmed: Option<WriteDigest>) -> Result<(), TxnError> {
         let console = self.console(tab).ok_or(TxnError::NoTransaction)?;
-        let run_id = self.next_run_id();
-        let (mut session, aborted) = {
+        let (mut session, aborted, run_id) = {
             let mut inner = console.inner.lock().await;
-            match &inner.session {
+            let idle = match &inner.session {
                 SessionSlot::Busy { .. } => return Err(TxnError::Busy),
                 SessionSlot::Empty | SessionSlot::Lost { .. } => return Err(TxnError::NoTransaction),
-                SessionSlot::Idle { .. } if inner.txn == TxnState::Idle => return Err(TxnError::NoTransaction),
-                SessionSlot::Idle { .. } => {}
-            }
+                SessionSlot::Idle(_) if inner.txn == TxnState::Idle => return Err(TxnError::NoTransaction),
+                SessionSlot::Idle(idle) => idle,
+            };
             let aborted = inner.txn == TxnState::Aborted;
-            if commit && !aborted {
+            let work = if commit && !aborted {
                 let saved = self.config(inner.config.connection_id).ok_or(TxnError::NoTransaction)?;
-                let SessionSlot::Idle { opened, .. } = &inner.session else { unreachable!("matched above") };
-                let target = writes::Target { saved: &saved, opened, console: &inner.config, txn: inner.txn, unasked: &inner.unasked };
-                if let Err(confirmation) = writes::check_commit(&target, confirmed.as_ref()) {
-                    return Err(TxnError::ConfirmWrites { confirmation });
-                }
-            }
-            let (session, _stop) = console.take_session(&mut inner, run_id, Work::Transaction).expect("slot is idle");
+                let target = writes::Target { saved: &saved, opened: idle.opened(), console: &inner.config, txn: inner.txn, unasked: &inner.unasked };
+                Work::Commit(writes::check(&target, &["COMMIT"], confirmed.as_ref()).map_err(|confirmation| TxnError::ConfirmWrites { confirmation })?)
+            } else {
+                Work::Rollback
+            };
+            let run_id = self.next_run_id();
+            let (session, _stop) = console.take_session(&mut inner, run_id, work).expect("slot is idle");
             console.publish(&mut inner, self);
-            (session, aborted)
+            (session, aborted, run_id)
         };
         let (kind, sql) = if commit && !aborted { (sql::StmtKind::Commit, "COMMIT") } else { (sql::StmtKind::Rollback, "ROLLBACK") };
         let started = std::time::Instant::now();
@@ -1177,9 +1176,9 @@ impl Engine {
         let run_id = s.next_run_id();
         let mut inner = console.inner.lock().await;
         validate(&inner)?;
-        if let Some((session, opened)) = fresh {
+        if let Some(idle) = fresh {
             if matches!(inner.session, SessionSlot::Empty | SessionSlot::Lost { .. }) {
-                inner.session = SessionSlot::Idle { session, opened };
+                inner.session = SessionSlot::Idle(idle);
             }
         }
         let (session, stop) = console.take_session(&mut inner, run_id, Work::Count).ok_or_else(|| failed("The count tab is busy."))?;
@@ -1307,7 +1306,6 @@ impl Engine {
             fresh = Some(s.open_tab_session(&config).await.map_err(|error| RunError::Connect { error })?);
         }
 
-        let run_id = s.next_run_id();
         let mut inner = console.inner.lock().await;
         let current = s.config(inner.config.connection_id).ok_or(RunError::NotConfigured)?;
         txn::validate_mode(current.database_kind, inner.config.mode).map_err(|what| RunError::Unsupported { what })?;
@@ -1317,23 +1315,25 @@ impl Engine {
         if inner.config != config {
             return Err(RunError::Busy);
         }
-        if let Some((session, opened)) = fresh {
+        if let Some(idle) = fresh {
             match inner.session {
-                SessionSlot::Empty | SessionSlot::Lost { .. } => inner.session = SessionSlot::Idle { session, opened },
-                SessionSlot::Idle { .. } => {}
+                SessionSlot::Empty | SessionSlot::Lost { .. } => inner.session = SessionSlot::Idle(idle),
+                SessionSlot::Idle(_) => {}
                 SessionSlot::Busy { .. } => return Err(RunError::Busy),
             }
         }
-        let SessionSlot::Idle { opened, .. } = &inner.session else { return Err(RunError::Busy) };
-        let target = writes::Target { saved: &current, opened, console: &config, txn: inner.txn, unasked: &inner.unasked };
-        match writes::check(&target, &sent, confirmed.as_ref()) {
-            Ok(unasked) => inner.unasked.add(&unasked),
+        let SessionSlot::Idle(idle) = &inner.session else { return Err(RunError::Busy) };
+        let target = writes::Target { saved: &current, opened: idle.opened(), console: &config, txn: inner.txn, unasked: &inner.unasked };
+        let checked = match writes::check(&target, &sent, confirmed.as_ref()) {
+            Ok(checked) => checked,
             Err(confirmation) => {
                 console.publish(&mut inner, s);
                 return Err(RunError::ConfirmWrites { confirmation });
             }
-        }
-        let Some((session, stop)) = console.take_session(&mut inner, run_id, Work::Run) else { return Err(RunError::Busy) };
+        };
+        let writes_stay_unasked = checked.writes_stay_unasked();
+        let run_id = s.next_run_id();
+        let Some((session, stop)) = console.take_session(&mut inner, run_id, Work::Run(checked)) else { return Err(RunError::Busy) };
         let txn = inner.txn;
         console.results.lock().unwrap().clear();
         inner.run = RunState::Running {
@@ -1348,7 +1348,7 @@ impl Engine {
         console.publish(&mut inner, s);
         drop(inner);
 
-        let plan = RunPlan { run_id, text, statements, txn, schema: config.schema.clone(), database: config.database.clone(), connection, page };
+        let plan = RunPlan { run_id, text, statements, txn, schema: config.schema.clone(), database: config.database.clone(), connection, page, writes_stay_unasked };
         s.spawn(console::run_task(console.clone(), s.clone(), session, plan, stop));
         Ok(RunAccepted { run_id, statements: ranges })
     }
@@ -1406,22 +1406,21 @@ impl Engine {
             fresh = Some(s.open_tab_session(&config).await.map_err(|error| ApplyError::Connect { error })?);
         }
 
-        let run_id = s.next_run_id();
-        let (mut session, txn, stop, (open, finish, undo)) = {
+        let (mut session, txn, stop, (open, finish, undo), run_id, writes_stay_unasked) = {
             let mut inner = console.inner.lock().await;
             let current = s.config(inner.config.connection_id).ok_or(ApplyError::NotConfigured)?;
             if current.database_kind == DatabaseKind::SqlServer
-                || matches!(&inner.session, SessionSlot::Idle { session, .. } if session.database_kind() == DatabaseKind::SqlServer)
+                || matches!(&inner.session, SessionSlot::Idle(idle) if idle.database_kind() == DatabaseKind::SqlServer)
             {
                 return Err(ApplyError::Unsupported { what: session::SQL_SERVER_EDITS_UNSUPPORTED.into() });
             }
             if inner.config != config {
                 return Err(ApplyError::Busy);
             }
-            if let Some((session, opened)) = fresh {
+            if let Some(idle) = fresh {
                 match inner.session {
-                    SessionSlot::Empty | SessionSlot::Lost { .. } => inner.session = SessionSlot::Idle { session, opened },
-                    SessionSlot::Idle { .. } => {}
+                    SessionSlot::Empty | SessionSlot::Lost { .. } => inner.session = SessionSlot::Idle(idle),
+                    SessionSlot::Idle(_) => {}
                     SessionSlot::Busy { .. } => return Err(ApplyError::Busy),
                 }
             }
@@ -1435,18 +1434,20 @@ impl Engine {
                 ("BEGIN", (config.mode == TxnMode::AutoCommit).then_some("COMMIT"), "ROLLBACK")
             };
             let sent: Vec<&str> = std::iter::once(wrap.0).chain(plan.iter().map(|edit| edit.sql.as_str())).chain(wrap.1).collect();
-            let SessionSlot::Idle { opened, .. } = &inner.session else { return Err(ApplyError::Busy) };
-            let target = writes::Target { saved: &current, opened, console: &config, txn, unasked: &inner.unasked };
-            match writes::check(&target, &sent, confirmed.as_ref()) {
-                Ok(unasked) => inner.unasked.add(&unasked),
+            let SessionSlot::Idle(idle) = &inner.session else { return Err(ApplyError::Busy) };
+            let target = writes::Target { saved: &current, opened: idle.opened(), console: &config, txn, unasked: &inner.unasked };
+            let checked = match writes::check(&target, &sent, confirmed.as_ref()) {
+                Ok(checked) => checked,
                 Err(confirmation) => {
                     console.publish(&mut inner, s);
                     return Err(ApplyError::ConfirmWrites { confirmation });
                 }
-            }
-            let Some((session, stop)) = console.take_session(&mut inner, run_id, Work::Edit) else { return Err(ApplyError::Busy) };
+            };
+            let writes_stay_unasked = checked.writes_stay_unasked();
+            let run_id = s.next_run_id();
+            let Some((session, stop)) = console.take_session(&mut inner, run_id, Work::Edit(checked)) else { return Err(ApplyError::Busy) };
             console.publish(&mut inner, s);
-            (session, txn, stop, wrap)
+            (session, txn, stop, wrap, run_id, writes_stay_unasked)
         };
 
         let inside = txn == TxnState::Active;
@@ -1505,7 +1506,14 @@ impl Engine {
             lines.push(OutputBody::Error { statement: None, error: error.clone() });
         }
         console.output_all(s, run_id, lines);
-        if let Ok(Some((db, owed))) = console.edit(s, run_id, |inner| Console::return_session(inner, session, after, lost)).await {
+        let held = writes_stay_unasked && outcome.is_ok();
+        let returned = console.edit(s, run_id, |inner| {
+            if held {
+                plan.iter().for_each(|edit| inner.unasked.add(&edit.sql));
+            }
+            Console::return_session(inner, session, after, lost)
+        });
+        if let Ok(Some((db, owed))) = returned.await {
             s.schedule_refreshes(db, owed);
         }
         outcome.map(|()| ApplySummary { committed: after == TxnState::Idle })

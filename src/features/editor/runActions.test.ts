@@ -856,8 +856,8 @@ describe("a run the engine asks about", () => {
       connection: "prod-postgres",
       database: "shop",
       unit: "Statement",
-      writes: 2,
-      statements: ["update orders set n = 1", "delete from orders"],
+      sends: { count: 2, statements: ["update orders set n = 1", "delete from orders"] },
+      holds: { count: 0, statements: [] },
       digest,
       ...patch,
     },
@@ -907,7 +907,7 @@ describe("a run the engine asks about", () => {
   it("sends nothing more when ⌘↵'s question is cancelled", async () => {
     connection();
     openSqlTab({ db: { connectionId: "prod", database: "shop" }, text: SCRIPT });
-    const runs = queueRunReplies(asked("d1", { writes: 1, statements: ["update orders set n = 1"] }));
+    const runs = queueRunReplies(asked("d1", { sends: { count: 1, statements: ["update orders set n = 1"] } }));
     void runOrChoose();
     await vi.waitFor(() => expect(question()?.title).toBe("Run 1 write on Production?"));
     expect(runs).toMatchObject([{ request: { target: { kind: "cursor", offset: 0 } }, confirmed: null }]);
@@ -920,15 +920,44 @@ describe("a run the engine asks about", () => {
   it("says how many are shown when the engine sends the first three", async () => {
     connection();
     openSqlTab({ db: { connectionId: "prod", database: "shop" }, text: SCRIPT });
-    queueRunReplies(asked("d1", { writes: 5, statements: ["delete from a", "delete from b", "delete from c"] }));
+    queueRunReplies(asked("d1", { sends: { count: 5, statements: ["delete from a", "delete from b", "delete from c"] } }));
     runActive({ kind: "all" });
-    await vi.waitFor(() => expect(question()?.body).toBe("This run sends 5 statements that write to prod-postgres / shop. The first 3 are shown."));
+    await vi.waitFor(() => expect(question()?.body).toBe("This run sends 5 statements that write to prod-postgres / shop. 3 of 5 are shown."));
+  });
+
+  it("lists the writes the transaction holds when a run that writes nothing could commit them", async () => {
+    connection();
+    openSqlTab({ db: { connectionId: "prod", database: "shop" }, text: "select 1\ncommit" });
+    const runs = queueRunReplies(asked("d1", { sends: { count: 0, statements: [] }, holds: { count: 2, statements: ["insert into t values (1)", "delete from t"] } }));
+    runActive({ kind: "all" });
+    await vi.waitFor(() => expect(question()).not.toBeNull());
+    expect(question()).toMatchObject({
+      title: "Run on Production?",
+      body: "This transaction holds 2 writes to prod-postgres / shop that ran before the connection was marked Production. Any run can commit them.",
+      statements: ["insert into t values (1)", "delete from t"],
+    });
+    expect(question()?.choices).toEqual([{ id: "btn", label: "Run", variant: "danger" }]);
+    useWorkspace.getState().answer("btn");
+    await vi.waitFor(() => expect(runs.map((r) => r.confirmed)).toEqual([null, "d1"]));
+  });
+
+  it("lists held writes before the run's own writes", async () => {
+    connection();
+    openSqlTab({ db: { connectionId: "prod", database: "shop" }, text: SCRIPT });
+    queueRunReplies(asked("d1", { holds: { count: 4, statements: ["delete from a", "delete from b", "delete from c"] } }));
+    runActive({ kind: "all" });
+    await vi.waitFor(() => expect(question()).not.toBeNull());
+    expect(question()).toMatchObject({
+      title: "Run 2 writes on Production?",
+      body: "This run sends 2 statements that write to prod-postgres / shop. This transaction holds 4 writes to prod-postgres / shop that ran before the connection was marked Production. Any run can commit them. 5 of 6 are shown.",
+      statements: ["delete from a", "delete from b", "delete from c", "update orders set n = 1", "delete from orders"],
+    });
   });
 
   it("names a SQL Server batch", async () => {
     connection({ name: "prod-mssql", databaseKind: "SqlServer" });
     openSqlTab({ db: { connectionId: "prod", database: "master" }, text: "EXEC dbo.purge" });
-    queueRunReplies(asked("d1", { connection: "prod-mssql", database: "master", unit: "Batch", writes: 1, statements: ["EXEC dbo.purge"] }));
+    queueRunReplies(asked("d1", { connection: "prod-mssql", database: "master", unit: "Batch", sends: { count: 1, statements: ["EXEC dbo.purge"] } }));
     runActive({ kind: "all" });
     await vi.waitFor(() => expect(question()?.body).toBe("This run sends 1 batch that writes to prod-mssql / master."));
   });
@@ -973,7 +1002,7 @@ describe("staged edits the engine asks about", () => {
   const key = [{ column: "id", value: "1" }];
   const asked: ApplyError = {
     kind: "ConfirmWrites",
-    confirmation: { connection: "prod-postgres", database: "shop", unit: "Statement", writes: 2, statements: [], digest: "d1" },
+    confirmation: { connection: "prod-postgres", database: "shop", unit: "Statement", sends: { count: 2, statements: [] }, holds: { count: 0, statements: [] }, digest: "d1" },
   };
   const question = () => {
     const overlay = useWorkspace.getState().overlay;
@@ -1006,6 +1035,19 @@ describe("staged edits the engine asks about", () => {
     await done;
     expect(applies.map((a) => a.confirmed)).toEqual([null, "d1"]);
     expect(useTableEdits.getState().byTab[id]).toBeUndefined();
+  });
+
+  it("names the writes the transaction already holds", async () => {
+    const holds = { count: 1, statements: ["insert into t values (1)"] };
+    const { id } = await staged({ ...asked, confirmation: { ...asked.confirmation, holds } });
+    const done = submitEdits(id);
+    await vi.waitFor(() => expect(question()).not.toBeNull());
+    expect(question()).toMatchObject({
+      body: "This sends 1 update and 1 delete to public.orders on prod-postgres / shop. This transaction holds a write to prod-postgres / shop that ran before the connection was marked Production.",
+      statements: ["insert into t values (1)"],
+    });
+    useWorkspace.getState().close();
+    await done;
   });
 
   it("keeps the edits when the question is cancelled", async () => {
@@ -1044,7 +1086,7 @@ describe("staged edits the engine asks about", () => {
 describe("a commit the engine asks about", () => {
   const asked: TxnError = {
     kind: "ConfirmWrites",
-    confirmation: { connection: "prod-postgres", database: "shop", unit: "Statement", writes: 1, statements: ["insert into t values (1)"], digest: "c1" },
+    confirmation: { connection: "prod-postgres", database: "shop", unit: "Statement", sends: { count: 0, statements: [] }, holds: { count: 1, statements: ["insert into t values (1)"] }, digest: "c1" },
   };
 
   function queueCommitReplies(...replies: (TxnError | null)[]) {
