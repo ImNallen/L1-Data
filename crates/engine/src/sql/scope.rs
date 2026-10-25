@@ -210,6 +210,8 @@ struct Frame {
     tree_start: usize,
     ctes_before: usize,
     joined: Option<usize>,
+    /// A `MERGE`, whose `INTO` target its condition and actions can name.
+    merge: bool,
 }
 
 impl Frame {
@@ -234,6 +236,7 @@ impl Frame {
             tree_start: 0,
             ctes_before: 0,
             joined: None,
+            merge: false,
         }
     }
 }
@@ -487,7 +490,11 @@ impl<'a> Walk<'a> {
             "UPDATE" if matches!(prev.as_deref(), Some("FOR" | "ON")) => Clause::Other,
             "UPDATE" => Clause::Relation { role: Role::Update, slot: Slot::Expect },
             "TABLE" => Clause::Relation { role: Role::Table, slot: Slot::Expect },
-            "INSERT" | "MERGE" => Clause::Next(&["INTO"]),
+            "INSERT" => Clause::Next(&["INTO"]),
+            "MERGE" => {
+                self.top().merge = true;
+                Clause::Next(&["INTO"])
+            }
             "DELETE" => Clause::Next(&["FROM"]),
             "WITH" if clause == Clause::Start => Clause::Cte,
             "WITH" if named && self.is_word(i + 1, "ORDINALITY") => return Some(i + 2),
@@ -859,7 +866,8 @@ impl<'a> Walk<'a> {
             let shadowed = |r: &Rel| {
                 child.is_some() && r.folded.as_deref().is_some_and(|k| rels.iter().any(|inner| inner.folded.as_deref().is_some_and(|i| same(self.kind, i, k))))
             };
-            let outer: Vec<&Rel> = visible.iter().filter(|r| !self.aliased_elsewhere(r, frame_rels) && !shadowed(r)).collect();
+            let frame = &self.frames[f];
+            let outer: Vec<&Rel> = visible.iter().filter(|r| !self.out_of_sight(r, frame, clause) && !shadowed(r)).collect();
             rels.extend(outer);
             child = Some(&self.frames[f]);
         }
@@ -926,7 +934,7 @@ impl<'a> Walk<'a> {
         let (mut expect, mut keywords) = if frame.query { self.expect(snap, frame) } else { self.expect_in_group(snap, frame) };
         if let (Expect::JoinCondition { target }, Clause::On { tree_start, .. }) = (&mut expect, snap.clause) {
             let before = frame.rels.get(tree_start..*target as usize).unwrap_or_default();
-            *target = before.iter().filter(|r| !self.aliased_elsewhere(r, &frame.rels)).count() as u16;
+            *target = before.iter().filter(|r| !self.out_of_sight(r, frame, snap.clause)).count() as u16;
         }
         if self.line_start && matches!(expect, Expect::Keyword | Expect::Alias | Expect::Expression) {
             keywords.extend(if self.kind == DatabaseKind::Postgres { PG_STATEMENTS } else { TSQL_STATEMENTS });
@@ -943,11 +951,23 @@ impl<'a> Walk<'a> {
         Scope { from_byte: self.from, expect, qualifier, relations, ctes, keywords, functions }
     }
 
-    /// T-SQL's `UPDATE o SET … FROM orders o` names its target by the alias a FROM item defines.
-    fn aliased_elsewhere(&self, rel: &Rel, frame_rels: &[Rel]) -> bool {
-        matches!(&rel.source, RelationSource::Table { schema: None, .. })
-            && rel.role == Role::Update
-            && frame_rels.iter().any(|o| o.role != Role::Update && o.folded.is_some() && rel.folded.as_deref().zip(o.folded.as_deref()).is_some_and(|(a, b)| same(self.kind, a, b)))
+    /// A relation the statement names that the cursor's clause cannot refer to: an `INSERT`, `SELECT INTO`, or
+    /// `CREATE TABLE AS` target outside its column list, and a T-SQL `UPDATE` target that a FROM item stands for.
+    fn out_of_sight(&self, rel: &Rel, frame: &Frame, clause: Clause) -> bool {
+        let names = |o: &Rel| rel.folded.as_deref().zip(o.folded.as_deref()).is_some_and(|(a, b)| same(self.kind, a, b));
+        let same_table = |o: &Rel| match (&rel.source, &o.source) {
+            (RelationSource::Table { schema: None, name }, RelationSource::Table { name: other, .. }) => same(self.kind, name, other),
+            _ => false,
+        };
+        match rel.role {
+            Role::Into => !frame.merge && !matches!(clause, Clause::Relation { role: Role::Into, .. }),
+            Role::Table => !matches!(clause, Clause::Relation { role: Role::Table, .. }),
+            Role::Update => {
+                matches!(&rel.source, RelationSource::Table { schema: None, .. })
+                    && frame.rels.iter().any(|o| o.role != Role::Update && o.folded.is_some() && (names(o) || self.kind == DatabaseKind::SqlServer && same_table(o)))
+            }
+            Role::From | Role::Join | Role::Using => false,
+        }
     }
 
     fn qualifier(&self, rels: &[&Rel]) -> Qualifier {
@@ -1151,8 +1171,7 @@ const TSQL_FUNCTIONS: &[&str] = &[
     "GREATEST", "GROUPING", "HASHBYTES", "IIF", "ISDATE", "ISJSON", "ISNULL", "ISNUMERIC", "JSON_ARRAY", "JSON_MODIFY", "JSON_OBJECT", "JSON_QUERY", "JSON_VALUE", "LAG",
     "LAST_VALUE", "LEAD", "LEAST", "LEFT", "LEN", "LOG", "LOG10", "LOWER", "LTRIM", "MAX", "MIN", "MONTH", "NCHAR", "NEWID", "NTILE", "OBJECT_ID", "OBJECT_NAME", "PARSE",
     "PATINDEX", "PERCENT_RANK", "PERCENTILE_CONT", "PERCENTILE_DISC", "PI", "POWER", "QUOTENAME", "RADIANS", "RAND", "RANK", "REPLACE", "REPLICATE", "REVERSE", "RIGHT",
-    "ROUND", "ROW_NUMBER", "RTRIM", "SCHEMA_NAME", "SCOPE_IDENTITY", "SIGN", "SIN", "SOUNDEX", "SPACE", "SQRT", "SQUARE", "STDEV", "STDEVP", "STR", "STRING_AGG",
-    "STRING_SPLIT", "STUFF", "SUBSTRING", "SUM", "SWITCHOFFSET", "SYSDATETIME", "SYSDATETIMEOFFSET", "SYSUTCDATETIME", "TAN", "TODATETIMEOFFSET", "TRANSLATE", "TRIM",
+    "ROUND", "ROW_NUMBER", "RTRIM", "SCHEMA_NAME", "SCOPE_IDENTITY", "SIGN", "SIN", "SOUNDEX", "SPACE", "SQRT", "SQUARE", "STDEV", "STDEVP", "STR", "STRING_AGG", "STUFF", "SUBSTRING", "SUM", "SWITCHOFFSET", "SYSDATETIME", "SYSDATETIMEOFFSET", "SYSUTCDATETIME", "TAN", "TODATETIMEOFFSET", "TRANSLATE", "TRIM",
     "TRY_CAST", "TRY_CONVERT", "TRY_PARSE", "UNICODE", "UPPER", "USER_NAME", "VAR", "VARP", "YEAR",
 ];
 
@@ -1639,6 +1658,18 @@ mod tests {
         assert_eq!((s.qualifier.clone(), s.relations[0].column_aliases.clone()), (Some(Qualifier::Relation { index: 0 }), vec!["v".to_owned(), "i".to_owned()]));
         assert_eq!(refs(&ms("SELECT t.| FROM shop..orders t"))[0].0, Some("t"));
         assert_eq!(refs(&ms("SELECT orders.| FROM shop..orders"))[0].0, Some("orders"));
+    }
+
+    #[test]
+    fn a_target_is_offered_only_where_the_server_lets_it_be_named() {
+        assert!(refs(&pg("insert into orders values (|)")).is_empty());
+        assert_eq!(refs(&pg("insert into orders (|")), [(Some("orders"), &table(None, "orders"))]);
+        assert_eq!(refs(&ms("SELECT o.id INTO #t FROM orders o WHERE |")), [(Some("o"), &table(None, "orders"))]);
+        assert_eq!(refs(&pg("create table t as select * from orders o where |")), [(Some("o"), &table(None, "orders"))]);
+        assert_eq!(refs(&ms("UPDATE orders SET status = 'x' FROM orders o WHERE |")), [(Some("o"), &table(None, "orders"))]);
+        assert_eq!(refs(&pg("update orders set status = 'x' from orders o where |")).len(), 2);
+        assert_eq!(refs(&ms("MERGE INTO orders t USING customers s ON |")).len(), 2);
+        assert!(!ms("SELECT |").functions.contains(&"STRING_SPLIT"));
     }
 
     #[test]
