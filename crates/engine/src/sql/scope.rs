@@ -244,6 +244,7 @@ struct Cte {
     written: String,
     columns: Vec<String>,
     star: Vec<TableName>,
+    aliases: Vec<String>,
 }
 
 enum Item {
@@ -278,6 +279,7 @@ struct Frame {
     lateral: Option<Range<usize>>,
     tree_start: usize,
     ctes_before: usize,
+    joined: Option<usize>,
 }
 
 impl Frame {
@@ -301,6 +303,7 @@ impl Frame {
             lateral: None,
             tree_start: 0,
             ctes_before: 0,
+            joined: None,
         }
     }
 }
@@ -457,6 +460,7 @@ impl<'a> Walk<'a> {
             (Clause::Select, _) => self.top().item_lexemes.push(i),
             (Clause::Relation { role: Role::From | Role::Join | Role::Using, .. } | Clause::On { .. }, Class::Comma) => {
                 let f = self.top();
+                f.joined = None;
                 f.tree_start = f.rels.len();
                 f.clause = Clause::Relation { role: Role::From, slot: Slot::Expect };
             }
@@ -471,6 +475,14 @@ impl<'a> Walk<'a> {
                 let written = self.text[self.sig[i].span.clone()].to_owned();
                 let folded = fold(self.kind, self.text, self.sig[i]);
                 let f = self.top();
+                if let Some(start) = f.joined.take() {
+                    let (mut columns, mut star) = (Vec::new(), Vec::new());
+                    for rel in f.rels.drain(start..) {
+                        expand(&rel, &mut columns, &mut star);
+                    }
+                    let source = RelationSource::Derived { columns, star };
+                    f.rels.push(Rel { written: None, folded: None, source, role, column_aliases: Vec::new() });
+                }
                 if !f.sealed
                     && let Some(rel) = f.rels.last_mut()
                 {
@@ -565,6 +577,7 @@ impl<'a> Walk<'a> {
             self.end_item();
         }
         let f = self.top();
+        f.joined = None;
         let merge_source = matches!(to, Clause::Relation { role: Role::Using, .. }) && f.rels.iter().any(|r| r.role == Role::Into);
         if matches!(to, Clause::Relation { role: Role::From | Role::Using, .. }) && !merge_source {
             f.tree_start = f.rels.len();
@@ -626,14 +639,17 @@ impl<'a> Walk<'a> {
         let name = fold(self.kind, self.text, self.sig[last]);
         let schema = (parts.len() >= 2).then(|| fold(self.kind, self.text, self.sig[parts[parts.len() - 2]]));
         let function = matches!(role, Role::From | Role::Join | Role::Using) && self.sig.get(j).is_some_and(|l| l.class == Class::Open) && !self.typed.contains(&j);
+        let cte = if function || schema.is_some() { None } else { self.cte(&name) };
+        let column_aliases = cte.as_ref().map(|c| c.aliases.clone()).unwrap_or_default();
         let source = if function {
             RelationSource::Derived { columns: Vec::new(), star: Vec::new() }
-        } else if let (None, Some(cte)) = (&schema, self.cte(&name)) {
+        } else if let Some(cte) = cte {
             RelationSource::Derived { columns: cte.columns, star: cte.star }
         } else {
             RelationSource::Table { schema, name: name.clone() }
         };
-        self.push_rel(Rel { written: Some(written), folded: Some(name), source, role, column_aliases: Vec::new() });
+        self.top().joined = None;
+        self.push_rel(Rel { written: Some(written), folded: Some(name), source, role, column_aliases });
         self.top().clause = Clause::Relation { role, slot: Slot::Named };
         j
     }
@@ -660,9 +676,8 @@ impl<'a> Walk<'a> {
         if self.frames[body].origin != Origin::CteBody || !(f.recursive || self.kind == DatabaseKind::SqlServer) {
             return None;
         }
-        let columns = explicit.clone().or_else(|| self.frames[body].first_output.as_ref().map(|o| o.0.clone())).unwrap_or_default();
-        let star = if explicit.is_some() { Vec::new() } else { self.frames[body].first_output.as_ref().map(|o| o.1.clone()).unwrap_or_default() };
-        Some(Cte { key: key.clone(), written: written.clone(), columns, star })
+        let (columns, star) = self.frames[body].first_output.clone().unwrap_or_default();
+        Some(Cte { key: key.clone(), written: written.clone(), columns, star, aliases: explicit.clone().unwrap_or_default() })
     }
 
     fn open(&mut self, i: usize) {
@@ -733,25 +748,29 @@ impl<'a> Walk<'a> {
                 }
             }
             Origin::CteBody => {
-                let (mut columns, mut star) = self.output(id);
+                let (columns, star) = self.output(id);
                 if let Some((key, written, explicit)) = self.frames[parent].pending_cte.take() {
-                    if let Some(explicit) = explicit {
-                        (columns, star) = (explicit, Vec::new());
-                    }
-                    self.frames[parent].ctes.push(Cte { key, written, columns, star });
+                    self.frames[parent].ctes.push(Cte { key, written, columns, star, aliases: explicit.unwrap_or_default() });
                 }
             }
             Origin::ColumnAliases => {
                 let names = std::mem::take(&mut self.frames[id].group_names);
                 let p = &mut self.frames[parent];
                 if let Some(rel) = p.rels.last_mut().filter(|_| !p.sealed) {
-                    rel.column_aliases = names;
+                    let kept = rel.column_aliases.iter().skip(names.len()).cloned().collect::<Vec<_>>();
+                    rel.column_aliases = [names, kept].concat();
                 }
             }
             Origin::ParenthesizedJoin => {
+                let start = self.frames[parent].rels.len();
                 for rel in self.frames[id].rels.clone() {
                     self.push_rel(rel);
                 }
+                let p = &mut self.frames[parent];
+                if let Clause::Relation { role, .. } = p.clause {
+                    p.clause = Clause::Relation { role, slot: Slot::Named };
+                }
+                p.joined = (!p.sealed).then_some(start);
             }
             Origin::Statement | Origin::Other => {}
         }
@@ -809,14 +828,6 @@ impl<'a> Walk<'a> {
         }
         let mut columns = Vec::new();
         let mut star = Vec::new();
-        let expand = |rel: &Rel, columns: &mut Vec<String>, star: &mut Vec<TableName>| match &rel.source {
-            RelationSource::Table { schema, name } => star.push(TableName { schema: schema.clone(), name: name.clone() }),
-            RelationSource::Derived { columns: c, star: s } => {
-                let renamed = if s.is_empty() { &rel.column_aliases[..] } else { &[] };
-                columns.extend(renamed.iter().chain(c.iter().skip(renamed.len())).cloned());
-                star.extend(s.iter().cloned());
-            }
-        };
         for item in &f.items {
             match item {
                 Item::Named(n) => columns.push(n.clone()),
@@ -1052,6 +1063,17 @@ impl<'a> Walk<'a> {
     }
 }
 
+fn expand(rel: &Rel, columns: &mut Vec<String>, star: &mut Vec<TableName>) {
+    match &rel.source {
+        RelationSource::Table { schema, name } => star.push(TableName { schema: schema.clone(), name: name.clone() }),
+        RelationSource::Derived { columns: c, star: s } => {
+            let renamed = if s.is_empty() { &rel.column_aliases[..] } else { &[] };
+            columns.extend(renamed.iter().chain(c.iter().skip(renamed.len())).cloned());
+            star.extend(s.iter().cloned());
+        }
+    }
+}
+
 fn closed(kind: DatabaseKind, lexeme: &str) -> bool {
     match kind {
         DatabaseKind::Postgres => lex(&format!("{lexeme} x")).first().is_some_and(|l| l.span.end == lexeme.len()),
@@ -1141,6 +1163,14 @@ mod tests {
 
     fn refs(scope: &Scope) -> Vec<(Option<&str>, &RelationSource)> {
         scope.relations.iter().map(|r| (r.reference.as_deref(), &r.source)).collect()
+    }
+
+    fn named_columns(scope: &Scope) -> Vec<(Option<&str>, Vec<String>)> {
+        let names = |r: &ScopeRelation| match &r.source {
+            RelationSource::Derived { columns, .. } => r.column_aliases.iter().chain(columns.iter().skip(r.column_aliases.len())).cloned().collect(),
+            RelationSource::Table { .. } => r.column_aliases.clone(),
+        };
+        scope.relations.iter().map(|r| (r.reference.as_deref(), names(r))).collect()
     }
 
     #[test]
@@ -1247,14 +1277,14 @@ mod tests {
         let s = pg("with recent as (select * from orders) select * from rec|");
         assert_eq!((s.expect, s.ctes.clone()), (Expect::Relation, vec!["recent".to_owned()]));
         let s = pg("with recent as (select * from orders), totals(cust, n) as (select customer_id, count(*) from orders group by 1) select r.| from recent r, totals t");
-        assert_eq!(
-            refs(&s),
-            [
-                (Some("r"), &RelationSource::Derived { columns: vec![], star: vec![TableName { schema: None, name: "orders".into() }] }),
-                (Some("t"), &RelationSource::Derived { columns: vec!["cust".into(), "n".into()], star: vec![] }),
-            ]
-        );
+        assert_eq!(refs(&s)[0], (Some("r"), &RelationSource::Derived { columns: vec![], star: vec![TableName { schema: None, name: "orders".into() }] }));
+        assert_eq!(named_columns(&s)[1], (Some("t"), vec!["cust".to_owned(), "n".to_owned()]));
         assert_eq!(s.ctes, ["recent", "totals"]);
+        let s = pg("with x(a) as (select id, total from orders) select x.| from x");
+        assert_eq!(named_columns(&s), [(Some("x"), vec!["a".to_owned(), "total".to_owned()])]);
+        let s = pg("with x(a, b) as (select * from orders) select x.| from x");
+        assert_eq!((s.relations[0].column_aliases.clone(), &s.relations[0].source), (vec!["a".to_owned(), "b".to_owned()], &RelationSource::Derived { columns: vec![], star: vec![TableName { schema: None, name: "orders".into() }] }));
+        assert_eq!(named_columns(&pg("with x(a, b) as (select 1, 2) select * from x y(c) where |")), [(Some("y"), vec!["c".to_owned(), "b".to_owned()])]);
         let s = pg("with x as (select o.id, o.total as amount, count(*) n from orders o) select * from x where |");
         assert_eq!(refs(&s), [(Some("x"), &RelationSource::Derived { columns: vec!["id".into(), "amount".into(), "n".into()], star: vec![] })]);
         assert_eq!(pg("with recent as (select 1) |").keywords, MAIN_VERBS);
@@ -1262,13 +1292,12 @@ mod tests {
 
     #[test]
     fn a_recursive_cte_refers_to_itself_inside_its_body() {
-        let n = RelationSource::Derived { columns: vec!["n".into()], star: vec![] };
         for s in [
             pg("with recursive t as (select 1 as n union all select t.n + 1 from t where t.|) select * from t"),
             pg("with recursive t(n) as (select 1 union all select n + 1 from t where t.|) select * from t"),
             ms("WITH t(n) AS (SELECT 1 UNION ALL SELECT n + 1 FROM t WHERE t.|) SELECT * FROM t"),
         ] {
-            assert_eq!((refs(&s), s.qualifier.clone(), s.ctes.clone()), (vec![(Some("t"), &n)], Some(Qualifier::Relation { index: 0 }), vec!["t".to_owned()]));
+            assert_eq!((named_columns(&s), s.qualifier.clone(), s.ctes.clone()), (vec![(Some("t"), vec!["n".to_owned()])], Some(Qualifier::Relation { index: 0 }), vec!["t".to_owned()]));
         }
         let s = pg("with recursive tree as (select 1 as n union all select n + 1 from tr|");
         assert_eq!((s.expect, s.ctes), (Expect::Relation, vec!["tree".to_owned()]));
@@ -1438,6 +1467,11 @@ mod tests {
             assert_eq!((refs(&s), s.expect), (vec![(Some("o"), &o), (Some("c"), &c), (Some("a"), &a)], Expect::JoinCondition { target: 2 }));
         }
         assert_eq!(pg("select * from (orders o join |").expect, Expect::Relation);
+        let s = pg("select j.| from (orders o join customers c on o.customer_id = c.id) as j");
+        let joined = RelationSource::Derived { columns: vec![], star: vec![TableName { schema: None, name: "orders".into() }, TableName { schema: None, name: "customers".into() }] };
+        assert_eq!((refs(&s), s.qualifier.clone()), (vec![(Some("j"), &joined)], Some(Qualifier::Relation { index: 0 })));
+        let s = pg("select * from (orders o join customers c on true) j join addresses a on |");
+        assert_eq!((refs(&s), s.expect), (vec![(Some("j"), &joined), (Some("a"), &a)], Expect::JoinCondition { target: 1 }));
     }
 
     #[test]
