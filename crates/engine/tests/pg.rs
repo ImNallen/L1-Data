@@ -2265,3 +2265,75 @@ async fn a_session_opened_on_production_still_asks_after_the_connection_moves_el
     assert_eq!(count(&oracle, &table).await, 0, "the live session still points where it was opened as Production");
     oracle.batch_execute(&format!("drop table public.{table}")).await.unwrap();
 }
+
+async fn resave(h: &Harness, host: &str, environment: Option<Environment>) {
+    let saved = h.engine.boot().connections.into_iter().find(|c| c.id == h.conn).unwrap();
+    let draft = ConnectionDraft {
+        database_kind: saved.database_kind,
+        id: Some(saved.id),
+        name: saved.name,
+        host: host.into(),
+        port: saved.port,
+        database: saved.database,
+        user: saved.user,
+        ssl_mode: saved.ssl_mode,
+        ca_cert_path: saved.ca_cert_path,
+        password: PasswordInput::Keep,
+        color: saved.color,
+        ssh: None,
+        environment,
+    };
+    h.engine.save_connection(draft).await.unwrap();
+}
+
+fn saved_host(h: &Harness) -> String {
+    h.engine.boot().connections.into_iter().find(|c| c.id == h.conn).unwrap().host
+}
+
+#[tokio::test]
+async fn a_session_opened_on_production_asks_after_the_connection_moves_away_and_back_as_local() {
+    let mut h = Harness::start().await;
+    let oracle = h.oracle().await;
+    let table = unique("t_guard");
+    oracle.batch_execute(&format!("create table public.{table} (n int)")).await.unwrap();
+    let home = saved_host(&h);
+    resave(&h, &home, Some(Environment::Production)).await;
+    let tab = h.sql_tab(TxnMode::AutoCommit).await;
+    h.run_ok(tab, "select 1").await;
+
+    resave(&h, "moved.invalid", Some(Environment::Local)).await;
+    h.run_ok(tab, "select 1").await;
+    resave(&h, &home, Some(Environment::Local)).await;
+
+    let asked = asked_to_run(&h, tab, script(&format!("insert into public.{table} values (1)")), None).await;
+    assert_eq!(asked.writes, 1);
+    assert_eq!(count(&oracle, &table).await, 0, "the tab's session was opened as Production");
+    oracle.batch_execute(&format!("drop table public.{table}")).await.unwrap();
+}
+
+#[tokio::test]
+async fn a_session_opened_on_production_asks_after_the_instance_reconnects_as_local() {
+    let role = Role::create().await;
+    let mut h = Harness::start_as(&role).await;
+    let table = unique("t_guard");
+    role.oracle.batch_execute(&format!("create table public.{table} (n int); grant select, insert on public.{table} to {}", role.name)).await.unwrap();
+    let home = saved_host(&h);
+    resave(&h, &home, Some(Environment::Production)).await;
+    let tab = h.sql_tab(TxnMode::AutoCommit).await;
+    let state = h.run_ok(tab, "select 1").await;
+    let SessionState::Open { backend_pid: console_pid } = state.session else { panic!("{:?}", state.session) };
+
+    resave(&h, &home, Some(Environment::Local)).await;
+    let metadata: Vec<i32> = role.backends().await.into_iter().filter(|(_, pid)| *pid != console_pid).map(|(_, pid)| pid).collect();
+    let [home_pid] = metadata[..] else { panic!("one home metadata session, found {metadata:?}") };
+    role.oracle.simple_query(&format!("select pg_terminate_backend({home_pid})")).await.unwrap();
+    h.wait_status(|s| !matches!(s, ConnStatus::Connected { .. })).await;
+
+    let asked = asked_to_run(&h, tab, script(&format!("insert into public.{table} values (1)")), None).await;
+    assert_eq!(asked.writes, 1);
+    assert!(matches!(h.status(), ConnStatus::Connected { .. }), "the run reconnected the instance from the Local config");
+    assert!(matches!(h.console(tab).session, SessionState::Open { backend_pid } if backend_pid == console_pid), "the tab kept the session it opened as Production");
+    assert_eq!(count(&role.oracle, &table).await, 0);
+    role.oracle.batch_execute(&format!("drop table public.{table}")).await.unwrap();
+    role.drop().await;
+}
