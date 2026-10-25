@@ -50,9 +50,17 @@ const ENVIRONMENTS: { value: Environment | null; label: string }[] = [
   { value: "Production", label: "Production" },
 ];
 
-const SQL_SERVER_AUTHS: { value: SqlServerAuth; label: string; hint: string }[] = [
+const SQL_SERVER_AUTHS: { value: SqlServerAuth; label: string; hint: ReactNode }[] = [
   { value: "SqlLogin", label: "SQL login", hint: "A SQL Server login and password. Windows authentication is not supported." },
-  { value: "EntraAzureCli", label: "Microsoft Entra ID (Azure CLI)", hint: "Signs in as the account of `az login`. No password is saved." },
+  {
+    value: "EntraAzureCli",
+    label: "Microsoft Entra ID (Azure CLI)",
+    hint: (
+      <>
+        Signs in as the account of <code className="font-mono">az login</code>. No password is saved.
+      </>
+    ),
+  },
 ];
 
 const SSH_AUTHS: { value: SshAuthKind; label: string }[] = [
