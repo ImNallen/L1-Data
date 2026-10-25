@@ -2463,3 +2463,16 @@ async fn prepared_transactions_on_production_wait_for_the_digest() {
     oracle.batch_execute(&format!("rollback prepared '{gid}'")).await.unwrap();
     oracle.batch_execute(&format!("drop table public.{table}")).await.unwrap();
 }
+
+#[tokio::test]
+async fn ddl_committed_by_commit_and_chain_refreshes_the_catalog() {
+    let mut h = Harness::start().await;
+    let tab = h.sql_tab(TxnMode::AutoCommit).await;
+    h.engine.connect(h.conn).await.unwrap();
+    let table = unique("t_chain");
+    let initial = h.engine.catalog(h.db()).await.unwrap().version;
+    h.run_ok(tab, &format!("begin;\ncreate table public.{table} (id int);\ncommit and chain;\nrollback")).await;
+    let catalog = h.catalog_when(&h.db(), |c| c.version > initial).await;
+    assert!(catalog.relation("public", &table).is_some(), "the chained commit kept the table");
+    h.run_ok(tab, &format!("drop table public.{table}")).await;
+}

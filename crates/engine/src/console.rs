@@ -130,6 +130,11 @@ impl ConsoleInner {
 
     pub fn finish_refreshes(&mut self, committed: bool) -> Option<(DatabaseRef, Owed)> {
         if self.txn != TxnState::Idle { return None; }
+        self.end_refreshes(committed)
+    }
+
+    /// A chained `COMMIT` or `ROLLBACK` ends the transaction that owes the refreshes while the next one opens.
+    fn end_refreshes(&mut self, committed: bool) -> Option<(DatabaseRef, Owed)> {
         let pending = self.refreshes.take()?;
         // Native batches may have committed DDL before opening the transaction that ended.
         (committed || pending.policy == RefreshPolicy::NativeEnd).then_some((pending.db, pending.owed))
@@ -504,9 +509,10 @@ pub async fn run_task(console: Arc<Console>, shared: Arc<Shared>, mut session: S
             Err(error) => (StmtStatus::Failed { error: error.clone() }, HistoryOutcome::Error { message: error.message.clone() }),
         };
         let unasked_write = plan.writes_stay_unasked && crate::text::is_write(sql, plan.connection.database_kind);
-        let ended = txn == TxnState::Idle || (result.is_ok() && matches!(stmt.kind, StmtKind::CommitAndChain | StmtKind::RollbackAndChain));
+        let chained = result.is_ok() && matches!(stmt.kind, StmtKind::CommitAndChain | StmtKind::RollbackAndChain);
+        let ended = txn == TxnState::Idle || chained;
         let due = console.edit(&shared, run_id, |inner| {
-            let committed = result.is_ok() && inner.txn != TxnState::Aborted && stmt.kind != crate::sql::StmtKind::Rollback;
+            let committed = result.is_ok() && inner.txn != TxnState::Aborted && !matches!(stmt.kind, StmtKind::Rollback | StmtKind::RollbackAndChain);
             inner.txn = txn;
             inner.txn_depth = session.txn_depth();
             if unasked_write {
@@ -519,7 +525,7 @@ pub async fn run_task(console: Arc<Console>, shared: Arc<Shared>, mut session: S
             if plan.connection.database_kind == DatabaseKind::Postgres && result.is_ok() {
                 inner.invalidate(DatabaseKind::Postgres, stmt.kind.invalidates());
             }
-            inner.finish_refreshes(committed)
+            if chained { inner.end_refreshes(committed) } else { inner.finish_refreshes(committed) }
         }).await?;
         if let Some((db, owed)) = due { shared.schedule_refreshes(db, owed); }
         let mut lines = notice_lines(&mut session);
