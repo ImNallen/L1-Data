@@ -5,7 +5,7 @@ import { useLive } from "../../state/live";
 import { dropRowCaches, rowCacheFor } from "../../state/rowCache";
 import { useWorkspace, type TableTab } from "../../state/workspace";
 import { dropEditor, seedEditor, textOf } from "../editor/editorStates";
-import { cycleTableOrder, filterForValue } from "./tableQuery";
+import { cycleTableOrder, filterForValue, referencedRows } from "./tableQuery";
 
 const tab: TableTab = {
   id: "table",
@@ -27,6 +27,17 @@ it("filters by a cell's value, using IS NULL for nulls", () => {
   expect(filterForValue("region", "EU-West", true)).toEqual({ column: "region", op: "Ne", value: "EU-West" });
   expect(filterForValue("region", null, false)).toEqual({ column: "region", op: "IsNull", value: "" });
   expect(filterForValue("region", null, true)).toEqual({ column: "region", op: "NotNull", value: "" });
+});
+
+it("shows the referenced row with one equality filter per key column", () => {
+  expect(referencedRows(["customer_id", "id"], ["7", "12"])).toEqual({
+    orderBy: "",
+    where: "",
+    filters: [
+      { column: "customer_id", op: "Eq", value: "7" },
+      { column: "id", op: "Eq", value: "12" },
+    ],
+  });
 });
 
 it("cycles header ordering through the engine and stores its SQL unchanged", async () => {

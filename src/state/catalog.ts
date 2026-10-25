@@ -2,7 +2,7 @@ import type { Completion } from "@codemirror/autocomplete";
 import type { SQLNamespace } from "@codemirror/lang-sql";
 import { create } from "zustand";
 import { shortType } from "../features/results/format";
-import { commands, type Catalog, type ColumnSource, type DatabaseRef, type RelKind, type Relation } from "../ipc/bindings";
+import { commands, type Catalog, type ColumnInfo, type ColumnSource, type DatabaseRef, type RelKind, type Relation } from "../ipc/bindings";
 import { dbKey, type DbKey } from "./dbKey";
 
 export type CatalogView = {
@@ -43,9 +43,13 @@ export function buildCatalogView(catalog: Catalog): CatalogView {
   return { catalog, completion, qualifiedTables, relationsById };
 }
 
+export function sourceColumn(view: CatalogView | undefined, source: ColumnSource | null): ColumnInfo | undefined {
+  if (!view || !source) return undefined;
+  return view.relationsById.get(source.tableOid)?.rel.columns.find((c) => c.attnum === source.attnum);
+}
+
 export function isPrimaryKey(view: CatalogView | undefined, source: ColumnSource | null): boolean {
-  if (!view || !source) return false;
-  return view.relationsById.get(source.tableOid)?.rel.columns.find((c) => c.attnum === source.attnum)?.pk ?? false;
+  return sourceColumn(view, source)?.pk ?? false;
 }
 
 type CatalogStore = {
