@@ -23,12 +23,13 @@ import type {
 import { dbKey, type DbKey } from "./dbKey";
 
 export const OUTPUT_LIMIT = 5_000;
+export type OutputLog = { entries: readonly OutputEntry[]; dropped: number };
 const HISTORY_TAIL_LIMIT = 200;
 
 export type LiveData = {
   connections: Record<ConnectionId, ConnectionState>;
   consoles: Record<TabId, ConsoleState>;
-  output: Record<TabId, OutputEntry[]>;
+  output: Record<TabId, OutputLog>;
   historyTail: HistoryEntry[];
   providers: Partial<Record<ProviderKind, ProviderState>>;
   chats: Record<ChatId, ChatState>;
@@ -128,9 +129,10 @@ export function applyEvent(s: LiveData, e: AppEvent): LiveData {
       return { ...s, consoles: keepHigher(s.consoles, state.tabId, state) };
     }
     case "ConsoleOutput": {
-      const prev = s.output[e.tabId] ?? [];
-      const next = prev.concat(e.entries);
-      return { ...s, output: { ...s.output, [e.tabId]: next.length > OUTPUT_LIMIT ? next.slice(-OUTPUT_LIMIT) : next } };
+      const prev = s.output[e.tabId] ?? { entries: [], dropped: 0 };
+      const all = prev.entries.concat(e.entries);
+      const cut = Math.max(0, all.length - OUTPUT_LIMIT);
+      return { ...s, output: { ...s.output, [e.tabId]: { entries: all.slice(cut), dropped: prev.dropped + cut } } };
     }
     case "HistoryAppended": {
       const { kind: _, ...entry } = e;

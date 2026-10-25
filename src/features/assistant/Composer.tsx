@@ -136,7 +136,7 @@ export function Composer({ chat }: { chat: ChatState | undefined }) {
   const sqlServer = useWorkspace((s) => databaseKindFor(tabTarget(s.active ? s.tabs[s.active] : undefined), s.configs) === "SqlServer");
   const picked = useWorkspace((s) => (s.active ? s.activeResult[s.active] : undefined));
   const run = useLive((s) => (active ? s.consoles[active]?.run : undefined));
-  const hasOutput = useLive((s) => (active ? (s.output[active]?.length ?? 0) : 0) > 0);
+  const hasOutput = useLive((s) => (active ? (s.output[active]?.entries.length ?? 0) : 0) > 0);
   const shown = gridResult(run, picked, hasOutput);
   const attaching = attach && shown !== null;
 

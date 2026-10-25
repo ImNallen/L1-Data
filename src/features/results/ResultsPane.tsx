@@ -13,8 +13,8 @@ import {
   Undo2Icon,
 } from "lucide-react";
 import { useEffect, useMemo, useRef, useSyncExternalStore, type RefObject } from "react";
-import type { ConsoleState, OutputEntry, QueryError, RunState, TabId } from "../../ipc/bindings";
-import { useLive } from "../../state/live";
+import type { ConsoleState, QueryError, RunState, TabId } from "../../ipc/bindings";
+import { useLive, type OutputLog } from "../../state/live";
 import { isBusy, outputTone, resultView, rowResults, runStatements, runSummary, shownResult, type ResultView, type Summary } from "../../state/status";
 import { useCatalog, viewFor } from "../../state/catalog";
 import { databaseKindFor } from "../../state/databaseKind";
@@ -40,7 +40,7 @@ import { ErrorBlock, OutputPanel } from "./OutputPanel";
 import { gridEditing, ResultGrid, type GridActions, type GridEditing, type GridQuery } from "./ResultGrid";
 import { cycleTableOrder, filterForValue, useFilterDrafts, useTableOrder } from "./tableQuery";
 
-const NO_OUTPUT: readonly OutputEntry[] = [];
+const NO_OUTPUT: OutputLog = { entries: [], dropped: 0 };
 
 const PAGE_SIZES = [10, 100, 250, 500, 1000];
 
@@ -244,7 +244,7 @@ function ResultBody({
 }: {
   run: RunState;
   view: ResultView;
-  output: readonly OutputEntry[];
+  output: OutputLog;
   query: GridQuery | null;
   editing: GridEditing | null;
   actions: RefObject<GridActions | null>;
@@ -262,7 +262,7 @@ function ResultBody({
         />
       );
     case "output":
-      return <OutputPanel entries={output} />;
+      return <OutputPanel log={output} />;
     case "tail": {
       const error = failedError(run);
       if (error) return <ErrorPanel error={error} />;
@@ -292,8 +292,8 @@ export function ResultsPane({ tabId }: { tabId: TabId | null }) {
   const shown = shownResult(run, picked);
   const summary = runSummary(run, picked, now);
   const output = useLive((s) => (tabId ? s.output[tabId] : undefined)) ?? NO_OUTPUT;
-  const view = resultView(run, picked, output.length > 0);
-  const tone = outputTone(output);
+  const view = resultView(run, picked, output.entries.length > 0);
+  const tone = outputTone(output.entries);
   const outputPick = run.kind === "Idle" ? undefined : { kind: "output" as const, runId: run.runId, result: shown?.index };
 
   const isTable = isTableTab(tab);
@@ -382,7 +382,7 @@ export function ResultsPane({ tabId }: { tabId: TabId | null }) {
             aria-label="Output"
             title="Output"
             aria-pressed={view.kind === "output"}
-            disabled={output.length === 0 || !tabId}
+            disabled={output.entries.length === 0 || !tabId}
             onClick={() => {
               const pick = view.kind === "output" ? (shown?.index ?? 0) : outputPick;
               if (tabId && pick !== undefined) setActiveResult(tabId, pick);

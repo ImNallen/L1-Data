@@ -366,9 +366,10 @@ describe("live.apply", () => {
     let s = applyEvent(emptyLive, { kind: "ConsoleOutput", tabId: TAB, entries: [entry(0), entry(1)] });
     s = applyEvent(s, { kind: "ConsoleOutput", tabId: TAB, entries: Array.from({ length: OUTPUT_LIMIT }, (_, i) => entry(i + 2)) });
     const out = s.output[TAB]!;
-    expect(out).toHaveLength(OUTPUT_LIMIT);
-    expect(out[0]?.atMs).toBe(2);
-    expect(out.at(-1)?.atMs).toBe(OUTPUT_LIMIT + 1);
+    expect(out.entries).toHaveLength(OUTPUT_LIMIT);
+    expect(out.entries[0]?.atMs).toBe(2);
+    expect(out.entries.at(-1)?.atMs).toBe(OUTPUT_LIMIT + 1);
+    expect(out.dropped).toBe(2);
   });
 
   it("prepends appended history entries", () => {

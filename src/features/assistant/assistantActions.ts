@@ -59,7 +59,7 @@ export function gridResult(run: RunState | undefined, picked: ResultPick | undef
 
 function shownResultRef(tabId: TabId): ResultRef | null {
   const live = useLive.getState();
-  return gridResult(live.consoles[tabId]?.run, ws().activeResult[tabId], (live.output[tabId]?.length ?? 0) > 0)?.meta.ref ?? null;
+  return gridResult(live.consoles[tabId]?.run, ws().activeResult[tabId], (live.output[tabId]?.entries.length ?? 0) > 0)?.meta.ref ?? null;
 }
 
 export function tabContext(tab: Tab, editor: EditorState, attach: ResultRef | null): TabContext {

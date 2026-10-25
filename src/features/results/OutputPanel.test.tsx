@@ -1,14 +1,18 @@
+// @vitest-environment jsdom
+import { act, cleanup, render, screen } from "@testing-library/react";
 import { renderToStaticMarkup } from "react-dom/server";
-import { expect, it } from "vitest";
+import { afterEach, expect, it } from "vitest";
 import type { OutputBody, OutputEntry } from "../../ipc/bindings";
-import { OUTPUT_LIMIT } from "../../state/live";
+import { OUTPUT_LIMIT, useLive } from "../../state/live";
+import { useWorkspace } from "../../state/workspace";
 import { OutputPanel } from "./OutputPanel";
+import { ResultsPane } from "./ResultsPane";
 
 const at = new Date(2026, 9, 15, 9, 5, 7).getTime();
 const entry = (runId: number, body: OutputBody): OutputEntry => ({ atMs: at, runId, body });
 
 const lines = (entries: OutputEntry[]) =>
-  renderToStaticMarkup(<OutputPanel entries={entries} />)
+  renderToStaticMarkup(<OutputPanel log={{ entries, dropped: 0 }} />)
     .split('<div data-testid="output-line"')
     .slice(1)
     .map((html) => {
@@ -47,8 +51,39 @@ it("prints each entry as a timestamped line in DataGrip's Output order", () => {
   ]);
 });
 
-it("says lines were dropped only when the log is at its cap", () => {
-  const info = entry(1, { kind: "Info", message: "x" });
-  expect(renderToStaticMarkup(<OutputPanel entries={[info]} />)).not.toContain("Only the last");
-  expect(renderToStaticMarkup(<OutputPanel entries={Array.from({ length: OUTPUT_LIMIT }, () => info)} />)).toContain("Only the last 5,000 lines are kept.");
+it("says lines were dropped only once the log has dropped some", () => {
+  const full = Array.from({ length: OUTPUT_LIMIT }, () => entry(1, { kind: "Info", message: "x" }));
+  expect(renderToStaticMarkup(<OutputPanel log={{ entries: full, dropped: 0 }} />)).not.toContain("Only the last");
+  expect(renderToStaticMarkup(<OutputPanel log={{ entries: full, dropped: 1 }} />)).toContain("Only the last 5,000 lines are kept.");
+});
+
+afterEach(() => {
+  cleanup();
+  useWorkspace.setState(useWorkspace.getInitialState(), true);
+  useLive.setState(useLive.getInitialState(), true);
+});
+
+it("leaves the lines on screen untouched while batches arrive past the cap", () => {
+  const info = (n: number) => entry(1, { kind: "Info", message: `line ${n}` });
+  const send = (from: number, count: number) =>
+    act(() => useLive.getState().apply({ kind: "ConsoleOutput", tabId: "t1", entries: Array.from({ length: count }, (_, i) => info(from + i)) }));
+  const tab = { id: "t1", title: "Query", console: { db: { connectionId: "c1", database: "shop" }, mode: "AutoCommit" as const }, table: null, file: null };
+  useWorkspace.setState({ tabs: { t1: tab }, order: ["t1"], active: "t1" });
+  send(0, OUTPUT_LIMIT);
+  render(<ResultsPane tabId="t1" />);
+  const panel = screen.getByTestId("output-panel");
+  const kept = [...panel.querySelectorAll("[data-testid=output-line]")].find((line) => line.textContent?.endsWith("line 4000"))!;
+  const mutations = new MutationObserver(() => {});
+  mutations.observe(panel, { subtree: true, childList: true, characterData: true });
+
+  send(OUTPUT_LIMIT, 10);
+
+  const changed = mutations.takeRecords();
+  expect(kept.isConnected && kept.textContent?.endsWith("line 4000")).toBe(true);
+  expect(changed.filter((m) => m.target !== panel)).toEqual([]);
+  expect(changed.flatMap((m) => [...m.addedNodes]).map((n) => n.textContent?.replace(/^\d\d:\d\d:\d\d/, ""))).toEqual([
+    "Only the last 5,000 lines are kept.",
+    ...Array.from({ length: 10 }, (_, i) => `line ${OUTPUT_LIMIT + i}`),
+  ]);
+  expect(panel.querySelectorAll("[data-testid=output-line]")).toHaveLength(OUTPUT_LIMIT);
 });
