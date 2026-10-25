@@ -36,6 +36,7 @@ import {
   openSqlTab,
   isBrowsing,
   submitEdits,
+  revertEdits,
   cancelActive,
   installRunBehavior,
   setTablePage,
@@ -849,6 +850,7 @@ describe("a run on a Production connection", () => {
       body: "This run sends 2 statements that write to prod-postgres / shop.",
     });
     expect(question()?.choices).toEqual([{ id: "btn", label: "Run writes", variant: "danger" }]);
+    expect(question()?.statements).toEqual(["update orders set n = 1", "delete from orders"]);
     expect(sent("console_run")).toEqual([]);
     useWorkspace.getState().answer("btn");
     await vi.waitFor(() => expect(sent("console_run")).toHaveLength(1));
@@ -916,5 +918,72 @@ describe("a run on a Production connection", () => {
     useWorkspace.getState().answer("btn");
     await new Promise((resolve) => setTimeout(resolve, 0));
     expect(sent("console_run")).toEqual([]);
+  });
+});
+
+describe("staged edits on a Production connection", () => {
+  const key = [{ column: "id", value: "1" }];
+  const question = () => {
+    const overlay = useWorkspace.getState().overlay;
+    return overlay.kind === "ask" ? overlay : null;
+  };
+
+  async function staged(environment: Environment | null) {
+    const id = await openWithConsole();
+    useWorkspace.setState((s) => ({ configs: { ...s.configs, c1: { ...connectionConfig("c1", "prod-postgres"), environment } } }));
+    useTableEdits.getState().edit(id, (edits) => markDeleted(setCell(edits, [{ column: "id", value: "2" }], "status", "x", "y"), [key], true));
+    const sent: string[] = [];
+    mockIPC((cmd) => {
+      sent.push(cmd);
+      if (cmd === "table_apply") return { committed: true };
+      return null;
+    });
+    return { id, sent };
+  }
+
+  it("asks before sending, naming each kind of change and the table", async () => {
+    const { id, sent } = await staged("Production");
+    const done = submitEdits(id);
+    await vi.waitFor(() => expect(question()).not.toBeNull());
+    expect(question()).toMatchObject({
+      title: "Apply 2 changes on Production?",
+      body: "This sends 1 update and 1 delete to public.orders on prod-postgres / shop.",
+    });
+    expect(sent).not.toContain("table_apply");
+    useWorkspace.getState().answer("btn");
+    await done;
+    expect(sent).toContain("table_apply");
+  });
+
+  it("keeps the edits when the question is cancelled", async () => {
+    const { id, sent } = await staged("Production");
+    const done = submitEdits(id);
+    await vi.waitFor(() => expect(question()).not.toBeNull());
+    useWorkspace.getState().close();
+    await done;
+    expect(sent).not.toContain("table_apply");
+    expect(pendingCount(useTableEdits.getState().byTab[id]!)).toBe(2);
+    expect(useTableEdits.getState().submitting[id]).toBeUndefined();
+  });
+
+  it("sends without asking elsewhere", async () => {
+    const { id, sent } = await staged("Staging");
+    await submitEdits(id);
+    expect(question()).toBeNull();
+    expect(sent).toContain("table_apply");
+  });
+
+  it("asks before Revert drops staged edits", async () => {
+    const { id } = await staged(null);
+    const done = revertEdits(id);
+    await vi.waitFor(() => expect(question()?.title).toBe("Revert 2 changes?"));
+    useWorkspace.getState().close();
+    await done;
+    expect(pendingCount(useTableEdits.getState().byTab[id]!)).toBe(2);
+    const again = revertEdits(id);
+    await vi.waitFor(() => expect(question()).not.toBeNull());
+    useWorkspace.getState().answer("btn");
+    await again;
+    expect(useTableEdits.getState().byTab[id]).toBeUndefined();
   });
 });

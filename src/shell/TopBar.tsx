@@ -106,6 +106,7 @@ export function TopBar({ hosted }: { hosted: HostedWindow | null }) {
                 <MenuItem key={c.id} checked={c.id === connectionId} onSelect={() => void setTabTarget(tab.id, homeDb(c))}>
                   <StatusDot tone={connectionTone(connections[c.id])} />
                   <ConnectionColorDot color={c.color} />
+                  <EnvironmentIcon environment={c.environment} size={13} testId={`env-icon-${c.id}`} />
                   {c.name}
                 </MenuItem>
               ))}
@@ -213,10 +214,14 @@ export function TopBar({ hosted }: { hosted: HostedWindow | null }) {
         ) : (
           <Button
             data-testid="run-btn"
+            data-environment={environment ?? undefined}
             disabled={busy}
             variant="primary"
-            title="Run the selection or the marked statement (⌘↵). On a blank line, or with ⌘⇧↵, choose which statement to run."
-            className="w-[104px] justify-center pr-2 pl-2.5 font-medium"
+            title={`Run the selection or the marked statement (⌘↵). On a blank line, or with ⌘⇧↵, choose which statement to run.${environment === "Production" ? " This tab targets Production, so a run that writes asks first." : ""}`}
+            className={cx(
+              "w-[104px] justify-center pr-2 pl-2.5 font-medium",
+              environment === "Production" && "ring-2 ring-danger ring-offset-2 ring-offset-bg",
+            )}
             onClick={() => void runOrChoose()}
           >
             <PlayIcon fill="currentColor" size={13} className="text-run-icon" />

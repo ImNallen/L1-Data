@@ -44,6 +44,18 @@ function AskDialog({ question }: { question: Extract<Overlay, { kind: "ask" }> }
       testId={`${question.testId}-dialog`}
       initialFocus={has("primary") ? primary : has("danger") ? cancel : undefined}
     >
+      {question.statements.length > 0 && (
+        <div data-testid={`${question.testId}-statements`} className="-mt-1 mb-4 flex flex-col gap-1.5">
+          {question.statements.map((sql, i) => (
+            <pre
+              key={i}
+              className="selectable max-h-24 overflow-auto rounded-md border border-control bg-bg px-2.5 py-1.5 font-mono text-code-sm whitespace-pre-wrap text-fg [overflow-wrap:anywhere]"
+            >
+              {sql}
+            </pre>
+          ))}
+        </div>
+      )}
       <div className="flex justify-end gap-2">
         <Button ref={cancel} variant="ghost" data-testid={`${question.testId}-cancel`} onClick={close}>
           Cancel
