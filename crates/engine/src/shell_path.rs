@@ -33,7 +33,7 @@ pub(crate) async fn search_path(agent_path: &AgentPath, home: &Path) -> OsString
 }
 
 pub(crate) fn dirs(path: &OsString) -> Vec<PathBuf> {
-    std::env::split_paths(path).filter(|p| !p.as_os_str().is_empty()).collect()
+    std::env::split_paths(path).filter(|p| p.is_absolute()).collect()
 }
 
 pub(crate) fn is_executable(path: &Path) -> bool {
@@ -58,4 +58,15 @@ async fn login_shell_path() -> Option<OsString> {
     let text = String::from_utf8_lossy(&output.stdout);
     let path = text.lines().last()?.trim();
     (!path.is_empty()).then(|| OsString::from(path))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_relative_path_entry_is_not_searched() {
+        let path = std::env::join_paths(["/opt/bin", ".", "", "node_modules/.bin", "/usr/bin"]).unwrap();
+        assert_eq!(dirs(&path), [PathBuf::from("/opt/bin"), PathBuf::from("/usr/bin")]);
+    }
 }
