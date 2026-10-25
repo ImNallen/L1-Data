@@ -316,8 +316,10 @@ it.each(["ord", "li", "le", "gr", "ri", "fu", "of", "in", "cr", "ha", "ex", "un"
       reply({ kind: "Alias" }, [table("orders", "orders")], { keywords: AFTER_TABLE, from: text.length - (text.length - base.length) }),
     );
     try {
-      type(alias);
-      await settle();
+      for (const ch of alias) {
+        type(ch);
+        await settle();
+      }
       const labels = currentCompletions(view.state).map((c) => c.label);
       expect(labels[0]).toBe(alias);
       expect(labels.length).toBeGreaterThan(1);

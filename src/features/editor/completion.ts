@@ -231,18 +231,29 @@ function declined(from: number, validFor: (text: string) => boolean = () => fals
 }
 
 /**
- * A reply holds for any word typed at its `from`, since the engine skips the word being typed. So a word typed where a
- * reply declined opens from that reply, with no new request for a large document.
+ * A reply holds for any word typed at its `from`, since the engine skips the word being typed. So more typing in that
+ * word is answered from the same reply: a declined reply can still open, and an alias list keeps the word as typed first.
  */
-function declinedReply(view: CatalogView | undefined, reply: Complete): CompletionResult {
-  const update: CompletionResult["update"] = (_current, from, to, ctx) => {
+function retype(view: CatalogView | undefined, reply: Complete): CompletionResult["update"] {
+  return (_current, from, to, ctx) => {
     const typed = ctx.state.sliceDoc(from, to);
-    if (!typed || !WORD.test(typed)) return null;
-    if (!opensUnasked(ctx, reply, typed)) return declinedReply(view, reply);
-    const options = optionsFor(view, reply, typed);
-    return options.length ? { from, options, validFor: WORD } : declinedReply(view, reply);
+    return typed && WORD.test(typed) ? resultFor(view, reply, from, typed, ctx) : null;
   };
-  return declined(reply.from, () => false, update);
+}
+
+function resultFor(
+  view: CatalogView | undefined,
+  reply: Complete,
+  from: number,
+  typed: string,
+  ctx: EditorContext,
+  joins: Completion[] = [],
+): CompletionResult {
+  if (!opensUnasked(ctx, reply, typed)) return declined(from, () => false, retype(view, reply));
+  if (reply.expect.kind === "Alias" && !reply.qualifier)
+    return { from, options: aliasOptions(reply, typed), validFor: (t) => t === typed, update: retype(view, reply) };
+  const options = [...joins, ...optionsFor(view, reply, typed)];
+  return options.length ? { from, options, validFor: WORD } : declined(from, () => false, retype(view, reply));
 }
 
 export function engineCompletion(view: CatalogView | undefined, kind: DatabaseKind): CompletionSource {
@@ -261,9 +272,9 @@ export function engineCompletion(view: CatalogView | undefined, kind: DatabaseKi
     if (!reply || ctx.aborted) return null;
     if (reply.kind === "None") return declined(ctx.matchBefore(TYPED)?.from ?? ctx.pos, (text) => WORD.test(text));
     const typed = ctx.state.sliceDoc(reply.from, ctx.pos);
-    if (!opensUnasked(ctx, reply, typed)) return declinedReply(view, reply);
-    const options = await completionOptions(view, reply, typed);
+    const joining = reply.expect.kind === "JoinCondition" && !reply.qualifier && view && opensUnasked(ctx, reply, typed);
+    const joins = joining && reply.expect.kind === "JoinCondition" ? await joinConditions(view, reply, reply.expect.target) : [];
     if (ctx.aborted) return null;
-    return options.length ? { from: reply.from, options, validFor: WORD } : declinedReply(view, reply);
+    return resultFor(view, reply, reply.from, typed, ctx, joins);
   };
 }
