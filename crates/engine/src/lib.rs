@@ -923,6 +923,7 @@ impl Engine {
         let s = &self.shared;
         let entra = s.entra(d.database_kind, d.sql_server_auth)?;
         let password = match (&d.password, d.id) {
+            _ if entra.is_some() => None,
             (PasswordInput::Set(pw), _) => Some(pw.clone()),
             (PasswordInput::Clear, _) | (PasswordInput::Keep, None) => None,
             (PasswordInput::Keep, Some(id)) => s.saved_secret(id, SecretSlot::Database)?,
@@ -1813,6 +1814,24 @@ mod tests {
         engine.delete_connection(saved.id).await.unwrap();
         let err = engine.save_connection(draft("dev")).await.unwrap_err();
         assert!(matches!(err, SaveError::Keychain { ref message } if message == "keychain touched"));
+    }
+
+    #[tokio::test]
+    async fn testing_an_entra_draft_never_reads_the_saved_password() {
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = |keys: Arc<dyn KeyStore>| EngineConfig { data_dir: dir.path().to_owned(), keys, agent_path: AgentPath::Fixed("".into()), az_binary: None, user_known_hosts: None, updates: Arc::new(crate::ScriptedTransport::named("off").unwrap()) };
+        let login = ConnectionDraft { database_kind: DatabaseKind::SqlServer, port: 1, ssl_mode: SslMode::VerifyFull, sql_server_auth: Some(SqlServerAuth::SqlLogin), ..draft("azure") };
+        let saved = {
+            let engine = Engine::open(cfg(Arc::new(MemoryKeyStore::default()))).await.unwrap();
+            let saved = engine.save_connection(login.clone()).await.unwrap();
+            engine.shutdown().await;
+            saved
+        };
+        assert!(saved.has_password);
+        let engine = Engine::open(cfg(Arc::new(NoKeychain))).await.unwrap();
+        let entra = ConnectionDraft { id: Some(saved.id), password: PasswordInput::Keep, sql_server_auth: Some(SqlServerAuth::EntraAzureCli), ..login };
+        let Err(ConnectError::Auth { message }) = engine.test_connection(entra).await else { panic!("the keychain was read") };
+        assert!(message.starts_with("Install the Azure CLI"), "{message}");
     }
 
     #[tokio::test]
