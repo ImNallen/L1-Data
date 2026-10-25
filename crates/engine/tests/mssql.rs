@@ -1012,7 +1012,7 @@ impl Harness {
                 FROM sys.triggers t JOIN sys.sql_modules m ON m.object_id=t.object_id WHERE t.parent_id=o.object_id
                 UNION ALL
                 SELECT CONCAT(N'module ',m.uses_ansi_nulls,' ',m.uses_quoted_identifier,' ',TRIM(CHAR(13)+CHAR(10)+CHAR(9)+' ' FROM m.definition))
-                FROM sys.sql_modules m WHERE m.object_id=o.object_id AND o.name NOT IN ('newname','moved')
+                FROM sys.sql_modules m WHERE m.object_id=o.object_id AND o.name NOT IN ('newname','moved','bare_moved','bare_in')
                 UNION ALL
                 SELECT CONCAT(N'property ',ep.class,' ',CASE ep.class WHEN 7 THEN (SELECT name FROM sys.indexes WHERE object_id=ep.major_id AND index_id=ep.minor_id)
                                                                   WHEN 2 THEN (SELECT name FROM sys.parameters WHERE object_id=ep.major_id AND parameter_id=ep.minor_id)
@@ -1096,17 +1096,31 @@ async fn hostile_object_scripts_replay_every_property_or_warn() {
         scripted.sort();
         assert_eq!(
             scripted,
-            ["Par ent", "cci", "f_scalar", "go_in_comment", "heap_pk", "moved", "newname", "parted", "qi_off", "refd", "refr", "sparse_set", "temporal", "temporal_history", "v_bound", "warned"]
+            ["Par ent", "bare_in", "bare_moved", "cci", "f_scalar", "go_in_comment", "heap_pk", "moved", "newname", "parted", "qi_off", "refd", "refr", "sparse_set", "temporal", "temporal_history", "v_bound", "warned"]
         );
 
         dst.replay_in_dependency_order(tables).await;
         dst.replay_in_dependency_order(modules).await;
         assert_eq!(dst.hostile_facts().await, src.hostile_facts().await);
 
-        let renamed = dst.all_rows("SELECT OBJECT_DEFINITION(OBJECT_ID(N'dbo.newname')),OBJECT_ID(N'dbo.oldname'),OBJECT_DEFINITION(OBJECT_ID(N'[we]]ird s].moved')),OBJECT_ID(N'dbo.moved')").await;
+        let renamed = dst
+            .all_rows(
+                "SELECT OBJECT_DEFINITION(OBJECT_ID(N'dbo.newname')),OBJECT_ID(N'dbo.oldname'),OBJECT_DEFINITION(OBJECT_ID(N'[we]]ird s].moved')),OBJECT_ID(N'dbo.moved'),
+                        OBJECT_DEFINITION(OBJECT_ID(N'[we]]ird s].bare_moved')),OBJECT_DEFINITION(OBJECT_ID(N'[we]]ird s].bare_in')),OBJECT_ID(N'dbo.bare_moved'),OBJECT_ID(N'dbo.bare_in')",
+            )
+            .await;
         assert_eq!(
             renamed,
-            [[Some("CREATE PROCEDURE [newname] AS SELECT 1".to_owned()), None, Some("CREATE PROCEDURE /* dbo.x */ [we]]ird s].[moved] @p int AS SELECT @p".to_owned()), None]]
+            [[
+                Some("CREATE PROCEDURE [dbo].[newname] AS SELECT 1".to_owned()),
+                None,
+                Some("CREATE PROCEDURE /* dbo.x */ [we]]ird s].[moved] @p int AS SELECT @p".to_owned()),
+                None,
+                Some("CREATE PROCEDURE [we]]ird s].[bare_moved] AS SELECT 2".to_owned()),
+                Some("CREATE PROCEDURE [we]]ird s].[bare_in] AS SELECT 3".to_owned()),
+                None,
+                None,
+            ]]
         );
         let schema_oid = |name: &str| catalog.schemas.iter().flat_map(|s| &s.relations).find(|r| r.name == name).unwrap().oid;
         let xml = src.engine.object_script(db.clone(), ScriptTarget::Index { relation_oid: schema_oid("warned"), name: "IX x".into() }).await;

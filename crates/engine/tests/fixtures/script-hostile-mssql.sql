@@ -64,6 +64,18 @@ ALTER SCHEMA [we]]ird s] TRANSFER dbo.moved;
 GO
 EXEC sys.sp_addextendedproperty N'MS_Description', N'the argument', N'SCHEMA', N'we]ird s', N'PROCEDURE', N'moved', N'PARAMETER', N'@p';
 GO
+CREATE PROCEDURE bare_moved AS SELECT 2
+GO
+ALTER SCHEMA [we]]ird s] TRANSFER dbo.bare_moved;
+GO
+CREATE USER bare_user WITHOUT LOGIN WITH DEFAULT_SCHEMA = [we]]ird s];
+GRANT CREATE PROCEDURE TO bare_user;
+GRANT ALTER ON SCHEMA::[we]]ird s] TO bare_user;
+GO
+EXECUTE AS USER = 'bare_user';
+EXEC (N'CREATE PROCEDURE bare_in AS SELECT 3');
+REVERT;
+GO
 SET QUOTED_IDENTIFIER OFF;
 GO
 CREATE PROCEDURE dbo.qi_off AS SELECT "a string" AS s

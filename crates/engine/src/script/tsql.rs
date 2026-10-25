@@ -439,7 +439,8 @@ fn index_text(i: &Index, table: &str, warnings: &mut Vec<String>) -> Option<Stri
 }
 
 /// `OBJECT_DEFINITION` keeps the name a module was created with, so a module renamed by
-/// `sp_rename` or moved by `ALTER SCHEMA ... TRANSFER` would replay under its old name.
+/// `sp_rename` or moved by `ALTER SCHEMA ... TRANSFER` would replay under its old name. A
+/// one-part name would replay in the default schema of whoever runs the script.
 fn module_text(m: &Module, warnings: &mut Vec<String>) -> String {
     let name = qualified(&m.schema, &m.name);
     let definition = m.definition.trim();
@@ -449,7 +450,7 @@ fn module_text(m: &Module, warnings: &mut Vec<String>) -> String {
             None
         }
         Some(header) => match header.parts.as_slice() {
-            [n] if *n != m.name => Some((header.span, ident(&m.name))),
+            [_] => Some((header.span, name.clone())),
             [s, n] if *s != m.schema || *n != m.name => Some((header.span, name.clone())),
             _ => None,
         },
@@ -837,10 +838,11 @@ GO
     #[test]
     fn a_renamed_or_moved_module_replays_under_its_current_name() {
         let text = |definition: &str, schema: &str| module(&Module { schema: schema.into(), ..procedure(definition) });
-        assert_eq!(text("CREATE PROCEDURE oldname AS SELECT 1", "dbo"), Ddl::complete(format!("{HEAD}CREATE PROCEDURE [newname] AS SELECT 1\nGO\n")));
+        assert_eq!(text("CREATE PROCEDURE oldname AS SELECT 1", "dbo"), Ddl::complete(format!("{HEAD}CREATE PROCEDURE [dbo].[newname] AS SELECT 1\nGO\n")));
+        assert_eq!(text("CREATE PROCEDURE [oldname] AS SELECT 1", "lab"), Ddl::complete(format!("{HEAD}CREATE PROCEDURE [lab].[newname] AS SELECT 1\nGO\n")));
         assert_eq!(text("/* x */ CREATE   PROC dbo.oldname AS SELECT 'oldname'", "dbo"), Ddl::complete(format!("{HEAD}/* x */ CREATE   PROC [dbo].[newname] AS SELECT 'oldname'\nGO\n")));
         assert_eq!(text("CREATE PROCEDURE dbo.newname AS SELECT 1", "we]ird s"), Ddl::complete(format!("{HEAD}CREATE PROCEDURE [we]]ird s].[newname] AS SELECT 1\nGO\n")));
-        assert_eq!(text("CREATE PROCEDURE newname AS SELECT 1", "lab"), Ddl::complete(format!("{HEAD}CREATE PROCEDURE newname AS SELECT 1\nGO\n")));
+        assert_eq!(text("CREATE PROCEDURE newname AS SELECT 1", "lab"), Ddl::complete(format!("{HEAD}CREATE PROCEDURE [lab].[newname] AS SELECT 1\nGO\n")));
         assert_eq!(text("create procedure [dbo].[newname] as select 1", "dbo"), Ddl::complete(format!("{HEAD}create procedure [dbo].[newname] as select 1\nGO\n")));
         assert_eq!(
             text("CREATE PROCEDURE p AS SELECT 'unclosed", "dbo"),
