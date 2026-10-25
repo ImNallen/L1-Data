@@ -2641,7 +2641,8 @@ async fn catalog_facts(client: &tokio_postgres::Client, relations: &str) -> Vec<
             SELECT concat_ws(' ', 'constraint', k.conname, pg_get_constraintdef(k.oid), k.convalidated, k.conislocal, k.coninhcount, obj_description(k.oid, 'pg_constraint'))
             FROM pg_constraint k WHERE k.conrelid = c.oid
             UNION ALL
-            SELECT concat_ws(' ', 'index', pg_get_indexdef(i.indexrelid), i.indisclustered, i.indisreplident, obj_description(i.indexrelid, 'pg_class'))
+            SELECT concat_ws(' ', 'index', pg_get_indexdef(i.indexrelid), i.indisclustered, i.indisreplident, obj_description(i.indexrelid, 'pg_class'),
+                             (SELECT string_agg(a.attnum || '=' || a.attstattarget, ',' ORDER BY a.attnum) FROM pg_attribute a WHERE a.attrelid = i.indexrelid))
             FROM pg_index i WHERE i.indrelid = c.oid
             UNION ALL
             SELECT concat_ws(' ', 'trigger', pg_get_triggerdef(t.oid), t.tgenabled, obj_description(t.oid, 'pg_trigger')) FROM pg_trigger t WHERE t.tgrelid = c.oid AND NOT t.tgisinternal
@@ -2770,6 +2771,7 @@ async fn hostile_object_scripts_replay_every_property_or_warn() {
 
     let outcome = futures_util::FutureExt::catch_unwind(std::panic::AssertUnwindSafe(async {
         original.batch_execute(HOSTILE).await.unwrap();
+        assert!(original.batch_execute("CREATE UNIQUE INDEX CONCURRENTLY dups_v ON app.dups (v)").await.is_err(), "the duplicate rows leave dups_v invalid");
         replay.batch_execute(HOSTILE_PRELUDE).await.unwrap();
         let db = h.db_named(&source);
         let script = async |target: ScriptTarget| h.engine.object_script(db.clone(), target).await.unwrap();
@@ -2803,11 +2805,14 @@ async fn hostile_object_scripts_replay_every_property_or_warn() {
             warned,
             std::collections::BTreeMap::from([
                 ("child.sql".to_owned(), vec!["the column order of app.child, because a replay puts inherited columns first".to_owned()]),
+                ("dups.sql".to_owned(), vec!["the invalid state of index app.dups_v, which a replay builds valid".to_owned()]),
+                ("pt.sql".to_owned(), vec!["the partial attachment of index app.pt_only, which a replay attaches to every partition".to_owned()]),
+                ("refd.sql".to_owned(), vec!["membership of app.refd in publication hostile_pub".to_owned()]),
                 ("ren.sql".to_owned(), vec!["privileges on app.ren_custom_seq (USAGE granted to pg_read_all_data)".to_owned()]),
                 ("select.sql".to_owned(), vec!["privileges on app.\"select\" (SELECT granted to pg_read_all_data, UPDATE (\"Mixed\") granted to pg_read_all_data)".to_owned()]),
             ])
         );
-        let reordered = |facts: Vec<String>| facts.into_iter().filter(|f| !f.starts_with("app.child column")).collect::<Vec<_>>();
+        let reordered = |facts: Vec<String>| facts.into_iter().filter(|f| !f.starts_with("app.child column") && !f.starts_with("app.pt1 index")).collect::<Vec<_>>();
         assert_eq!(reordered(catalog_facts(&replay, HOSTILE_RELATIONS).await), reordered(catalog_facts(&original, HOSTILE_RELATIONS).await));
         let columns = "select string_agg(attname, ',' order by attname) from pg_attribute where attrelid = 'app.child'::regclass and attnum > 0";
         let (a, b) = (original.query_one(columns, &[]).await.unwrap(), replay.query_one(columns, &[]).await.unwrap());

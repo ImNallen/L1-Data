@@ -133,3 +133,12 @@ CREATE TABLE "order"."group" (id int);
 -- a typed table with column options and a key
 CREATE TABLE app.pets OF app.pet (kind WITH OPTIONS DEFAULT 'cat' NOT NULL, name WITH OPTIONS NOT NULL, PRIMARY KEY (id));
 CREATE TABLE app.bare_pets OF app.pet;
+-- an expression index with a statistics target, an index on only a partitioned parent, a published table, and a table whose unique index build failed
+CREATE INDEX "Lower a" ON app.opt ((lower(a)));
+ALTER INDEX app."Lower a" ALTER COLUMN 1 SET STATISTICS 300;
+CREATE TABLE app.pt (k int) PARTITION BY LIST (k);
+CREATE TABLE app.pt1 PARTITION OF app.pt FOR VALUES IN (1);
+CREATE INDEX pt_only ON ONLY app.pt (k);
+CREATE PUBLICATION hostile_pub FOR TABLE app.refd;
+CREATE TABLE app.dups (v int);
+INSERT INTO app.dups VALUES (1), (1);

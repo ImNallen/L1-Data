@@ -15,7 +15,8 @@ const RELATION: &str = "SELECT c.relkind::text, n.nspname, c.relname, c.relpersi
               WHERE h.inhrelid = c.oid AND NOT c.relispartition ORDER BY h.inhseqno),
         ARRAY(SELECT hc.relname::text FROM pg_inherits h JOIN pg_class hc ON hc.oid = h.inhparent
               WHERE h.inhrelid = c.oid AND NOT c.relispartition ORDER BY h.inhseqno),
-        CASE WHEN c.reloftype <> 0 THEN format_type(c.reloftype, NULL) END
+        CASE WHEN c.reloftype <> 0 THEN format_type(c.reloftype, NULL) END,
+        ARRAY(SELECT p.pubname::text FROM pg_publication_rel pr JOIN pg_publication p ON p.oid = pr.prpubid WHERE pr.prrelid = c.oid ORDER BY 1)
      FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
      LEFT JOIN pg_inherits i ON i.inhrelid = c.oid AND c.relispartition
      LEFT JOIN pg_class p ON p.oid = i.inhparent LEFT JOIN pg_namespace pn ON pn.oid = p.relnamespace
@@ -102,7 +103,10 @@ const CONSTRAINTS: &str = "SELECT k.conname, pg_get_constraintdef(k.oid), obj_de
 const INDEXES: &str = "SELECT ic.relname,
         CASE WHEN NOT EXISTS (SELECT 1 FROM pg_constraint k WHERE k.conindid = i.indexrelid AND k.conrelid = i.indrelid AND k.contype IN ('p', 'u', 'x'))
              THEN pg_get_indexdef(i.indexrelid) END,
-        obj_description(i.indexrelid, 'pg_class'), i.indisclustered, i.indisreplident, ts.spcname
+        obj_description(i.indexrelid, 'pg_class'), i.indisclustered, i.indisreplident, ts.spcname,
+        ARRAY(SELECT a.attnum::int4 FROM pg_attribute a WHERE a.attrelid = i.indexrelid AND NULLIF(a.attstattarget, -1) IS NOT NULL ORDER BY a.attnum),
+        ARRAY(SELECT NULLIF(a.attstattarget, -1)::int4 FROM pg_attribute a WHERE a.attrelid = i.indexrelid AND NULLIF(a.attstattarget, -1) IS NOT NULL ORDER BY a.attnum),
+        NOT i.indisvalid, ic.relkind = 'I'
      FROM pg_index i JOIN pg_class ic ON ic.oid = i.indexrelid LEFT JOIN pg_tablespace ts ON ts.oid = ic.reltablespace
      WHERE i.indrelid = $1 AND NOT EXISTS (SELECT 1 FROM pg_inherits h WHERE h.inhrelid = i.indexrelid)
      ORDER BY ic.relname";
@@ -180,7 +184,7 @@ fn grant_row(r: &Row) -> Grant {
 }
 
 fn unscripted(r: &Row, grants: &[Row]) -> ddl::Unscripted {
-    let mut u = ddl::Unscripted { security_labels: r.get(16), ..Default::default() };
+    let mut u = ddl::Unscripted { security_labels: r.get(16), publications: r.get(22), ..Default::default() };
     for g in grants {
         match (g.get::<_, Option<String>>(0), g.get::<_, Option<String>>(1)) {
             (Some(schema), Some(name)) => match u.sequence_privileges.last_mut() {
@@ -396,7 +400,18 @@ fn constraint_row(r: &Row) -> ddl::Constraint {
 }
 
 fn index_row(r: &Row) -> ddl::Index {
-    ddl::Index { name: r.get(0), definition: r.get(1), comment: r.get(2), clustered: r.get(3), replica_identity: r.get(4), tablespace: r.get(5) }
+    let (columns, targets): (Vec<i32>, Vec<i32>) = (r.get(6), r.get(7));
+    ddl::Index {
+        name: r.get(0),
+        definition: r.get(1),
+        comment: r.get(2),
+        clustered: r.get(3),
+        replica_identity: r.get(4),
+        tablespace: r.get(5),
+        statistics: columns.into_iter().zip(targets).collect(),
+        invalid: r.get(8),
+        partitioned: r.get(9),
+    }
 }
 
 fn trigger_row(r: &Row) -> ddl::Trigger {
@@ -433,15 +448,18 @@ async fn index(tx: &Transaction<'_>, relation: u32, name: &str) -> Result<Object
     let sql = "SELECT ic.relname,
                       CASE WHEN k.oid IS NULL THEN pg_get_indexdef(i.indexrelid) END,
                       obj_description(i.indexrelid, 'pg_class'), i.indisclustered, i.indisreplident, ts.spcname,
+                      ARRAY(SELECT a.attnum::int4 FROM pg_attribute a WHERE a.attrelid = i.indexrelid AND NULLIF(a.attstattarget, -1) IS NOT NULL ORDER BY a.attnum),
+                      ARRAY(SELECT NULLIF(a.attstattarget, -1)::int4 FROM pg_attribute a WHERE a.attrelid = i.indexrelid AND NULLIF(a.attstattarget, -1) IS NOT NULL ORDER BY a.attnum),
+                      NOT i.indisvalid, ic.relkind = 'I',
                       k.conname, pg_get_constraintdef(k.oid), n.nspname, c.relname, c.relkind::text, obj_description(k.oid, 'pg_constraint')
                FROM pg_index i JOIN pg_class ic ON ic.oid = i.indexrelid JOIN pg_class c ON c.oid = i.indrelid JOIN pg_namespace n ON n.oid = c.relnamespace
                LEFT JOIN pg_tablespace ts ON ts.oid = ic.reltablespace
                LEFT JOIN pg_constraint k ON k.conindid = i.indexrelid AND k.conrelid = i.indrelid AND k.contype IN ('p', 'u', 'x')
                WHERE i.indrelid = $1 AND ic.relname = $2";
     let r = tx.query_opt(sql, &[&relation, &name]).await.map_err(failed)?.ok_or(DetailError::Gone)?;
-    let constraint = r.get::<_, Option<String>>(6).map(|name| ddl::Constraint { name, definition: r.get(7), comment: r.get(11) });
-    let (schema, table): (&str, &str) = (r.get(8), r.get(9));
-    let ddl = ddl::index_script(&index_row(&r), constraint.as_ref(), keyword(r.get(10)), schema, &ddl::qualified(schema, table));
+    let constraint = r.get::<_, Option<String>>(10).map(|name| ddl::Constraint { name, definition: r.get(11), comment: r.get(15) });
+    let (schema, table): (&str, &str) = (r.get(12), r.get(13));
+    let ddl = ddl::index_script(&index_row(&r), constraint.as_ref(), keyword(r.get(14)), schema, &ddl::qualified(schema, table));
     Ok(script::object_script(name, ddl))
 }
 

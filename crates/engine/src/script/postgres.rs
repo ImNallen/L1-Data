@@ -36,6 +36,7 @@ pub struct Unscripted {
     /// The privileges on each sequence the script creates for the table, by schema and name.
     pub sequence_privileges: Vec<((String, String), Vec<Grant>)>,
     pub security_labels: bool,
+    pub publications: Vec<String>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -135,6 +136,10 @@ pub struct Index {
     pub clustered: bool,
     pub replica_identity: bool,
     pub tablespace: Option<String>,
+    /// Statistics targets by index column number.
+    pub statistics: Vec<(i32, i32)>,
+    pub invalid: bool,
+    pub partitioned: bool,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -259,7 +264,7 @@ fn table_statements(t: &Table, out: &mut Vec<String>, warnings: &mut Vec<String>
     for c in &t.columns {
         out.extend(column_changes(c, keyword, &name, !matches!(t.parent, Parent::Partition { .. }) && c.declared && c.inherited.is_none()));
     }
-    indexes(&t.indexes, keyword, &t.schema, &name, out);
+    indexes(&t.indexes, keyword, &t.schema, &name, out, warnings);
     match t.replica_identity {
         _ if t.foreign.is_some() => {}
         ReplicaIdentity::Nothing => out.push(format!("ALTER TABLE {name} REPLICA IDENTITY NOTHING")),
@@ -316,6 +321,10 @@ fn unscripted(u: &Unscripted, name: &str) -> Vec<String> {
     out.extend(u.sequence_privileges.iter().filter_map(|((schema, sequence), grants)| privileges(&qualified(schema, sequence), grants)));
     if u.security_labels {
         out.push(format!("security labels on {name}"));
+    }
+    if !u.publications.is_empty() {
+        let list: Vec<String> = u.publications.iter().map(|p| ident(p)).collect();
+        out.push(format!("membership of {name} in {} {}", if list.len() == 1 { "publication" } else { "publications" }, list.join(", ")));
     }
     out
 }
@@ -448,10 +457,17 @@ fn identity_clause(i: &Identity, schema: &str, table: &str) -> String {
     if options.is_empty() { head } else { format!("{head} ({})", options.join(" ")) }
 }
 
-fn indexes(list: &[Index], keyword: &str, schema: &str, relation: &str, out: &mut Vec<String>) {
+fn indexes(list: &[Index], keyword: &str, schema: &str, relation: &str, out: &mut Vec<String>, warnings: &mut Vec<String>) {
     for i in list {
         let name = ident(&i.name);
+        let qualified_name = qualified(schema, &i.name);
         out.extend(i.definition.as_deref().map(index));
+        out.extend(i.statistics.iter().map(|(column, target)| format!("ALTER INDEX {qualified_name} ALTER COLUMN {column} SET STATISTICS {target}")));
+        match (i.invalid, i.partitioned) {
+            (false, _) => {}
+            (true, false) => warnings.push(format!("the invalid state of index {qualified_name}, which a replay builds valid")),
+            (true, true) => warnings.push(format!("the partial attachment of index {qualified_name}, which a replay attaches to every partition")),
+        }
         if let Some(space) = &i.tablespace {
             out.push(format!("ALTER INDEX {} SET TABLESPACE {}", qualified(schema, &i.name), ident(space)));
         }
@@ -491,7 +507,8 @@ pub fn view(v: &View) -> Ddl {
     for c in &v.columns {
         statements.extend(column_changes(c, keyword, &name, false));
     }
-    indexes(&v.indexes, keyword, &v.schema, &name, &mut statements);
+    let mut warnings = unscripted(&v.unscripted, &name);
+    indexes(&v.indexes, keyword, &v.schema, &name, &mut statements, &mut warnings);
     for tr in &v.triggers {
         statements.extend(trigger(tr, keyword, &name));
     }
@@ -502,7 +519,7 @@ pub fn view(v: &View) -> Ddl {
     for c in &v.columns {
         statements.extend(comment(&format!("COLUMN {name}.{}", ident(&c.name)), &c.comment));
     }
-    Ddl { text: script(statements), warnings: unscripted(&v.unscripted, &name) }
+    Ddl { text: script(statements), warnings }
 }
 
 pub fn routine(definition: &str, procedure: bool, signature: &str, description: &Option<String>, grants: &[Grant]) -> Ddl {
@@ -513,11 +530,12 @@ pub fn routine(definition: &str, procedure: bool, signature: &str, description: 
 
 pub fn index_script(i: &Index, constraint: Option<&Constraint>, keyword: &str, schema: &str, relation: &str) -> Ddl {
     let mut statements: Vec<String> = constraint.map(|k| format!("ALTER {keyword} {relation} ADD CONSTRAINT {} {}", ident(&k.name), k.definition)).into_iter().collect();
-    indexes(std::slice::from_ref(i), keyword, schema, relation, &mut statements);
+    let mut warnings = vec![];
+    indexes(std::slice::from_ref(i), keyword, schema, relation, &mut statements, &mut warnings);
     if let Some(k) = constraint {
         statements.extend(comment(&format!("CONSTRAINT {} ON {relation}", ident(&k.name)), &k.comment));
     }
-    Ddl::complete(script(statements))
+    Ddl { text: script(statements), warnings }
 }
 
 /// `pg_get_indexdef` prints `ON ONLY` for a partitioned table's index, which would create the
@@ -838,6 +856,7 @@ ALTER FOREIGN TABLE public.e2 ALTER COLUMN v OPTIONS (ADD column_name 'vv');
                 privileges: vec![grant("SELECT", None, "app", Change::Granted), grant("UPDATE", Some("\"Mixed\""), "PUBLIC", Change::GrantedWithGrantOption)],
                 sequence_privileges: vec![(("app".into(), "child_id_seq".into()), vec![grant("USAGE", None, "app", Change::Granted)])],
                 security_labels: true,
+                publications: vec![],
             },
             ..Default::default()
         };
@@ -937,6 +956,30 @@ ALTER FOREIGN TABLE public.e2 ALTER COLUMN v OPTIONS (ADD column_name 'vv');
         );
         let plain = Index { name: "i".into(), definition: Some("CREATE INDEX i ON ONLY public.t USING btree (a)".into()), tablespace: Some("fast".into()), ..Default::default() };
         assert_eq!(index_script(&plain, None, "TABLE", "public", "public.t").text, "CREATE INDEX i ON public.t USING btree (a);\n\nALTER INDEX public.i SET TABLESPACE fast;\n");
+    }
+
+    #[test]
+    fn an_index_keeps_its_column_statistics_and_warns_when_invalid_or_partly_attached() {
+        let expr = Index { name: "Lower".into(), definition: Some("CREATE INDEX \"Lower\" ON app.t USING btree (lower(a))".into()), statistics: vec![(1, 300)], ..Default::default() };
+        assert_eq!(index_script(&expr, None, "TABLE", "app", "app.t"), Ddl::complete("CREATE INDEX \"Lower\" ON app.t USING btree (lower(a));\n\nALTER INDEX app.\"Lower\" ALTER COLUMN 1 SET STATISTICS 300;\n".into()));
+        let broken = Index { name: "dup".into(), definition: Some("CREATE UNIQUE INDEX dup ON app.t USING btree (a)".into()), invalid: true, ..Default::default() };
+        assert_eq!(index_script(&broken, None, "TABLE", "app", "app.t").warnings, ["the invalid state of index app.dup, which a replay builds valid"]);
+        let only = Index { name: "p_k".into(), definition: Some("CREATE INDEX p_k ON ONLY app.p USING btree (k)".into()), invalid: true, partitioned: true, ..Default::default() };
+        let t = Table { schema: "app".into(), name: "p".into(), columns: vec![col("k", "integer")], partition_key: Some("LIST (k)".into()), indexes: vec![only], ..Default::default() };
+        assert_eq!(table(&t).warnings, ["the partial attachment of index app.p_k, which a replay attaches to every partition"]);
+    }
+
+    #[test]
+    fn publication_membership_warns_naming_each_publication() {
+        let t = |publications: &[&str]| Table {
+            schema: "app".into(),
+            name: "t".into(),
+            columns: vec![col("id", "integer")],
+            unscripted: Unscripted { publications: publications.iter().map(|p| p.to_string()).collect(), ..Default::default() },
+            ..Default::default()
+        };
+        assert_eq!(table(&t(&["pub"])).warnings, ["membership of app.t in publication pub"]);
+        assert_eq!(table(&t(&["a", "B b"])).warnings, ["membership of app.t in publications a, \"B b\""]);
     }
 
     #[test]
