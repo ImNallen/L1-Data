@@ -1,3 +1,4 @@
+use crate::tds::codec::{TokenError, TokenInfo};
 use crate::tds::stream::ReceivedToken;
 use crate::{row::ColumnType, Column, Row};
 use futures_util::{
@@ -11,15 +12,16 @@ use std::{
     task::{self, Poll},
 };
 
-/// A set of `Streams` of [`QueryItem`] values, which can be either result
-/// metadata or a row.
+/// A set of `Streams` of [`QueryItem`] values: result metadata, rows, server
+/// messages and errors, and the end of each statement.
 ///
 /// The `QueryStream` needs to be polled empty before sending another query to
 /// the [`Client`], failing to do so causes a flush before the next query,
 /// slowing it down in an undeterministic way.
 ///
-/// Every stream starts with metadata, describing the structure of the incoming
-/// rows, e.g. the columns in the order they are presented in every row.
+/// Each result set starts with metadata, describing the structure of the
+/// incoming rows, e.g. the columns in the order they are presented in every
+/// row. Messages and statement ends arrive in server order around them.
 ///
 /// If after consuming rows from the stream, another metadata result arrives, it
 /// means the stream has multiple results from different queries. This new
@@ -54,11 +56,13 @@ use std::{
 ///     )
 ///     .await?;
 ///
-/// // The stream consists of four items, in the following order:
+/// // The stream consists of six items, in the following order:
 /// // - Metadata from `SELECT 1`
 /// // - The only resulting row from `SELECT 1`
+/// // - The end of `SELECT 1`, with its row count
 /// // - Metadata from `SELECT 2`
 /// // - The only resulting row from `SELECT 2`
+/// // - The end of `SELECT 2`, with its row count
 /// while let Some(item) = stream.try_next().await? {
 ///     match item {
 ///         // our first item is the column data always
@@ -77,6 +81,7 @@ use std::{
 ///         QueryItem::Row(row) => {
 ///             assert_eq!(Some(2), row.get(0));
 ///         }
+///         QueryItem::Info(_) | QueryItem::Error(_) | QueryItem::Done(_) => {}
 ///     }
 /// }
 /// # Ok(())
@@ -92,6 +97,7 @@ pub struct QueryStream<'a> {
     token_stream: Peekable<BoxStream<'a, crate::Result<ReceivedToken>>>,
     columns: Option<Arc<Vec<Column>>>,
     result_set_index: Option<usize>,
+    in_result: bool,
 }
 
 impl<'a> Debug for QueryStream<'a> {
@@ -111,29 +117,8 @@ impl<'a> QueryStream<'a> {
             token_stream: token_stream.peekable(),
             columns: None,
             result_set_index: None,
+            in_result: false,
         }
-    }
-
-    /// Moves the stream forward until having result metadata, stream end or an
-    /// error.
-    pub(crate) async fn forward_to_metadata(&mut self) -> crate::Result<()> {
-        loop {
-            let item = Pin::new(&mut self.token_stream)
-                .peek()
-                .await
-                .map(|r| r.as_ref().map_err(|e| e.clone()))
-                .transpose()?;
-
-            match item {
-                Some(ReceivedToken::NewResultset(_)) => break,
-                Some(_) => {
-                    self.token_stream.try_next().await?;
-                }
-                None => break,
-            }
-        }
-
-        Ok(())
     }
 
     /// The list of columns either for the current result set, or for the next
@@ -246,7 +231,7 @@ impl<'a> QueryStream<'a> {
         let s = self.try_filter_map(|item| async {
             match item {
                 QueryItem::Row(row) => Ok(Some(row)),
-                QueryItem::Metadata(_) => Ok(None),
+                _ => Ok(None),
             }
         });
 
@@ -292,6 +277,7 @@ where
                 // a result set on the fly rather than discard a leading row.
                 current.get_or_insert_with(Vec::new).push(row);
             }
+            QueryItem::Info(_) | QueryItem::Error(_) | QueryItem::Done(_) => {}
         }
     }
 
@@ -330,6 +316,16 @@ pub enum QueryItem {
     Row(Row),
     /// Information of the upcoming row data.
     Metadata(ResultMetadata),
+    /// A message from `PRINT`, a low-severity `RAISERROR`, or the server, in
+    /// stream order.
+    Info(TokenInfo),
+    /// A server error, in stream order. The batch can go on after it, and the
+    /// stream still ends with the first error once its items run out.
+    Error(TokenError),
+    /// The end of a statement, with the rows it returned or changed. `None`
+    /// under `SET NOCOUNT ON`, for statements that count no rows, such as DDL,
+    /// and for a `SELECT` that sent no result set, such as `SET @x = 1`.
+    Done(Option<u64>),
 }
 
 impl QueryItem {
@@ -343,8 +339,8 @@ impl QueryItem {
     /// Returns a reference to the metadata, if the item is of a correct variant.
     pub fn as_metadata(&self) -> Option<&ResultMetadata> {
         match self {
-            QueryItem::Row(_) => None,
             QueryItem::Metadata(ref metadata) => Some(metadata),
+            _ => None,
         }
     }
 
@@ -352,15 +348,15 @@ impl QueryItem {
     pub fn as_row(&self) -> Option<&Row> {
         match self {
             QueryItem::Row(ref row) => Some(row),
-            QueryItem::Metadata(_) => None,
+            _ => None,
         }
     }
 
     /// Returns the metadata, if the item is of a correct variant.
     pub fn into_metadata(self) -> Option<ResultMetadata> {
         match self {
-            QueryItem::Row(_) => None,
             QueryItem::Metadata(metadata) => Some(metadata),
+            _ => None,
         }
     }
 
@@ -368,7 +364,7 @@ impl QueryItem {
     pub fn into_row(self) -> Option<Row> {
         match self {
             QueryItem::Row(row) => Some(row),
-            QueryItem::Metadata(_) => None,
+            _ => None,
         }
     }
 }
@@ -398,6 +394,7 @@ impl<'a> Stream for QueryStream<'a> {
 
                     let column_meta = Arc::new(column_meta);
                     this.columns = Some(column_meta.clone());
+                    this.in_result = true;
 
                     this.result_set_index = this.result_set_index.map(|i| i + 1);
 
@@ -422,6 +419,12 @@ impl<'a> Stream for QueryStream<'a> {
                     };
 
                     Poll::Ready(Some(Ok(QueryItem::Row(row))))
+                }
+                ReceivedToken::Info(info) => Poll::Ready(Some(Ok(QueryItem::Info(info)))),
+                ReceivedToken::Error(error) => Poll::Ready(Some(Ok(QueryItem::Error(error)))),
+                ReceivedToken::Done(done) | ReceivedToken::DoneInProc(done) => {
+                    let rows = done.row_count(std::mem::take(&mut this.in_result));
+                    Poll::Ready(Some(Ok(QueryItem::Done(rows))))
                 }
                 _ => continue,
             };
@@ -684,6 +687,63 @@ mod tests {
             .await
             .expect("into_row empty");
         assert!(none.is_none());
+    }
+
+    #[tokio::test]
+    async fn query_stream_yields_messages_and_statement_ends_in_order() {
+        let info = |message: &str| {
+            ReceivedToken::Info(TokenInfo {
+                number: 0,
+                state: 1,
+                class: 0,
+                message: message.into(),
+                server: String::new(),
+                procedure: String::new(),
+                line: 1,
+            })
+        };
+        let items: Vec<QueryItem> = query_stream(vec![
+            info("before"),
+            token_meta("first"),
+            token_row(),
+            ReceivedToken::Error(TokenError {
+                code: 8134,
+                state: 1,
+                class: 16,
+                message: "failed".into(),
+                server: String::new(),
+                procedure: String::new(),
+                line: 1,
+            }),
+            info("terminated"),
+            ReceivedToken::Done(Default::default()),
+            info("after"),
+        ])
+        .try_collect()
+        .await
+        .expect("items");
+        let shape: Vec<String> = items
+            .iter()
+            .map(|item| match item {
+                QueryItem::Info(info) => format!("info {}", info.message()),
+                QueryItem::Metadata(_) => "metadata".into(),
+                QueryItem::Row(_) => "row".into(),
+                QueryItem::Error(error) => format!("error {}", error.message()),
+                QueryItem::Done(rows) => format!("done {rows:?}"),
+            })
+            .collect();
+        assert_eq!(
+            shape,
+            [
+                "info before",
+                "metadata",
+                "row",
+                "error failed",
+                "info terminated",
+                "done None",
+                "info after"
+            ]
+        );
     }
 
     #[tokio::test]

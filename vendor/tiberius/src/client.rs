@@ -264,10 +264,7 @@ impl<S: AsyncRead + AsyncWrite + Unpin + Send> Client<S> {
             .await?;
 
         let ts = TokenStream::new(&mut self.connection);
-        let mut result = QueryStream::new(ts.try_unfold());
-        result.forward_to_metadata().await?;
-
-        Ok(result)
+        Ok(QueryStream::new(ts.try_unfold()))
     }
 
     /// Execute multiple queries, delimited with `;` and return multiple result
@@ -323,10 +320,7 @@ impl<S: AsyncRead + AsyncWrite + Unpin + Send> Client<S> {
 
         let ts = TokenStream::new(&mut self.connection);
 
-        let mut result = QueryStream::new(ts.try_unfold());
-        result.forward_to_metadata().await?;
-
-        Ok(result)
+        Ok(QueryStream::new(ts.try_unfold()))
     }
 
     /// Execute a `BULK INSERT` statement, efficiently storing a large number of

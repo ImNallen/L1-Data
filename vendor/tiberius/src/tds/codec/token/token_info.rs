@@ -1,10 +1,8 @@
 use super::token_error::decode_error_info_body;
 use crate::SqlReadBytes;
 
-// Fields are decoded from the INFO token and logged at DEBUG on receipt, but
-// are not otherwise read; retained for `Debug` diagnostics and future surfacing
-// of server informational messages to callers.
-#[allow(dead_code)]
+/// A message the server sent in an INFO token, such as `PRINT` output or a
+/// `RAISERROR` at severity 10 or lower.
 #[derive(Debug)]
 pub struct TokenInfo {
     /// info number
@@ -38,6 +36,42 @@ impl TokenInfo {
             procedure: body.procedure,
             line: body.line,
         })
+    }
+
+    /// The message number. `PRINT` sends 0 and `RAISERROR` with a message
+    /// string sends 50000.
+    pub fn number(&self) -> u32 {
+        self.number
+    }
+
+    /// The message state.
+    pub fn state(&self) -> u8 {
+        self.state
+    }
+
+    /// The class (severity). SQL Server sends severity 10 as 0.
+    pub fn class(&self) -> u8 {
+        self.class
+    }
+
+    /// The message text.
+    pub fn message(&self) -> &str {
+        &self.message
+    }
+
+    /// The server name.
+    pub fn server(&self) -> &str {
+        &self.server
+    }
+
+    /// The name of the stored procedure that sent the message.
+    pub fn procedure(&self) -> &str {
+        &self.procedure
+    }
+
+    /// The line number in the batch or procedure, or 0 when none applies.
+    pub fn line(&self) -> u32 {
+        self.line
     }
 }
 

@@ -44,6 +44,7 @@ pub enum QueryEvent {
     Row(Vec<Option<String>>),
     Complete { affected_rows: Option<u64> },
     Notice(OutputBody),
+    ServerError(QueryError),
 }
 pub type QueryStream<'a> = Pin<Box<dyn Stream<Item = Result<QueryEvent, QueryError>> + Send + 'a>>;
 

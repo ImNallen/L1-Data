@@ -2,7 +2,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
-use futures_util::StreamExt;
+use futures_util::{Stream, StreamExt};
 use tokio::sync::{Mutex, watch};
 
 use crate::Shared;
@@ -15,6 +15,42 @@ use crate::text::{OffsetMap, synthesize_tag};
 use crate::txn::{StmtOutcome, TransactionPlan, txn_after};
 
 pub(crate) const STREAM_EMIT_INTERVAL: Duration = Duration::from_millis(100);
+const OUTPUT_COALESCE: Duration = Duration::from_millis(5);
+
+pub(crate) struct OutputBatch<'a> {
+    console: &'a Console,
+    shared: &'a Shared,
+    run_id: RunId,
+    lines: Vec<OutputBody>,
+}
+
+impl<'a> OutputBatch<'a> {
+    pub fn new(console: &'a Console, shared: &'a Shared, run_id: RunId) -> Self {
+        Self { console, shared, run_id, lines: Vec::new() }
+    }
+
+    pub fn push(&mut self, body: OutputBody) {
+        self.lines.push(body);
+    }
+
+    pub fn send(&mut self) {
+        self.console.output_all(self.shared, self.run_id, std::mem::take(&mut self.lines));
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.lines.is_empty()
+    }
+
+    pub async fn wait<S: Stream + Unpin>(&mut self, stream: &mut S) -> Option<S::Item> {
+        match tokio::time::timeout(OUTPUT_COALESCE, stream.next()).await {
+            Ok(next) => next,
+            Err(_) => {
+                self.send();
+                stream.next().await
+            }
+        }
+    }
+}
 
 pub struct Console {
     pub tab: TabId,
@@ -417,7 +453,9 @@ pub async fn run_task(console: Arc<Console>, shared: Arc<Shared>, mut session: S
             Console::statements_mut(inner)[index].status = StmtStatus::Preparing;
         }).await?;
         let unit_started = Instant::now();
-        let result = run_outputs(&console, &shared, &mut session, &plan, index, &caps, &stop).await?;
+        let ran = run_outputs(&console, &shared, &mut session, &plan, index, &caps, &stop).await?;
+        let logged = matches!(ran, Err(Failed { logged: true, .. }));
+        let result = ran.map_err(|failed| failed.error);
         let cancelled = stop.load(Ordering::Relaxed) && result.is_err();
         let result = result.map_err(|mut e| {
             e.position = e.position.map(|p| DocOffset(map.to_utf16(stmt.span.start).0.saturating_add(p.0)));
@@ -442,7 +480,7 @@ pub async fn run_task(console: Arc<Console>, shared: Arc<Shared>, mut session: S
         }).await?;
         if let Some((db, owed)) = due { shared.schedule_refreshes(db, owed); }
         let mut lines = notice_lines(&mut session);
-        if let Err(error) = &result { lines.push(OutputBody::Error { statement: Some(i), error: error.clone() }); }
+        if let Err(error) = &result && !logged { lines.push(OutputBody::Error { statement: Some(i), error: error.clone() }); }
         console.output_all(&shared, run_id, lines);
         shared.record_history(HistoryInsert {
             database_kind: plan.connection.database_kind,
@@ -521,7 +559,7 @@ async fn set_status(console: &Console, shared: &Shared, run_id: RunId, index: u1
 
 pub fn notice_lines(session: &mut Session) -> Vec<OutputBody> { session.drain_notices() }
 
-async fn run_outputs(console: &Console, shared: &Shared, session: &mut Session, plan: &RunPlan, index: usize, caps: &Caps, stop: &AtomicBool) -> Result<Result<(Option<u64>, Vec<String>), QueryError>, Orphaned> {
+async fn run_outputs(console: &Console, shared: &Shared, session: &mut Session, plan: &RunPlan, index: usize, caps: &Caps, stop: &AtomicBool) -> Result<Result<(Option<u64>, Vec<String>), Failed>, Orphaned> {
     let sql = plan.statements[index].span.text(&plan.text);
     let run_id = plan.run_id;
     let started = Instant::now();
@@ -531,16 +569,20 @@ async fn run_outputs(console: &Console, shared: &Shared, session: &mut Session, 
     let mut rows: Option<u64> = None;
     let mut tags = Vec::new();
     let mut failure = None;
+    let mut reported = None;
     let mut nth: u16 = 0;
     let mut rerun: Option<Rerun> = None;
+    let mut log = OutputBatch::new(console, shared, run_id);
     let mut stream = session.query(sql);
-    while let Some(event) = stream.next().await {
+    loop {
+        let next = if log.is_empty() { stream.next().await } else { log.wait(&mut stream).await };
+        let Some(event) = next else { break };
         match event {
             Err(error) => { failure = Some(error); break; }
             Ok(QueryEvent::Prepared) if stop.load(Ordering::Relaxed) => { failure = Some(crate::session::error("Cancelled")); break; }
             Ok(QueryEvent::Prepared) => {}
             Ok(QueryEvent::Columns(mut columns)) => {
-                if let Some((set, out)) = active.take() { finish_rows(console, shared, index, &set, &mut outputs[out], started, &mut rows); }
+                if let Some((set, out)) = active.take() { finish_rows(&mut log, index, &set, &mut outputs[out], started, &mut rows); }
                 if let Some(table) = plan.page.as_ref().and_then(|p| p.relation.as_ref()) && plan.connection.database_kind == DatabaseKind::SqlServer {
                     if columns.len() != table.columns.len() || columns.iter().zip(&table.columns).any(|(actual, known)| actual.name != known.name || actual.r#type.category != known.category) {
                         failure = Some(crate::session::error("Table shape changed. Refresh the catalog before browsing again."));
@@ -572,37 +614,67 @@ async fn run_outputs(console: &Console, shared: &Shared, session: &mut Session, 
                 else { failure = Some(crate::session::error("Driver returned a row without result metadata")); break; }
             }
             Ok(QueryEvent::Complete { affected_rows }) => {
-                if let Some((set, out)) = active.take() { finish_rows(console, shared, index, &set, &mut outputs[out], started, &mut rows); }
+                if let Some((set, out)) = active.take() { finish_rows(&mut log, index, &set, &mut outputs[out], started, &mut rows); }
                 else {
-                    let tag = affected_rows.map_or_else(|| "Batch completed (affected rows unavailable)".into(), |n| synthesize_tag(&plan.statements[index].kind, n));
+                    let tag = match (plan.connection.database_kind, affected_rows) {
+                        (_, None) => "Commands completed successfully".into(),
+                        (DatabaseKind::Postgres, Some(n)) => synthesize_tag(&plan.statements[index].kind, n),
+                        (DatabaseKind::SqlServer, Some(1)) => "1 row affected".into(),
+                        (DatabaseKind::SqlServer, Some(n)) => format!("{n} rows affected"),
+                    };
                     let elapsed_ms = elapsed_ms(started);
-                    console.output(shared, run_id, OutputBody::Command { statement: index as u16, tag: tag.clone(), elapsed_ms });
+                    log.push(OutputBody::Command { statement: index as u16, tag: tag.clone(), elapsed_ms });
+                    if matches!(outputs.last(), Some(RunOutput::Command { .. })) {
+                        outputs.pop();
+                        tags.pop();
+                    }
                     tags.push(tag.clone());
                     outputs.push(RunOutput::Command { tag, affected_rows, elapsed_ms });
                 }
             }
-            Ok(QueryEvent::Notice(body)) => console.output(shared, run_id, body),
+            Ok(QueryEvent::Notice(body)) => log.push(body),
+            Ok(QueryEvent::ServerError(error)) => {
+                if let Some((set, out)) = active.take() { end_rows(&set, &mut outputs[out], started, RowsState::Failed); }
+                log.push(OutputBody::Error { statement: Some(index as u16), error: error.clone() });
+                reported.get_or_insert(error);
+            }
         }
         if last_emit.elapsed() >= STREAM_EMIT_INTERVAL {
             last_emit = Instant::now();
+            log.send();
             if let Some((set, out)) = &active { set.set_elapsed(elapsed_ms(started)); outputs[*out] = RunOutput::Rows { result: set.meta(), state: RowsState::Streaming }; }
             console.edit(shared, run_id, |inner| Console::statements_mut(inner)[index].outputs = outputs.clone()).await?;
         }
     }
     drop(stream);
     if let Some((set, out)) = active {
-        if failure.is_none() { finish_rows(console, shared, index, &set, &mut outputs[out], started, &mut rows); }
-        else { set.set_elapsed(elapsed_ms(started)); outputs[out] = RunOutput::Rows { result: set.meta(), state: if stop.load(Ordering::Relaxed) { RowsState::Cancelled } else { RowsState::Failed } }; }
+        if failure.is_none() { finish_rows(&mut log, index, &set, &mut outputs[out], started, &mut rows); }
+        else { end_rows(&set, &mut outputs[out], started, if stop.load(Ordering::Relaxed) { RowsState::Cancelled } else { RowsState::Failed }); }
     }
+    log.send();
     console.edit(shared, run_id, |inner| Console::statements_mut(inner)[index].outputs = outputs).await?;
-    Ok(match failure { Some(error) => Err(error), None => Ok((rows, tags)) })
+    Ok(match (failure, reported) {
+        (Some(error), _) => Err(Failed { error, logged: false }),
+        (None, Some(error)) => Err(Failed { error, logged: true }),
+        (None, None) => Ok((rows, tags)),
+    })
 }
 
-fn finish_rows(console: &Console, shared: &Shared, index: usize, set: &ResultSet, output: &mut RunOutput, started: Instant, rows: &mut Option<u64>) {
+struct Failed {
+    error: QueryError,
+    logged: bool,
+}
+
+fn end_rows(set: &ResultSet, output: &mut RunOutput, started: Instant, state: RowsState) {
+    set.set_elapsed(elapsed_ms(started));
+    *output = RunOutput::Rows { result: set.meta(), state };
+}
+
+fn finish_rows(log: &mut OutputBatch, index: usize, set: &ResultSet, output: &mut RunOutput, started: Instant, rows: &mut Option<u64>) {
     set.set_elapsed(elapsed_ms(started));
     let meta = set.meta();
     *rows = Some(rows.unwrap_or(0) + meta.rows_seen);
-    console.output(shared, set.r#ref.run_id, OutputBody::Rows { statement: index as u16, rows: meta.rows_seen, elapsed_ms: meta.elapsed_ms, truncated: meta.truncated.is_some() });
+    log.push(OutputBody::Rows { statement: index as u16, rows: meta.rows_seen, elapsed_ms: meta.elapsed_ms, truncated: meta.truncated.is_some() });
     *output = RunOutput::Rows { result: meta, state: RowsState::Complete };
 }
 

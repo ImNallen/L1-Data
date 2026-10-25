@@ -245,7 +245,7 @@ pub use tds::{
     codec::{
         AltMetaDataColumn, BaseMetaDataColumn, BulkLoadRequest, ColumnData, ColumnFlag,
         FixedLenType, IntoRow, IsolationLevel, MetaDataColumn, TokenAltMetaData, TokenAltRow,
-        TokenRow, TypeInfo, TypeLength, VarLenContext, VarLenType,
+        TokenInfo, TokenRow, TypeInfo, TypeLength, VarLenContext, VarLenType,
     },
     collation::Collation,
     numeric,

@@ -71,6 +71,23 @@ impl Harness {
         assert!(matches!(state.run, RunState::Finished { outcome: RunOutcome::Ok, .. }), "{sql}: {:?}", state.run);
         state
     }
+    async fn logged(&mut self, sql: &str) -> (ConsoleState, Vec<OutputBody>) {
+        let id = self.start(sql).await.run_id;
+        let (tab, events) = (self.tab, &mut self.events);
+        let mut log = Vec::new();
+        let state = tokio::time::timeout(Duration::from_secs(30), async {
+            loop {
+                match events.recv().await.unwrap() {
+                    AppEvent::ConsoleOutput { tab_id, entries } if tab_id == tab => log.extend(entries.into_iter().filter(|e| e.run_id == id).map(|e| e.body)),
+                    AppEvent::ConsoleChanged(state) if state.tab_id == tab && matches!(state.run, RunState::Finished { run_id, .. } if run_id == id) => return state,
+                    _ => {}
+                }
+            }
+        })
+        .await
+        .expect("Engine run did not finish");
+        (state, log)
+    }
     fn rowsets(state: &ConsoleState) -> Vec<&ResultMeta> {
         let RunState::Finished { statements, .. } = &state.run else { panic!("not finished") };
         statements
@@ -105,6 +122,193 @@ async fn real_engine_streams_a_multi_result_batch_and_keeps_zero_row_sets() {
     assert_eq!(h.rows(sets[3])[0][0].as_deref(), Some("shop"));
     assert_eq!((state.txn, state.txn_depth), (TxnState::Idle, Some(0)));
     assert_eq!(sets[0].database_kind, DatabaseKind::SqlServer);
+}
+
+fn lines(log: &[OutputBody]) -> Vec<String> {
+    log.iter()
+        .filter_map(|body| match body {
+            OutputBody::Notice { severity, message, .. } => Some(format!("{severity}: {message}")),
+            OutputBody::Rows { rows, .. } => Some(format!("rows {rows}")),
+            OutputBody::Command { tag, .. } => Some(tag.clone()),
+            OutputBody::Error { error, .. } => Some(format!("{}: {}", error.severity, error.message)),
+            _ => None,
+        })
+        .collect()
+}
+
+fn summary(state: &ConsoleState) -> Vec<String> {
+    let RunState::Finished { statements, .. } = &state.run else { panic!("not finished") };
+    statements
+        .iter()
+        .flat_map(|s| &s.outputs)
+        .filter_map(|o| match o {
+            RunOutput::Command { tag, .. } => Some(tag.clone()),
+            _ => None,
+        })
+        .collect()
+}
+
+#[tokio::test]
+async fn print_and_low_severity_raiserror_reach_the_output_log_in_server_order() {
+    let mut h = Harness::open(TxnMode::AutoCommit).await;
+    let (_, log) = h.logged("PRINT 'hello'").await;
+    assert_eq!(lines(&log), ["NOTICE: hello", "Commands completed successfully"]);
+
+    let (state, log) = h.logged("PRINT '1'; SELECT 2 AS two; PRINT '3';").await;
+    assert_eq!(lines(&log), ["NOTICE: 1", "rows 1", "NOTICE: 3"]);
+    assert_eq!(Harness::rowsets(&state).len(), 1);
+
+    let (_, log) = h.logged("RAISERROR('informational', 10, 1); RAISERROR('careful', 5, 1); PRINT 'after'").await;
+    assert_eq!(lines(&log), ["NOTICE: informational", "WARNING: careful", "NOTICE: after", "Commands completed successfully"]);
+
+    let (state, log) = h.logged("PRINT 'a'; RAISERROR('boom', 16, 1); PRINT 'b'").await;
+    assert_eq!(lines(&log), ["NOTICE: a", "ERROR: boom", "NOTICE: b"]);
+    assert!(matches!(state.run, RunState::Finished { outcome: RunOutcome::Failed, .. }), "{:?}", state.run);
+    let RunState::Finished { statements, .. } = &state.run else { unreachable!() };
+    assert!(matches!(&statements[0].status, StmtStatus::Failed { error } if error.message == "boom"), "{:?}", statements[0].status);
+
+    let (_, log) = h.logged("RAISERROR('e1', 16, 1); RAISERROR('e2', 16, 1)").await;
+    assert_eq!(lines(&log), ["ERROR: e1", "ERROR: e2"]);
+
+    let (_, log) = h.logged("CREATE TABLE #u (id int PRIMARY KEY); INSERT #u VALUES (1); INSERT #u VALUES (1); INSERT #u VALUES (2); DROP TABLE #u").await;
+    let log = lines(&log);
+    assert_eq!(log.len(), 4, "{log:?}");
+    assert_eq!(log[0], "1 row affected");
+    assert!(log[1].starts_with("ERROR: Violation of PRIMARY KEY constraint"), "{log:?}");
+    assert_eq!(log[2..], ["NOTICE: The statement has been terminated.", "1 row affected"]);
+}
+
+#[tokio::test]
+async fn a_fatal_error_in_the_batch_retires_the_session() {
+    let mut h = Harness::open(TxnMode::AutoCommit).await;
+    let (state, log) = h.logged("PRINT 'before'; RAISERROR('fatal', 20, 1) WITH LOG; PRINT 'never'").await;
+    assert_eq!(lines(&log)[..2], ["NOTICE: before", "FATAL: fatal"]);
+    assert!(!lines(&log).contains(&"NOTICE: never".into()), "{log:?}");
+    assert!(log.iter().any(|body| matches!(body, OutputBody::Info { message } if message.starts_with("Session reset"))), "{log:?}");
+    let RunState::Finished { statements, .. } = &state.run else { unreachable!() };
+    assert!(matches!(&statements[0].status, StmtStatus::Failed { error } if error.severity == "FATAL" && error.message == "fatal"), "{:?}", statements[0].status);
+    h.ok("SELECT 1 AS one").await;
+}
+
+fn rowset_states(state: &ConsoleState) -> Vec<(RowsState, u64)> {
+    let RunState::Finished { statements, .. } = &state.run else { panic!("not finished") };
+    statements
+        .iter()
+        .flat_map(|s| &s.outputs)
+        .filter_map(|o| match o {
+            RunOutput::Rows { result, state } => Some((*state, result.rows_seen)),
+            _ => None,
+        })
+        .collect()
+}
+
+#[tokio::test]
+async fn an_error_cuts_off_only_the_result_set_it_ends() {
+    let mut h = Harness::open(TxnMode::AutoCommit).await;
+    let (state, log) = h.logged("SELECT x FROM (VALUES (1),(2),(0),(3)) v(x) WHERE 10 / x > 0").await;
+    assert_eq!(rowset_states(&state), [(RowsState::Failed, 2)]);
+    assert_eq!(lines(&log), ["ERROR: Divide by zero error encountered."]);
+    assert!(matches!(state.run, RunState::Finished { outcome: RunOutcome::Failed, .. }), "{:?}", state.run);
+
+    let (state, log) = h.logged("SELECT 1 AS a; SELECT 1/0 AS b; SELECT 3 AS c").await;
+    assert_eq!(rowset_states(&state), [(RowsState::Complete, 1), (RowsState::Failed, 0), (RowsState::Complete, 1)]);
+    assert_eq!(lines(&log), ["rows 1", "ERROR: Divide by zero error encountered.", "rows 1"]);
+}
+
+#[tokio::test]
+async fn a_nowait_message_streams_while_the_batch_waits_and_survives_cancel() {
+    let mut h = Harness::open(TxnMode::AutoCommit).await;
+    let id = h.start("RAISERROR('early', 0, 1) WITH NOWAIT; WAITFOR DELAY '00:00:30'; PRINT 'never'").await.run_id;
+    let (tab, events) = (h.tab, &mut h.events);
+    let early = tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            if let AppEvent::ConsoleOutput { tab_id, entries } = events.recv().await.unwrap()
+                && tab_id == tab
+                && let Some(entry) = entries.into_iter().find(|e| e.run_id == id && matches!(&e.body, OutputBody::Notice { .. }))
+            {
+                return entry.body;
+            }
+        }
+    })
+    .await
+    .expect("The NOWAIT message did not arrive while the batch waited");
+    assert!(matches!(early, OutputBody::Notice { message, .. } if message == "early"));
+    h.engine.console_cancel(h.tab).await;
+    let state = h.finish(id).await;
+    assert!(matches!(state.run, RunState::Finished { outcome: RunOutcome::Cancelled, .. }), "{:?}", state.run);
+}
+
+async fn notices_read_slowly(events: &mut broadcast::Receiver<AppEvent>, until: impl Fn(&AppEvent) -> bool) -> (Vec<String>, u64) {
+    let (mut notices, mut lagged) = (Vec::new(), 0);
+    loop {
+        match events.recv().await {
+            Ok(event) if until(&event) => return (notices, lagged),
+            Ok(AppEvent::ConsoleOutput { entries, .. }) => {
+                notices.extend(entries.into_iter().filter_map(|e| match e.body {
+                    OutputBody::Notice { message, .. } => Some(message),
+                    _ => None,
+                }));
+                tokio::time::sleep(Duration::from_millis(1)).await;
+            }
+            Ok(_) => {}
+            Err(broadcast::error::RecvError::Lagged(n)) => lagged += n,
+            Err(e) => panic!("{e:?}"),
+        }
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_nowait_flood_reaches_a_slow_reader_whole() {
+    let mut h = Harness::open(TxnMode::AutoCommit).await;
+    let id = h.start("DECLARE @i int = 0; WHILE @i < 20000 BEGIN RAISERROR('%d', 0, 1, @i) WITH NOWAIT; SET @i += 1; END").await.run_id;
+    let tab = h.tab;
+    let (notices, lagged) = notices_read_slowly(&mut h.events, |event| matches!(event, AppEvent::ConsoleChanged(s) if s.tab_id == tab && matches!(s.run, RunState::Finished { run_id, .. } if run_id == id))).await;
+    assert_eq!(lagged, 0);
+    assert_eq!(notices.len(), 20_000);
+    assert!(notices.iter().enumerate().all(|(i, n)| *n == i.to_string()));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_export_sends_the_notices_of_its_rerun_in_batches() {
+    let mut h = Harness::open(TxnMode::AutoCommit).await;
+    let state = h.ok("DECLARE @i int = 0; WHILE @i < 5000 BEGIN PRINT @i; SET @i += 1; END; SELECT 1 AS a").await;
+    let meta = Harness::rowsets(&state)[0].clone();
+    let mut events = h.engine.subscribe();
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("out.csv");
+    h.engine.result_export(meta.r#ref, ExportFormat::Csv, ExportScope::All, path.display().to_string()).await.unwrap();
+    let (mut notices, mut lagged) = (0, 0);
+    loop {
+        match events.try_recv() {
+            Ok(AppEvent::ConsoleOutput { entries, .. }) => notices += entries.iter().filter(|e| matches!(e.body, OutputBody::Notice { .. })).count(),
+            Ok(_) => {}
+            Err(broadcast::error::TryRecvError::Lagged(n)) => lagged += n,
+            Err(broadcast::error::TryRecvError::Empty) => break,
+            Err(e) => panic!("{e:?}"),
+        }
+    }
+    assert_eq!((notices, lagged), (5_000, 0));
+}
+
+#[tokio::test]
+async fn sql_server_reports_each_statement_count_like_ssms() {
+    let mut h = Harness::open(TxnMode::AutoCommit).await;
+    let (state, log) = h
+        .logged("CREATE TABLE #counted (id int); DECLARE @n int = 0; INSERT #counted VALUES (1),(2),(3),(4),(5); SET @n = 1; UPDATE #counted SET id = id + 1; SELECT id FROM #counted WHERE id > 4; DELETE #counted WHERE id = 2; DROP TABLE #counted")
+        .await;
+    assert_eq!(lines(&log), ["5 rows affected", "5 rows affected", "rows 2", "1 row affected"]);
+    assert_eq!(summary(&state), ["5 rows affected", "1 row affected"]);
+
+    let (state, log) = h.logged("DECLARE @i int = 0; WHILE @i < 3 BEGIN PRINT @i; SET @i += 1; END").await;
+    assert_eq!(lines(&log), ["NOTICE: 0", "NOTICE: 1", "NOTICE: 2", "Commands completed successfully"]);
+    assert_eq!(summary(&state), ["Commands completed successfully"]);
+
+    let (state, _) = h.logged("CREATE TABLE #loop (id int); DECLARE @i int = 0; WHILE @i < 50 BEGIN INSERT #loop VALUES (@i); SET @i += 1; END; DROP TABLE #loop").await;
+    assert_eq!(summary(&state), ["1 row affected"]);
+
+    let (state, log) = h.logged("SET NOCOUNT ON; CREATE TABLE #quiet (id int); INSERT #quiet VALUES (1); DROP TABLE #quiet; SET NOCOUNT OFF").await;
+    assert_eq!(lines(&log), ["Commands completed successfully"]);
+    assert_eq!(summary(&state), ["Commands completed successfully"]);
 }
 
 #[tokio::test]
