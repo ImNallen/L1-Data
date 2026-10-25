@@ -516,6 +516,7 @@ impl<'a> Walk<'a> {
                 }
                 Clause::Select
             }
+            _ if clause == Clause::Select && prev.as_deref() == Some("AS") => return None,
             "FROM" if prev.as_deref() == Some("DISTINCT") => return Some(i + 1),
             "FROM" => Clause::Relation { role: Role::From, slot: Slot::Expect },
             "JOIN" | "APPLY" => Clause::Relation { role: Role::Join, slot: Slot::Expect },
@@ -640,9 +641,10 @@ impl<'a> Walk<'a> {
         let name = fold(self.kind, self.text, self.sig[last]);
         let schema = (parts.len() >= 2).then(|| fold(self.kind, self.text, self.sig[parts[parts.len() - 2]]));
         let function = matches!(role, Role::From | Role::Join | Role::Using) && self.sig.get(j).is_some_and(|l| l.class == Class::Open) && !self.typed.contains(&j);
-        let cte = if function || schema.is_some() { None } else { self.cte(&name) };
+        let other_database = self.kind == DatabaseKind::SqlServer && parts.len() >= 3;
+        let cte = if function || other_database || schema.is_some() { None } else { self.cte(&name) };
         let column_aliases = cte.as_ref().map(|c| c.aliases.clone()).unwrap_or_default();
-        let source = if function {
+        let source = if function || other_database {
             RelationSource::Derived { columns: Vec::new(), star: Vec::new() }
         } else if let Some(cte) = cte {
             RelationSource::Derived { columns: cte.columns, star: cte.star }
@@ -1670,6 +1672,19 @@ mod tests {
         let s = pg("select * from orders o where exists (select * from customers o join addresses a on |)");
         assert_eq!((refs(&s), s.expect), (vec![(Some("o"), &table(None, "customers")), (Some("a"), &table(None, "addresses"))], Expect::JoinCondition { target: 1 }));
         assert_eq!(refs(&pg("select * from orders o where exists (select 1 from customers c where c.id = o.|)")).len(), 2);
+    }
+
+    #[test]
+    fn a_label_after_as_is_a_name_even_when_it_is_a_keyword() {
+        assert_eq!(pg("select 1 as order, | from orders").expect, Expect::Expression);
+        let s = pg("with x as (select 1 as order) select * from x where |");
+        assert_eq!(refs(&s), [(Some("x"), &RelationSource::Derived { columns: vec!["\"order\"".into()], star: vec![] })]);
+    }
+
+    #[test]
+    fn a_tsql_name_in_another_database_offers_no_catalog_columns() {
+        let s = ms("SELECT o.| FROM reporting.dbo.orders o");
+        assert_eq!(refs(&s), [(Some("o"), &RelationSource::Derived { columns: vec![], star: vec![] })]);
     }
 
     #[test]
