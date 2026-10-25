@@ -47,6 +47,7 @@ import {
   textOf,
 } from "./editorStates";
 import { closeChooser, openChooser } from "./chooserState";
+import { docText } from "./docText";
 
 const ws = () => useWorkspace.getState();
 const notify = (text: string) => ws().notify(text);
@@ -619,7 +620,7 @@ async function markOnce(): Promise<void> {
   const sel = state.selection.main;
   if (isBrowsing(tab) || !sel.empty) return showRunTarget(id, null);
   const target = textTarget(tab);
-  const outline = await commands.scriptOutline(state.doc.toString(), sel.head, target.databaseKind);
+  const outline = await commands.scriptOutline(docText(state.doc), sel.head, target.databaseKind);
   const now = editorStateOf(id);
   // A stale reply is dropped: the change that made it stale already scheduled a newer pass.
   if (ws().active !== id || !sameTextTarget(id, target) || now.doc !== state.doc || !now.selection.main.empty || now.selection.main.head !== sel.head) return;

@@ -4,12 +4,18 @@ import { commands, type CompletionContext, type DatabaseKind, type Relation, typ
 import { isViewKind, type CatalogView } from "../../state/catalog";
 import { detailKey, useRelationDetail } from "../../state/relationDetail";
 import { shortType } from "../results/format";
+import { docText } from "./docText";
 
 type Complete = Extract<CompletionContext, { kind: "Complete" }>;
 type Resolved = { schema: string; rel: Relation };
 type Column = { name: string; insert: string; detail: string };
 
-const BOOST = { join: 99, column: 4, reference: 3, relation: 2, function: 1, keyword: -1 };
+const BOOST = { typed: 100, join: 99, column: 4, reference: 3, relation: 2, function: 1, keyword: -1 };
+
+/** The engine's word characters, so a request follows the same words it reads, such as `café` or `@id`. */
+const WORD = /^[\p{L}\p{N}_$#@]*$/u;
+const TYPED = /[\p{L}\p{N}_$#@]+/u;
+const ASKS_AFTER = /[\p{L}\p{N}_$#@.\s]/u;
 
 const JOIN_DETAIL_WAIT_MS = 250;
 
@@ -85,24 +91,27 @@ async function joinConditions(view: CatalogView, reply: Complete, target: number
   const keysOf = (oid: number) => useRelationDetail.getState().entries[detailKey(db, oid)]?.detail?.keys ?? [];
   const col = (r: (typeof others)[number], name: string) => {
     const i = r.rel.columns.findIndex((c) => c.name === name);
-    return `${r.ref}.${r.aliases[i] ?? r.rel.columns[i]?.quoted ?? name}`;
+    const quoted = r.aliases[i] ?? r.rel.columns[i]?.quoted;
+    return quoted === undefined ? undefined : `${r.ref}.${quoted}`;
   };
-  const conditions: string[] = [];
+  const condition = (pairs: [string | undefined, string | undefined][]) =>
+    pairs.every(([a, b]) => a !== undefined && b !== undefined) ? pairs.map(([a, b]) => `${a} = ${b}`).join(" AND ") : undefined;
+  const conditions: (string | undefined)[] = [];
   for (const o of others) {
     for (const key of keysOf(t.rel.oid)) {
       if (key.kind.kind === "Foreign" && key.kind.refSchema === o.schema && key.kind.refTable === o.rel.name) {
         const refs = key.kind.refColumns;
-        conditions.push(key.columns.map((c, i) => `${col(t, c)} = ${col(o, refs[i]!)}`).join(" AND "));
+        conditions.push(condition(key.columns.map((c, i) => [col(t, c), col(o, refs[i]!)])));
       }
     }
     for (const key of keysOf(o.rel.oid)) {
       if (key.kind.kind === "Foreign" && key.kind.refSchema === t.schema && key.kind.refTable === t.rel.name) {
         const refs = key.kind.refColumns;
-        conditions.push(key.columns.map((c, i) => `${col(t, refs[i]!)} = ${col(o, c)}`).join(" AND "));
+        conditions.push(condition(key.columns.map((c, i) => [col(t, refs[i]!), col(o, c)])));
       }
     }
   }
-  return [...new Set(conditions)].map((label) => ({ label, type: "text", detail: "foreign key", boost: BOOST.join }));
+  return [...new Set(conditions.filter((c) => c !== undefined))].map((label) => ({ label, type: "text", detail: "foreign key", boost: BOOST.join }));
 }
 
 function qualifiedOptions(view: CatalogView | undefined, reply: Complete): Completion[] {
@@ -134,10 +143,23 @@ function qualifiedOptions(view: CatalogView | undefined, reply: Complete): Compl
   return [...relations, ...functions];
 }
 
-export async function completionOptions(view: CatalogView | undefined, reply: Complete): Promise<Completion[]> {
+/** Two or more letters that begin a keyword that can follow, such as `wh` of `WHERE`. */
+function startsKeyword(typed: string, keywords: string[]): boolean {
+  const upper = typed.toUpperCase();
+  return typed.length >= 2 && keywords.some((k) => k.startsWith(upper));
+}
+
+/** Where an alias may stand, the word as typed comes first, so Enter keeps it and a keyword takes an arrow key to pick. */
+function aliasOptions(reply: Complete, typed: string): Completion[] {
+  const keep: Completion[] = typed ? [{ label: typed, type: "variable", detail: "alias", boost: BOOST.typed }] : [];
+  return [...keep, ...keywordOptions(reply)];
+}
+
+export async function completionOptions(view: CatalogView | undefined, reply: Complete, typed = ""): Promise<Completion[]> {
   if (reply.qualifier) return qualifiedOptions(view, reply);
   const expect = reply.expect;
-  if (expect.kind === "Keyword" || expect.kind === "Alias") return keywordOptions(reply);
+  if (expect.kind === "Alias") return aliasOptions(reply, typed);
+  if (expect.kind === "Keyword") return keywordOptions(reply);
   if (expect.kind === "Relation") {
     const schema = view?.catalog.defaultSchema;
     const local = view?.catalog.schemas.find((s) => s.name === schema)?.relations.map((r) => relationOption(r)) ?? [];
@@ -156,10 +178,10 @@ export async function completionOptions(view: CatalogView | undefined, reply: Co
   return [...joins, ...columns, ...references, ...catalogFunctions, ...builtins, ...keywordOptions(reply)];
 }
 
-function opensUnasked(ctx: EditorContext, expect: Complete["expect"]): boolean {
+function opensUnasked(ctx: EditorContext, reply: Complete, typed: string): boolean {
   if (ctx.explicit) return true;
-  if (expect.kind === "Alias") return false;
-  return ctx.matchBefore(/[\w$#]+/) !== null || ctx.state.sliceDoc(ctx.pos - 1, ctx.pos) === "." || expect.kind === "JoinCondition";
+  if (reply.expect.kind === "Alias") return startsKeyword(typed, reply.keywords);
+  return ctx.matchBefore(TYPED) !== null || ctx.state.sliceDoc(ctx.pos - 1, ctx.pos) === "." || reply.expect.kind === "JoinCondition";
 }
 
 function inFlightThenNewest<T>(send: (ctx: EditorContext) => Promise<T>): (ctx: EditorContext) => Promise<T | null> {
@@ -174,7 +196,7 @@ function inFlightThenNewest<T>(send: (ctx: EditorContext) => Promise<T>): (ctx: 
         busy = false;
         const next = waiting;
         waiting = null;
-        next?.resolve(start(next.ctx));
+        next?.resolve(next.ctx.aborted ? Promise.resolve(null) : start(next.ctx));
       });
     return reply;
   };
@@ -187,22 +209,28 @@ function inFlightThenNewest<T>(send: (ctx: EditorContext) => Promise<T>): (ctx: 
 
 /**
  * Declines to open without returning null. When a request returns null, CodeMirror never asks again for a word typed
- * while it was in flight, so typing `wh` quickly after a table would never offer `WHERE`.
+ * while it was in flight, so typing `wh` quickly after a table would never offer `WHERE`. `validFor` names the further
+ * typing that cannot change the answer, such as more letters inside a string, so it asks no new request for them.
  */
-function declined(ctx: EditorContext): CompletionResult {
-  return { from: ctx.pos, options: [], validFor: () => false };
+function declined(from: number, validFor: (text: string) => boolean = () => false): CompletionResult {
+  return { from, options: [], validFor };
 }
 
 export function engineCompletion(view: CatalogView | undefined, kind: DatabaseKind): CompletionSource {
-  const ask = inFlightThenNewest((ctx) => commands.completionContext(ctx.state.doc.toString(), ctx.pos, kind));
+  const ask = inFlightThenNewest((ctx) => commands.completionContext(docText(ctx.state.doc), ctx.pos, kind));
   return async (ctx: EditorContext): Promise<CompletionResult | null> => {
     const before = ctx.state.sliceDoc(ctx.pos - 1, ctx.pos);
-    if (!ctx.explicit && !/[\w$#.\s]/.test(before)) return null;
+    if (!ctx.explicit && !ASKS_AFTER.test(before)) return null;
     const reply = await ask(ctx);
     if (!reply || ctx.aborted) return null;
-    if (reply.kind === "None" || !opensUnasked(ctx, reply.expect)) return declined(ctx);
-    const options = await completionOptions(view, reply);
+    if (reply.kind === "None") return declined(ctx.matchBefore(TYPED)?.from ?? ctx.pos, (text) => WORD.test(text));
+    const typed = ctx.state.sliceDoc(reply.from, ctx.pos);
+    if (!opensUnasked(ctx, reply, typed)) {
+      const stillAlias = (text: string) => WORD.test(text) && !startsKeyword(text, reply.keywords);
+      return declined(reply.from, reply.expect.kind === "Alias" ? stillAlias : undefined);
+    }
+    const options = await completionOptions(view, reply, typed);
     if (ctx.aborted) return null;
-    return options.length ? { from: reply.from, options, validFor: /^[\w$#]*$/ } : declined(ctx);
+    return options.length ? { from: reply.from, options, validFor: WORD } : declined(reply.from);
   };
 }

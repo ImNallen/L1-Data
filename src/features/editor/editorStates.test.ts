@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { syntaxTree } from "@codemirror/language";
-import { CompletionContext, currentCompletions, type CompletionResult } from "@codemirror/autocomplete";
+import { acceptCompletion, CompletionContext, currentCompletions, moveCompletionSelection, type CompletionResult } from "@codemirror/autocomplete";
 import { EditorView } from "@codemirror/view";
 import { clearMocks, mockIPC } from "@tauri-apps/api/mocks";
 import { afterEach, expect, it, vi } from "vitest";
@@ -149,13 +149,15 @@ it("offers the foreign key join condition first, with the joined relation's colu
   expect(labels).toContain("email");
 });
 
-it("joins every column of a composite foreign key with AND", async () => {
-  const { labels } = await completeAtEnd(
-    "select * from orders o join addresses a on ",
-    reply({ kind: "JoinCondition", target: 1 }, [table("o", "orders"), table("a", "addresses")]),
-    { keys: { [oidOf("orders")]: ORDER_KEYS } },
-  );
+it("joins every column of a composite foreign key with AND, and leaves out a key the catalog lacks a column for", async () => {
+  const catalog = shopCatalog("c1", 1);
+  const orders = catalog.schemas[1]!.relations.find((r) => r.name === "orders")!;
+  orders.columns.push({ ...orders.columns[1]!, attnum: 9, name: "ship_address_id", quoted: "ship_address_id" });
+  const joinAddresses = reply({ kind: "JoinCondition", target: 1 }, [table("o", "orders"), table("a", "addresses")]);
+  const { labels } = await completeAtEnd("select * from orders o join addresses a on ", joinAddresses, { keys: { [oidOf("orders")]: ORDER_KEYS }, catalog });
   expect(labels[0]).toBe("a.customer_id = o.customer_id AND a.id = o.ship_address_id");
+  const stale = await completeAtEnd("select * from orders o join addresses a on ", joinAddresses, { keys: { [oidOf("orders")]: ORDER_KEYS } });
+  expect(stale.labels.some((l) => l.includes(" = "))).toBe(false);
 });
 
 it("reads a foreign key from the joined relation to one already in scope", async () => {
@@ -265,6 +267,126 @@ it("asks again when a word typed during a declined request now opens a list", as
   } finally {
     view.destroy();
   }
+});
+
+function mountWith(text: string, answer: (text: string) => Reply | Promise<Reply>, catalog: Catalog | null = shopCatalog("c1", 1)) {
+  mockIPC(async (cmd, args) => (cmd === "completion_context" ? answer((args as { text: string }).text) : null));
+  seedEditor("t1", text);
+  configureSql("t1", catalog ? buildCatalogView(catalog) : undefined, "Postgres");
+  const view = new EditorView({ state: editorStateOf("t1"), parent: document.body });
+  const type = (typed: string) => {
+    for (const ch of typed)
+      view.dispatch({ changes: { from: view.state.doc.length, insert: ch }, selection: { anchor: view.state.doc.length + 1 }, userEvent: "input.type" });
+  };
+  return { view, type };
+}
+
+const settle = () => new Promise((resolve) => setTimeout(resolve, 150));
+
+const AFTER_TABLE = [
+  "JOIN",
+  "LEFT JOIN",
+  "INNER JOIN",
+  "RIGHT JOIN",
+  "FULL JOIN",
+  "CROSS JOIN",
+  "WHERE",
+  "GROUP BY",
+  "HAVING",
+  "ORDER BY",
+  "LIMIT",
+  "OFFSET",
+  "UNION",
+  "INTERSECT",
+  "EXCEPT",
+];
+
+it.each(["ord", "li", "le", "gr", "ri", "fu", "of", "in", "cr", "ha", "ex", "un", "jo", "wh"])(
+  "keeps the alias %s on Enter after a table and still lists the keywords",
+  async (alias) => {
+    const base = "select * from orders ";
+    const { view, type } = mountWith(base, (text) =>
+      reply({ kind: "Alias" }, [table("orders", "orders")], { keywords: AFTER_TABLE, from: text.length - (text.length - base.length) }),
+    );
+    try {
+      type(alias);
+      await settle();
+      const labels = currentCompletions(view.state).map((c) => c.label);
+      expect(labels[0]).toBe(alias);
+      expect(labels.length).toBeGreaterThan(1);
+      acceptCompletion(view);
+      expect(view.state.doc.toString()).toBe(base + alias);
+    } finally {
+      view.destroy();
+    }
+  },
+);
+
+it("picks a keyword after a table once the arrow keys move to it", async () => {
+  const base = "select * from orders ";
+  const { view, type } = mountWith(base, () => reply({ kind: "Alias" }, [table("orders", "orders")], { keywords: AFTER_TABLE, from: base.length }));
+  try {
+    type("wh");
+    await settle();
+    moveCompletionSelection(true)(view);
+    acceptCompletion(view);
+    expect(view.state.doc.toString()).toBe(base + "WHERE");
+  } finally {
+    view.destroy();
+  }
+});
+
+it("asks again when a word typed during a request that found no options now has some", async () => {
+  const pending: (() => void)[] = [];
+  const { view, type } = mountWith(
+    "select * from ",
+    async (text) => {
+      await new Promise<void>((resolve) => pending.push(resolve));
+      return reply({ kind: "Relation" }, [], { ctes: text.endsWith("xy") ? ["xyz"] : [], from: text.length - (text.endsWith("xy") ? 2 : 1) });
+    },
+    null,
+  );
+  try {
+    type("x");
+    await settle();
+    type("y");
+    pending.shift()!();
+    await settle();
+    pending.shift()?.();
+    await settle();
+    expect(currentCompletions(view.state).map((c) => c.label)).toContain("xyz");
+  } finally {
+    view.destroy();
+  }
+});
+
+it("asks after a letter outside ASCII, as the engine reads it", async () => {
+  const { sent } = await completeAtEnd("select * from caf\u00e9", reply({ kind: "Relation" }), { explicit: false });
+  expect(sent).toHaveLength(1);
+});
+
+it("sends no request for a waiting completion that CodeMirror already cancelled", async () => {
+  const sent: string[] = [];
+  const pending: (() => void)[] = [];
+  mockIPC(async (cmd, args) => {
+    if (cmd !== "completion_context") return null;
+    sent.push((args as { text: string }).text);
+    await new Promise<void>((resolve) => pending.push(resolve));
+    return reply({ kind: "Keyword" }, [], { keywords: ["SELECT"], from: 0 });
+  });
+  seedEditor("t1", "");
+  configureSql("t1", buildCatalogView(shopCatalog("c1", 1)));
+  const base = editorStateOf("t1");
+  const [source] = base.languageDataAt<(c: CompletionContext) => Promise<CompletionResult | null>>("autocomplete", 0);
+  const context = (text: string) => new CompletionContext(base.update({ changes: { from: 0, insert: text } }).state, text.length, true);
+  const first = source!(context("s"));
+  const cancelled = context("se");
+  const second = source!(cancelled);
+  (cancelled as unknown as { abortListeners: null }).abortListeners = null;
+  pending.shift()!();
+  await first;
+  expect(await second).toBeNull();
+  expect(sent).toEqual(["s"]);
 });
 
 it("keeps one completion request in flight and sends only the newest one that waited", async () => {
