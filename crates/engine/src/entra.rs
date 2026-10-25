@@ -112,7 +112,7 @@ fn parse(stdout: &[u8]) -> Result<Token, String> {
         Some(serde_json::Value::String(s)) => s.trim().parse().ok(),
         _ => None,
     };
-    Ok(Token { access: reply.access_token, expires_at: seconds.map(|s| UNIX_EPOCH + Duration::from_secs(s)) })
+    Ok(Token { access: reply.access_token, expires_at: seconds.and_then(|s| UNIX_EPOCH.checked_add(Duration::from_secs(s))) })
 }
 
 #[cfg(test)]
@@ -129,6 +129,7 @@ mod tests {
         assert_eq!(parse(reply).unwrap(), Token { access: "eyJ0".into(), expires_at: Some(epoch(1761400992)) });
         assert_eq!(parse(br#"{"accessToken":"a","expires_on":"1761400992"}"#).unwrap().expires_at, Some(epoch(1761400992)));
         assert_eq!(parse(br#"{"accessToken":"a","expiresOn":"2026-10-25 14:03:12.000000"}"#).unwrap().expires_at, None);
+        assert_eq!(parse(br#"{"accessToken":"a","expires_on":18446744073709551615}"#).unwrap().expires_at, None, "an expiry past SystemTime is not cached");
         assert!(parse(br#"{"accessToken":"","expires_on":1}"#).is_err());
         assert!(parse(b"ERROR: Please run 'az login'").is_err());
     }
