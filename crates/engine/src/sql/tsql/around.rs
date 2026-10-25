@@ -2,61 +2,26 @@ use std::ops::Range;
 
 use super::{word_cont, word_start};
 
-/// A word at depth 0 that the statement-start rules name, or `""` for any other word. It matches on a stack copy, so the
-/// scan allocates nothing per word.
+/// A word at depth 0 that the statement-start rules name, or `""` for any other word. It picks candidates by length and
+/// compares with the standard library, so the scan allocates and copies nothing per word.
 fn keyword(word: &[u8]) -> &'static str {
-    let mut buf = [0u8; 9];
-    if !(2..=buf.len()).contains(&word.len()) {
-        return "";
+    let candidates: &[&'static str] = match word.len() {
+        2 => &["AS", "IF", "OF", "ON", "OR"],
+        3 => &["ALL", "FOR", "NOT", "SET", "TRY", "USE"],
+        4 => &["DENY", "DROP", "ELSE", "EXEC", "THEN", "WITH"],
+        5 => &["AFTER", "ALTER", "BEGIN", "CATCH", "GRANT", "MERGE", "PRINT", "THROW", "UNION", "WHILE"],
+        6 => &["CREATE", "DELETE", "EXCEPT", "INSERT", "RETURN", "REVOKE", "SELECT", "UPDATE", "VALUES"],
+        7 => &["DECLARE", "EXECUTE", "INSTEAD"],
+        8 => &["TRUNCATE"],
+        9 => &["INTERSECT", "RAISERROR"],
+        _ => return "",
+    };
+    for k in candidates {
+        if k.as_bytes().eq_ignore_ascii_case(word) {
+            return k;
+        }
     }
-    for (b, w) in buf.iter_mut().zip(word) {
-        *b = w.to_ascii_uppercase();
-    }
-    match &buf[..word.len()] {
-        b"AFTER" => "AFTER",
-        b"ALL" => "ALL",
-        b"ALTER" => "ALTER",
-        b"AS" => "AS",
-        b"BEGIN" => "BEGIN",
-        b"CATCH" => "CATCH",
-        b"CREATE" => "CREATE",
-        b"DECLARE" => "DECLARE",
-        b"DELETE" => "DELETE",
-        b"DENY" => "DENY",
-        b"DROP" => "DROP",
-        b"ELSE" => "ELSE",
-        b"EXCEPT" => "EXCEPT",
-        b"EXEC" => "EXEC",
-        b"EXECUTE" => "EXECUTE",
-        b"FOR" => "FOR",
-        b"GRANT" => "GRANT",
-        b"IF" => "IF",
-        b"INSERT" => "INSERT",
-        b"INSTEAD" => "INSTEAD",
-        b"INTERSECT" => "INTERSECT",
-        b"MERGE" => "MERGE",
-        b"NOT" => "NOT",
-        b"OF" => "OF",
-        b"ON" => "ON",
-        b"OR" => "OR",
-        b"PRINT" => "PRINT",
-        b"RAISERROR" => "RAISERROR",
-        b"RETURN" => "RETURN",
-        b"REVOKE" => "REVOKE",
-        b"SELECT" => "SELECT",
-        b"SET" => "SET",
-        b"THEN" => "THEN",
-        b"THROW" => "THROW",
-        b"TRUNCATE" => "TRUNCATE",
-        b"TRY" => "TRY",
-        b"UNION" => "UNION",
-        b"UPDATE" => "UPDATE",
-        b"USE" => "USE",
-        b"VALUES" => "VALUES",
-        b"WHILE" => "WHILE",
-        b"WITH" => "WITH",
-        _ => "",
-    }
+    ""
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -254,7 +219,6 @@ pub(in crate::sql) fn statement_around(text: &str, at: usize) -> Range<usize> {
                 (start, statement, prev) = (i, Statement::default(), Prev::None);
             }
             _ => {
-                let ascii_word = |c: u8| c.is_ascii_alphanumeric() || matches!(c, b'_' | b'@' | b'#' | b'$');
                 let word = if c.is_ascii() { c.is_ascii_alphabetic() || matches!(c, b'_' | b'@' | b'#') } else { text[i..].chars().next().is_some_and(word_start) };
                 if !word {
                     prev = Prev::Other;
@@ -263,13 +227,10 @@ pub(in crate::sql) fn statement_around(text: &str, at: usize) -> Range<usize> {
                 }
                 let mut word_end = i + 1;
                 while word_end < b.len() {
-                    let c = b[word_end];
-                    if ascii_word(c) || c >= 0x80 && !text.is_char_boundary(word_end) {
-                        word_end += 1;
-                    } else if c >= 0x80 && text[word_end..].chars().next().is_some_and(word_cont) {
-                        word_end += 1;
-                    } else {
-                        break;
+                    match b[word_end] {
+                        b'a'..=b'z' | b'A'..=b'Z' | b'0'..=b'9' | b'_' | b'@' | b'#' | b'$' => word_end += 1,
+                        0x80.. if !text.is_char_boundary(word_end) || text[word_end..].chars().next().is_some_and(word_cont) => word_end += 1,
+                        _ => break,
                     }
                 }
                 let w = keyword(&b[i..word_end]);
