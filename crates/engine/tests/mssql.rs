@@ -1011,7 +1011,7 @@ impl Harness {
                 SELECT CONCAT(N'check ',k.name,' ',k.definition,' ',k.is_disabled,' ',k.is_not_trusted,' ',k.is_not_for_replication) FROM sys.check_constraints k WHERE k.parent_object_id=o.object_id
                 UNION ALL
                 SELECT CONCAT(N'trigger ',t.name,' ',t.is_disabled,' ',m.uses_ansi_nulls,' ',m.uses_quoted_identifier,' ',TRIM(CHAR(13)+CHAR(10)+CHAR(9)+' ' FROM m.definition))
-                FROM sys.triggers t JOIN sys.sql_modules m ON m.object_id=t.object_id WHERE t.parent_id=o.object_id
+                FROM sys.triggers t JOIN sys.sql_modules m ON m.object_id=t.object_id WHERE t.parent_id=o.object_id AND t.name<>'enc_trg'
                 UNION ALL
                 SELECT CONCAT(N'module ',m.uses_ansi_nulls,' ',m.uses_quoted_identifier,' ',TRIM(CHAR(13)+CHAR(10)+CHAR(9)+' ' FROM m.definition))
                 FROM sys.sql_modules m WHERE m.object_id=o.object_id AND o.name NOT IN ('newname','moved','bare_moved','bare_in')
@@ -1020,11 +1020,12 @@ impl Harness {
                                                                   WHEN 2 THEN (SELECT name FROM sys.parameters WHERE object_id=ep.major_id AND parameter_id=ep.minor_id)
                                                                   ELSE COL_NAME(ep.major_id,ep.minor_id) END,' ',ep.name,' ',CONVERT(nvarchar(max),ep.value),' ',CONVERT(sysname,SQL_VARIANT_PROPERTY(ep.value,'BaseType')))
                 FROM sys.extended_properties ep WHERE ep.class IN (1,2,7) AND ep.major_id=o.object_id AND SQL_VARIANT_PROPERTY(ep.value,'BaseType') IN ('nvarchar','varchar')
+                  AND NOT EXISTS (SELECT 1 FROM sys.indexes x WHERE ep.class=7 AND x.object_id=ep.major_id AND x.index_id=ep.minor_id AND x.type=3)
                 UNION ALL
                 SELECT CONCAT(N'classification ',COL_NAME(sc.major_id,sc.minor_id),' ',sc.label,' ',sc.label_id,' ',sc.information_type,' ',sc.information_type_id,' ',sc.rank)
                 FROM sys.sensitivity_classifications sc WHERE sc.class=1 AND sc.major_id=o.object_id
              ) f(fact)
-             WHERE o.is_ms_shipped=0 AND o.type IN ('U','V','P','FN','IF','TF','TR','C','F','PK','UQ','D') AND o.name NOT IN ('enc','node_t')
+             WHERE o.is_ms_shipped=0 AND o.type IN ('U','V','P','FN','IF','TF','TR','C','F','PK','UQ','D') AND o.name NOT IN ('enc','node_t','enc_trg')
              ORDER BY 1",
         )
         .await
@@ -1060,7 +1061,12 @@ async fn hostile_object_scripts_replay_every_property_or_warn() {
 
         let warned = |name: &str| -> Vec<&str> {
             match name {
-                "warned" => vec!["ANSI_PADDING OFF on [dbo].[warned].[pad]", "XML index [IX x] on [dbo].[warned]", "extended property [Version] of type int on [dbo].[warned]"],
+                "warned" => vec![
+                    "ANSI_PADDING OFF on [dbo].[warned].[pad]",
+                    "XML index [IX x] on [dbo].[warned]",
+                    "trigger [dbo].[enc_trg] on [dbo].[warned], whose text is encrypted",
+                    "extended property [Version] of type int on [dbo].[warned]",
+                ],
                 "parted" => vec![
                     "partition scheme [ps_hostile] on [dbo].[parted]",
                     "partition scheme [ps_hostile] for index [IX_parted] on [dbo].[parted]",
@@ -1092,7 +1098,7 @@ async fn hostile_object_scripts_replay_every_property_or_warn() {
             for f in &schema.functions {
                 let result = src.engine.object_script(db.clone(), ScriptTarget::Routine { oid: f.oid }).await;
                 if f.name == "enc" {
-                    let message = "SQL Server has no readable definition for [dbo].[enc]. The module is encrypted or CLR, or this login lacks VIEW DEFINITION permission.";
+                    let message = "SQL Server has no readable definition for [dbo].[enc]. The module is encrypted, or this login lacks VIEW DEFINITION permission.";
                     assert_eq!(refusal(result), message);
                     continue;
                 }
@@ -1134,6 +1140,8 @@ async fn hostile_object_scripts_replay_every_property_or_warn() {
         let schema_oid = |name: &str| catalog.schemas.iter().flat_map(|s| &s.relations).find(|r| r.name == name).unwrap().oid;
         let xml = src.engine.object_script(db.clone(), ScriptTarget::Index { relation_oid: schema_oid("warned"), name: "IX x".into() }).await;
         assert_eq!(refusal(xml), "Only clustered, nonclustered, and columnstore indexes can be scripted, and IX x is none of these.");
+        let encrypted = src.engine.object_script(db.clone(), ScriptTarget::Trigger { relation_oid: schema_oid("warned"), name: "enc_trg".into() }).await;
+        assert_eq!(refusal(encrypted), "SQL Server has no readable definition for [dbo].[enc_trg]. The module is encrypted, or this login lacks VIEW DEFINITION permission.");
         let unique = src.engine.object_script(db.clone(), ScriptTarget::Index { relation_oid: schema_oid("refd"), name: "UQ_refd".into() }).await.unwrap();
         assert_eq!(
             unique.text,

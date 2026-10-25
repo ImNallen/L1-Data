@@ -11,7 +11,7 @@ pub struct Table {
     pub foreign_keys: Vec<ForeignKey>,
     pub checks: Vec<Check>,
     pub indexes: Vec<Index>,
-    pub triggers: Vec<Module>,
+    pub triggers: Vec<Trigger>,
     pub heap: Option<Storage>,
     pub large_values: Option<Place>,
     pub lock_escalation: String,
@@ -151,11 +151,19 @@ pub struct Module {
     pub properties: Vec<Property>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Trigger {
+    Text(Module),
+    /// SQL Server keeps no T-SQL text for a CLR trigger.
+    Clr { schema: String, name: String },
+    Encrypted { schema: String, name: String },
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct View {
     pub module: Module,
     pub indexes: Vec<Index>,
-    pub triggers: Vec<Module>,
+    pub triggers: Vec<Trigger>,
     pub properties: Vec<Property>,
 }
 
@@ -264,11 +272,33 @@ pub fn module(m: &Module) -> Ddl {
     Ddl { text, warnings }
 }
 
-/// Indexes disable last, because a disabled clustered index makes its table unreadable to every later step.
-fn dependents<'a>(name: &str, disabled_keys: impl Iterator<Item = &'a str>, indexes: &'a [Index], triggers: &[Module], props: &[Property], warnings: &mut Vec<String>) -> Vec<String> {
-    let mut parts: Vec<String> = indexes.iter().filter_map(|i| index_text(i, name, warnings)).collect();
-    parts.extend(triggers.iter().map(|m| module_text(m, warnings)));
-    parts.extend(properties(props, warnings));
+/// Indexes disable last, because a disabled clustered index makes its table unreadable to every
+/// later step. An index or trigger the script leaves out takes its extended properties with it,
+/// because adding them would fail on the replay.
+fn dependents<'a>(name: &str, disabled_keys: impl Iterator<Item = &'a str>, indexes: &'a [Index], triggers: &[Trigger], props: &[Property], warnings: &mut Vec<String>) -> Vec<String> {
+    let mut parts = vec![];
+    let mut left_out = vec![];
+    for i in indexes {
+        match index_text(i, name, warnings) {
+            Some(text) => parts.push(text),
+            None => left_out.push(("INDEX", i.name.as_str())),
+        }
+    }
+    for t in triggers {
+        match t {
+            Trigger::Text(m) => parts.push(module_text(m, warnings)),
+            Trigger::Clr { schema, name: trigger } => {
+                warnings.push(format!("CLR trigger {} on {name}", qualified(schema, trigger)));
+                left_out.push(("TRIGGER", trigger));
+            }
+            Trigger::Encrypted { schema, name: trigger } => {
+                warnings.push(format!("trigger {} on {name}, whose text is encrypted", qualified(schema, trigger)));
+                left_out.push(("TRIGGER", trigger));
+            }
+        }
+    }
+    let props: Vec<Property> = props.iter().filter(|p| !p.levels.get(2).is_some_and(|(kind, n)| left_out.contains(&(kind.as_str(), n.as_str())))).cloned().collect();
+    parts.extend(properties(&props, warnings));
     let disabled: Vec<&str> = disabled_keys.chain(indexes.iter().filter(|i| i.storage.disabled && matches!(i.kind, 1 | 2 | 5 | 6)).map(|i| i.name.as_str())).collect();
     if !disabled.is_empty() {
         parts.push(disable(name, &disabled));
@@ -587,7 +617,7 @@ mod tests {
             }],
             checks: vec![Check { name: "CK_qty".into(), definition: "([qty]>(0))".into(), state: State::default() }],
             indexes: vec![Index { include: vec!["qty".into()], ..index_on("IX_code", 2, &["code"]) }],
-            triggers: vec![Module {
+            triggers: vec![Trigger::Text(Module {
                 schema: "dbo".into(),
                 name: "t".into(),
                 definition: "CREATE TRIGGER dbo.t ON dbo.tickets AFTER UPDATE AS SELECT 1\n".into(),
@@ -595,7 +625,7 @@ mod tests {
                 quoted_identifier: false,
                 disabled_on: Some("[dbo].[tickets]".into()),
                 properties: vec![],
-            }],
+            })],
             ..table_named("tickets")
         };
         assert_eq!(
@@ -894,6 +924,29 @@ GO
     }
 
     #[test]
+    fn clr_and_encrypted_triggers_warn_and_take_their_properties_like_a_left_out_index() {
+        let base = [("SCHEMA", "dbo"), ("TABLE", "t")];
+        let t = Table {
+            indexes: vec![index_on("IX x", 3, &["x"])],
+            triggers: vec![Trigger::Clr { schema: "dbo".into(), name: "clr".into() }, Trigger::Encrypted { schema: "dbo".into(), name: "enc]x".into() }],
+            properties: vec![
+                property("MS_Description", "kept", &base),
+                property("MS_Description", "xml", &[base[0], base[1], ("INDEX", "IX x")]),
+                property("MS_Description", "clr", &[base[0], base[1], ("TRIGGER", "clr")]),
+                property("MS_Description", "enc", &[base[0], base[1], ("TRIGGER", "enc]x")]),
+                property("MS_Description", "column", &[base[0], base[1], ("COLUMN", "clr")]),
+            ],
+            ..table_named("t")
+        };
+        let ddl = table(&t);
+        assert_eq!(ddl.warnings, ["XML index [IX x] on [dbo].[t]", "CLR trigger [dbo].[clr] on [dbo].[t]", "trigger [dbo].[enc]]x] on [dbo].[t], whose text is encrypted"]);
+        assert!(ddl.text.contains("@value = N'kept'") && ddl.text.contains("@value = N'column'"), "{}", ddl.text);
+        for gone in ["@value = N'xml'", "@value = N'clr'", "@value = N'enc'"] {
+            assert!(!ddl.text.contains(gone), "{gone} in {}", ddl.text);
+        }
+    }
+
+    #[test]
     fn extended_properties_replay_for_the_table_its_parts_and_warn_for_other_types() {
         let base = [("SCHEMA", "we]ird s"), ("TABLE", "Par ent")];
         let t = Table {
@@ -960,7 +1013,7 @@ GO
         let v = View {
             module: module("v", "CREATE VIEW dbo.v WITH SCHEMABINDING AS SELECT id FROM dbo.t"),
             indexes: vec![Index { unique: true, on_view: true, storage: Storage { fill_factor: 90, ..Storage::default() }, ..index_on("IX_v", 1, &["id"]) }],
-            triggers: vec![module("v_ins", "CREATE TRIGGER dbo.v_ins ON dbo.v INSTEAD OF INSERT AS SELECT 1")],
+            triggers: vec![Trigger::Text(module("v_ins", "CREATE TRIGGER dbo.v_ins ON dbo.v INSTEAD OF INSERT AS SELECT 1"))],
             properties: vec![property("MS_Description", "bound", &[("SCHEMA", "dbo"), ("VIEW", "v")])],
         };
         assert_eq!(

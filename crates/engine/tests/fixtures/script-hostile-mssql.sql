@@ -138,6 +138,11 @@ SET ANSI_PADDING ON;
 GO
 CREATE PRIMARY XML INDEX [IX x] ON dbo.warned (x);
 GO
+CREATE TRIGGER dbo.enc_trg ON dbo.warned WITH ENCRYPTION AFTER INSERT AS SELECT 1
+GO
+EXEC sys.sp_addextendedproperty N'MS_Description', N'xml index', N'SCHEMA', N'dbo', N'TABLE', N'warned', N'INDEX', N'IX x';
+EXEC sys.sp_addextendedproperty N'MS_Description', N'encrypted', N'SCHEMA', N'dbo', N'TABLE', N'warned', N'TRIGGER', N'enc_trg';
+GO
 EXEC sys.sp_addextendedproperty N'Version', 3, N'SCHEMA', N'dbo', N'TABLE', N'warned';
 GO
 CREATE PARTITION FUNCTION pf_hostile (int) AS RANGE LEFT FOR VALUES (10);

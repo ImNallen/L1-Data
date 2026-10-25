@@ -118,7 +118,7 @@ impl MsSession {
             }
             ScriptTarget::Routine { oid } => self.module_script(&format!("o.object_id={}", native_object_id(*oid))).await,
             ScriptTarget::Trigger { relation_oid, name } => {
-                self.module_script(&format!("o.parent_object_id={} AND o.type='TR' AND o.name={}", native_object_id(*relation_oid), quote_literal(name))).await
+                self.module_script(&format!("o.parent_object_id={} AND o.type IN ('TR','TA') AND o.name={}", native_object_id(*relation_oid), quote_literal(name))).await
             }
             ScriptTarget::Index { relation_oid, name } => {
                 let oid = native_object_id(*relation_oid);
@@ -150,6 +150,7 @@ impl MsSession {
         match required(r, 2).map_err(failed)?.trim() {
             "V" => {
                 let (_, module) = self.modules(&format!("o.object_id={oid}")).await?.into_iter().next().ok_or(DetailError::Gone)?;
+                let module = module.text()?;
                 let view = ddl::View { indexes: self.indexes(oid, "1=1", f).await?, triggers: self.triggers(oid).await?, properties: self.properties(&format!("o.object_id={oid}")).await?, module };
                 Ok(script::object_script(&view.module.name, ddl::view(&view)))
             }
@@ -196,19 +197,28 @@ impl MsSession {
     }
 
     async fn module_script(&mut self, filter: &str) -> Result<ObjectScript, DetailError> {
-        let (oid, mut module) = self.modules(filter).await?.into_iter().next().ok_or(DetailError::Gone)?;
+        let (oid, module) = self.modules(filter).await?.into_iter().next().ok_or(DetailError::Gone)?;
+        let mut module = module.text()?;
         module.properties = self.properties(&format!("ep.class IN (1,2) AND ep.major_id={oid}")).await?;
         Ok(script::object_script(&module.name, ddl::module(&module)))
     }
 
-    async fn triggers(&mut self, oid: i32) -> Result<Vec<ddl::Module>, DetailError> {
-        Ok(self.modules(&format!("o.parent_object_id={oid} AND o.type='TR'")).await?.into_iter().map(|(_, m)| m).collect())
+    async fn triggers(&mut self, oid: i32) -> Result<Vec<ddl::Trigger>, DetailError> {
+        let found = self.modules(&format!("o.parent_object_id={oid} AND o.type IN ('TR','TA')")).await?;
+        Ok(found
+            .into_iter()
+            .map(|(_, m)| match m {
+                Found::Text(module) => ddl::Trigger::Text(module),
+                Found::Clr { schema, name } => ddl::Trigger::Clr { schema, name },
+                Found::Unreadable { schema, name } => ddl::Trigger::Encrypted { schema, name },
+            })
+            .collect())
     }
 
-    async fn modules(&mut self, filter: &str) -> Result<Vec<(i32, ddl::Module)>, DetailError> {
+    async fn modules(&mut self, filter: &str) -> Result<Vec<(i32, Found)>, DetailError> {
         let rows = self
             .rows(&format!(
-                "SELECT s.name,o.name,OBJECT_DEFINITION(o.object_id),m.uses_ansi_nulls,m.uses_quoted_identifier,tr.is_disabled,ps.name,po.name,o.object_id
+                "SELECT s.name,o.name,OBJECT_DEFINITION(o.object_id),m.uses_ansi_nulls,m.uses_quoted_identifier,tr.is_disabled,ps.name,po.name,o.object_id,o.type
                  FROM sys.objects o JOIN sys.schemas s ON s.schema_id=o.schema_id
                  LEFT JOIN sys.sql_modules m ON m.object_id=o.object_id
                  LEFT JOIN sys.triggers tr ON tr.object_id=o.object_id
@@ -220,18 +230,19 @@ impl MsSession {
         rows.iter()
             .map(|r| {
                 let (schema, name) = (text(r, 0)?, text(r, 1)?);
+                let oid = number(r, 8).map_err(failed)?;
+                if matches!(required(r, 9).map_err(failed)?.trim(), "TA" | "PC" | "FS" | "FT") {
+                    return Ok((oid, Found::Clr { schema, name }));
+                }
                 let Some(definition) = r[2].clone() else {
-                    return Err(refused(format!(
-                        "SQL Server has no readable definition for {}. The module is encrypted or CLR, or this login lacks VIEW DEFINITION permission.",
-                        ddl::qualified(&schema, &name)
-                    )));
+                    return Ok((oid, Found::Unreadable { schema, name }));
                 };
                 let disabled_on = match r[5].as_deref() {
                     Some("1") => Some(ddl::qualified(&text(r, 6)?, &text(r, 7)?)),
                     _ => None,
                 };
                 let module = ddl::Module { schema, name, definition, ansi_nulls: bit(r, 3)?, quoted_identifier: bit(r, 4)?, disabled_on, properties: vec![] };
-                Ok((number(r, 8).map_err(failed)?, module))
+                Ok((oid, Found::Text(module)))
             })
             .collect()
     }
@@ -469,6 +480,25 @@ impl MsSession {
                 index
             })
             .collect())
+    }
+}
+
+enum Found {
+    Text(ddl::Module),
+    Clr { schema: String, name: String },
+    Unreadable { schema: String, name: String },
+}
+
+impl Found {
+    fn text(self) -> Result<ddl::Module, DetailError> {
+        match self {
+            Found::Text(module) => Ok(module),
+            Found::Clr { schema, name } => Err(refused(format!("{} runs CLR code, so SQL Server keeps no T-SQL text for it.", ddl::qualified(&schema, &name)))),
+            Found::Unreadable { schema, name } => Err(refused(format!(
+                "SQL Server has no readable definition for {}. The module is encrypted, or this login lacks VIEW DEFINITION permission.",
+                ddl::qualified(&schema, &name)
+            ))),
+        }
     }
 }
 
