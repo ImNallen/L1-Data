@@ -42,8 +42,10 @@ import {
 import { useWorkspace } from "../../state/workspace";
 import { fontStack } from "../../themes/fonts";
 import { ContextMenuArea, ContextMenuItem, cx } from "../../ui/primitives";
+import { openTableTab } from "../editor/runActions";
+import { useKeyLinks, type BrowsedTable, type KeyLink } from "./foreignKeys";
 import { groupDigits, isNumeric, toTsv } from "./format";
-import type { SortKey } from "./tableQuery";
+import { referencedRows, type SortKey } from "./tableQuery";
 
 const HEADER_H = 28;
 const ROWNUM_W = 36;
@@ -97,6 +99,7 @@ export function gridKeyColumns(editing: GridEditing | null, edits: TableEdits): 
 const DEFAULT = Symbol("default");
 
 export type GridQuery = {
+  table: BrowsedTable;
   sort: SortKey[];
   filtered: Set<string>;
   onSort(column: string, additive: boolean): void;
@@ -400,11 +403,23 @@ export function ResultGrid({
     return () => window.removeEventListener("mouseup", up);
   }, []);
 
-  const openCell = async (row: number, col: number) => {
+  const fullValue = async (row: number, col: number) => {
     const shown = cellValue(row, col);
-    const value = row < rowCount && cache.isCut(row, col) ? await cache.loadFull(row, col) : shown === DEFAULT ? null : shown;
+    return row < rowCount && cache.isCut(row, col) ? await cache.loadFull(row, col) : shown === DEFAULT ? null : shown;
+  };
+  const openCell = async (row: number, col: number) => {
+    const value = await fullValue(row, col);
     if (value === undefined) return;
     useWorkspace.getState().open({ kind: "cell", title: `${columns[col]?.name ?? ""} · row ${row + 1}`, value });
+  };
+  const links = useKeyLinks(meta, query?.table ?? null);
+  const follow = async (row: number, link: KeyLink) => {
+    const values = await Promise.all(link.resultColumns.map((col) => fullValue(row, col)));
+    if (!values.every((v) => typeof v === "string")) return;
+    await openTableTab({ db: meta.db, schema: link.schema, relation: link.table }, referencedRows(link.refColumns, values));
+  };
+  const openRecord = (row: number) => {
+    if (row < rowCount) useWorkspace.getState().open({ kind: "record", meta, row });
   };
 
   const [editingCell, setEditingCell] = useState<(Cell & { draft: string; initial: string; stored: CellValue }) | null>(null);
@@ -515,6 +530,9 @@ export function ResultGrid({
         const id = rowIdOf(r);
         return newRowAt(r) || (id && edits.updates[rowKey(id)]?.values[columns[c]!.name] !== undefined) ? shown : undefined;
       });
+    } else if (mod && e.key.toLowerCase() === "i" && selection) {
+      e.preventDefault();
+      openRecord(selection.focus.row);
     } else if (mod && e.key.toLowerCase() === "a") {
       e.preventDefault();
       setSelection({ anchor: { row: 0, col: 0 }, focus: { row: total - 1, col: columns.length - 1 } });
@@ -543,6 +561,8 @@ export function ResultGrid({
   const menuRowId = menuCell ? rowIdOf(menuCell.row) : null;
   const menuRowDeleted = menuRowId ? rowKey(menuRowId) in edits.deletes : false;
   const shortValue = (v: string) => (v.length > 24 ? `${v.slice(0, 24)}…` : v);
+  const menuLinks = menuCell ? links.filter((link) => link.resultColumns.includes(menuCell.col)) : [];
+  const hasValue = (row: number, col: number) => typeof cellValue(row, col) === "string";
 
   const grid = (
     <div
@@ -785,25 +805,43 @@ export function ResultGrid({
       </div>
     </div>
   );
-  if (!query) return grid;
   return (
     <ContextMenuArea
       menu={
         menuCell &&
         menuColumn !== undefined && (
           <>
-            {menuValue !== undefined && (
+            {query && (
               <>
-                <ContextMenuItem testId="grid-menu-filter-eq" onSelect={() => query.onFilterValue(menuColumn, menuValue, false)}>
-                  {menuValue === null ? `Filter ${menuColumn} is null` : `Filter ${menuColumn} = ${shortValue(menuValue)}`}
+                {menuValue !== undefined && (
+                  <>
+                    <ContextMenuItem testId="grid-menu-filter-eq" onSelect={() => query.onFilterValue(menuColumn, menuValue, false)}>
+                      {menuValue === null ? `Filter ${menuColumn} is null` : `Filter ${menuColumn} = ${shortValue(menuValue)}`}
+                    </ContextMenuItem>
+                    <ContextMenuItem testId="grid-menu-filter-ne" onSelect={() => query.onFilterValue(menuColumn, menuValue, true)}>
+                      {menuValue === null ? `Filter ${menuColumn} is not null` : `Filter ${menuColumn} ≠ ${shortValue(menuValue)}`}
+                    </ContextMenuItem>
+                  </>
+                )}
+                <ContextMenuItem testId="grid-menu-filter-column" onSelect={() => query.onFilterColumn(menuColumn)}>
+                  Filter {menuColumn}…
                 </ContextMenuItem>
-                <ContextMenuItem testId="grid-menu-filter-ne" onSelect={() => query.onFilterValue(menuColumn, menuValue, true)}>
-                  {menuValue === null ? `Filter ${menuColumn} is not null` : `Filter ${menuColumn} ≠ ${shortValue(menuValue)}`}
-                </ContextMenuItem>
+                <div className="my-1 h-px bg-control" />
               </>
             )}
-            <ContextMenuItem testId="grid-menu-filter-column" onSelect={() => query.onFilterColumn(menuColumn)}>
-              Filter {menuColumn}…
+            {menuLinks.map((link) => (
+              <ContextMenuItem
+                key={link.name}
+                testId={`grid-menu-follow-${link.name}`}
+                disabled={!link.resultColumns.every((col) => hasValue(menuCell.row, col))}
+                onSelect={() => void follow(menuCell.row, link)}
+              >
+                Go to referenced row in {link.table}
+              </ContextMenuItem>
+            ))}
+            <ContextMenuItem testId="grid-menu-record" disabled={menuCell.row >= rowCount} onSelect={() => openRecord(menuCell.row)}>
+              View as record
+              <span className="ml-auto pl-6 text-ui-12 text-dim">⌘I</span>
             </ContextMenuItem>
             {editable && (
               <>

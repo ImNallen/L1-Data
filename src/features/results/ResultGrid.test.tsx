@@ -1,11 +1,19 @@
+// @vitest-environment jsdom
+import { clearMocks, mockIPC } from "@tauri-apps/api/mocks";
+import { cleanup, render, screen } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import { renderToStaticMarkup } from "react-dom/server";
-import { expect, it } from "vitest";
-import type { ColumnMeta, DatabaseKind, TypeCategory } from "../../ipc/bindings";
-import { buildCatalogView } from "../../state/catalog";
+import { afterEach, expect, it, vi } from "vitest";
+import type { ColumnMeta, DatabaseKind, RelationDetail, ResultMeta, RowPage, TableScript, TypeCategory } from "../../ipc/bindings";
+import { buildCatalogView, useCatalog } from "../../state/catalog";
 import { dbKey } from "../../state/dbKey";
+import { useRelationDetail } from "../../state/relationDetail";
+import { dropRowCaches } from "../../state/rowCache";
 import { markDeleted, NO_EDITS, setCell } from "../../state/tableEdits";
+import { useWorkspace } from "../../state/workspace";
 import { shopCatalog } from "../../testing/shopCatalog";
-import { gridEditing, gridKeyColumns, HeaderIcon, nextFocus, primaryKeyColumns, selectRows } from "./ResultGrid";
+import { dropEditor } from "../editor/editorStates";
+import { gridEditing, gridKeyColumns, HeaderIcon, nextFocus, primaryKeyColumns, ResultGrid, selectRows } from "./ResultGrid";
 
 const iconOf = (category: TypeCategory, primaryKey = false) => {
   const html = renderToStaticMarkup(<HeaderIcon column={{ name: "c", type: { display: "t", category }, source: null }} primaryKey={primaryKey} />);
@@ -166,4 +174,121 @@ it.each(["update", "delete"])("keeps original key columns for a pending %s when 
   const edits = change === "update" ? setCell(NO_EDITS, selected, "note", "edited", "original") : markDeleted(NO_EDITS, [selected], true);
   expect(gridKeyColumns({ pkColumns: ["alternate"], writableColumns: new Set(["note"]) }, edits)).toEqual(["id"]);
   expect(gridKeyColumns(null, edits)).toEqual(["id"]);
+});
+
+const shopDb = { connectionId: "c1", database: "shop" };
+const ordersDetail = (oid: number): RelationDetail => ({
+  db: shopDb,
+  oid,
+  catalogVersion: 1,
+  defaults: [],
+  keys: [
+    { name: "orders_pkey", columns: ["id"], kind: { kind: "Primary" } },
+    {
+      name: "orders_customer_id_fkey",
+      columns: ["customer_id"],
+      kind: { kind: "Foreign", refSchema: "public", refTable: "customers", refColumns: ["id"], onDelete: "NoAction", onUpdate: "NoAction" },
+    },
+  ],
+  indexes: [],
+  triggers: [],
+});
+
+function queryResult(rows: (string | null)[][]): ResultMeta {
+  const catalog = shopCatalog("c1", 1);
+  const orders = catalog.schemas[1]!.relations.find((r) => r.name === "orders")!;
+  orders.columns[1]!.fk = true;
+  useCatalog.setState({ views: { [dbKey(shopDb)]: buildCatalogView(catalog) } });
+  vi.spyOn(HTMLElement.prototype, "offsetWidth", "get").mockReturnValue(800);
+  vi.spyOn(HTMLElement.prototype, "offsetHeight", "get").mockReturnValue(600);
+  vi.spyOn(HTMLCanvasElement.prototype, "getContext").mockReturnValue(null);
+  vi.stubGlobal(
+    "ResizeObserver",
+    class {
+      observe() {}
+      unobserve() {}
+      disconnect() {}
+    },
+  );
+  mockIPC((cmd): RowPage | RelationDetail | TableScript | null => {
+    if (cmd === "result_page") return { start: 0, rows, cut: [] };
+    if (cmd === "relation_detail") return ordersDetail(orders.oid);
+    if (cmd === "table_script") return { text: "SELECT * FROM public.customers", acceptedTexts: ["SELECT * FROM public.customers"] };
+    return null;
+  });
+  return {
+    databaseKind: "Postgres",
+    ref: { tabId: "q1", runId: 1, index: 0 },
+    db: shopDb,
+    columns: [
+      { name: "id", type: { display: "bigint", category: "Integer" }, source: { tableOid: orders.oid, attnum: 1 } },
+      { name: "customer_id", type: { display: "bigint", category: "Integer" }, source: { tableOid: orders.oid, attnum: 2 } },
+    ],
+    rowCount: rows.length,
+    rowsSeen: rows.length,
+    truncated: null,
+    elapsedMs: 1,
+    allRows: { kind: "Statement" },
+  };
+}
+
+afterEach(() => {
+  cleanup();
+  clearMocks();
+  dropRowCaches("q1");
+  for (const id of useWorkspace.getState().order) dropEditor(id);
+  useWorkspace.setState(useWorkspace.getInitialState(), true);
+  useCatalog.setState(useCatalog.getInitialState(), true);
+  useRelationDetail.setState(useRelationDetail.getInitialState(), true);
+  vi.restoreAllMocks();
+  vi.unstubAllGlobals();
+});
+
+it("follows a foreign key from a query result to the referenced row, and not from a NULL", async () => {
+  const user = userEvent.setup();
+  render(
+    <ResultGrid
+      meta={queryResult([
+        ["1", "42"],
+        ["2", null],
+      ])}
+      done
+      query={null}
+      editing={null}
+    />,
+  );
+  await user.pointer({ keys: "[MouseRight]", target: await screen.findByText("NULL") });
+  expect((await screen.findByTestId("grid-menu-follow-orders_customer_id_fkey")).hasAttribute("data-disabled")).toBe(true);
+  await user.keyboard("{Escape}");
+
+  await user.pointer({ keys: "[MouseRight]", target: screen.getByText("42") });
+  const follow = await screen.findByTestId("grid-menu-follow-orders_customer_id_fkey");
+  expect([follow.textContent, follow.hasAttribute("data-disabled"), screen.queryByTestId("grid-menu-filter-eq")]).toEqual([
+    "Go to referenced row in customers",
+    false,
+    null,
+  ]);
+  await user.click(follow);
+  await vi.waitFor(() =>
+    expect(Object.values(useWorkspace.getState().tabs).map((t) => [t.console.db, t.table])).toEqual([
+      [shopDb, { schema: "public", table: "customers", page: 0, query: { orderBy: "", where: "", filters: [{ column: "id", op: "Eq", value: "42" }] } }],
+    ]),
+  );
+});
+
+it("opens the focused row as a record with ⌘I or the menu", async () => {
+  const user = userEvent.setup();
+  const meta = queryResult([
+    ["1", "42"],
+    ["2", null],
+  ]);
+  render(<ResultGrid meta={meta} done query={null} editing={null} />);
+  await user.click(await screen.findByText("2"));
+  await user.keyboard("{Meta>}i{/Meta}");
+  expect(useWorkspace.getState().overlay).toEqual({ kind: "record", meta, row: 1 });
+
+  useWorkspace.getState().close();
+  await user.pointer({ keys: "[MouseRight]", target: screen.getByText("42") });
+  await user.click(await screen.findByTestId("grid-menu-record"));
+  expect(useWorkspace.getState().overlay).toEqual({ kind: "record", meta, row: 0 });
 });

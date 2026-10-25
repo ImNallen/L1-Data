@@ -178,9 +178,26 @@ export function ContextMenuArea({ menu, children }: { menu: ReactNode; children:
   );
 }
 
-export function ContextMenuItem({ children, onSelect, testId, danger }: { children: ReactNode; onSelect: () => void; testId?: string; danger?: boolean }) {
+export function ContextMenuItem({
+  children,
+  onSelect,
+  testId,
+  danger,
+  disabled,
+}: {
+  children: ReactNode;
+  onSelect: () => void;
+  testId?: string;
+  danger?: boolean;
+  disabled?: boolean;
+}) {
   return (
-    <ContextMenu.Item data-testid={testId} onSelect={onSelect} className={cx(MENU_ITEM, "pr-3", danger ? "text-danger" : "text-fg")}>
+    <ContextMenu.Item
+      data-testid={testId}
+      onSelect={onSelect}
+      disabled={disabled}
+      className={cx(MENU_ITEM, "pr-3 data-[disabled]:opacity-40", danger ? "text-danger" : "text-fg")}
+    >
       {children}
     </ContextMenu.Item>
   );
