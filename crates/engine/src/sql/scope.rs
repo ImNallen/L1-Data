@@ -802,11 +802,23 @@ impl<'a> Walk<'a> {
 
     /// The output column a select item names, as the server names it.
     fn item(&self, item: &[usize]) -> Item {
+        let n = item.len();
+        let is_word = |k: usize, w: &str| k < n && self.is_word(item[k], w);
+        let call_suffix = |k: usize| k + 2 < n && self.sig[item[k + 1]].class == Class::Open && self.sig[item[k + 2]].class == Class::Close && k + 3 == n;
+        if n > 3 && self.kind == DatabaseKind::Postgres {
+            for k in (3..n).rev() {
+                let suffix = ((is_word(k, "FILTER") || is_word(k, "OVER")) && call_suffix(k))
+                    || (is_word(k, "OVER") && k + 2 == n && self.sig[item[k + 1]].class == Class::Word)
+                    || (is_word(k, "WITHIN") && is_word(k + 1, "GROUP") && call_suffix(k + 1));
+                if suffix {
+                    return self.item(&item[..k]);
+                }
+            }
+        }
         let class = |k: usize| self.sig[item[k]].class;
         let text = |k: usize| &self.text[self.sig[item[k]].span.clone()];
         let named = |k: usize| matches!(class(k), Class::Word | Class::Name);
         let name = |k: usize| Item::Named(fold(self.kind, self.text, self.sig[item[k]]));
-        let n = item.len();
         let pg = self.kind == DatabaseKind::Postgres;
         if let Some(k) = (0..n).rev().find(|&k| class(k) == Class::Other && text(k) == "::")
             && k + 1 + self.cast_type_len(&item[k + 1..]) == n
@@ -897,7 +909,11 @@ impl<'a> Walk<'a> {
                 (_, Clause::On { tree_start, target, .. }) => &frame_rels[tree_start.min(target)..(target + 1).min(frame_rels.len())],
                 _ => &frame_rels[..],
             };
-            rels.extend(visible.iter().filter(|r| !self.aliased_elsewhere(r, frame_rels)));
+            let shadowed = |r: &Rel| {
+                child.is_some() && r.folded.as_deref().is_some_and(|k| rels.iter().any(|inner| inner.folded.as_deref().is_some_and(|i| same(self.kind, i, k))))
+            };
+            let outer: Vec<&Rel> = visible.iter().filter(|r| !self.aliased_elsewhere(r, frame_rels) && !shadowed(r)).collect();
+            rels.extend(outer);
             child = Some(&self.frames[f]);
         }
         let forward: Vec<&Cte> = chain.iter().filter(|&&f| self.frames[f].recursive).flat_map(|&f| self.frames[f].ctes.iter()).collect();
@@ -1610,6 +1626,8 @@ mod tests {
         assert_eq!(derived("with x as (select distinct * from orders) select * from x where |", Postgres), (vec![], vec!["orders".into()]));
         assert_eq!(derived("with x as (select distinct on (id) * from orders) select * from x where |", Postgres), (vec![], vec!["orders".into()]));
         assert_eq!(derived("with x as (select id::text, count(*), a + b, total n from orders) select * from x where |", Postgres).0, ["id", "count", "n"]);
+        let windows = "with x as (select count(*) filter (where total > 0), sum(total) over (), rank() over w, percentile_cont(0.5) within group (order by total) from orders) select * from x where |";
+        assert_eq!(derived(windows, Postgres).0, ["count", "sum", "rank", "percentile_cont"]);
         let casts = "with x as (select total::double precision, id::numeric(10,2), t::timestamp(3) with time zone, a::int[], b::pg_catalog.int4, c::text d, e::numeric as f from orders) select * from x where |";
         assert_eq!(derived(casts, Postgres).0, ["total", "id", "t", "a", "b", "d", "f"]);
         assert_eq!(derived("WITH x AS (SELECT TOP 5 amount = o.total, o.id FROM orders o) SELECT * FROM x WHERE |", SqlServer).0, ["amount", "id"]);
@@ -1633,6 +1651,13 @@ mod tests {
         assert_eq!(pg("select * from (|) x where a = 1").expect, Expect::Relation);
         let s = pg("select t1.| from t1 union select b from t2 as x");
         assert_eq!((refs(&s), s.qualifier.clone()), (vec![(Some("t1"), &table(None, "t1"))], Some(Qualifier::Relation { index: 0 })));
+    }
+
+    #[test]
+    fn an_inner_alias_hides_the_outer_relation_of_that_name() {
+        let s = pg("select * from orders o where exists (select * from customers o join addresses a on |)");
+        assert_eq!((refs(&s), s.expect), (vec![(Some("o"), &table(None, "customers")), (Some("a"), &table(None, "addresses"))], Expect::JoinCondition { target: 1 }));
+        assert_eq!(refs(&pg("select * from orders o where exists (select 1 from customers c where c.id = o.|)")).len(), 2);
     }
 
     #[test]
