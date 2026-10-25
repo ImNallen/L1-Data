@@ -2628,7 +2628,7 @@ async fn catalog_facts(client: &tokio_postgres::Client, relations: &str) -> Vec<
                              (SELECT string_agg(h.inhparent::regclass::text, ',' ORDER BY h.inhseqno) FROM pg_inherits h WHERE h.inhrelid = c.oid))
             UNION ALL
             SELECT concat_ws(' ', 'column', a.attnum, a.attname, format_type(a.atttypid, a.atttypmod), a.attnotnull, a.attidentity, a.attgenerated,
-                             pg_get_expr(d.adbin, d.adrelid), a.attcollation::regcollation, col_description(c.oid, a.attnum), a.attislocal, a.attinhcount,
+                             pg_get_expr(d.adbin, d.adrelid), (SELECT co.collnamespace::regnamespace::text || '.' || quote_ident(co.collname) FROM pg_collation co WHERE co.oid = a.attcollation), col_description(c.oid, a.attnum), a.attislocal, a.attinhcount,
                              a.attstattarget, a.attstorage, to_jsonb(a) ->> 'attcompression', a.attoptions, a.attfdwoptions)
             FROM pg_attribute a LEFT JOIN pg_attrdef d ON d.adrelid = a.attrelid AND d.adnum = a.attnum
             WHERE a.attrelid = c.oid AND a.attnum > 0 AND NOT a.attisdropped
@@ -2661,6 +2661,18 @@ async fn catalog_facts(client: &tokio_postgres::Client, relations: &str) -> Vec<
          ORDER BY 1"
     );
     client.query(&sql, &[]).await.unwrap().iter().map(|r| r.get(0)).collect()
+}
+
+/// `DROP DATABASE ... WITH (FORCE)` needs PostgreSQL 13, and the seeded round trip runs on 12 too.
+async fn drop_database(client: &tokio_postgres::Client, name: &str) {
+    for _ in 0..50 {
+        client.execute("select pg_terminate_backend(pid) from pg_stat_activity where datname = $1 and pid <> pg_backend_pid()", &[&name]).await.unwrap();
+        if client.batch_execute(&format!("drop database {name}")).await.is_ok() {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    panic!("could not drop database {name}");
 }
 
 async fn replay_in_dependency_order(client: &tokio_postgres::Client, mut scripts: Vec<String>) {
@@ -2739,7 +2751,7 @@ async fn object_scripts_replay_into_an_empty_database_with_the_same_catalog() {
     }))
     .await;
     drop(scratch);
-    shop.batch_execute(&format!("drop database {name} with (force)")).await.unwrap();
+    drop_database(&shop, &name).await;
     if let Err(panic) = outcome {
         std::panic::resume_unwind(panic);
     }
@@ -2852,7 +2864,7 @@ async fn hostile_object_scripts_replay_every_property_or_warn() {
     .await;
     drop((original, replay));
     for name in [&source, &target] {
-        shop.batch_execute(&format!("drop database {name} with (force)")).await.unwrap();
+        drop_database(&shop, name).await;
     }
     if let Err(panic) = outcome {
         std::panic::resume_unwind(panic);
