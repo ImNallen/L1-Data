@@ -299,7 +299,7 @@ mod tests {
 
     fn writes(text: &str, target: RunTarget, kind: DatabaseKind) -> Vec<&str> {
         let spans = pick(text, OffsetMap::new(text).target(target), kind).unwrap_or_default();
-        marked_writes(text, &spans, kind).into_iter().filter(|(_, writes)| *writes).map(|(sql, _)| sql).collect()
+        spans.iter().map(|span| span.text(text)).filter(|sql| is_write(sql, kind)).collect()
     }
 
     fn cursor_at(text: &str, needle: &str) -> RunTarget {
@@ -307,7 +307,7 @@ mod tests {
     }
 
     #[test]
-    fn marked_writes_flags_only_the_postgres_statements_the_run_executes_that_write() {
+    fn only_the_postgres_statements_a_run_executes_that_write_count() {
         let pg = DatabaseKind::Postgres;
         assert_eq!(writes("select * from orders", RunTarget::All, pg), Vec::<&str>::new());
         assert_eq!(writes("update orders set n = 1 where id = 7", RunTarget::All, pg), ["update orders set n = 1 where id = 7"]);
@@ -321,7 +321,7 @@ mod tests {
     }
 
     #[test]
-    fn marked_writes_flags_only_the_sql_server_batches_the_run_executes_that_write() {
+    fn only_the_sql_server_batches_a_run_executes_that_write_count() {
         let ms = DatabaseKind::SqlServer;
         assert_eq!(writes("SELECT * FROM dbo.orders", RunTarget::All, ms), Vec::<&str>::new());
         assert_eq!(writes("UPDATE dbo.orders SET n = 1", RunTarget::All, ms), ["UPDATE dbo.orders SET n = 1"]);
@@ -460,10 +460,6 @@ pub fn pick(text: &str, target: ByteTarget, kind: DatabaseKind) -> Result<Vec<St
 pub fn classify(text: &str, kind: DatabaseKind) -> StmtKind { match kind { DatabaseKind::Postgres => sql::classify(text), DatabaseKind::SqlServer => sql::tsql::classify(text) } }
 pub fn is_write(text: &str, kind: DatabaseKind) -> bool { match kind { DatabaseKind::Postgres => sql::history_is_write(text), DatabaseKind::SqlServer => sql::tsql::is_write(text) } }
 
-/// Each statement, or SQL Server batch, that `spans` names, and whether it writes.
-pub fn marked_writes<'a>(text: &'a str, spans: &[StmtSpan], kind: DatabaseKind) -> Vec<(&'a str, bool)> {
-    spans.iter().map(|span| span.text(text)).map(|sql| (sql, is_write(sql, kind))).collect()
-}
 
 pub fn table_script(kind: DatabaseKind, schema: &str, table: &str) -> TableScript {
     fn postgres_ident(name: &str) -> String {

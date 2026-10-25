@@ -1292,7 +1292,7 @@ impl Engine {
         }
         let map = text::OffsetMap::new(&text);
         let ranges: Vec<DocRange> = spans.iter().map(|span| map.range(span)).collect();
-        let work = text::marked_writes(&text, &spans, connection.database_kind);
+        let sent: Vec<&str> = spans.iter().map(|span| span.text(&text)).collect();
 
         let mut fresh = None;
         let needs_session = matches!(console.inner.lock().await.session, SessionSlot::Empty | SessionSlot::Lost { .. });
@@ -1312,13 +1312,17 @@ impl Engine {
         if inner.config != config {
             return Err(RunError::Busy);
         }
-        writes::check(&current, &config, &work, confirmed.as_ref()).map_err(|confirmation| RunError::ConfirmWrites { confirmation })?;
         if let Some(session) = fresh {
             match inner.session {
                 SessionSlot::Empty | SessionSlot::Lost { .. } => inner.session = SessionSlot::Idle(session),
                 SessionSlot::Idle(_) => {}
                 SessionSlot::Busy { .. } => return Err(RunError::Busy),
             }
+        }
+        let target = writes::Target { stored: &current, connected: &instance.config, console: &config };
+        if let Err(confirmation) = writes::check(&target, &sent, confirmed.as_ref()) {
+            console.publish(&mut inner, s);
+            return Err(RunError::ConfirmWrites { confirmation });
         }
         let Some((session, stop)) = console.take_session(&mut inner, run_id, Work::Run) else { return Err(RunError::Busy) };
         let txn = inner.txn;
@@ -1377,6 +1381,7 @@ impl Engine {
             return Err(ApplyError::Unsupported { what: session::SQL_SERVER_EDITS_UNSUPPORTED.into() });
         }
         s.connect(config.connection_id).await.map_err(|error| ApplyError::Connect { error })?;
+        let instance = s.instance(config.connection_id).ok_or(ApplyError::NotConfigured)?;
         let catalog = self.catalog(config.db()).await.map_err(|_| ApplyError::NotConfigured)?;
         let relation = catalog.relation(&changes.schema, &changes.table).ok_or(ApplyError::NotConfigured)?;
         let pk = relation.pk_columns();
@@ -1395,7 +1400,7 @@ impl Engine {
         }
 
         let run_id = s.next_run_id();
-        let (mut session, txn, stop) = {
+        let (mut session, txn, stop, (open, finish, undo)) = {
             let mut inner = console.inner.lock().await;
             let current = s.config(inner.config.connection_id).ok_or(ApplyError::NotConfigured)?;
             if current.database_kind == DatabaseKind::SqlServer
@@ -1406,11 +1411,6 @@ impl Engine {
             if inner.config != config {
                 return Err(ApplyError::Busy);
             }
-            if inner.txn == TxnState::Aborted {
-                return Err(ApplyError::TransactionAborted);
-            }
-            let work: Vec<(&str, bool)> = plan.iter().map(|edit| (edit.sql.as_str(), true)).collect();
-            writes::check(&current, &config, &work, confirmed.as_ref()).map_err(|confirmation| ApplyError::ConfirmWrites { confirmation })?;
             if let Some(session) = fresh {
                 match inner.session {
                     SessionSlot::Empty | SessionSlot::Lost { .. } => inner.session = SessionSlot::Idle(session),
@@ -1418,18 +1418,27 @@ impl Engine {
                     SessionSlot::Busy { .. } => return Err(ApplyError::Busy),
                 }
             }
+            if inner.txn == TxnState::Aborted {
+                return Err(ApplyError::TransactionAborted);
+            }
             let txn = inner.txn;
+            let wrap = if txn == TxnState::Active {
+                ("SAVEPOINT l1_apply", Some("RELEASE SAVEPOINT l1_apply"), "ROLLBACK TO SAVEPOINT l1_apply; RELEASE SAVEPOINT l1_apply")
+            } else {
+                ("BEGIN", (config.mode == TxnMode::AutoCommit).then_some("COMMIT"), "ROLLBACK")
+            };
+            let sent: Vec<&str> = std::iter::once(wrap.0).chain(plan.iter().map(|edit| edit.sql.as_str())).chain(wrap.1).collect();
+            let target = writes::Target { stored: &current, connected: &instance.config, console: &config };
+            if let Err(confirmation) = writes::check(&target, &sent, confirmed.as_ref()) {
+                console.publish(&mut inner, s);
+                return Err(ApplyError::ConfirmWrites { confirmation });
+            }
             let Some((session, stop)) = console.take_session(&mut inner, run_id, Work::Edit) else { return Err(ApplyError::Busy) };
             console.publish(&mut inner, s);
-            (session, txn, stop)
+            (session, txn, stop, wrap)
         };
 
         let inside = txn == TxnState::Active;
-        let (open, finish, undo) = if inside {
-            ("SAVEPOINT l1_apply", Some("RELEASE SAVEPOINT l1_apply"), "ROLLBACK TO SAVEPOINT l1_apply; RELEASE SAVEPOINT l1_apply")
-        } else {
-            ("BEGIN", (config.mode == TxnMode::AutoCommit).then_some("COMMIT"), "ROLLBACK")
-        };
         let mut lines = Vec::new();
         let mut outcome: Result<(), ApplyError> = async {
             session.batch(open).await.map_err(|e| ApplyError::Transaction { error: e })?;

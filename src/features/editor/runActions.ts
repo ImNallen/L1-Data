@@ -172,8 +172,7 @@ function deferPageForPendingWork(tabId: TabId, target: PageTarget | undefined): 
 /** The answer holds only for the target it named, so a target changed meanwhile drops the run. */
 async function writesConfirmed(tab: Tab, asked: WriteConfirmation): Promise<boolean> {
   const n = asked.writes;
-  const sqlServer = databaseKindFor(tabTarget(tab), ws().configs) === "SqlServer";
-  const unit = sqlServer ? (n === 1 ? "batch" : "batches") : n === 1 ? "statement" : "statements";
+  const unit = asked.unit === "Batch" ? (n === 1 ? "batch" : "batches") : n === 1 ? "statement" : "statements";
   const rest = n > asked.statements.length ? ` The first ${asked.statements.length} are shown.` : "";
   const ok = await confirm({
     title: `Run ${plural(n, "write")} on Production?`,

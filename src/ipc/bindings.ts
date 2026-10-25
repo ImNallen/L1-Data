@@ -1500,14 +1500,15 @@ export type WriteConfirmation = {
 	/**  The connection's name. */
 	connection: string,
 	database: string,
+	unit: ExecutionUnitKind,
 	writes: number,
-	/**  The first three statements, or SQL Server batches, that write, trimmed. */
+	/**  The first three statements, or SQL Server batches, that write, trimmed and cut at 2,000 characters. */
 	statements: string[],
 	digest: WriteDigest,
 };
 
 /**
- *  Opaque outside `writes.rs`. It names the exact statements a guarded action sends and the connection, database,
+ *  Opaque: only `writes.rs` makes one, and everything else compares two for equality. It names the exact statements a guarded action sends and the connection, database,
  *  schema, and mode they run on. The engine makes one when it refuses a write on Production and accepts it back
  *  only while all of that is unchanged.
  */

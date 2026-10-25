@@ -109,7 +109,7 @@ fn writes(tokens: &[Token<'_>]) -> bool {
     };
     match first.to_ascii_uppercase().as_str() {
         "INSERT" | "UPDATE" | "DELETE" | "MERGE" | "TRUNCATE" | "CREATE" | "ALTER" | "DROP"
-        | "COMMENT" | "GRANT" | "REVOKE" | "REINDEX" | "RENAME" | "IMPORT" | "SECURITY" | "CALL" | "DO" | "REFRESH"
+        | "COMMENT" | "GRANT" | "REVOKE" | "REINDEX" | "RENAME" | "IMPORT" | "SECURITY" | "CALL" | "DO" | "EXECUTE" | "REFRESH"
         | "VACUUM" | "CLUSTER" => true,
         "WITH" => {
             let mut i = 1;
@@ -324,6 +324,7 @@ mod tests {
             "explain (analyze 1) delete from t",
             "call purge_orders()",
             "do $$ begin delete from t; end $$",
+            "execute purge_orders_plan(7)",
             "refresh materialized view v",
             "vacuum full t",
             "cluster t using t_pkey",

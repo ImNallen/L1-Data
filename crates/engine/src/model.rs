@@ -1785,7 +1785,7 @@ pub enum RunError {
     ConfirmWrites { confirmation: WriteConfirmation },
 }
 
-/// Opaque outside `writes.rs`. It names the exact statements a guarded action sends and the connection, database,
+/// Opaque: only `writes.rs` makes one, and everything else compares two for equality. It names the exact statements a guarded action sends and the connection, database,
 /// schema, and mode they run on. The engine makes one when it refuses a write on Production and accepts it back
 /// only while all of that is unchanged.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Type)]
@@ -1798,8 +1798,9 @@ pub struct WriteConfirmation {
     /// The connection's name.
     pub connection: String,
     pub database: String,
+    pub unit: ExecutionUnitKind,
     pub writes: u32,
-    /// The first three statements, or SQL Server batches, that write, trimmed.
+    /// The first three statements, or SQL Server batches, that write, trimmed and cut at 2,000 characters.
     pub statements: Vec<String>,
     pub digest: WriteDigest,
 }

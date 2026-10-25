@@ -2236,3 +2236,32 @@ async fn staged_edits_on_production_apply_only_with_the_digest_of_the_same_edits
     set_environment(&h, None).await;
     h.run_ok(tab, &format!("drop table public.{table}")).await;
 }
+
+#[tokio::test]
+async fn a_session_opened_on_production_still_asks_after_the_connection_moves_elsewhere() {
+    let mut h = Harness::start().await;
+    let oracle = h.oracle().await;
+    let table = unique("t_guard");
+    oracle.batch_execute(&format!("create table public.{table} (n int primary key)")).await.unwrap();
+    set_environment(&h, Some(Environment::Production)).await;
+    let tab = h.sql_tab(TxnMode::AutoCommit).await;
+    h.run_ok(tab, "select 1").await;
+    h.engine.refresh_catalog(h.db()).await.unwrap();
+
+    let page = RunRequest::TablePage { schema: "public".into(), table: table.clone(), page: 0, query: TableQuery::default() };
+    let accepted = h.engine.console_run(tab, page, None).await.expect("a table page reads, so it never asks");
+    h.wait_finished(tab, accepted.run_id).await;
+
+    let moved = ConnectionDraft {
+        id: Some(h.conn),
+        host: "127.0.0.1".into(),
+        password: PasswordInput::Keep,
+        environment: Some(Environment::Local),
+        ..draft_from_url(&url(), "dev").unwrap()
+    };
+    h.engine.save_connection(moved).await.unwrap();
+    let asked = asked_to_run(&h, tab, script(&format!("insert into public.{table} values (1)")), None).await;
+    assert_eq!(asked.writes, 1);
+    assert_eq!(count(&oracle, &table).await, 0, "the live session still points where it was opened as Production");
+    oracle.batch_execute(&format!("drop table public.{table}")).await.unwrap();
+}

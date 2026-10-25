@@ -850,7 +850,15 @@ describe("a run the engine asks about", () => {
   const SCRIPT = "update orders set n = 1;\nselect 1;\ndelete from orders;";
   const asked = (digest: string, patch: Partial<WriteConfirmation> = {}): RunError => ({
     kind: "ConfirmWrites",
-    confirmation: { connection: "prod-postgres", database: "shop", writes: 2, statements: ["update orders set n = 1", "delete from orders"], digest, ...patch },
+    confirmation: {
+      connection: "prod-postgres",
+      database: "shop",
+      unit: "Statement",
+      writes: 2,
+      statements: ["update orders set n = 1", "delete from orders"],
+      digest,
+      ...patch,
+    },
   });
 
   function connection(patch: Partial<ConnectionConfig> = {}) {
@@ -919,7 +927,7 @@ describe("a run the engine asks about", () => {
   it("names a SQL Server batch", async () => {
     connection({ name: "prod-mssql", databaseKind: "SqlServer" });
     openSqlTab({ db: { connectionId: "prod", database: "master" }, text: "EXEC dbo.purge" });
-    engine(asked("d1", { connection: "prod-mssql", database: "master", writes: 1, statements: ["EXEC dbo.purge"] }));
+    engine(asked("d1", { connection: "prod-mssql", database: "master", unit: "Batch", writes: 1, statements: ["EXEC dbo.purge"] }));
     runActive({ kind: "all" });
     await vi.waitFor(() => expect(question()?.body).toBe("This run sends 1 batch that writes to prod-mssql / master."));
   });
@@ -964,7 +972,7 @@ describe("staged edits the engine asks about", () => {
   const key = [{ column: "id", value: "1" }];
   const asked: ApplyError = {
     kind: "ConfirmWrites",
-    confirmation: { connection: "prod-postgres", database: "shop", writes: 2, statements: [], digest: "d1" },
+    confirmation: { connection: "prod-postgres", database: "shop", unit: "Statement", writes: 2, statements: [], digest: "d1" },
   };
   const question = () => {
     const overlay = useWorkspace.getState().overlay;
