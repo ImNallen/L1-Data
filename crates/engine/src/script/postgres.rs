@@ -408,18 +408,18 @@ fn attached_indexes(list: &[AttachedIndex], schema: &str, relation: &str, out: &
 
 fn restore_attached_name(schema: &str, table: &str, index: &str, parent: &str) -> String {
     let (schema, table, index, parent) = (quote_literal(schema), quote_literal(table), quote_literal(index), quote_literal(parent));
-    format!(
-        "DO $l1$
-DECLARE
+    let body = format!(
+        "DECLARE
     attached name := (SELECT c.relname FROM pg_catalog.pg_inherits h JOIN pg_catalog.pg_index i ON i.indexrelid = h.inhrelid JOIN pg_catalog.pg_class c ON c.oid = h.inhrelid
                       WHERE h.inhparent = {parent}::regclass AND i.indrelid = {table}::regclass);
 BEGIN
     IF attached <> {index} THEN
         EXECUTE format('ALTER INDEX %I.%I RENAME TO %I', {schema}, attached, {index});
     END IF;
-END
-$l1$"
-    )
+END"
+    );
+    let tag = std::iter::once("$l1$".to_owned()).chain((1..).map(|n| format!("$l1_{n}$"))).find(|tag| !body.contains(tag.as_str())).unwrap_or_default();
+    format!("DO {tag}\n{body}\n{tag}")
 }
 
 fn generation(kind: Generated, expr: &str) -> String {
@@ -943,6 +943,14 @@ COMMENT ON COLUMN public.t.status IS 'lifecycle';
             table(&leaf).text,
             "CREATE TABLE app.ri_1 PARTITION OF app.ri\n    FOR VALUES IN (1);\n\nDO $l1$\nDECLARE\n    attached name := (SELECT c.relname FROM pg_catalog.pg_inherits h JOIN pg_catalog.pg_index i ON i.indexrelid = h.inhrelid JOIN pg_catalog.pg_class c ON c.oid = h.inhrelid\n                      WHERE h.inhparent = 'app.ri_id_k'::regclass AND i.indrelid = 'app.ri_1'::regclass);\nBEGIN\n    IF attached <> 'ri_1_custom' THEN\n        EXECUTE format('ALTER INDEX %I.%I RENAME TO %I', 'app', attached, 'ri_1_custom');\n    END IF;\nEND\n$l1$;\n\nALTER TABLE app.ri_1 CLUSTER ON ri_1_custom;\n\nALTER TABLE app.ri_1 REPLICA IDENTITY USING INDEX ri_1_custom;\n\nCOMMENT ON INDEX app.ri_1_custom IS 'leaf index';\n\nALTER TABLE app.ri_1 DISABLE TRIGGER off;\n\nALTER TABLE app.ri_1 ENABLE TRIGGER \"on\";\n\nCOMMENT ON TRIGGER \"on\" ON app.ri_1 IS 'leaf note';\n"
         );
+    }
+
+    #[test]
+    fn an_attached_index_restore_quotes_its_block_with_a_tag_no_name_contains() {
+        let block = restore_attached_name("app", "app.t", "x$l1$y$l1_1$", "app.p");
+        assert!(block.starts_with("DO $l1_2$\n") && block.ends_with("\n$l1_2$"), "{block}");
+        assert_eq!(block.matches("$l1_2$").count(), 2, "{block}");
+        assert!(block.contains("IF attached <> 'x$l1$y$l1_1$' THEN"), "{block}");
     }
 
     #[test]
