@@ -21,15 +21,14 @@ export const commands = {
 	exactRowCount: (tabId: TabId, db: DatabaseRef, schema: string, table: string, query: TableQuery) => typedError<number, CountError>(__TAURI_INVOKE("exact_row_count", { tabId, db, schema, table, query })),
 	consoleConfigure: (tabId: TabId, config: ConsoleConfig) => typedError<ConsoleState, ConfigureError>(__TAURI_INVOKE("console_configure", { tabId, config })),
 	scriptOutline: (text: string, cursor: DocOffset, databaseKind: DatabaseKind) => __TAURI_INVOKE<ScriptOutline>("script_outline", { text, cursor, databaseKind }),
-	scriptWrites: (text: string, target: RunTarget, databaseKind: DatabaseKind) => __TAURI_INVOKE<DocRange[]>("script_writes", { text, target, databaseKind }),
 	editorFormat: (text: string, target: RunTarget, databaseKind: DatabaseKind) => typedError<FormatEdit, FormatError>(__TAURI_INVOKE("editor_format", { text, target, databaseKind })),
 	tableScript: (db: DatabaseRef, schema: string, table: string) => typedError<TableScript, string>(__TAURI_INVOKE("table_script", { db, schema, table })),
 	tableOrder: (db: DatabaseRef, schema: string, table: string, orderBy: string, edit: TableOrderEdit) => typedError<TableOrderView, string>(__TAURI_INVOKE("table_order", { db, schema, table, orderBy, edit })),
-	consoleRun: (tabId: TabId, request: RunRequest) => typedError<RunAccepted, RunError>(__TAURI_INVOKE("console_run", { tabId, request })),
+	consoleRun: (tabId: TabId, request: RunRequest, confirmed: string | null) => typedError<RunAccepted, RunError>(__TAURI_INVOKE("console_run", { tabId, request, confirmed })),
 	consoleCancel: (tabId: TabId) => __TAURI_INVOKE<void>("console_cancel", { tabId }),
 	consoleCommit: (tabId: TabId) => typedError<null, TxnError>(__TAURI_INVOKE("console_commit", { tabId })),
 	consoleRollback: (tabId: TabId) => typedError<null, TxnError>(__TAURI_INVOKE("console_rollback", { tabId })),
-	tableApply: (tabId: TabId, changes: TableChanges) => typedError<ApplySummary, ApplyError>(__TAURI_INVOKE("table_apply", { tabId, changes })),
+	tableApply: (tabId: TabId, changes: TableChanges, confirmed: string | null) => typedError<ApplySummary, ApplyError>(__TAURI_INVOKE("table_apply", { tabId, changes, confirmed })),
 	consoleClose: (tabId: TabId, force: boolean) => typedError<null, DisconnectError>(__TAURI_INVOKE("console_close", { tabId, force })),
 	resultPage: (resultRef: ResultRef, start: number, len: number) => typedError<RowPage, ResultError>(__TAURI_INVOKE("result_page", { resultRef, start, len })),
 	resultCell: (resultRef: ResultRef, row: number, col: number) => typedError<string | null, ResultError>(__TAURI_INVOKE("result_cell", { resultRef, row, col })),
@@ -118,7 +117,7 @@ export type ApplyError = { kind: "Busy" } | { kind: "NotConfigured" } | { kind: 
 /**  An update or delete matched `rows` rows instead of one, so the row changed underneath. */
 { kind: "RowMismatch"; change: ChangeRef; rows: number } | 
 /**  Opening or committing the transaction failed. */
-{ kind: "Transaction"; error: QueryError } | { kind: "OutcomeUnknown"; error: QueryError };
+{ kind: "Transaction"; error: QueryError } | { kind: "OutcomeUnknown"; error: QueryError } | { kind: "ConfirmWrites"; confirmation: WriteConfirmation };
 
 export type ApplySummary = {
 	/**  False when the changes wait in the tab's open transaction (manual mode) for Commit. */
@@ -525,7 +524,7 @@ export type EntrySnapshot = {
 	entry: Entry,
 };
 
-/**  What the user says the connection points at. The UI marks `Production` and asks before a run on it writes. */
+/**  What the user says the connection points at. The UI marks `Production`, and the engine asks before a write runs on it. */
 export type Environment = "Local" | "Staging" | "Production";
 
 export type ExecutionUnitKind = "Statement" | "Batch";
@@ -1061,7 +1060,7 @@ export type RunError = { kind: "Busy" } | { kind: "NoStatement" } | { kind: "Not
 /**  `what` names the construct, e.g. `"COPY FROM STDIN"`. */
 { kind: "Unsupported"; what: string } | { kind: "Connect"; error: ConnectError } | 
 /**  WHERE or ORDER BY isn't a single expression, e.g. it smuggles in a second statement. */
-{ kind: "BadFilter" };
+{ kind: "BadFilter" } | { kind: "ConfirmWrites"; confirmation: WriteConfirmation };
 
 /**  Engine-wide monotonic. */
 export type RunId = number;
@@ -1495,6 +1494,24 @@ export type Workspace = {
 	active: TabId | null,
 	layout: Layout,
 };
+
+/**  The engine ran nothing. Ask the user, then send the same request again with `digest`. */
+export type WriteConfirmation = {
+	/**  The connection's name. */
+	connection: string,
+	database: string,
+	writes: number,
+	/**  The first three statements, or SQL Server batches, that write, trimmed. */
+	statements: string[],
+	digest: WriteDigest,
+};
+
+/**
+ *  Opaque outside `writes.rs`. It names the exact statements a guarded action sends and the connection, database,
+ *  schema, and mode they run on. The engine makes one when it refuses a write on Production and accepts it back
+ *  only while all of that is unchanged.
+ */
+export type WriteDigest = string;
 
 /* Tauri Specta runtime */
 async function typedError<T, E>(result: Promise<T>): Promise<{ status: "ok"; data: T } | { status: "error"; error: E }> {

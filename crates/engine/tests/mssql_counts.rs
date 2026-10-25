@@ -63,7 +63,7 @@ impl Harness {
     }
 
     async fn run(&self, tab: TabId, request: RunRequest) -> ConsoleState {
-        let accepted = self.engine.console_run(tab, request).await.unwrap();
+        let accepted = self.engine.console_run(tab, request, None).await.unwrap();
         tokio::time::timeout(Duration::from_secs(10), async {
             loop {
                 let state = self.state(tab);
@@ -237,7 +237,7 @@ async fn busy_count_refuses_competitors_and_cancel_preserves_original_results() 
         let before = h.state(h.tab);
         assert_eq!(before.txn, TxnState::Open);
         assert!(matches!(h.count(TableQuery::default()).await, Err(CountError::Failed { message }) if message.contains("busy")));
-        assert!(matches!(h.engine.console_run(h.tab, RunRequest::Script { text: "SELECT 99".into(), target: RunTarget::All }).await, Err(RunError::Busy)));
+        assert!(matches!(h.engine.console_run(h.tab, RunRequest::Script { text: "SELECT 99".into(), target: RunTarget::All }, None).await, Err(RunError::Busy)));
         assert!(matches!(h.engine.console_commit(h.tab).await, Err(TxnError::Busy)));
         assert!(matches!(h.engine.console_rollback(h.tab).await, Err(TxnError::Busy)));
         assert!(matches!(h.engine.console_configure(h.tab, h.config("reporting")).await, Err(ConfigureError::Busy)));

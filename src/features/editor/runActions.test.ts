@@ -6,12 +6,12 @@ import type {
   ConnectionConfig,
   ConsoleState,
   DatabaseKind,
-  DocRange,
-  Environment,
+  RunError,
   Settings,
   TableQuery,
   TableScript,
   TabSnapshot,
+  WriteConfirmation,
 } from "../../ipc/bindings";
 import { connectionConfig } from "../../testing/connections";
 import { shopCatalog } from "../../testing/shopCatalog";
@@ -206,7 +206,11 @@ it("Last counts on its own tab and loads the exact last table page", async () =>
   await pending;
   expect(requests[1]).toEqual({
     cmd: "console_run",
-    args: { tabId: id, request: { kind: "tablePage", schema: "public", table: "orders", page: 2, query: { orderBy: "", filters: [], where: "" } } },
+    args: {
+      tabId: id,
+      request: { kind: "tablePage", schema: "public", table: "orders", page: 2, query: { orderBy: "", filters: [], where: "" } },
+      confirmed: null,
+    },
   });
   expect(useWorkspace.getState().tabs[id]?.table).toMatchObject({ page: 2, exactRowCount: 1251 });
 });
@@ -399,6 +403,7 @@ it.each(["update", "delete"])("submits the original named %s key after PostgreSQ
           updates: change === "update" ? [{ key: [{ column: "id", value: "1" }], set: [{ column: "status", value: "edited" }] }] : [],
           deletes: change === "delete" ? [[{ column: "id", value: "1" }]] : [],
         },
+        confirmed: null,
       },
     },
   ]);
@@ -509,7 +514,7 @@ it.each(["SELECT * FROM public.orders", "SELECT * FROM public.orders;", "\n SELE
     ws.restore({ tabs: [saved], active: id, layout: ws.layout }, [connectionConfig("c1", "PostgreSQL")], ws.settings);
     await loadTableOnce(id);
     await vi.waitFor(() => expect(runs).toHaveLength(1));
-    expect(runs).toEqual([{ tabId: id, request: { kind: "tablePage", schema: "public", table: "orders", page: 2, query } }]);
+    expect(runs).toEqual([{ tabId: id, request: { kind: "tablePage", schema: "public", table: "orders", page: 2, query }, confirmed: null }]);
     const tab = useWorkspace.getState().tabs[id];
     expect(tab && isBrowsing(tab)).toBe(true);
     expect(workspaceSnapshot(useWorkspace.getState(), { textOf, isDirty: () => false }).tabs).toEqual([saved]);
@@ -841,29 +846,28 @@ describe("pages during an exact count", () => {
   });
 });
 
-describe("a run on a Production connection", () => {
+describe("a run the engine asks about", () => {
   const SCRIPT = "update orders set n = 1;\nselect 1;\ndelete from orders;";
-  const BOTH: DocRange[] = [
-    { from: 0, to: 23 },
-    { from: 35, to: 53 },
-  ];
+  const asked = (digest: string, patch: Partial<WriteConfirmation> = {}): RunError => ({
+    kind: "ConfirmWrites",
+    confirmation: { connection: "prod-postgres", database: "shop", writes: 2, statements: ["update orders set n = 1", "delete from orders"], digest, ...patch },
+  });
 
-  function connection(environment: Environment | null, patch: Partial<ConnectionConfig> = {}) {
-    useWorkspace.setState({ configs: { prod: { ...connectionConfig("prod", "prod-postgres"), environment, ...patch } } });
+  function connection(patch: Partial<ConnectionConfig> = {}) {
+    useWorkspace.setState({ configs: { prod: { ...connectionConfig("prod", "prod-postgres"), environment: "Production", ...patch } } });
   }
 
-  function record(writes: DocRange[]) {
-    const calls: { cmd: string; args: unknown }[] = [];
+  /** Each `console_run` takes the next reply. An error reply rejects as the engine's error. */
+  function engine(...replies: (RunError | null)[]) {
+    const runs: { request?: unknown; confirmed?: unknown }[] = [];
     mockIPC((cmd, args) => {
-      calls.push({ cmd, args });
-      if (cmd === "script_writes") return writes;
-      if (cmd === "script_outline") return { statements: BOTH, atCursor: 0, unitKind: "Statement" };
-      if (cmd === "console_run") return { runId: 1, statements: [] };
-      if (cmd === "table_script") return ordersScript;
-      return null;
+      if (cmd === "script_outline") return { statements: [{ from: 0, to: 23 }], atCursor: 0, unitKind: "Statement" };
+      if (cmd !== "console_run") return null;
+      runs.push(args as { confirmed?: unknown });
+      const reply = replies.shift();
+      return reply ? Promise.reject(reply) : { runId: 1, statements: [] };
     });
-    const sent = (cmd: string) => calls.filter((c) => c.cmd === cmd).map((c) => c.args);
-    return { calls, sent };
+    return runs;
   }
 
   const question = () => {
@@ -871,10 +875,10 @@ describe("a run on a Production connection", () => {
     return overlay.kind === "ask" ? overlay : null;
   };
 
-  it("asks first, then runs the text and target it checked", async () => {
-    connection("Production");
+  it("shows the engine's question, then sends the same request with its digest", async () => {
+    connection();
     const id = openSqlTab({ db: { connectionId: "prod", database: "shop" }, text: SCRIPT });
-    const { sent } = record(BOTH);
+    const runs = engine(asked("d1"));
     runActive({ kind: "all" });
     await vi.waitFor(() => expect(question()).not.toBeNull());
     expect(question()).toMatchObject({
@@ -884,130 +888,137 @@ describe("a run on a Production connection", () => {
     });
     expect(question()?.choices).toEqual([{ id: "btn", label: "Run writes", variant: "danger" }]);
     expect(question()?.statements).toEqual(["update orders set n = 1", "delete from orders"]);
-    expect(sent("console_run")).toEqual([]);
+    const request = { kind: "script", text: SCRIPT, target: { kind: "all" } };
+    expect(runs).toEqual([{ tabId: id, request, confirmed: null }]);
     useWorkspace.getState().answer("btn");
-    await vi.waitFor(() => expect(sent("console_run")).toHaveLength(1));
-    expect(sent("script_writes")).toEqual([{ text: SCRIPT, target: { kind: "all" }, databaseKind: "Postgres" }]);
-    expect(sent("console_run")).toEqual([{ tabId: id, request: { kind: "script", text: SCRIPT, target: { kind: "all" } } }]);
+    await vi.waitFor(() => expect(runs).toHaveLength(2));
+    expect(runs[1]).toEqual({ tabId: id, request, confirmed: "d1" });
   });
 
-  it("runs nothing when ⌘↵'s question is cancelled", async () => {
-    connection("Production");
+  it("sends nothing more when ⌘↵'s question is cancelled", async () => {
+    connection();
     openSqlTab({ db: { connectionId: "prod", database: "shop" }, text: SCRIPT });
-    const { sent } = record([BOTH[0]!]);
+    const runs = engine(asked("d1", { writes: 1, statements: ["update orders set n = 1"] }));
     void runOrChoose();
     await vi.waitFor(() => expect(question()?.title).toBe("Run 1 write on Production?"));
-    expect(sent("script_writes")).toEqual([{ text: SCRIPT, target: { kind: "cursor", offset: 0 }, databaseKind: "Postgres" }]);
+    expect(runs).toMatchObject([{ request: { target: { kind: "cursor", offset: 0 } }, confirmed: null }]);
     useWorkspace.getState().close();
     await new Promise((resolve) => setTimeout(resolve, 0));
-    expect(sent("console_run")).toEqual([]);
+    expect(runs).toHaveLength(1);
     expect(useWorkspace.getState().overlay.kind).toBe("none");
   });
 
+  it("says how many are shown when the engine sends the first three", async () => {
+    connection();
+    openSqlTab({ db: { connectionId: "prod", database: "shop" }, text: SCRIPT });
+    engine(asked("d1", { writes: 5, statements: ["delete from a", "delete from b", "delete from c"] }));
+    runActive({ kind: "all" });
+    await vi.waitFor(() => expect(question()?.body).toBe("This run sends 5 statements that write to prod-postgres / shop. The first 3 are shown."));
+  });
+
   it("names a SQL Server batch", async () => {
-    connection("Production", { name: "prod-mssql", databaseKind: "SqlServer" });
+    connection({ name: "prod-mssql", databaseKind: "SqlServer" });
     openSqlTab({ db: { connectionId: "prod", database: "master" }, text: "EXEC dbo.purge" });
-    record([{ from: 0, to: 14 }]);
+    engine(asked("d1", { connection: "prod-mssql", database: "master", writes: 1, statements: ["EXEC dbo.purge"] }));
     runActive({ kind: "all" });
     await vi.waitFor(() => expect(question()?.body).toBe("This run sends 1 batch that writes to prod-mssql / master."));
   });
 
-  it("runs without asking when the run writes nothing", async () => {
-    connection("Production");
-    openSqlTab({ db: { connectionId: "prod", database: "shop" }, text: "select 1" });
-    const { sent } = record([]);
-    runActive({ kind: "all" });
-    await vi.waitFor(() => expect(sent("console_run")).toHaveLength(1));
-    expect(sent("script_writes")).toHaveLength(1);
-    expect(question()).toBeNull();
-  });
-
-  it.each([null, "Local", "Staging"] satisfies (Environment | null)[])("runs a write on a %s connection without checking", async (environment) => {
-    connection(environment);
+  it("asks again when the engine refuses the digest it gave", async () => {
+    connection();
     openSqlTab({ db: { connectionId: "prod", database: "shop" }, text: SCRIPT });
-    const { sent } = record(BOTH);
+    const runs = engine(asked("d1"), asked("d2", { connection: "prod-renamed" }));
     runActive({ kind: "all" });
-    await vi.waitFor(() => expect(sent("console_run")).toHaveLength(1));
-    expect(sent("script_writes")).toEqual([]);
-    expect(question()).toBeNull();
+    await vi.waitFor(() => expect(question()).not.toBeNull());
+    useWorkspace.getState().answer("btn");
+    await vi.waitFor(() => expect(question()?.body).toBe("This run sends 2 statements that write to prod-renamed / shop."));
+    useWorkspace.getState().answer("btn");
+    await vi.waitFor(() => expect(runs).toHaveLength(3));
+    expect(runs.map((r) => r.confirmed)).toEqual([null, "d1", "d2"]);
   });
 
-  it("loads a table page without checking", async () => {
-    connection("Production");
-    const { sent } = record(BOTH);
-    await openTableTab({ db: { connectionId: "prod", database: "shop" }, schema: "public", relation: "orders" });
-    setTablePage(useWorkspace.getState().active!, 1);
-    await vi.waitFor(() => expect(sent("console_run")).toHaveLength(1));
-    expect(sent("script_writes")).toEqual([]);
+  it("runs once without asking when the engine accepts", async () => {
+    connection();
+    openSqlTab({ db: { connectionId: "prod", database: "shop" }, text: "select 1" });
+    const runs = engine(null);
+    runActive({ kind: "all" });
+    await vi.waitFor(() => expect(runs).toHaveLength(1));
+    expect(runs[0]?.confirmed).toBeNull();
+    expect(question()).toBeNull();
   });
 
   it("drops the run when the tab's target changes while it asks", async () => {
-    connection("Production");
+    connection();
     const id = openSqlTab({ db: { connectionId: "prod", database: "shop" }, text: SCRIPT });
-    const { sent } = record(BOTH);
+    const runs = engine(asked("d1"));
     runActive({ kind: "all" });
     await vi.waitFor(() => expect(question()).not.toBeNull());
     useWorkspace.getState().patchConsole(id, { db: { connectionId: "prod", database: "reporting" } });
     useWorkspace.getState().answer("btn");
     await new Promise((resolve) => setTimeout(resolve, 0));
-    expect(sent("console_run")).toEqual([]);
+    expect(runs).toHaveLength(1);
   });
 });
 
-describe("staged edits on a Production connection", () => {
+describe("staged edits the engine asks about", () => {
   const key = [{ column: "id", value: "1" }];
+  const asked: ApplyError = {
+    kind: "ConfirmWrites",
+    confirmation: { connection: "prod-postgres", database: "shop", writes: 2, statements: [], digest: "d1" },
+  };
   const question = () => {
     const overlay = useWorkspace.getState().overlay;
     return overlay.kind === "ask" ? overlay : null;
   };
 
-  async function staged(environment: Environment | null) {
+  async function staged(...replies: (ApplyError | null)[]) {
     const id = await openWithConsole();
-    useWorkspace.setState((s) => ({ configs: { ...s.configs, c1: { ...connectionConfig("c1", "prod-postgres"), environment } } }));
     useTableEdits.getState().edit(id, (edits) => markDeleted(setCell(edits, [{ column: "id", value: "2" }], "status", "x", "y"), [key], true));
-    const sent: string[] = [];
-    mockIPC((cmd) => {
-      sent.push(cmd);
-      if (cmd === "table_apply") return { committed: true };
-      return null;
+    const applies: { confirmed?: unknown }[] = [];
+    mockIPC((cmd, args) => {
+      if (cmd !== "table_apply") return null;
+      applies.push(args as { confirmed?: unknown });
+      const reply = replies.shift();
+      return reply ? Promise.reject(reply) : { committed: true };
     });
-    return { id, sent };
+    return { id, applies };
   }
 
-  it("asks before sending, naming each kind of change and the table", async () => {
-    const { id, sent } = await staged("Production");
+  it("shows the question, naming each kind of change and the table, then sends the digest", async () => {
+    const { id, applies } = await staged(asked);
     const done = submitEdits(id);
     await vi.waitFor(() => expect(question()).not.toBeNull());
     expect(question()).toMatchObject({
       title: "Apply 2 changes on Production?",
       body: "This sends 1 update and 1 delete to public.orders on prod-postgres / shop.",
     });
-    expect(sent).not.toContain("table_apply");
+    expect(applies.map((a) => a.confirmed)).toEqual([null]);
     useWorkspace.getState().answer("btn");
     await done;
-    expect(sent).toContain("table_apply");
+    expect(applies.map((a) => a.confirmed)).toEqual([null, "d1"]);
+    expect(useTableEdits.getState().byTab[id]).toBeUndefined();
   });
 
   it("keeps the edits when the question is cancelled", async () => {
-    const { id, sent } = await staged("Production");
+    const { id, applies } = await staged(asked);
     const done = submitEdits(id);
     await vi.waitFor(() => expect(question()).not.toBeNull());
     useWorkspace.getState().close();
     await done;
-    expect(sent).not.toContain("table_apply");
+    expect(applies).toHaveLength(1);
     expect(pendingCount(useTableEdits.getState().byTab[id]!)).toBe(2);
     expect(useTableEdits.getState().submitting[id]).toBeUndefined();
   });
 
-  it("sends without asking elsewhere", async () => {
-    const { id, sent } = await staged("Staging");
+  it("sends once without asking when the engine accepts", async () => {
+    const { id, applies } = await staged(null);
     await submitEdits(id);
     expect(question()).toBeNull();
-    expect(sent).toContain("table_apply");
+    expect(applies.map((a) => a.confirmed)).toEqual([null]);
   });
 
   it("asks before Revert drops staged edits", async () => {
-    const { id } = await staged(null);
+    const { id } = await staged();
     const done = revertEdits(id);
     await vi.waitFor(() => expect(question()?.title).toBe("Revert 2 changes?"));
     useWorkspace.getState().close();

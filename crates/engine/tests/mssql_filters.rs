@@ -54,7 +54,7 @@ impl Harness {
     }
 
     async fn run(&mut self, request: RunRequest) -> Vec<Vec<Option<String>>> {
-        let accepted = self.engine.console_run(self.tab, request).await.unwrap();
+        let accepted = self.engine.console_run(self.tab, request, None).await.unwrap();
         let state = tokio::time::timeout(Duration::from_secs(30), async {
             loop {
                 if let AppEvent::ConsoleChanged(state) = self.events.recv().await.unwrap() {
@@ -158,7 +158,7 @@ async fn displayed_text_lobs_and_xml_support_page_and_count_filters() {
                 let query = TableQuery { filters: vec![ColumnFilter { column: column.into(), op, value: value.into() }], ..Default::default() };
                 assert!(matches!(h.engine.exact_row_count(h.tab, h.db.clone(), "dbo".into(), table.clone(), query.clone()).await,
                     Err(CountError::Failed { message }) if message.contains("4000")));
-                assert!(matches!(h.engine.console_run(h.tab, RunRequest::TablePage { schema: "dbo".into(), table: table.clone(), page: 0, query }).await,
+                assert!(matches!(h.engine.console_run(h.tab, RunRequest::TablePage { schema: "dbo".into(), table: table.clone(), page: 0, query }, None).await,
                     Err(RunError::BadFilter)));
             }
         }
@@ -209,7 +209,7 @@ async fn approximate_numbers_keep_typed_equality_and_refuse_inexact_text_search(
                 let query = TableQuery { filters: vec![ColumnFilter { column: column.into(), op, value: selected.into() }], ..Default::default() };
                 let count = h.engine.exact_row_count(h.tab, h.db.clone(), "dbo".into(), table.clone(), query.clone()).await;
                 assert!(matches!(&count, Err(CountError::Failed { message }) if message.contains("canonical") && message.contains("comparison")), "{column} {op:?}: {count:?}");
-                assert!(matches!(h.engine.console_run(h.tab, RunRequest::TablePage { schema: "dbo".into(), table: table.clone(), page: 0, query }).await,
+                assert!(matches!(h.engine.console_run(h.tab, RunRequest::TablePage { schema: "dbo".into(), table: table.clone(), page: 0, query }, None).await,
                     Err(RunError::BadFilter)));
             }
         }

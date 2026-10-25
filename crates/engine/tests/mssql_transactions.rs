@@ -70,7 +70,7 @@ impl Harness {
     }
 
     async fn run(&self, tab: TabId, sql: &str) -> ConsoleState {
-        let accepted = self.engine.console_run(tab, RunRequest::Script { text: sql.into(), target: RunTarget::All }).await.unwrap();
+        let accepted = self.engine.console_run(tab, RunRequest::Script { text: sql.into(), target: RunTarget::All }, None).await.unwrap();
         self.finish(tab, accepted.run_id).await
     }
 
@@ -174,7 +174,7 @@ async fn manual_configuration_and_staged_edits_refuse_before_trigger_execution()
         let mut delete = changes(&h.table);
         delete.deletes.push(vec![cell("id", "1")]);
         for edit in [changes(&h.table), changes("not_a_table"), edit, delete] {
-            let refused = h.engine.table_apply(h.tab, edit).await;
+            let refused = h.engine.table_apply(h.tab, edit, None).await;
             assert!(matches!(refused, Err(ApplyError::Unsupported { ref what }) if what.contains("SQL editor") && what.contains("Auto-commit")), "{refused:?}");
             assert_eq!(serde_json::to_value(h.state(h.tab)).unwrap(), before);
         }
@@ -194,7 +194,7 @@ async fn staged_refusal_preserves_xact_abort_and_prior_native_transaction_work()
         let mut edit = changes(&h.table);
         edit.inserts.push(vec![cell("id", "1"), cell("n", "99")]);
         for edit in [edit, changes(&h.table)] {
-            assert!(matches!(h.engine.table_apply(h.tab, edit).await, Err(ApplyError::Unsupported { .. })));
+            assert!(matches!(h.engine.table_apply(h.tab, edit, None).await, Err(ApplyError::Unsupported { .. })));
             assert_eq!(serde_json::to_value(h.state(h.tab)).unwrap(), before);
         }
         let refused = h.engine.console_configure(h.tab, ConsoleConfig {
@@ -245,7 +245,7 @@ async fn native_errors_and_cancellation_preserve_observable_transaction_state() 
         assert_eq!(h.scalar(h.observer, &format!("SELECT n FROM dbo.[{}]", h.table)).await, "1");
         h.ok(h.tab, &format!("BEGIN TRANSACTION; UPDATE dbo.[{}] SET n=3", h.table)).await;
         let SessionState::Open { backend_pid } = h.state(h.tab).session else { panic!("Expected native session") };
-        let accepted = h.engine.console_run(h.tab, RunRequest::Script { text: "WAITFOR DELAY '00:00:30'".into(), target: RunTarget::All }).await.unwrap();
+        let accepted = h.engine.console_run(h.tab, RunRequest::Script { text: "WAITFOR DELAY '00:00:30'".into(), target: RunTarget::All }, None).await.unwrap();
         tokio::time::timeout(Duration::from_secs(5), async {
             loop {
                 if h.scalar(h.observer, &format!("SELECT COUNT_BIG(*) FROM sys.dm_exec_requests WHERE session_id={backend_pid} AND command='WAITFOR'")).await == "1" { break; }
@@ -296,7 +296,7 @@ async fn cancellation_does_not_claim_committed_work_was_rolled_back() {
             (format!("UPDATE [{}] SET n=2\nGO\nWAITFOR DELAY '00:00:30'", h.table), "2"),
             (format!("BEGIN TRANSACTION; UPDATE [{}] SET n=3; COMMIT TRANSACTION; WAITFOR DELAY '00:00:30'", h.table), "3"),
         ] {
-            let accepted = h.engine.console_run(h.tab, RunRequest::Script { text: sql, target: RunTarget::All }).await.unwrap();
+            let accepted = h.engine.console_run(h.tab, RunRequest::Script { text: sql, target: RunTarget::All }, None).await.unwrap();
             tokio::time::timeout(Duration::from_secs(3), async {
                 loop {
                     let SessionState::Open { backend_pid } = h.state(h.tab).session else { continue };

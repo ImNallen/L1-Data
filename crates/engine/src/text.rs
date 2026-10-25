@@ -298,9 +298,8 @@ mod tests {
     }
 
     fn writes(text: &str, target: RunTarget, kind: DatabaseKind) -> Vec<&str> {
-        let map = OffsetMap::new(text);
-        let byte = |o: DocOffset| map.from_utf16(o);
-        super::script_writes(text, target, kind).into_iter().map(|r| &text[byte(r.from)..byte(r.to)]).collect()
+        let spans = pick(text, OffsetMap::new(text).target(target), kind).unwrap_or_default();
+        marked_writes(text, &spans, kind).into_iter().filter(|(_, writes)| *writes).map(|(sql, _)| sql).collect()
     }
 
     fn cursor_at(text: &str, needle: &str) -> RunTarget {
@@ -308,7 +307,7 @@ mod tests {
     }
 
     #[test]
-    fn script_writes_lists_only_the_postgres_statements_the_run_executes_that_write() {
+    fn marked_writes_flags_only_the_postgres_statements_the_run_executes_that_write() {
         let pg = DatabaseKind::Postgres;
         assert_eq!(writes("select * from orders", RunTarget::All, pg), Vec::<&str>::new());
         assert_eq!(writes("update orders set n = 1 where id = 7", RunTarget::All, pg), ["update orders set n = 1 where id = 7"]);
@@ -322,7 +321,7 @@ mod tests {
     }
 
     #[test]
-    fn script_writes_lists_only_the_sql_server_batches_the_run_executes_that_write() {
+    fn marked_writes_flags_only_the_sql_server_batches_the_run_executes_that_write() {
         let ms = DatabaseKind::SqlServer;
         assert_eq!(writes("SELECT * FROM dbo.orders", RunTarget::All, ms), Vec::<&str>::new());
         assert_eq!(writes("UPDATE dbo.orders SET n = 1", RunTarget::All, ms), ["UPDATE dbo.orders SET n = 1"]);
@@ -331,12 +330,6 @@ mod tests {
         assert_eq!(writes(script, cursor_at(script, "UPDATE"), ms), ["UPDATE dbo.orders SET n = 1"]);
         assert_eq!(writes(script, cursor_at(script, "SELECT 2"), ms), Vec::<&str>::new());
         assert_eq!(writes("USE shop\nGO\nDELETE FROM dbo.orders", RunTarget::All, ms), Vec::<&str>::new(), "the run refuses USE, so it deletes nothing");
-    }
-
-    #[test]
-    fn script_writes_ranges_are_utf16() {
-        let text = "select '😀';\nupdate t set x = 'é';";
-        assert_eq!(super::script_writes(text, RunTarget::All, DatabaseKind::Postgres), [r(13, 33)]);
     }
 
     #[test]
@@ -467,12 +460,9 @@ pub fn pick(text: &str, target: ByteTarget, kind: DatabaseKind) -> Result<Vec<St
 pub fn classify(text: &str, kind: DatabaseKind) -> StmtKind { match kind { DatabaseKind::Postgres => sql::classify(text), DatabaseKind::SqlServer => sql::tsql::classify(text) } }
 pub fn is_write(text: &str, kind: DatabaseKind) -> bool { match kind { DatabaseKind::Postgres => sql::history_is_write(text), DatabaseKind::SqlServer => sql::tsql::is_write(text) } }
 
-/// The statements, or SQL Server batches, that a `Script` run of `target` executes and that write. A target the run
-/// refuses has none, because that run executes nothing.
-pub fn script_writes(text: &str, target: RunTarget, kind: DatabaseKind) -> Vec<DocRange> {
-    let map = OffsetMap::new(text);
-    let spans = pick(text, map.target(target), kind).unwrap_or_default();
-    spans.iter().filter(|span| is_write(span.text(text), kind)).map(|span| map.range(span)).collect()
+/// Each statement, or SQL Server batch, that `spans` names, and whether it writes.
+pub fn marked_writes<'a>(text: &'a str, spans: &[StmtSpan], kind: DatabaseKind) -> Vec<(&'a str, bool)> {
+    spans.iter().map(|span| span.text(text)).map(|sql| (sql, is_write(sql, kind))).collect()
 }
 
 pub fn table_script(kind: DatabaseKind, schema: &str, table: &str) -> TableScript {

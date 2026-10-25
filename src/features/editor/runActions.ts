@@ -12,6 +12,7 @@ import {
   type TableQuery,
   type TableScript,
   type TxnMode,
+  type WriteConfirmation,
 } from "../../ipc/bindings";
 import { applyErrorText, configureErrorText, runErrorText, txnErrorText } from "../../ipc/errors";
 import { databaseKindFor } from "../../state/databaseKind";
@@ -168,28 +169,19 @@ function deferPageForPendingWork(tabId: TabId, target: PageTarget | undefined): 
   return true;
 }
 
-const SHOWN_WRITES = 3;
-
 /** The answer holds only for the target it named, so a target changed meanwhile drops the run. */
-async function writesConfirmed(tab: Tab, text: string, target: RunTarget): Promise<boolean> {
-  const db = tabTarget(tab);
-  const config = db ? ws().configs[db.connectionId] : undefined;
-  if (!db || config?.environment !== "Production") return true;
-  const unchanged = () => ws().tabs[tab.id]?.console === tab.console;
-  const writeRanges = await commands.scriptWrites(text, target, config.databaseKind);
-  if (!unchanged()) return false;
-  if (writeRanges.length === 0) return true;
-  const n = writeRanges.length;
-  const unit = config.databaseKind === "SqlServer" ? (n === 1 ? "batch" : "batches") : n === 1 ? "statement" : "statements";
-  const shown = writeRanges.slice(0, SHOWN_WRITES);
-  const rest = n > shown.length ? ` The first ${shown.length} are shown.` : "";
+async function writesConfirmed(tab: Tab, asked: WriteConfirmation): Promise<boolean> {
+  const n = asked.writes;
+  const sqlServer = databaseKindFor(tabTarget(tab), ws().configs) === "SqlServer";
+  const unit = sqlServer ? (n === 1 ? "batch" : "batches") : n === 1 ? "statement" : "statements";
+  const rest = n > asked.statements.length ? ` The first ${asked.statements.length} are shown.` : "";
   const ok = await confirm({
     title: `Run ${plural(n, "write")} on Production?`,
-    body: `This run sends ${n} ${unit} that ${n === 1 ? "writes" : "write"} to ${config.name} / ${db.database}.${rest}`,
-    statements: shown.map((r) => text.slice(r.from, r.to).trim()),
+    body: `This run sends ${n} ${unit} that ${n === 1 ? "writes" : "write"} to ${asked.connection} / ${asked.database}.${rest}`,
+    statements: asked.statements,
     confirmLabel: "Run writes",
   });
-  return ok && unchanged();
+  return ok && ws().tabs[tab.id]?.console === tab.console;
 }
 
 async function runTab(tabId: TabId, target?: PageTarget, script?: RunTarget): Promise<void> {
@@ -212,13 +204,15 @@ async function runTab(tabId: TabId, target?: PageTarget, script?: RunTarget): Pr
   } else {
     const state = editorStateOf(tabId);
     text = state.doc.toString();
-    const run = script ?? selectionTarget(state);
-    if (!(await writesConfirmed(tab, text, run))) return;
-    request = { kind: "script", text, target: run };
+    request = { kind: "script", text, target: script ?? selectionTarget(state) };
     showDiagnostics(tabId, []);
   }
 
-  const res = await commands.consoleRun(tabId, request);
+  let res = await commands.consoleRun(tabId, request, null);
+  while (res.status === "error" && res.error.kind === "ConfirmWrites") {
+    if (!(await writesConfirmed(tab, res.error.confirmation))) return;
+    res = await commands.consoleRun(tabId, request, res.error.confirmation.digest);
+  }
   if (res.status === "error") {
     notify(runErrorText(res.error));
     return;
@@ -451,15 +445,13 @@ export async function submitEdits(tabId: TabId): Promise<void> {
   const store = useTableEdits.getState();
   if (!store.beginSubmit(tabId)) return;
   try {
-    if (await editsConfirmed(tab, edits)) await applyEdits(tab, edits);
+    await applyEdits(tab, edits);
   } finally {
     store.endSubmit(tabId);
   }
 }
 
-async function editsConfirmed(tab: TableTab, edits: TableEdits): Promise<boolean> {
-  const config = ws().configs[tab.console.db.connectionId];
-  if (config?.environment !== "Production") return true;
+async function editsConfirmed(tab: TableTab, edits: TableEdits, asked: WriteConfirmation): Promise<boolean> {
   const updates = Object.keys(edits.updates).filter((k) => !(k in edits.deletes)).length;
   const parts = [
     edits.inserts.length > 0 && plural(edits.inserts.length, "insert"),
@@ -468,8 +460,8 @@ async function editsConfirmed(tab: TableTab, edits: TableEdits): Promise<boolean
   ].filter((p): p is string => p !== false);
   const what = parts.length > 1 ? `${parts.slice(0, -1).join(", ")} and ${parts.at(-1)}` : parts[0];
   const ok = await confirm({
-    title: `Apply ${plural(pendingCount(edits), "change")} on Production?`,
-    body: `This sends ${what} to ${tab.table.schema}.${tab.table.table} on ${config.name} / ${tab.console.db.database}.`,
+    title: `Apply ${plural(asked.writes, "change")} on Production?`,
+    body: `This sends ${what} to ${tab.table.schema}.${tab.table.table} on ${asked.connection} / ${asked.database}.`,
     confirmLabel: "Apply changes",
   });
   const now = ws().tabs[tab.id];
@@ -493,7 +485,11 @@ async function applyEdits(tab: TableTab, edits: TableEdits): Promise<void> {
   if (!(await ensureConsole(tab))) return;
   const count = pendingCount(edits);
   const { changes, rowOf } = toChanges(edits, tab.table.schema, tab.table.table);
-  const res = await commands.tableApply(tabId, changes);
+  let res = await commands.tableApply(tabId, changes, null);
+  while (res.status === "error" && res.error.kind === "ConfirmWrites") {
+    if (!(await editsConfirmed(tab, edits, res.error.confirmation))) return;
+    res = await commands.tableApply(tabId, changes, res.error.confirmation.digest);
+  }
   if (res.status === "error") {
     const failedAt = "change" in res.error ? rowOf(res.error.change) : null;
     useTableEdits.setState((s) => ({ byTab: { ...s.byTab, [tabId]: { ...edits, failedAt } } }));

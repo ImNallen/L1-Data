@@ -20,6 +20,7 @@ mod tunnel;
 mod txn;
 mod update;
 mod view;
+mod writes;
 
 use std::collections::{BTreeSet, HashMap};
 use std::future::Future;
@@ -897,11 +898,6 @@ impl Engine {
         text::script_outline(text, cursor, database_kind)
     }
 
-    /// The confirm before a run on a Production connection. Pure, so the sync command never needs the runtime.
-    pub fn script_writes(&self, text: &str, target: RunTarget, database_kind: DatabaseKind) -> Vec<DocRange> {
-        text::script_writes(text, target, database_kind)
-    }
-
     /// The editor's format action. Pure, so the sync command never needs the runtime.
     pub fn editor_format(&self, text: &str, target: RunTarget, database_kind: DatabaseKind) -> Result<FormatEdit, FormatError> {
         text::format_edit(text, target, database_kind)
@@ -1237,7 +1233,7 @@ impl Engine {
         Ok(state)
     }
 
-    pub async fn console_run(&self, tab: TabId, r: RunRequest) -> Result<RunAccepted, RunError> {
+    pub async fn console_run(&self, tab: TabId, r: RunRequest, confirmed: Option<WriteDigest>) -> Result<RunAccepted, RunError> {
         let s = &self.shared;
         let console = s.console(tab).ok_or(RunError::NotConfigured)?;
         let (mut config, busy) = {
@@ -1296,6 +1292,7 @@ impl Engine {
         }
         let map = text::OffsetMap::new(&text);
         let ranges: Vec<DocRange> = spans.iter().map(|span| map.range(span)).collect();
+        let work = text::marked_writes(&text, &spans, connection.database_kind);
 
         let mut fresh = None;
         let needs_session = matches!(console.inner.lock().await.session, SessionSlot::Empty | SessionSlot::Lost { .. });
@@ -1315,6 +1312,7 @@ impl Engine {
         if inner.config != config {
             return Err(RunError::Busy);
         }
+        writes::check(&current, &config, &work, confirmed.as_ref()).map_err(|confirmation| RunError::ConfirmWrites { confirmation })?;
         if let Some(session) = fresh {
             match inner.session {
                 SessionSlot::Empty | SessionSlot::Lost { .. } => inner.session = SessionSlot::Idle(session),
@@ -1370,7 +1368,7 @@ impl Engine {
     /// Applies PostgreSQL staged table edits on the tab's own session, all or nothing. With no transaction open, auto-commit
     /// mode commits them and manual mode leaves them in a new open transaction. Inside an open transaction they
     /// run under a savepoint, so a failure leaves that transaction as it was.
-    pub async fn table_apply(&self, tab: TabId, changes: TableChanges) -> Result<ApplySummary, ApplyError> {
+    pub async fn table_apply(&self, tab: TabId, changes: TableChanges, confirmed: Option<WriteDigest>) -> Result<ApplySummary, ApplyError> {
         let s = &self.shared;
         let console = s.console(tab).ok_or(ApplyError::NotConfigured)?;
         let config = console.inner.lock().await.config.clone();
@@ -1408,15 +1406,17 @@ impl Engine {
             if inner.config != config {
                 return Err(ApplyError::Busy);
             }
+            if inner.txn == TxnState::Aborted {
+                return Err(ApplyError::TransactionAborted);
+            }
+            let work: Vec<(&str, bool)> = plan.iter().map(|edit| (edit.sql.as_str(), true)).collect();
+            writes::check(&current, &config, &work, confirmed.as_ref()).map_err(|confirmation| ApplyError::ConfirmWrites { confirmation })?;
             if let Some(session) = fresh {
                 match inner.session {
                     SessionSlot::Empty | SessionSlot::Lost { .. } => inner.session = SessionSlot::Idle(session),
                     SessionSlot::Idle(_) => {}
                     SessionSlot::Busy { .. } => return Err(ApplyError::Busy),
                 }
-            }
-            if inner.txn == TxnState::Aborted {
-                return Err(ApplyError::TransactionAborted);
             }
             let txn = inner.txn;
             let Some((session, stop)) = console.take_session(&mut inner, run_id, Work::Edit) else { return Err(ApplyError::Busy) };
@@ -2018,7 +2018,7 @@ mod tests {
         assert!(matches!(engine.console_configure(tab, unknown).await, Err(ConfigureError::UnknownConnection)));
         let r = ResultRef { tab_id: tab, run_id: RunId(1), index: 0 };
         assert!(matches!(engine.result_page(r, 0, 10), Err(ResultError::Gone)));
-        assert!(matches!(engine.console_run(tab, RunRequest::Script { text: "select 1".into(), target: RunTarget::All }).await, Err(RunError::NotConfigured)));
+        assert!(matches!(engine.console_run(tab, RunRequest::Script { text: "select 1".into(), target: RunTarget::All }, None).await, Err(RunError::NotConfigured)));
         assert!(matches!(engine.console_commit(tab).await, Err(TxnError::NoTransaction)));
     }
 
@@ -2067,14 +2067,14 @@ mod tests {
             RunRequest::Script { text: "UPDATE dbo.target SET n=2\nGO\nSELECT 1".into(), target: RunTarget::All },
             RunRequest::TablePage { schema: "dbo".into(), table: "target".into(), page: 0, query: TableQuery::default() },
         ] {
-            let refused = engine.console_run(tab, request).await;
+            let refused = engine.console_run(tab, request, None).await;
             assert!(matches!(refused, Err(RunError::Unsupported { ref what }) if what.contains("Select Auto-commit")), "{refused:?}");
             assert_eq!(serde_json::to_value(legacy.snapshot(&*legacy.inner.lock().await)).unwrap(), before);
         }
         let edit = TableChanges { schema: "missing".into(), table: "target".into(), inserts: vec![], updates: vec![], deletes: vec![] };
-        assert!(matches!(engine.table_apply(tab, edit.clone()).await, Err(ApplyError::Unsupported { .. })));
+        assert!(matches!(engine.table_apply(tab, edit.clone(), None).await, Err(ApplyError::Unsupported { .. })));
         engine.console_configure(tab, ConsoleConfig { connection_id: connection.id, database: "shop".into(), schema: None, mode: TxnMode::AutoCommit }).await.unwrap();
-        assert!(matches!(engine.table_apply(tab, edit).await, Err(ApplyError::Unsupported { .. })));
+        assert!(matches!(engine.table_apply(tab, edit, None).await, Err(ApplyError::Unsupported { .. })));
         assert_eq!(refuser.accepted.load(Ordering::SeqCst), 0);
         assert!(engine.shared.instance(connection.id).is_none());
         assert!(matches!(legacy.inner.lock().await.session, SessionSlot::Empty));
@@ -2132,7 +2132,7 @@ mod tests {
         use std::panic::AssertUnwindSafe;
 
         async fn rows(engine: &Engine, tab: TabId, text: String) -> Vec<Vec<Option<String>>> {
-            let accepted = engine.console_run(tab, RunRequest::Script { text, target: RunTarget::All }).await.unwrap();
+            let accepted = engine.console_run(tab, RunRequest::Script { text, target: RunTarget::All }, None).await.unwrap();
             let state = tokio::time::timeout(Duration::from_secs(15), async {
                 loop {
                     let state = engine.boot().consoles.into_iter().find(|s| s.tab_id == tab).unwrap();
@@ -2182,14 +2182,14 @@ mod tests {
                 RunRequest::Script { text: format!("UPDATE dbo.[{name}] SET n=2 WHERE id=1\nGO\nSELECT 1"), target: RunTarget::All },
                 RunRequest::TablePage { schema: "dbo".into(), table: name.clone(), page: 0, query: TableQuery::default() },
             ] {
-                assert!(matches!(engine.console_run(tab, request).await, Err(RunError::Unsupported { .. })));
+                assert!(matches!(engine.console_run(tab, request, None).await, Err(RunError::Unsupported { .. })));
                 assert_eq!(serde_json::to_value(console.snapshot(&*console.inner.lock().await)).unwrap(), before);
             }
             let edit = TableChanges {
                 schema: "dbo".into(), table: name.clone(), inserts: vec![], deletes: vec![],
                 updates: vec![RowUpdate { key: vec![CellWrite { column: "id".into(), value: Some("1".into()) }], set: vec![CellWrite { column: "n".into(), value: Some("3".into()) }] }],
             };
-            assert!(matches!(engine.table_apply(tab, edit).await, Err(ApplyError::Unsupported { .. })));
+            assert!(matches!(engine.table_apply(tab, edit, None).await, Err(ApplyError::Unsupported { .. })));
             assert_eq!(serde_json::to_value(console.snapshot(&*console.inner.lock().await)).unwrap(), before);
             assert_eq!(rows(&engine, observer, format!("SELECT n FROM dbo.[{name}]; SELECT n FROM dbo.[{audit}]; SELECT NEXT VALUE FOR dbo.[{sequence}]")).await,
                 vec![vec![Some("1".into())], vec![Some("1".into())], vec![Some("2".into())]]);

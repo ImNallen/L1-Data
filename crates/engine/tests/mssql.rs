@@ -47,7 +47,7 @@ impl Harness {
         DatabaseRef { connection_id: self.connection, database: "shop".into() }
     }
     async fn start(&self, sql: &str) -> RunAccepted {
-        self.engine.console_run(self.tab, RunRequest::Script { text: sql.into(), target: RunTarget::All }).await.unwrap()
+        self.engine.console_run(self.tab, RunRequest::Script { text: sql.into(), target: RunTarget::All }, None).await.unwrap()
     }
     async fn finish(&mut self, id: RunId) -> ConsoleState {
         tokio::time::timeout(Duration::from_secs(30), async {
@@ -327,7 +327,7 @@ async fn catalogs_details_browse_counts_and_exact_text_use_sql_server() {
     assert!(detail.defaults.iter().any(|d| d.column == "status"));
     assert!(detail.indexes.iter().any(|i| i.name == "IX_orders_customer"));
     let request = RunRequest::TablePage { schema: "lab".into(), table: "type_zoo".into(), page: 0, query: TableQuery::default() };
-    let accepted = h.engine.console_run(h.tab, request).await.unwrap();
+    let accepted = h.engine.console_run(h.tab, request, None).await.unwrap();
     let state = h.finish(accepted.run_id).await;
     assert!(matches!(state.run, RunState::Finished { outcome: RunOutcome::Ok, .. }), "{:?}", state.run);
     let sets = Harness::rowsets(&state);
@@ -411,7 +411,7 @@ async fn transactions_are_observed_and_commit_button_finishes_all_nesting() {
 #[tokio::test]
 async fn every_batch_is_validated_before_any_execution_and_dynamic_use_stays_scoped() {
     let mut h = Harness::open(TxnMode::AutoCommit).await;
-    let rejected = h.engine.console_run(h.tab, RunRequest::Script { text: "CREATE TABLE #must_not_exist(id int)\nGO\nUSE reporting".into(), target: RunTarget::All }).await;
+    let rejected = h.engine.console_run(h.tab, RunRequest::Script { text: "CREATE TABLE #must_not_exist(id int)\nGO\nUSE reporting".into(), target: RunTarget::All }, None).await;
     assert!(matches!(rejected, Err(RunError::Unsupported { .. })));
     let state = h.ok("SELECT OBJECT_ID('tempdb..#must_not_exist')").await;
     assert_eq!(h.rows(Harness::rowsets(&state)[0])[0][0], None);
@@ -542,7 +542,7 @@ async fn clr_columns_stay_in_the_catalog_and_browse_refuses_unsupported_values()
     }
     assert_eq!(relation.columns[1].type_display, "hierarchyid");
     assert_eq!(relation.columns[2].type_display, "geography");
-    let run = h.engine.console_run(h.tab, RunRequest::TablePage { schema: "dbo".into(), table: table.clone(), page: 0, query: TableQuery::default() }).await.unwrap();
+    let run = h.engine.console_run(h.tab, RunRequest::TablePage { schema: "dbo".into(), table: table.clone(), page: 0, query: TableQuery::default() }, None).await.unwrap();
     let state = h.finish(run.run_id).await;
     assert!(
         matches!(&state.run, RunState::Finished { outcome: RunOutcome::Failed, statements, .. } if matches!(&statements[0].status, StmtStatus::Failed { error } if error.message.contains("CLR"))),
@@ -581,7 +581,7 @@ async fn database_catalogs_stay_scoped_and_header_sort_sql_runs_with_bracket_nam
         .engine
         .console_run(
             h.tab,
-            RunRequest::TablePage { schema: "lab".into(), table: "awkward names".into(), page: 0, query: TableQuery { order_by: descending.sql, ..TableQuery::default() } },
+            RunRequest::TablePage { schema: "lab".into(), table: "awkward names".into(), page: 0, query: TableQuery { order_by: descending.sql, ..TableQuery::default() } }, None,
         )
         .await
         .unwrap();
@@ -757,7 +757,7 @@ async fn insert_exports_replay_identity_and_leave_out_computed_and_rowversion_co
     let outcome = AssertUnwindSafe(async {
         h.ok(&format!("INSERT INTO dbo.[{source}] (label) VALUES (N'a'), (N'bb'), (N'ccc'); DELETE FROM dbo.[{source}] WHERE id = 2")).await;
         h.engine.refresh_catalog(h.db()).await.unwrap();
-        let page = h.engine.console_run(h.tab, RunRequest::TablePage { schema: "dbo".into(), table: source.clone(), page: 0, query: TableQuery::default() }).await.unwrap();
+        let page = h.engine.console_run(h.tab, RunRequest::TablePage { schema: "dbo".into(), table: source.clone(), page: 0, query: TableQuery::default() }, None).await.unwrap();
         let state = h.finish(page.run_id).await;
         let meta = Harness::rowsets(&state)[0].clone();
         let (summary, script) = h.export(&meta, ExportFormat::SqlInsert, ExportScope::All, "ident.sql").await;

@@ -219,7 +219,7 @@ impl Harness {
 
     async fn start_run(&mut self, tab: TabId, sql: &str) -> RunAccepted {
         self.engine
-            .console_run(tab, RunRequest::Script { text: sql.into(), target: RunTarget::All })
+            .console_run(tab, RunRequest::Script { text: sql.into(), target: RunTarget::All }, None)
             .await
             .unwrap()
     }
@@ -556,7 +556,7 @@ async fn error_position_maps_to_utf16_past_an_emoji() {
     let cursor = text.encode_utf16().count() as u32 - 3;
     let accepted = h
         .engine
-        .console_run(tab, RunRequest::Script { text: text.into(), target: RunTarget::Cursor { offset: DocOffset(cursor) } })
+        .console_run(tab, RunRequest::Script { text: text.into(), target: RunTarget::Cursor { offset: DocOffset(cursor) } }, None)
         .await
         .unwrap();
     assert_eq!(accepted.statements.len(), 1, "cursor picks only the second statement");
@@ -576,7 +576,7 @@ async fn cancel_finishes_cancelled_quickly() {
     let tab = h.sql_tab(TxnMode::AutoCommit).await;
     let accepted = h.start_run(tab, "select slow_echo(30); select 2").await;
     tokio::time::sleep(Duration::from_millis(300)).await;
-    assert!(matches!(h.engine.console_run(tab, RunRequest::Script { text: "select 1".into(), target: RunTarget::All }).await, Err(RunError::Busy)));
+    assert!(matches!(h.engine.console_run(tab, RunRequest::Script { text: "select 1".into(), target: RunTarget::All }, None).await, Err(RunError::Busy)));
     assert!(matches!(h.engine.console_commit(tab).await, Err(TxnError::Busy)));
     let started = Instant::now();
     h.engine.console_cancel(tab).await;
@@ -797,7 +797,7 @@ async fn ddl_refreshes_the_catalog() {
     h.wait_published("shop", version).await;
     assert_eq!(h.catalog_status("shop"), CatalogStatus::Ready { version });
 
-    let page = h.engine.console_run(tab, RunRequest::TablePage { schema: "public".into(), table: "orders".into(), page: 2, query: TableQuery::default() }).await.unwrap();
+    let page = h.engine.console_run(tab, RunRequest::TablePage { schema: "public".into(), table: "orders".into(), page: 2, query: TableQuery::default() }, None).await.unwrap();
     let state = h.wait_finished(tab, page.run_id).await;
     let meta = Harness::result(&state, 0);
     assert_eq!(meta.row_count, 500);
@@ -931,7 +931,7 @@ async fn esc_during_all_rows_leaves_the_target_untouched_and_the_session_alive()
     };
     let during = h.wait_console(tab, |s| s.export.as_ref().is_some_and(|p| p.rows > 0)).await;
     assert_eq!((during.work, during.export.as_ref().map(|p| (p.result, p.format))), (Some(ConsoleWork::Export), Some((meta.r#ref, ExportFormat::Csv))));
-    assert!(matches!(h.engine.console_run(tab, RunRequest::Script { text: "select 1".into(), target: RunTarget::All }).await, Err(RunError::Busy)), "the export holds the session");
+    assert!(matches!(h.engine.console_run(tab, RunRequest::Script { text: "select 1".into(), target: RunTarget::All }, None).await, Err(RunError::Busy)), "the export holds the session");
     h.engine.console_cancel(tab).await;
 
     assert!(matches!(export.await.unwrap(), Err(ExportError::Cancelled)));
@@ -977,7 +977,7 @@ async fn a_table_tabs_all_rows_is_the_whole_filtered_table_in_page_order() {
     h.engine.set_settings(Settings { table_page_size: 10, ..h.engine.settings() });
     let tab = h.sql_tab(TxnMode::AutoCommit).await;
     let query = TableQuery { r#where: "status <> 'cancelled'".into(), order_by: "total DESC".into(), ..Default::default() };
-    let accepted = h.engine.console_run(tab, RunRequest::TablePage { schema: "public".into(), table: "orders".into(), page: 1, query }).await.unwrap();
+    let accepted = h.engine.console_run(tab, RunRequest::TablePage { schema: "public".into(), table: "orders".into(), page: 1, query }, None).await.unwrap();
     let state = h.wait_finished(tab, accepted.run_id).await;
     let meta = Harness::result(&state, 0);
     assert_eq!((meta.row_count, meta.truncated, &meta.all_rows), (10, None, &AllRows::Table));
@@ -1084,11 +1084,11 @@ async fn schema_and_search_path_follow_the_console_config() {
     assert_eq!(h.scalar(tab, "show search_path").await, "public");
     assert_eq!(h.scalar(tab, "show application_name").await, "L1 Data");
     for copy in ["copy customers from stdin", "copy public.customers (id) to stdout", "copy pg_temp.nope from stdin with (format csv)"] {
-        let err = h.engine.console_run(tab, RunRequest::Script { text: copy.into(), target: RunTarget::All }).await.err();
+        let err = h.engine.console_run(tab, RunRequest::Script { text: copy.into(), target: RunTarget::All }, None).await.err();
         assert!(matches!(err, Some(RunError::Unsupported { .. })), "{copy}: {err:?}");
     }
     assert_eq!(h.scalar(tab, "select 5").await, "5", "the session survived the rejected COPYs");
-    assert!(matches!(h.engine.console_run(tab, RunRequest::Script { text: " -- nothing\n".into(), target: RunTarget::All }).await, Err(RunError::NoStatement)));
+    assert!(matches!(h.engine.console_run(tab, RunRequest::Script { text: " -- nothing\n".into(), target: RunTarget::All }, None).await, Err(RunError::NoStatement)));
     h.engine.console_close(tab, false).await.unwrap();
     assert!(h.engine.boot().consoles.is_empty());
     h.engine.disconnect(h.conn, false).await.unwrap();
@@ -1138,7 +1138,7 @@ async fn table_apply_commits_every_change_or_none() {
     ok.updates.push(RowUpdate { key: vec![cell("id", Some("2"))], set: vec![cell("name", Some("b'2")), cell("note", Some("x"))] });
     ok.inserts.push(vec![cell("name", Some("d"))]);
     let before = h.log(tab).len();
-    let summary = h.engine.table_apply(tab, ok).await.unwrap();
+    let summary = h.engine.table_apply(tab, ok, None).await.unwrap();
     assert!(summary.committed);
     h.drain();
     assert_eq!(
@@ -1158,7 +1158,7 @@ async fn table_apply_commits_every_change_or_none() {
     let mut missing = changes(&table);
     missing.inserts.push(vec![cell("name", Some("e"))]);
     missing.updates.push(RowUpdate { key: vec![cell("id", Some("999"))], set: vec![cell("name", Some("ghost"))] });
-    let err = h.engine.table_apply(tab, missing).await.unwrap_err();
+    let err = h.engine.table_apply(tab, missing, None).await.unwrap_err();
     assert!(matches!(err, ApplyError::RowMismatch { change: ChangeRef { kind: ChangeKind::Update, index: 0 }, rows: 0 }), "{err:?}");
 
     let mut violating = changes(&table);
@@ -1166,7 +1166,7 @@ async fn table_apply_commits_every_change_or_none() {
     violating.inserts.push(vec![cell("note", Some("no name"))]);
     h.drain();
     let before = h.log(tab).len();
-    let err = h.engine.table_apply(tab, violating).await.unwrap_err();
+    let err = h.engine.table_apply(tab, violating, None).await.unwrap_err();
     assert!(matches!(&err, ApplyError::Failed { change: ChangeRef { kind: ChangeKind::Insert, index: 0 }, error } if error.sqlstate.as_deref() == Some("23502")), "{err:?}");
     h.drain();
     let failed = &h.log(tab)[before..];
@@ -1179,7 +1179,7 @@ async fn table_apply_commits_every_change_or_none() {
 
     let mut keyless = changes(&table);
     keyless.deletes.push(vec![cell("name", Some("c"))]);
-    assert!(matches!(h.engine.table_apply(tab, keyless).await, Err(ApplyError::NoPrimaryKey)));
+    assert!(matches!(h.engine.table_apply(tab, keyless, None).await, Err(ApplyError::NoPrimaryKey)));
     h.run_ok(tab, &format!("drop table public.{table}")).await;
 }
 
@@ -1193,14 +1193,14 @@ async fn table_apply_in_manual_mode_waits_for_commit_and_a_failure_keeps_the_ope
 
     let mut insert = changes(&table);
     insert.inserts.push(vec![cell("name", Some("d"))]);
-    let summary = h.engine.table_apply(manual, insert).await.unwrap();
+    let summary = h.engine.table_apply(manual, insert, None).await.unwrap();
     assert!(!summary.committed);
     assert_eq!(h.console(manual).txn, TxnState::Active);
     assert_eq!(rows_of(&mut h, auto, &table).await, "1:a:NULL 2:b:NULL 3:c:NULL", "other sessions don't see it before Commit");
 
     let mut failing = changes(&table);
     failing.updates.push(RowUpdate { key: vec![cell("id", Some("1"))], set: vec![cell("name", None)] });
-    assert!(matches!(h.engine.table_apply(manual, failing).await, Err(ApplyError::Failed { .. })));
+    assert!(matches!(h.engine.table_apply(manual, failing, None).await, Err(ApplyError::Failed { .. })));
     assert_eq!(h.console(manual).txn, TxnState::Active, "the savepoint kept the transaction usable");
     assert_eq!(rows_of(&mut h, manual, &table).await, "1:a:NULL 2:b:NULL 3:c:NULL 4:d:NULL", "earlier work in the transaction survives");
 
@@ -1221,7 +1221,7 @@ async fn table_pages_sort_and_filter_in_the_engine() {
     };
     let page = h
         .engine
-        .console_run(tab, RunRequest::TablePage { schema: "public".into(), table: "customers".into(), page: 0, query: query.clone() })
+        .console_run(tab, RunRequest::TablePage { schema: "public".into(), table: "customers".into(), page: 0, query: query.clone() }, None)
         .await
         .unwrap();
     let state = h.wait_finished(tab, page.run_id).await;
@@ -1242,7 +1242,7 @@ async fn table_pages_sort_and_filter_in_the_engine() {
         TableQuery { r#where: "true; drop table customers".into(), ..Default::default() },
         TableQuery { order_by: "id; drop table customers".into(), ..Default::default() },
     ] {
-        let refused = h.engine.console_run(tab, RunRequest::TablePage { schema: "public".into(), table: "customers".into(), page: 0, query: smuggled }).await;
+        let refused = h.engine.console_run(tab, RunRequest::TablePage { schema: "public".into(), table: "customers".into(), page: 0, query: smuggled }, None).await;
         assert!(matches!(refused, Err(RunError::BadFilter)), "{refused:?}");
     }
 }
@@ -1255,7 +1255,7 @@ async fn sql_comments_in_where_and_order_by_keep_the_page_limit() {
     let query = TableQuery { order_by: "id DESC -- newest first".into(), filters: vec![], r#where: "region = 'APAC' -- only asia".into() };
     let page = h
         .engine
-        .console_run(tab, RunRequest::TablePage { schema: "public".into(), table: "customers".into(), page: 0, query: query.clone() })
+        .console_run(tab, RunRequest::TablePage { schema: "public".into(), table: "customers".into(), page: 0, query: query.clone() }, None)
         .await
         .unwrap();
     let state = h.wait_finished(tab, page.run_id).await;
@@ -1295,7 +1295,7 @@ async fn table_page_preserves_nested_domain_native_metadata_and_primary_key() {
 
         let accepted = h.engine.console_run(tab, RunRequest::TablePage {
             schema: schema.clone(), table: "items".into(), page: 0, query: TableQuery::default(),
-        }).await.unwrap();
+        }, None).await.unwrap();
         let state = h.wait_finished(tab, accepted.run_id).await;
         assert!(matches!(state.run, RunState::Finished { outcome: RunOutcome::Ok, .. }), "{:?}", state.run);
         let meta = Harness::result(&state, 0);
@@ -1313,7 +1313,7 @@ async fn table_page_preserves_nested_domain_native_metadata_and_primary_key() {
             schema: schema.clone(), table: "items".into(), inserts: vec![], deletes: vec![],
             updates: vec![RowUpdate { key, set: vec![cell("value", Some("43"))] }],
         };
-        assert!(h.engine.table_apply(tab, changes).await.unwrap().committed);
+        assert!(h.engine.table_apply(tab, changes, None).await.unwrap().committed);
         assert_eq!(h.scalar(tab, &format!("SELECT value FROM {schema}.items WHERE id = 1")).await, "43");
     }).await;
     oracle.batch_execute(&format!("DROP SCHEMA {schema} CASCADE")).await.unwrap();
@@ -1329,7 +1329,7 @@ async fn table_page_on_second_database_uses_its_pk() {
     let tab = h.sql_tab_on(TxnMode::AutoCommit, "reporting").await;
     let page = h
         .engine
-        .console_run(tab, RunRequest::TablePage { schema: "public".into(), table: "daily".into(), page: 0, query: TableQuery::default() })
+        .console_run(tab, RunRequest::TablePage { schema: "public".into(), table: "daily".into(), page: 0, query: TableQuery::default() }, None)
         .await
         .unwrap();
     let state = h.wait_finished(tab, page.run_id).await;
@@ -1346,7 +1346,7 @@ async fn table_page_on_second_database_uses_its_pk() {
 
     let mut changes = TableChanges { schema: "public".into(), table: "daily".into(), inserts: vec![], updates: vec![], deletes: vec![] };
     changes.updates.push(RowUpdate { key: vec![cell("day", Some("2026-01-02"))], set: vec![cell("orders", Some("101"))] });
-    assert!(h.engine.table_apply(tab, changes).await.unwrap().committed, "the full key of daily is its own primary key");
+    assert!(h.engine.table_apply(tab, changes, None).await.unwrap().committed, "the full key of daily is its own primary key");
     h.run_ok(tab, "update daily set orders = 101 where day = '2026-01-02'").await;
 }
 

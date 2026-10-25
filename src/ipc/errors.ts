@@ -83,6 +83,8 @@ export function runErrorText(e: RunError): string {
       return connectErrorText(e.error);
     case "BadFilter":
       return "WHERE and ORDER BY each take one expression, without a semicolon.";
+    case "ConfirmWrites":
+      return `Nothing ran. This run writes to Production on ${e.confirmation.connection} / ${e.confirmation.database} and needs your confirmation.`;
     default: {
       const unreachable: never = e;
       return unreachable;
@@ -115,6 +117,8 @@ export function applyErrorText(e: ApplyError): string {
         ? `Could not apply edits. A row to ${verb} no longer exists. Reload and try again.`
         : `Could not apply edits. A row to ${verb} matched ${e.rows} rows.`;
     }
+    case "ConfirmWrites":
+      return `Nothing was applied. These edits write to Production on ${e.confirmation.connection} / ${e.confirmation.database} and need your confirmation.`;
     default: {
       const unreachable: never = e;
       return unreachable;

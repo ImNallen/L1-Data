@@ -135,7 +135,7 @@ it("keeps restored table browsing active when the target gains its canonical spe
   await vi.waitFor(() =>
     expect(calls).toContainEqual({
       cmd: "console_run",
-      args: { tabId: tab.id, request: { kind: "tablePage", schema: "dbo", table: "orders", page: 3, query: EMPTY_QUERY } },
+      args: { tabId: tab.id, request: { kind: "tablePage", schema: "dbo", table: "orders", page: 3, query: EMPTY_QUERY }, confirmed: null },
     }),
   );
   expect(calls).toContainEqual({

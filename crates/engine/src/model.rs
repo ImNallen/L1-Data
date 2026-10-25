@@ -113,7 +113,7 @@ impl<'de> Deserialize<'de> for SqlServerAuth {
     }
 }
 
-/// What the user says the connection points at. The UI marks `Production` and asks before a run on it writes.
+/// What the user says the connection points at. The UI marks `Production`, and the engine asks before a write runs on it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Type)]
 pub enum Environment {
     Local,
@@ -1782,6 +1782,26 @@ pub enum RunError {
     Connect { error: ConnectError },
     /// WHERE or ORDER BY isn't a single expression, e.g. it smuggles in a second statement.
     BadFilter,
+    ConfirmWrites { confirmation: WriteConfirmation },
+}
+
+/// Opaque outside `writes.rs`. It names the exact statements a guarded action sends and the connection, database,
+/// schema, and mode they run on. The engine makes one when it refuses a write on Production and accepts it back
+/// only while all of that is unchanged.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Type)]
+pub struct WriteDigest(pub String);
+
+/// The engine ran nothing. Ask the user, then send the same request again with `digest`.
+#[derive(Debug, Clone, Serialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct WriteConfirmation {
+    /// The connection's name.
+    pub connection: String,
+    pub database: String,
+    pub writes: u32,
+    /// The first three statements, or SQL Server batches, that write, trimmed.
+    pub statements: Vec<String>,
+    pub digest: WriteDigest,
 }
 
 #[derive(Debug, Clone, Serialize, Type)]
@@ -1867,6 +1887,7 @@ pub enum ApplyError {
     /// Opening or committing the transaction failed.
     Transaction { error: QueryError },
     OutcomeUnknown { error: QueryError },
+    ConfirmWrites { confirmation: WriteConfirmation },
 }
 
 #[derive(Debug, Clone, Serialize, Type)]

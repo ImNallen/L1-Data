@@ -54,7 +54,7 @@ impl Harness {
     }
 
     async fn request(&mut self, request: RunRequest) -> ConsoleState {
-        let run = self.engine.console_run(self.tab, request).await.unwrap().run_id;
+        let run = self.engine.console_run(self.tab, request, None).await.unwrap().run_id;
         tokio::time::timeout(Duration::from_secs(30), async {
             loop {
                 if let AppEvent::ConsoleChanged(state) = self.events.recv().await.unwrap()

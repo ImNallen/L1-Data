@@ -77,7 +77,7 @@ impl Harness {
     }
 
     async fn request(&self, tab: TabId, request: RunRequest) -> ConsoleState {
-        let run = self.engine.console_run(tab, request).await.unwrap().run_id;
+        let run = self.engine.console_run(tab, request, None).await.unwrap().run_id;
         let state = tokio::time::timeout(Duration::from_secs(20), async {
             loop {
                 let state = self.state(tab);

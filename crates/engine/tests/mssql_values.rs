@@ -82,7 +82,7 @@ impl Harness {
     }
 
     async fn sql(&mut self, text: &str) -> Vec<Vec<Option<String>>> {
-        let accepted = self.engine.console_run(self.tab, RunRequest::Script { text: text.into(), target: RunTarget::All }).await.unwrap();
+        let accepted = self.engine.console_run(self.tab, RunRequest::Script { text: text.into(), target: RunTarget::All }, None).await.unwrap();
         let state = self.finish(accepted).await;
         let RunState::Finished { statements, .. } = &state.run else { unreachable!() };
         if statements.iter().flat_map(|s| &s.outputs).any(|o| matches!(o, RunOutput::Rows { .. })) { self.rows(&state) } else { vec![] }
@@ -91,7 +91,7 @@ impl Harness {
     async fn filtered(&mut self, table: &str, column: &str, op: FilterOp, value: &str) -> Vec<Vec<Option<String>>> {
         let query = TableQuery { filters: vec![ColumnFilter { column: column.into(), op, value: value.into() }], ..Default::default() };
         let count = self.engine.exact_row_count(self.tab, self.db.clone(), "dbo".into(), table.into(), query.clone()).await.unwrap();
-        let accepted = self.engine.console_run(self.tab, RunRequest::TablePage { schema: "dbo".into(), table: table.into(), page: 0, query }).await.unwrap();
+        let accepted = self.engine.console_run(self.tab, RunRequest::TablePage { schema: "dbo".into(), table: table.into(), page: 0, query }, None).await.unwrap();
         let state = self.finish(accepted).await;
         let rows = self.rows(&state);
         assert_eq!(count, rows.len() as u64, "count and page disagree for {column} {op:?} {value}");
@@ -188,7 +188,7 @@ async fn selected_binary_filters_compare_bytes_and_search_displayed_hex() {
             let query = TableQuery { filters: vec![ColumnFilter { column: column.into(), op: FilterOp::Eq, value: value.into() }], ..Default::default() };
             assert!(h.engine.exact_row_count(h.tab, h.db.clone(), "dbo".into(), table.clone(), query.clone()).await.is_err());
             assert!(matches!(
-                h.engine.console_run(h.tab, RunRequest::TablePage { schema: "dbo".into(), table: table.clone(), page: 0, query }).await,
+                h.engine.console_run(h.tab, RunRequest::TablePage { schema: "dbo".into(), table: table.clone(), page: 0, query }, None).await,
                 Err(RunError::BadFilter)
             ));
         }
