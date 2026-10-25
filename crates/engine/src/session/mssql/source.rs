@@ -20,58 +20,176 @@ fn text(row: &[Option<String>], i: usize) -> Result<String, DetailError> {
     Ok(required(row, i).map_err(failed)?.to_owned())
 }
 
+/// Catalog columns newer than SQL Server 2016 read as their default on a server that lacks them.
+struct Features {
+    sequential_key: &'static str,
+    columnstore_order: &'static str,
+    xml_compression: &'static str,
+    ledger: &'static str,
+    graph: (&'static str, &'static str),
+}
+
+fn storage_columns(f: &Features) -> String {
+    format!(
+        "i.fill_factor,i.is_padded,i.ignore_dup_key,COALESCE(st.no_recompute,0),i.allow_row_locks,i.allow_page_locks,{},NULLIF(NULLIF(p.data_compression_desc,'NONE'),'COLUMNSTORE'),{},i.compression_delay,i.is_disabled,ds.type,ds.name",
+        f.sequential_key, f.xml_compression
+    )
+}
+
+/// Only the first partition's compression is read, because a partitioned object already warns about its partition scheme.
+const STORAGE_JOINS: &str = "LEFT JOIN sys.stats st ON st.object_id=i.object_id AND st.stats_id=i.index_id
+     OUTER APPLY (SELECT TOP 1 * FROM sys.partitions p WHERE p.object_id=i.object_id AND p.index_id=i.index_id ORDER BY p.partition_number) p
+     JOIN sys.data_spaces ds ON ds.data_space_id=i.data_space_id";
+
+fn place(row: &[Option<String>], at: usize) -> Option<ddl::Place> {
+    match (row.get(at)?.as_deref()?.trim(), row.get(at + 1)?.clone()?) {
+        ("FG", name) if name == "PRIMARY" => None,
+        ("PS", name) => Some(ddl::Place::PartitionScheme(name)),
+        (_, name) => Some(ddl::Place::Filegroup(name)),
+    }
+}
+
+fn storage(r: &[Option<String>], at: usize) -> Result<ddl::Storage, DetailError> {
+    Ok(ddl::Storage {
+        fill_factor: number(r, at).map_err(failed)?,
+        pad_index: bit(r, at + 1)?,
+        ignore_dup_key: bit(r, at + 2)?,
+        no_recompute: bit(r, at + 3)?,
+        deny_row_locks: !bit(r, at + 4)?,
+        deny_page_locks: !bit(r, at + 5)?,
+        sequential_key: bit(r, at + 6)?,
+        compression: r[at + 7].clone(),
+        xml_compression: bit(r, at + 8)?,
+        compression_delay: r[at + 9].as_deref().and_then(|d| d.parse().ok()),
+        disabled: bit(r, at + 10)?,
+        place: place(r, at + 11),
+    })
+}
+
 impl MsSession {
     pub(in crate::session) async fn script(&mut self, target: &ScriptTarget) -> Result<ObjectScript, DetailError> {
         match target {
-            ScriptTarget::Relation { oid } => self.relation_script(native_object_id(*oid)).await,
+            ScriptTarget::Relation { oid } => {
+                let f = self.features().await?;
+                self.relation_script(native_object_id(*oid), &f).await
+            }
             ScriptTarget::Routine { oid } => self.module_script(&format!("o.object_id={}", native_object_id(*oid))).await,
             ScriptTarget::Trigger { relation_oid, name } => {
                 self.module_script(&format!("o.parent_object_id={} AND o.type='TR' AND o.name={}", native_object_id(*relation_oid), quote_literal(name))).await
             }
             ScriptTarget::Index { relation_oid, name } => {
                 let oid = native_object_id(*relation_oid);
+                let f = self.features().await?;
                 let table = self.rows(&format!("SELECT s.name,o.name FROM sys.objects o JOIN sys.schemas s ON s.schema_id=o.schema_id WHERE o.object_id={oid}")).await.map_err(failed)?;
                 let table = table.first().ok_or(DetailError::Gone)?;
-                let indexes = self.indexes(oid, &format!("i.name={}", quote_literal(name))).await?;
+                let indexes = self.indexes(oid, &format!("i.name={}", quote_literal(name)), &f).await?;
                 let index = indexes.first().ok_or(DetailError::Gone)?;
-                Ok(script::object_script(name, script::Ddl::complete(ddl::index(index, &ddl::qualified(&text(table, 0)?, &text(table, 1)?)))))
+                let ddl = ddl::index(index, &ddl::qualified(&text(table, 0)?, &text(table, 1)?))
+                    .ok_or_else(|| refused(format!("Only clustered, nonclustered, and columnstore indexes can be scripted, and {name} is none of these.")))?;
+                Ok(script::object_script(name, ddl))
             }
         }
     }
 
-    async fn relation_script(&mut self, oid: i32) -> Result<ObjectScript, DetailError> {
-        let rows = self.rows(&format!("SELECT s.name,o.name,o.type,t.uses_ansi_nulls FROM sys.objects o JOIN sys.schemas s ON s.schema_id=o.schema_id LEFT JOIN sys.tables t ON t.object_id=o.object_id WHERE o.object_id={oid}")).await.map_err(failed)?;
+    async fn features(&mut self) -> Result<Features, DetailError> {
+        let rows = self
+            .rows(
+                "SELECT COL_LENGTH('sys.indexes','optimize_for_sequential_key'),COL_LENGTH('sys.index_columns','column_store_order_ordinal'),
+                        COL_LENGTH('sys.partitions','xml_compression'),COL_LENGTH('sys.tables','ledger_type'),COL_LENGTH('sys.tables','is_node')",
+            )
+            .await
+            .map_err(failed)?;
+        let has = |i: usize| rows.first().is_some_and(|r| r[i].is_some());
+        let pick = |i: usize, column: &'static str, absent: &'static str| if has(i) { column } else { absent };
+        Ok(Features {
+            sequential_key: pick(0, "i.optimize_for_sequential_key", "0"),
+            columnstore_order: pick(1, "ic.column_store_order_ordinal", "0"),
+            xml_compression: pick(2, "COALESCE(p.xml_compression,0)", "0"),
+            ledger: pick(3, "t.ledger_type<>0", "1=0"),
+            graph: if has(4) { ("t.is_node=1", "t.is_edge=1") } else { ("1=0", "1=0") },
+        })
+    }
+
+    async fn relation_script(&mut self, oid: i32, f: &Features) -> Result<ObjectScript, DetailError> {
+        let rows = self
+            .rows(&format!(
+                "SELECT s.name,o.name,o.type,t.uses_ansi_nulls,t.lock_escalation_desc,hs.name,h.name,t.history_retention_period,t.history_retention_period_unit_desc,
+                    ts.name,tt.name,lds.type,lds.name,COL_NAME(pe.object_id,pe.start_column_id),COL_NAME(pe.object_id,pe.end_column_id),
+                    CASE WHEN t.is_memory_optimized=1 THEN 'Memory-optimized tables' WHEN {} THEN 'Ledger tables' WHEN {} THEN 'Graph node tables'
+                         WHEN {} THEN 'Graph edge tables' WHEN t.is_filetable=1 THEN 'FileTables' WHEN t.is_external=1 THEN 'External tables' END
+                 FROM sys.objects o JOIN sys.schemas s ON s.schema_id=o.schema_id
+                 LEFT JOIN sys.tables t ON t.object_id=o.object_id
+                 LEFT JOIN sys.objects h ON h.object_id=t.history_table_id LEFT JOIN sys.schemas hs ON hs.schema_id=h.schema_id
+                 LEFT JOIN sys.tables tt ON tt.history_table_id=o.object_id LEFT JOIN sys.schemas ts ON ts.schema_id=tt.schema_id
+                 LEFT JOIN sys.data_spaces lds ON lds.data_space_id=t.lob_data_space_id
+                 LEFT JOIN sys.periods pe ON pe.object_id=o.object_id
+                 WHERE o.object_id={oid}",
+                f.ledger, f.graph.0, f.graph.1
+            ))
+            .await
+            .map_err(failed)?;
         let r = rows.first().ok_or(DetailError::Gone)?;
         match required(r, 2).map_err(failed)?.trim() {
-            "V" => self.module_script(&format!("o.object_id={oid}")).await,
+            "V" => {
+                let (_, module) = self.modules(&format!("o.object_id={oid}")).await?.into_iter().next().ok_or(DetailError::Gone)?;
+                let view = ddl::View { indexes: self.indexes(oid, "1=1", f).await?, triggers: self.triggers(oid).await?, properties: self.properties(&format!("o.object_id={oid}")).await?, module };
+                Ok(script::object_script(&view.module.name, ddl::view(&view)))
+            }
             "U" => {
+                if let Some(kind) = &r[15] {
+                    return Err(refused(format!("{kind} cannot be scripted yet.")));
+                }
                 let name = text(r, 1)?;
+                let heap = self.rows(&format!("SELECT {} FROM sys.indexes i {STORAGE_JOINS} WHERE i.object_id={oid} AND i.index_id=0", storage_columns(f))).await.map_err(failed)?;
+                let versioning = match (&r[5], &r[6]) {
+                    (Some(schema), Some(history)) => Some(ddl::Versioning {
+                        schema: schema.clone(),
+                        name: history.clone(),
+                        retention: match (r[7].as_deref().and_then(|n| n.parse::<i32>().ok()), r[8].as_deref()) {
+                            (Some(n), Some(unit)) if n >= 0 && unit != "INFINITE" => Some((n, unit.to_owned())),
+                            _ => None,
+                        },
+                    }),
+                    _ => None,
+                };
                 let table = ddl::Table {
                     schema: text(r, 0)?,
                     name: name.clone(),
                     ansi_nulls: bit(r, 3)?,
                     columns: self.columns(oid).await?,
-                    keys: self.keys(oid).await?,
+                    keys: self.keys(oid, f).await?,
                     foreign_keys: self.foreign_keys(oid).await?,
-                    checks: self.rows(&format!("SELECT name,definition FROM sys.check_constraints WHERE parent_object_id={oid} ORDER BY name")).await.map_err(failed)?.iter().map(|r| Ok((text(r, 0)?, text(r, 1)?))).collect::<Result<_, DetailError>>()?,
-                    indexes: self.indexes(oid, "i.is_primary_key=0 AND i.is_unique_constraint=0 AND i.type IN (1,2)").await?,
-                    triggers: self.modules(&format!("o.parent_object_id={oid} AND o.type='TR'")).await?.into_iter().map(|(_, m)| m).collect(),
+                    checks: self.checks(oid).await?,
+                    indexes: self.indexes(oid, "i.is_primary_key=0 AND i.is_unique_constraint=0", f).await?,
+                    triggers: self.triggers(oid).await?,
+                    heap: heap.first().map(|r| storage(r, 0)).transpose()?,
+                    large_values: place(r, 11),
+                    lock_escalation: text(r, 4)?,
+                    period: r[13].clone().zip(r[14].clone()),
+                    versioning,
+                    history_of: r[9].clone().zip(r[10].clone()),
+                    properties: self.properties(&format!("o.object_id={oid}")).await?,
                 };
-                Ok(script::object_script(&name, script::Ddl::complete(ddl::table(&table))))
+                Ok(script::object_script(&name, ddl::table(&table)))
             }
             _ => Err(refused("Only tables and views can be scripted.")),
         }
     }
 
     async fn module_script(&mut self, filter: &str) -> Result<ObjectScript, DetailError> {
-        let (name, module) = self.modules(filter).await?.into_iter().next().ok_or(DetailError::Gone)?;
-        Ok(script::object_script(&name, script::Ddl::complete(ddl::module(&module))))
+        let (oid, mut module) = self.modules(filter).await?.into_iter().next().ok_or(DetailError::Gone)?;
+        module.properties = self.properties(&format!("ep.class IN (1,2) AND ep.major_id={oid}")).await?;
+        Ok(script::object_script(&module.name, ddl::module(&module)))
     }
 
-    async fn modules(&mut self, filter: &str) -> Result<Vec<(String, ddl::Module)>, DetailError> {
+    async fn triggers(&mut self, oid: i32) -> Result<Vec<ddl::Module>, DetailError> {
+        Ok(self.modules(&format!("o.parent_object_id={oid} AND o.type='TR'")).await?.into_iter().map(|(_, m)| m).collect())
+    }
+
+    async fn modules(&mut self, filter: &str) -> Result<Vec<(i32, ddl::Module)>, DetailError> {
         let rows = self
             .rows(&format!(
-                "SELECT s.name,o.name,OBJECT_DEFINITION(o.object_id),m.uses_ansi_nulls,m.uses_quoted_identifier,tr.is_disabled,ps.name,po.name
+                "SELECT s.name,o.name,OBJECT_DEFINITION(o.object_id),m.uses_ansi_nulls,m.uses_quoted_identifier,tr.is_disabled,ps.name,po.name,o.object_id
                  FROM sys.objects o JOIN sys.schemas s ON s.schema_id=o.schema_id
                  LEFT JOIN sys.sql_modules m ON m.object_id=o.object_id
                  LEFT JOIN sys.triggers tr ON tr.object_id=o.object_id
@@ -82,15 +200,49 @@ impl MsSession {
             .map_err(failed)?;
         rows.iter()
             .map(|r| {
-                let qualified = ddl::qualified(&text(r, 0)?, &text(r, 1)?);
+                let (schema, name) = (text(r, 0)?, text(r, 1)?);
                 let Some(definition) = r[2].clone() else {
-                    return Err(refused(format!("SQL Server has no readable definition for {qualified}. The module is encrypted or CLR, or this login lacks VIEW DEFINITION permission.")));
+                    return Err(refused(format!(
+                        "SQL Server has no readable definition for {}. The module is encrypted or CLR, or this login lacks VIEW DEFINITION permission.",
+                        ddl::qualified(&schema, &name)
+                    )));
                 };
-                let disabled = match r[5].as_deref() {
-                    Some("1") => Some((qualified, ddl::qualified(&text(r, 6)?, &text(r, 7)?))),
+                let disabled_on = match r[5].as_deref() {
+                    Some("1") => Some(ddl::qualified(&text(r, 6)?, &text(r, 7)?)),
                     _ => None,
                 };
-                Ok((text(r, 1)?, ddl::Module { definition, ansi_nulls: bit(r, 3)?, quoted_identifier: bit(r, 4)?, disabled }))
+                let module = ddl::Module { schema, name, definition, ansi_nulls: bit(r, 3)?, quoted_identifier: bit(r, 4)?, disabled_on, properties: vec![] };
+                Ok((number(r, 8).map_err(failed)?, module))
+            })
+            .collect()
+    }
+
+    async fn properties(&mut self, filter: &str) -> Result<Vec<ddl::Property>, DetailError> {
+        let rows = self
+            .rows(&format!(
+                "SELECT ep.name,CONVERT(nvarchar(max),ep.value),CONVERT(sysname,SQL_VARIANT_PROPERTY(ep.value,'BaseType')),s.name,
+                    CASE o.type WHEN 'U' THEN 'TABLE' WHEN 'V' THEN 'VIEW' WHEN 'P' THEN 'PROCEDURE' WHEN 'PC' THEN 'PROCEDURE' ELSE 'FUNCTION' END,o.name,
+                    CASE WHEN ep.class=7 THEN 'INDEX' WHEN ep.class=2 THEN 'PARAMETER' WHEN ep.minor_id>0 THEN 'COLUMN' WHEN c.type='TR' THEN 'TRIGGER' WHEN c.object_id IS NOT NULL THEN 'CONSTRAINT' END,
+                    CASE WHEN ep.class=7 THEN i.name WHEN ep.class=2 THEN pa.name WHEN ep.minor_id>0 THEN col.name ELSE c.name END
+                 FROM sys.extended_properties ep
+                 LEFT JOIN sys.objects c ON ep.class=1 AND ep.minor_id=0 AND c.object_id=ep.major_id AND c.parent_object_id<>0
+                 JOIN sys.objects o ON o.object_id=COALESCE(c.parent_object_id,ep.major_id)
+                 JOIN sys.schemas s ON s.schema_id=o.schema_id
+                 LEFT JOIN sys.indexes i ON ep.class=7 AND i.object_id=ep.major_id AND i.index_id=ep.minor_id
+                 LEFT JOIN sys.parameters pa ON ep.class=2 AND pa.object_id=ep.major_id AND pa.parameter_id=ep.minor_id
+                 LEFT JOIN sys.columns col ON ep.class=1 AND ep.minor_id>0 AND col.object_id=ep.major_id AND col.column_id=ep.minor_id
+                 WHERE ep.class IN (1,2,7) AND {filter}
+                 ORDER BY 7,8,1"
+            ))
+            .await
+            .map_err(failed)?;
+        rows.iter()
+            .map(|r| {
+                let mut levels = vec![("SCHEMA".to_owned(), text(r, 3)?), (text(r, 4)?, text(r, 5)?)];
+                if let Some(level) = r[6].clone() {
+                    levels.push((level, text(r, 7)?));
+                }
+                Ok(ddl::Property { name: text(r, 0)?, value: r[1].clone(), base_type: r[2].clone(), levels })
             })
             .collect()
     }
@@ -100,43 +252,67 @@ impl MsSession {
             .rows(&format!(
                 "SELECT c.name,COALESCE(t.name,ut.name),ut.is_user_defined,SCHEMA_NAME(ut.schema_id),ut.name,c.max_length,c.precision,c.scale,c.is_nullable,
                     CASE WHEN c.collation_name<>CONVERT(sysname,DATABASEPROPERTYEX(DB_NAME(),'Collation')) THEN c.collation_name END,
-                    CONVERT(nvarchar(40),ic.seed_value),CONVERT(nvarchar(40),ic.increment_value),cc.definition,cc.is_persisted,dc.name,dc.definition
+                    CONVERT(nvarchar(40),ic.seed_value),CONVERT(nvarchar(40),ic.increment_value),cc.definition,cc.is_persisted,dc.name,dc.definition,
+                    COALESCE(ic.is_not_for_replication,0),c.is_sparse,c.is_column_set,c.is_rowguidcol,mc.masking_function,c.generated_always_type,c.is_hidden,
+                    CASE WHEN c.is_ansi_padded=0 AND t.name IN ('char','varchar','binary','varbinary') THEN 1 ELSE 0 END,c.is_filestream,
+                    CASE WHEN c.encryption_type IS NULL THEN 0 ELSE 1 END,SCHEMA_NAME(xsc.schema_id),xsc.name,c.is_xml_document
                  FROM sys.columns c
                  JOIN sys.types ut ON ut.user_type_id=c.user_type_id
                  LEFT JOIN sys.types t ON t.user_type_id=c.system_type_id AND t.system_type_id=t.user_type_id
                  LEFT JOIN sys.identity_columns ic ON ic.object_id=c.object_id AND ic.column_id=c.column_id
                  LEFT JOIN sys.computed_columns cc ON cc.object_id=c.object_id AND cc.column_id=c.column_id
                  LEFT JOIN sys.default_constraints dc ON dc.object_id=c.default_object_id
+                 LEFT JOIN sys.masked_columns mc ON mc.object_id=c.object_id AND mc.column_id=c.column_id
+                 LEFT JOIN sys.xml_schema_collections xsc ON xsc.xml_collection_id=c.xml_collection_id AND c.xml_collection_id<>0
                  WHERE c.object_id={oid} ORDER BY c.column_id"
             ))
             .await
             .map_err(failed)?;
         rows.iter()
             .map(|r| {
-                let type_name = if bit(r, 2)? {
-                    ddl::qualified(&text(r, 3)?, &text(r, 4)?)
-                } else {
-                    display(required(r, 1).map_err(failed)?, number(r, 5).map_err(failed)?, number(r, 6).map_err(failed)?, number(r, 7).map_err(failed)?)
+                let type_name = match (&r[26], &r[27]) {
+                    (Some(schema), Some(collection)) => format!("xml({} {})", if bit(r, 28)? { "DOCUMENT" } else { "CONTENT" }, ddl::qualified(schema, collection)),
+                    _ if bit(r, 2)? => ddl::qualified(&text(r, 3)?, &text(r, 4)?),
+                    _ => display(required(r, 1).map_err(failed)?, number(r, 5).map_err(failed)?, number(r, 6).map_err(failed)?, number(r, 7).map_err(failed)?),
                 };
-                let identity = r[10].clone().zip(r[11].clone());
                 let computed = match &r[12] {
                     Some(definition) => Some(ddl::Computed { definition: definition.clone(), persisted: bit(r, 13)? }),
                     None => None,
                 };
-                Ok(ddl::Column { name: text(r, 0)?, type_name, collation: r[9].clone(), nullable: bit(r, 8)?, identity, computed, default: r[14].clone().zip(r[15].clone()) })
+                Ok(ddl::Column {
+                    name: text(r, 0)?,
+                    type_name,
+                    collation: r[9].clone(),
+                    nullable: bit(r, 8)?,
+                    identity: r[10].clone().zip(r[11].clone()),
+                    not_for_replication: bit(r, 16)?,
+                    computed,
+                    default: r[14].clone().zip(r[15].clone()),
+                    sparse: bit(r, 17)?,
+                    column_set: bit(r, 18)?,
+                    rowguidcol: bit(r, 19)?,
+                    masked: r[20].clone(),
+                    generated: number(r, 21).map_err(failed)?,
+                    hidden: bit(r, 22)?,
+                    ansi_padding_off: bit(r, 23)?,
+                    filestream: bit(r, 24)?,
+                    encrypted: bit(r, 25)?,
+                })
             })
             .collect()
     }
 
-    async fn keys(&mut self, oid: i32) -> Result<Vec<ddl::Key>, DetailError> {
+    async fn keys(&mut self, oid: i32, f: &Features) -> Result<Vec<ddl::Key>, DetailError> {
         let rows = self
             .rows(&format!(
-                "SELECT k.name,k.type,i.type,c.name,ic.is_descending_key FROM sys.key_constraints k
+                "SELECT k.name,k.type,i.type,c.name,ic.is_descending_key,{} FROM sys.key_constraints k
                  JOIN sys.indexes i ON i.object_id=k.parent_object_id AND i.index_id=k.unique_index_id
+                 {STORAGE_JOINS}
                  JOIN sys.index_columns ic ON ic.object_id=i.object_id AND ic.index_id=i.index_id
                  JOIN sys.columns c ON c.object_id=ic.object_id AND c.column_id=ic.column_id
                  WHERE k.parent_object_id={oid} AND ic.key_ordinal>0
-                 ORDER BY CASE k.type WHEN 'PK' THEN 0 ELSE 1 END,k.name,ic.key_ordinal"
+                 ORDER BY CASE k.type WHEN 'PK' THEN 0 ELSE 1 END,k.name,ic.key_ordinal",
+                storage_columns(f)
             ))
             .await
             .map_err(failed)?;
@@ -146,16 +322,30 @@ impl MsSession {
             let column = (text(r, 3)?, bit(r, 4)?);
             match keys.last_mut() {
                 Some(k) if k.name == name => k.columns.push(column),
-                _ => keys.push(ddl::Key { name, primary: required(r, 1).map_err(failed)?.trim() == "PK", clustered: required(r, 2).map_err(failed)? == "1", columns: vec![column] }),
+                _ => keys.push(ddl::Key {
+                    name,
+                    primary: required(r, 1).map_err(failed)?.trim() == "PK",
+                    clustered: required(r, 2).map_err(failed)? == "1",
+                    columns: vec![column],
+                    storage: storage(r, 5)?,
+                }),
             }
         }
         Ok(keys)
     }
 
+    async fn checks(&mut self, oid: i32) -> Result<Vec<ddl::Check>, DetailError> {
+        let rows = self
+            .rows(&format!("SELECT name,definition,is_disabled,is_not_trusted,is_not_for_replication FROM sys.check_constraints WHERE parent_object_id={oid} ORDER BY name"))
+            .await
+            .map_err(failed)?;
+        rows.iter().map(|r| Ok(ddl::Check { name: text(r, 0)?, definition: text(r, 1)?, state: state(r, 2)? })).collect()
+    }
+
     async fn foreign_keys(&mut self, oid: i32) -> Result<Vec<ddl::ForeignKey>, DetailError> {
         let rows = self
             .rows(&format!(
-                "SELECT fk.name,c.name,rs.name,ro.name,rc.name,fk.delete_referential_action_desc,fk.update_referential_action_desc
+                "SELECT fk.name,c.name,rs.name,ro.name,rc.name,fk.delete_referential_action_desc,fk.update_referential_action_desc,fk.is_disabled,fk.is_not_trusted,fk.is_not_for_replication
                  FROM sys.foreign_keys fk JOIN sys.foreign_key_columns fc ON fc.constraint_object_id=fk.object_id
                  JOIN sys.columns c ON c.object_id=fc.parent_object_id AND c.column_id=fc.parent_column_id
                  JOIN sys.objects ro ON ro.object_id=fc.referenced_object_id JOIN sys.schemas rs ON rs.schema_id=ro.schema_id
@@ -181,42 +371,73 @@ impl MsSession {
                     ref_columns: vec![ref_column],
                     on_delete: text(r, 5)?,
                     on_update: text(r, 6)?,
+                    state: state(r, 7)?,
                 }),
             }
         }
         Ok(keys)
     }
 
-    async fn indexes(&mut self, oid: i32, filter: &str) -> Result<Vec<ddl::Index>, DetailError> {
+    /// Clustered indexes come first, because a view's other indexes need its clustered index.
+    async fn indexes(&mut self, oid: i32, filter: &str, f: &Features) -> Result<Vec<ddl::Index>, DetailError> {
         let rows = self
             .rows(&format!(
-                "SELECT i.name,i.is_unique,i.type,i.filter_definition,c.name,ic.is_descending_key,ic.is_included_column
-                 FROM sys.indexes i JOIN sys.index_columns ic ON ic.object_id=i.object_id AND ic.index_id=i.index_id
+                "SELECT i.name,i.is_unique,i.type,i.filter_definition,c.name,ic.is_descending_key,ic.is_included_column,{},o.type,{}
+                 FROM sys.indexes i JOIN sys.objects o ON o.object_id=i.object_id
+                 {STORAGE_JOINS}
+                 JOIN sys.index_columns ic ON ic.object_id=i.object_id AND ic.index_id=i.index_id
                  JOIN sys.columns c ON c.object_id=ic.object_id AND c.column_id=ic.column_id
                  WHERE i.object_id={oid} AND i.index_id>0 AND i.is_hypothetical=0 AND {filter}
-                 ORDER BY i.name,ic.is_included_column,ic.key_ordinal,ic.index_column_id"
+                 ORDER BY CASE WHEN i.type IN (1,5) THEN 0 ELSE 1 END,i.name,ic.is_included_column,ic.key_ordinal,ic.index_column_id",
+                f.columnstore_order,
+                storage_columns(f)
             ))
             .await
             .map_err(failed)?;
-        let mut indexes: Vec<ddl::Index> = vec![];
+        let mut indexes: Vec<(ddl::Index, Vec<(u32, String)>)> = vec![];
         for r in &rows {
             let name = text(r, 0)?;
-            if !matches!(required(r, 2).map_err(failed)?, "1" | "2") {
-                return Err(refused(format!("Only clustered and nonclustered indexes can be scripted, and {name} is neither.")));
-            }
-            let index = match indexes.last_mut() {
-                Some(i) if i.name == name => i,
+            let (index, order) = match indexes.last_mut() {
+                Some((i, order)) if i.name == name => (i, order),
                 _ => {
-                    indexes.push(ddl::Index { name, unique: bit(r, 1)?, clustered: required(r, 2).map_err(failed)? == "1", keys: vec![], include: vec![], filter: r[3].clone() });
-                    indexes.last_mut().expect("pushed above")
+                    let index = ddl::Index {
+                        name,
+                        kind: number(r, 2).map_err(failed)?,
+                        unique: bit(r, 1)?,
+                        keys: vec![],
+                        include: vec![],
+                        order: vec![],
+                        filter: r[3].clone(),
+                        on_view: required(r, 8).map_err(failed)?.trim() == "V",
+                        storage: storage(r, 9)?,
+                    };
+                    indexes.push((index, vec![]));
+                    let (i, order) = indexes.last_mut().expect("pushed above");
+                    (i, order)
                 }
             };
+            let column = text(r, 4)?;
+            let ordinal: u32 = number(r, 7).map_err(failed)?;
+            if ordinal > 0 {
+                order.push((ordinal, column.clone()));
+            }
             if bit(r, 6)? {
-                index.include.push(text(r, 4)?);
+                index.include.push(column);
             } else {
-                index.keys.push((text(r, 4)?, bit(r, 5)?));
+                index.keys.push((column, bit(r, 5)?));
             }
         }
-        Ok(indexes)
+        Ok(indexes
+            .into_iter()
+            .map(|(mut index, mut order)| {
+                order.sort();
+                index.order = order.into_iter().map(|(_, c)| c).collect();
+                index
+            })
+            .collect())
     }
+}
+
+fn state(r: &[Option<String>], at: usize) -> Result<ddl::State, DetailError> {
+    Ok(ddl::State { disabled: bit(r, at)?, untrusted: bit(r, at + 1)?, not_for_replication: bit(r, at + 2)? })
 }
