@@ -133,7 +133,7 @@ async fn concurrent_sign_ins_share_one_az_call_and_its_failure() {
 async fn a_signed_out_cli_fails_as_auth_naming_az_login() {
     let h = Harness::with_az("signed-out").await;
     let Err(ConnectError::Auth { message }) = h.engine.test_connection(entra("127.0.0.1", refused_port())).await else { panic!("expected Auth") };
-    assert!(message.contains("Run `az login`") && message.contains("Please run 'az login'"), "{message}");
+    assert!(message.starts_with("Run `az login`, then try again.") && message.contains("Please run 'az login'"), "{message}");
     assert_eq!(h.calls(), 1);
 }
 
@@ -141,7 +141,7 @@ async fn a_signed_out_cli_fails_as_auth_naming_az_login() {
 async fn a_missing_cli_fails_as_auth_naming_the_install_and_az_login() {
     let h = Harness::without_az().await;
     let Err(ConnectError::Auth { message }) = h.engine.test_connection(entra("127.0.0.1", refused_port())).await else { panic!("expected Auth") };
-    assert!(message.contains("Install the Azure CLI, run `az login`"), "{message}");
+    assert!(message.starts_with("Install the Azure CLI, run `az login`, then try again."), "{message}");
 }
 
 #[tokio::test]

@@ -92,17 +92,17 @@ impl AzCli {
             .output();
         let output = tokio::time::timeout(AZ_TIMEOUT, run)
             .await
-            .map_err(|_| auth(format!("The Azure CLI did not answer within {} s. Run `az login`, then try again.", AZ_TIMEOUT.as_secs())))?
-            .map_err(|e| auth(format!("Could not run the Azure CLI at {}: {e}. Install the Azure CLI, run `az login`, then try again.", program.display())))?;
+            .map_err(|_| auth(format!("Run `az login`, then try again. The Azure CLI did not answer within {} s.", AZ_TIMEOUT.as_secs())))?
+            .map_err(|e| auth(format!("Install the Azure CLI, run `az login`, then try again. {} did not run: {e}", program.display())))?;
         if !output.status.success() {
             let said = String::from_utf8_lossy(&output.stderr).lines().map(str::trim).find(|l| !l.is_empty()).unwrap_or_default().chars().take(300).collect::<String>();
-            return Err(auth(format!("The Azure CLI has no token for Azure SQL. Run `az login`, then try again. az said: {said}")));
+            return Err(auth(format!("Run `az login`, then try again. The Azure CLI has no token for Azure SQL: {said}")));
         }
         parse(&output.stdout).map_err(|e| auth(format!("The Azure CLI's token could not be read: {e}")))
     }
 
     fn program(&self, path: &OsString) -> Result<PathBuf, ConnectError> {
-        let missing = |at: String| auth(format!("Microsoft Entra ID sign-in uses the Azure CLI, which was not found {at}. Install the Azure CLI, run `az login`, then try again."));
+        let missing = |at: String| auth(format!("Install the Azure CLI, run `az login`, then try again. Entra ID sign-in uses it, and it is not {at}."));
         if let Some(binary) = &self.binary {
             return if is_executable(binary) { Ok(binary.clone()) } else { Err(missing(format!("at {}", binary.display()))) };
         }
@@ -171,7 +171,7 @@ mod tests {
     async fn a_token_past_its_refresh_point_runs_az_again() {
         let cli = seeded("stale", SystemTime::now() - Duration::from_secs(1));
         let Err(ConnectError::Auth { message }) = cli.token().await else { panic!("az is not on an empty PATH") };
-        assert!(message.contains("Install the Azure CLI, run `az login`"), "{message}");
+        assert!(message.starts_with("Install the Azure CLI, run `az login`, then try again."), "{message}");
     }
 
     #[tokio::test]
