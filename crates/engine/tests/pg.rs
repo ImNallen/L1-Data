@@ -2431,6 +2431,27 @@ async fn a_begin_behind_any_comment_holds_its_writes_until_production_asks() {
 }
 
 #[tokio::test]
+async fn a_rollback_to_a_savepoint_keeps_the_writes_before_it_held() {
+    let mut h = Harness::start().await;
+    let oracle = h.oracle().await;
+    let table = unique("t_guard");
+    oracle.batch_execute(&format!("create table public.{table} (n int)")).await.unwrap();
+    let held = format!("insert into public.{table} values (1)");
+    for rollback_to in ["rollback to s", "rollback work to savepoint s", "ROLLBACK TRANSACTION TO s"] {
+        set_environment(&h, Some(Environment::Staging)).await;
+        let tab = h.sql_tab(TxnMode::AutoCommit).await;
+        let state = h.run_ok(tab, &format!("begin;\n{held};\nsavepoint s;\n{rollback_to}")).await;
+        assert_eq!(state.txn, TxnState::Active, "{rollback_to}");
+        set_environment(&h, Some(Environment::Production)).await;
+        let asked = asked_to_run(&h, tab, script("commit"), None).await;
+        assert_eq!(asked.holds.statements, [held.clone()], "{rollback_to}");
+        assert_eq!(count(&oracle, &table).await, 0, "{rollback_to}: nothing committed unasked");
+        h.engine.console_rollback(tab).await.unwrap();
+    }
+    oracle.batch_execute(&format!("drop table public.{table}")).await.unwrap();
+}
+
+#[tokio::test]
 async fn writes_stay_held_until_the_engine_sees_their_transaction_end() {
     let mut h = Harness::start().await;
     let oracle = h.oracle().await;

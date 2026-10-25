@@ -57,7 +57,7 @@ pub fn classify(stmt: &str) -> StmtKind {
         "BEGIN" | "START" => StmtKind::Begin,
         "COMMIT" | "END" if chains(&words) => StmtKind::CommitAndChain,
         "COMMIT" | "END" => StmtKind::Commit,
-        "ROLLBACK" | "ABORT" if w(1) == "TO" => StmtKind::RollbackTo,
+        "ROLLBACK" | "ABORT" if w(1) == "TO" || (matches!(w(1), "WORK" | "TRANSACTION") && w(2) == "TO") => StmtKind::RollbackTo,
         "ROLLBACK" | "ABORT" if chains(&words) => StmtKind::RollbackAndChain,
         "ROLLBACK" | "ABORT" => StmtKind::Rollback,
         "SAVEPOINT" => StmtKind::Savepoint,
@@ -148,6 +148,8 @@ mod tests {
         assert_eq!(classify("abort work"), StmtKind::Rollback);
         assert_eq!(classify("rollback to savepoint s1"), StmtKind::RollbackTo);
         assert_eq!(classify("ROLLBACK TO s1"), StmtKind::RollbackTo);
+        assert_eq!(classify("rollback work to savepoint s1"), StmtKind::RollbackTo);
+        assert_eq!(classify("ROLLBACK TRANSACTION TO s1"), StmtKind::RollbackTo);
         assert_eq!(classify("savepoint s1"), StmtKind::Savepoint);
         assert_eq!(classify("release savepoint s1"), StmtKind::Release);
         assert_eq!(classify("commit and chain"), StmtKind::CommitAndChain);
