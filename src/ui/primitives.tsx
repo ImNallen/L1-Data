@@ -193,16 +193,19 @@ export function ContextMenuItem({
   testId,
   danger,
   disabled,
+  keyShortcuts,
 }: {
   children: ReactNode;
   onSelect: () => void;
   testId?: string;
   danger?: boolean;
   disabled?: boolean;
+  keyShortcuts?: string;
 }) {
   return (
     <ContextMenu.Item
       data-testid={testId}
+      aria-keyshortcuts={keyShortcuts}
       onSelect={onSelect}
       disabled={disabled}
       className={cx(MENU_ITEM, "pr-3 data-[disabled]:opacity-40", danger ? "text-danger" : "text-fg")}

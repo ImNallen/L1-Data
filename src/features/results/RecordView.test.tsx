@@ -83,6 +83,17 @@ it("pages through rows with the arrow keys, loading each page through the row ca
   expect(position()).toBe("Row 300 of 600");
 });
 
+it.each(["shiftKey", "altKey", "metaKey", "ctrlKey"])("leaves an arrow with %s to the browser, so a text selection can grow", async (modifier) => {
+  serve();
+  const user = userEvent.setup();
+  render(<RecordView meta={meta} row={0} onClose={() => {}} />);
+  await vi.waitFor(() => expect(valueOf(0)).toBe("1"));
+  const event = new KeyboardEvent("keydown", { key: "ArrowDown", bubbles: true, cancelable: true, [modifier]: true });
+  screen.getByTestId("record-fields").dispatchEvent(event);
+  await user.keyboard("{ArrowDown}");
+  expect([position(), event.defaultPrevented]).toEqual(["Row 2 of 600", false]);
+});
+
 it("reads full values only for the row it stays on, and drops a read for a row it has left", async () => {
   let release: (value: string) => void = () => {};
   serve({ cutRows: [0, 1, 2], cell: (row) => (row === 1 ? new Promise((resolve) => (release = resolve)) : Promise.resolve(long(row))) });

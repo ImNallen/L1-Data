@@ -863,9 +863,11 @@ export function ResultGrid({
                 {linkLabel(link)}
               </ContextMenuItem>
             ))}
-            <ContextMenuItem testId="grid-menu-record" disabled={menuCell.row >= rowCount} onSelect={() => openRecord(menuCell.row)}>
+            <ContextMenuItem testId="grid-menu-record" keyShortcuts="Meta+I" disabled={menuCell.row >= rowCount} onSelect={() => openRecord(menuCell.row)}>
               View as record
-              <span className="ml-auto pl-6 text-ui-12 text-dim">⌘I</span>
+              <span aria-hidden className="ml-auto pl-6 text-ui-12 text-dim">
+                ⌘I
+              </span>
             </ContextMenuItem>
             {editable && (
               <>

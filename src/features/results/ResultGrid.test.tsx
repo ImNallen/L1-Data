@@ -287,12 +287,12 @@ it("follows a foreign key from a query result to the referenced row, and not fro
     />,
   );
   await user.pointer({ keys: "[MouseRight]", target: await screen.findByText("NULL") });
-  expect((await screen.findByTestId("grid-menu-follow-orders_customer_id_fkey")).hasAttribute("data-disabled")).toBe(true);
+  expect((await screen.findByTestId("grid-menu-follow-orders_customer_id_fkey")).getAttribute("aria-disabled")).toBe("true");
   await user.keyboard("{Escape}");
 
   await user.pointer({ keys: "[MouseRight]", target: screen.getByText("42") });
   const follow = await screen.findByTestId("grid-menu-follow-orders_customer_id_fkey");
-  expect([follow.textContent, follow.hasAttribute("data-disabled"), screen.queryByTestId("grid-menu-filter-eq")]).toEqual([
+  expect([follow.textContent, follow.hasAttribute("aria-disabled"), screen.queryByTestId("grid-menu-filter-eq")]).toEqual([
     "Go to referenced row in customers",
     false,
     null,
@@ -318,7 +318,9 @@ it("opens the focused row as a record with ⌘I or the menu", async () => {
 
   useWorkspace.getState().close();
   await user.pointer({ keys: "[MouseRight]", target: screen.getByText("42") });
-  await user.click(await screen.findByTestId("grid-menu-record"));
+  const item = await screen.findByRole("menuitem", { name: "View as record" });
+  expect(item.getAttribute("aria-keyshortcuts")).toBe("Meta+I");
+  await user.click(item);
   expect(useWorkspace.getState().overlay).toEqual({ kind: "record", meta, row: 0 });
 });
 
@@ -357,10 +359,10 @@ it("disables View as record on a staged new row", async () => {
   render(<ResultGrid meta={meta} done query={null} editing={EDITING} />);
   await screen.findByText("42");
   await user.pointer({ keys: "[MouseRight]", target: screen.getByTestId("grid-cell-1-1") });
-  expect((await screen.findByTestId("grid-menu-record")).hasAttribute("data-disabled")).toBe(true);
+  expect((await screen.findByTestId("grid-menu-record")).getAttribute("aria-disabled")).toBe("true");
   await user.keyboard("{Escape}");
   await user.pointer({ keys: "[MouseRight]", target: screen.getByText("42") });
-  expect((await screen.findByTestId("grid-menu-record")).hasAttribute("data-disabled")).toBe(false);
+  expect((await screen.findByTestId("grid-menu-record")).hasAttribute("aria-disabled")).toBe(false);
 });
 
 it("follows a cut key by its full value, and a staged key by the value the grid shows", async () => {

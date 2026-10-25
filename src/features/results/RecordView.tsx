@@ -58,7 +58,7 @@ export function RecordView({ meta, row: first, onClose }: { meta: ResultMeta; ro
   const move = (by: number) => setRow((r) => Math.max(0, Math.min(last, r + by)));
   const onKeyDown = (e: KeyboardEvent) => {
     const by = STEP[e.key];
-    if (by === undefined) return;
+    if (by === undefined || e.shiftKey || e.altKey || e.metaKey || e.ctrlKey) return;
     e.preventDefault();
     move(by);
   };
