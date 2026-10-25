@@ -15,6 +15,7 @@ struct Harness {
     observer: TabId,
     other_database: TabId,
     tables: Vec<String>,
+    databases: Vec<String>,
     _dir: tempfile::TempDir,
 }
 
@@ -59,7 +60,7 @@ impl Harness {
             tab: TabId(uuid::Uuid::new_v4()),
             observer: TabId(uuid::Uuid::new_v4()),
             other_database: TabId(uuid::Uuid::new_v4()),
-            tables: Vec::new(), _dir: dir,
+            tables: Vec::new(), databases: Vec::new(), _dir: dir,
         };
         h.configure(h.tab, "shop", if kind == DatabaseKind::Postgres { TxnMode::Manual } else { TxnMode::AutoCommit }).await;
         h.configure(h.observer, "shop", TxnMode::AutoCommit).await;
@@ -167,6 +168,42 @@ impl Harness {
     }
 
     #[cfg(feature = "mssql-tests")]
+    fn live_databases(&self) -> Vec<DatabaseState> {
+        let live = self.engine.boot().live.into_iter().find(|s| s.id == self.connection).unwrap();
+        let ConnStatus::Connected { instance, .. } = live.status else { panic!("Expected a connected instance") };
+        instance.databases
+    }
+
+    /// A database only this test writes to, so a lock it holds cannot stall another test's catalog.
+    #[cfg(feature = "mssql-tests")]
+    async fn disposable_database(&mut self) -> String {
+        let database = format!("l1_refresh_db_{}", uuid::Uuid::new_v4().simple());
+        self.databases.push(database.clone());
+        self.ok(self.observer, &format!("CREATE DATABASE [{database}]")).await;
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while !self.live_databases().iter().any(|d| d.name == database) {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        }).await.expect("The disposable database never reached the database list");
+        database
+    }
+
+    /// Reads the connection snapshot, as the UI does, so a Failed refresh is not reloaded here.
+    #[cfg(feature = "mssql-tests")]
+    async fn ready_after(&self, database: &str, before: u64) -> Arc<Catalog> {
+        let status = tokio::time::timeout(Duration::from_secs(4), async {
+            loop {
+                let status = self.live_databases().into_iter().find(|d| d.name == database).unwrap().catalog;
+                if matches!(status, CatalogStatus::Ready { version } if version > before) { return; }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        }).await;
+        let last = self.live_databases().into_iter().find(|d| d.name == database).unwrap().catalog;
+        assert!(status.is_ok(), "{database} catalog stayed at {last:?} after version {before}");
+        self.engine.catalog(self.db(database)).await.unwrap()
+    }
+
+    #[cfg(feature = "mssql-tests")]
     async fn waiting(&self, pid: i32) {
         tokio::time::timeout(Duration::from_secs(5), async {
             loop {
@@ -177,7 +214,15 @@ impl Harness {
     }
 
     async fn cleanup(self) {
-        self.engine.console_close(self.tab, true).await.unwrap();
+        for state in self.engine.boot().consoles {
+            if state.tab_id != self.observer && state.tab_id != self.other_database {
+                self.engine.console_close(state.tab_id, true).await.unwrap();
+            }
+        }
+        for database in &self.databases {
+            self.ok(self.observer, &format!("IF DB_ID(N'{database}') IS NOT NULL BEGIN ALTER DATABASE [{database}] SET SINGLE_USER WITH ROLLBACK IMMEDIATE; DROP DATABASE [{database}]; END")).await;
+            assert_eq!(self.scalar(&format!("SELECT COUNT_BIG(*) FROM sys.databases WHERE name=N'{database}'")).await, "0", "Disposable database {database} survived cleanup");
+        }
         for table in &self.tables {
             self.ok(self.observer, &format!("DROP TABLE IF EXISTS {}", self.qualified(table))).await;
             assert!(!self.table_exists(table).await, "Disposable table {table} survived cleanup");
@@ -282,6 +327,34 @@ async fn force_closing_running_native_batch_refreshes_its_committed_ddl() {
         assert!(h.table_exists(&table).await);
         h.engine.console_close(h.tab, true).await.unwrap();
         h.refreshed(before, &table).await;
+    }.boxed()).await;
+}
+
+#[cfg(feature = "mssql-tests")]
+#[tokio::test]
+async fn refresh_that_loses_a_deadlock_to_another_users_ddl_still_converges() {
+    check(DatabaseKind::SqlServer, |h| async move {
+        let database = h.disposable_database().await;
+        let writer = TabId(uuid::Uuid::new_v4());
+        h.configure(writer, &database, TxnMode::AutoCommit).await;
+        let before = h.engine.catalog(h.db(&database)).await.unwrap().version;
+        h.ok(writer, "CREATE TABLE dbo.dropped (id int)").await;
+        let shown = h.ready_after(&database, before).await.version;
+        let other = Harness::open(DatabaseKind::SqlServer).await;
+        other.configure(other.tab, &database, TxnMode::AutoCommit).await;
+        let state = other.ok(other.tab, "BEGIN TRANSACTION; TRUNCATE TABLE dbo.dropped").await;
+        let SessionState::Open { backend_pid } = state.session else { panic!("Expected native session") };
+        h.ok(writer, "CREATE TABLE dbo.created (id int)").await;
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while h.scalar(&format!("SELECT COUNT_BIG(*) FROM sys.dm_exec_requests WHERE blocking_session_id={backend_pid} AND wait_type='LCK_M_SCH_S'")).await == "0" {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        }).await.expect("Catalog refresh did not wait behind the other user's TRUNCATE");
+        other.ok(other.tab, "DROP TABLE dbo.dropped").await;
+        other.engine.console_commit(other.tab).await.unwrap();
+        other.cleanup().await;
+        let catalog = h.ready_after(&database, shown).await;
+        assert!(catalog.relation("dbo", "created").is_some() && catalog.relation("dbo", "dropped").is_none());
     }.boxed()).await;
 }
 
