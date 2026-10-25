@@ -37,6 +37,7 @@ pub(super) struct MsSession {
     cancel: watch::Sender<u64>,
     closed: watch::Sender<Option<String>>,
     metadata: bool,
+    script_features: Option<source::Features>,
 }
 
 #[derive(Clone)]
@@ -193,6 +194,7 @@ impl MsSession {
             cancel,
             closed,
             metadata: false,
+            script_features: None,
         })
     }
     pub(super) async fn open_metadata(p: &ConnectParams) -> Result<Self, ConnectError> {
@@ -307,6 +309,19 @@ impl MsSession {
             }
         }
         failed.map_or(Ok(rows), Err)
+    }
+    /// The rows of each result set a batch returns, in order.
+    pub(super) async fn results(&mut self, sql: &str) -> Result<Vec<Vec<Vec<Option<String>>>>, QueryError> {
+        let mut stream = self.query(sql);
+        let mut sets: Vec<Vec<Vec<Option<String>>>> = Vec::new();
+        while let Some(event) = stream.next().await {
+            match event? {
+                QueryEvent::Columns(_) => sets.push(Vec::new()),
+                QueryEvent::Row(row) => sets.last_mut().ok_or_else(|| error("SQL Server sent a row before its columns"))?.push(row),
+                _ => {}
+            }
+        }
+        Ok(sets)
     }
     pub(super) async fn batch(&mut self, sql: &str) -> Result<(), QueryError> {
         self.rows(sql).await.map(drop)

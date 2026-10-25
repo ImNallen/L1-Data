@@ -25,8 +25,8 @@ const FEATURES: &str = "SELECT COL_LENGTH('sys.indexes','optimize_for_sequential
     COL_LENGTH('sys.partitions','xml_compression'),COL_LENGTH('sys.tables','ledger_type'),COL_LENGTH('sys.tables','is_node'),COL_LENGTH('sys.tables','history_retention_period'),
     COL_LENGTH('sys.indexes','suppress_dup_key_messages'),COL_LENGTH('sys.sensitivity_classifications','label'),COL_LENGTH('sys.sensitivity_classifications','rank')";
 
-#[derive(Debug, PartialEq, Eq)]
-struct Features {
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct Features {
     sequential_key: &'static str,
     columnstore_order: &'static str,
     xml_compression: &'static str,
@@ -109,29 +109,45 @@ fn storage(r: &[Option<String>], at: usize) -> Result<ddl::Storage, DetailError>
     })
 }
 
+type Row = Vec<Option<String>>;
+
+/// The queries of one script, sent as one batch, because each round trip to the server costs
+/// more than the catalog query it carries.
+#[derive(Default)]
+struct Batch(Vec<String>);
+
+impl Batch {
+    fn add(&mut self, sql: String) -> usize {
+        self.0.push(sql);
+        self.0.len() - 1
+    }
+}
+
 impl MsSession {
     pub(in crate::session) async fn script(&mut self, target: &ScriptTarget) -> Result<ObjectScript, DetailError> {
+        let f = self.features().await?;
         match target {
-            ScriptTarget::Relation { oid } => {
-                let f = self.features().await?;
-                self.relation_script(native_object_id(*oid), &f).await
-            }
+            ScriptTarget::Relation { oid } => self.relation_script(native_object_id(*oid), &f).await,
             ScriptTarget::Routine { oid } => self.module_script(&format!("o.object_id={}", native_object_id(*oid))).await,
             ScriptTarget::Trigger { relation_oid, name } => {
                 self.module_script(&format!("o.parent_object_id={} AND o.type IN ('TR','TA') AND o.name={}", native_object_id(*relation_oid), quote_literal(name))).await
             }
             ScriptTarget::Index { relation_oid, name } => {
                 let oid = native_object_id(*relation_oid);
-                let f = self.features().await?;
-                let table = self.rows(&format!("SELECT s.name,o.name FROM sys.objects o JOIN sys.schemas s ON s.schema_id=o.schema_id WHERE o.object_id={oid}")).await.map_err(failed)?;
-                let table = table.first().ok_or(DetailError::Gone)?;
-                let table = ddl::qualified(&text(table, 0)?, &text(table, 1)?);
                 let literal = quote_literal(name);
-                let props = self.properties(&format!("((ep.class=7 AND ep.major_id={oid} AND i.name={literal}) OR (ep.class=1 AND c.parent_object_id={oid} AND c.name={literal}))")).await?;
-                if let Some(key) = self.keys(oid, &format!("k.name={literal}"), &f).await?.first() {
+                let mut batch = Batch::default();
+                let table = batch.add(format!("SELECT s.name,o.name FROM sys.objects o JOIN sys.schemas s ON s.schema_id=o.schema_id WHERE o.object_id={oid}"));
+                let props = batch.add(properties_sql(&format!("((ep.class=7 AND ep.major_id={oid} AND i.name={literal}) OR (ep.class=1 AND c.parent_object_id={oid} AND c.name={literal}))")));
+                let keys = batch.add(keys_sql(oid, &format!("k.name={literal}"), &f));
+                let indexes = batch.add(indexes_sql(oid, &format!("i.name={literal}"), &f));
+                let sets = self.run_batch(batch).await?;
+                let table = sets[table].first().ok_or(DetailError::Gone)?;
+                let table = ddl::qualified(&text(table, 0)?, &text(table, 1)?);
+                let props = properties(&sets[props])?;
+                if let Some(key) = keys_from(&sets[keys])?.first() {
                     return Ok(script::object_script(name, ddl::key_script(key, &table, &props)));
                 }
-                let indexes = self.indexes(oid, &format!("i.name={literal}"), &f).await?;
+                let indexes = indexes_from(&sets[indexes])?;
                 let index = indexes.first().ok_or(DetailError::Gone)?;
                 let ddl = ddl::index(index, &table, &props).ok_or_else(|| refused(format!("Only clustered, nonclustered, and columnstore indexes can be scripted, and {name} is none of these.")))?;
                 Ok(script::object_script(name, ddl))
@@ -139,25 +155,46 @@ impl MsSession {
         }
     }
 
+    /// The server's version cannot change while the session lives, so its features are read once.
     async fn features(&mut self) -> Result<Features, DetailError> {
+        if let Some(f) = self.script_features {
+            return Ok(f);
+        }
         let rows = self.rows(FEATURES).await.map_err(failed)?;
-        Ok(Features::from_lengths(rows.first().map_or(&[][..], Vec::as_slice)))
+        let f = Features::from_lengths(rows.first().map_or(&[][..], Vec::as_slice));
+        self.script_features = Some(f);
+        Ok(f)
+    }
+
+    async fn run_batch(&mut self, batch: Batch) -> Result<Vec<Vec<Row>>, DetailError> {
+        let sets = self.results(&batch.0.join(";\n")).await.map_err(failed)?;
+        if sets.len() != batch.0.len() {
+            return Err(refused(format!("SQL Server returned {} result sets for {} queries.", sets.len(), batch.0.len())));
+        }
+        Ok(sets)
     }
 
     async fn relation_script(&mut self, oid: i32, f: &Features) -> Result<ObjectScript, DetailError> {
-        let rows = self.rows(&relation_query(oid, f)).await.map_err(failed)?;
-        let r = rows.first().ok_or(DetailError::Gone)?;
+        let mut batch = Batch::default();
+        let relation = batch.add(relation_query(oid, f));
+        let view = batch.add(modules_sql(&format!("o.object_id={oid}")));
+        let heap = batch.add(format!("SELECT {} FROM sys.indexes i {STORAGE_JOINS} WHERE i.object_id={oid} AND i.index_id=0", storage_columns(f)));
+        let columns = batch.add(columns_sql(oid));
+        let keys = batch.add(keys_sql(oid, "1=1", f));
+        let foreign_keys = batch.add(foreign_keys_sql(oid));
+        let checks = batch.add(format!("SELECT name,definition,is_disabled,is_not_trusted,is_not_for_replication FROM sys.check_constraints WHERE parent_object_id={oid} ORDER BY name"));
+        let indexes = batch.add(indexes_sql(oid, "i.is_primary_key=0 AND i.is_unique_constraint=0", f));
+        let triggers = batch.add(modules_sql(&format!("o.parent_object_id={oid} AND o.type IN ('TR','TA')")));
+        let props = batch.add(properties_sql(&format!("o.object_id={oid}")));
+        let grants = batch.add(grants_sql(&oid.to_string()));
+        let classifications = f.classifications.map(|rank| batch.add(classifications_sql(oid, rank)));
+        let sets = self.run_batch(batch).await?;
+
+        let r = sets[relation].first().ok_or(DetailError::Gone)?;
         match required(r, 2).map_err(failed)?.trim() {
             "V" => {
-                let (_, module) = self.modules(&format!("o.object_id={oid}")).await?.into_iter().next().ok_or(DetailError::Gone)?;
-                let module = module.text()?;
-                let view = ddl::View {
-                    indexes: self.indexes(oid, "1=1", f).await?,
-                    triggers: self.triggers(oid).await?,
-                    properties: self.properties(&format!("o.object_id={oid}")).await?,
-                    grants: self.grants(oid).await?,
-                    module,
-                };
+                let (_, module) = modules(&sets[view])?.into_iter().next().ok_or(DetailError::Gone)?;
+                let view = ddl::View { indexes: indexes_from(&sets[indexes])?, triggers: triggers_from(&sets[triggers])?, properties: properties(&sets[props])?, grants: grants_from(&sets[grants])?, module: module.text()? };
                 Ok(script::object_script(&view.module.name, ddl::view(&view)))
             }
             "U" => {
@@ -165,7 +202,6 @@ impl MsSession {
                     return Err(refused(format!("{kind} cannot be scripted yet.")));
                 }
                 let name = text(r, 1)?;
-                let heap = self.rows(&format!("SELECT {} FROM sys.indexes i {STORAGE_JOINS} WHERE i.object_id={oid} AND i.index_id=0", storage_columns(f))).await.map_err(failed)?;
                 let versioning = match (&r[5], &r[6]) {
                     (Some(schema), Some(history)) => Some(ddl::Versioning {
                         schema: schema.clone(),
@@ -181,21 +217,21 @@ impl MsSession {
                     schema: text(r, 0)?,
                     name: name.clone(),
                     ansi_nulls: bit(r, 3)?,
-                    columns: self.columns(oid).await?,
-                    keys: self.keys(oid, "1=1", f).await?,
-                    foreign_keys: self.foreign_keys(oid).await?,
-                    checks: self.checks(oid).await?,
-                    indexes: self.indexes(oid, "i.is_primary_key=0 AND i.is_unique_constraint=0", f).await?,
-                    triggers: self.triggers(oid).await?,
-                    heap: heap.first().map(|r| storage(r, 0)).transpose()?,
+                    columns: columns_from(&sets[columns])?,
+                    keys: keys_from(&sets[keys])?,
+                    foreign_keys: foreign_keys_from(&sets[foreign_keys])?,
+                    checks: sets[checks].iter().map(|r| Ok(ddl::Check { name: text(r, 0)?, definition: text(r, 1)?, state: state(r, 2)? })).collect::<Result<_, DetailError>>()?,
+                    indexes: indexes_from(&sets[indexes])?,
+                    triggers: triggers_from(&sets[triggers])?,
+                    heap: sets[heap].first().map(|r| storage(r, 0)).transpose()?,
                     large_values: place(r, 11),
                     lock_escalation: text(r, 4)?,
                     period: r[13].clone().zip(r[14].clone()),
                     versioning,
                     history_of: r[9].clone().zip(r[10].clone()),
-                    properties: self.properties(&format!("o.object_id={oid}")).await?,
-                    classifications: self.classifications(oid, f).await?,
-                    grants: self.grants(oid).await?,
+                    properties: properties(&sets[props])?,
+                    classifications: classifications.map_or(Ok(vec![]), |at| classifications_from(&sets[at]))?,
+                    grants: grants_from(&sets[grants])?,
                 };
                 Ok(script::object_script(&name, ddl::table(&table)))
             }
@@ -204,313 +240,310 @@ impl MsSession {
     }
 
     async fn module_script(&mut self, filter: &str) -> Result<ObjectScript, DetailError> {
-        let (oid, module) = self.modules(filter).await?.into_iter().next().ok_or(DetailError::Gone)?;
+        let ids = format!("SELECT o.object_id FROM sys.objects o WHERE {filter}");
+        let mut batch = Batch::default();
+        let found = batch.add(modules_sql(filter));
+        let props = batch.add(properties_sql(&format!("ep.class IN (1,2) AND ep.major_id IN ({ids})")));
+        let grants = batch.add(grants_sql(&ids));
+        let sets = self.run_batch(batch).await?;
+        let (_, module) = modules(&sets[found])?.into_iter().next().ok_or(DetailError::Gone)?;
         let mut module = module.text()?;
-        module.properties = self.properties(&format!("ep.class IN (1,2) AND ep.major_id={oid}")).await?;
-        module.grants = self.grants(oid).await?;
+        module.properties = properties(&sets[props])?;
+        module.grants = grants_from(&sets[grants])?;
         Ok(script::object_script(&module.name, ddl::module(&module)))
     }
+}
 
-    async fn triggers(&mut self, oid: i32) -> Result<Vec<ddl::Trigger>, DetailError> {
-        let found = self.modules(&format!("o.parent_object_id={oid} AND o.type IN ('TR','TA')")).await?;
-        Ok(found
-            .into_iter()
-            .map(|(_, m)| match m {
-                Found::Text(module) => ddl::Trigger::Text(module),
-                Found::Clr { schema, name } => ddl::Trigger::Clr { schema, name },
-                Found::Unreadable { schema, name } => ddl::Trigger::Encrypted { schema, name },
-            })
-            .collect())
-    }
+fn modules_sql(filter: &str) -> String {
+    format!(
+        "SELECT s.name,o.name,OBJECT_DEFINITION(o.object_id),m.uses_ansi_nulls,m.uses_quoted_identifier,tr.is_disabled,ps.name,po.name,o.object_id,o.type
+         FROM sys.objects o JOIN sys.schemas s ON s.schema_id=o.schema_id
+         LEFT JOIN sys.sql_modules m ON m.object_id=o.object_id
+         LEFT JOIN sys.triggers tr ON tr.object_id=o.object_id
+         LEFT JOIN sys.objects po ON po.object_id=o.parent_object_id LEFT JOIN sys.schemas ps ON ps.schema_id=po.schema_id
+         WHERE {filter} ORDER BY o.name"
+    )
+}
 
-    async fn modules(&mut self, filter: &str) -> Result<Vec<(i32, Found)>, DetailError> {
-        let rows = self
-            .rows(&format!(
-                "SELECT s.name,o.name,OBJECT_DEFINITION(o.object_id),m.uses_ansi_nulls,m.uses_quoted_identifier,tr.is_disabled,ps.name,po.name,o.object_id,o.type
-                 FROM sys.objects o JOIN sys.schemas s ON s.schema_id=o.schema_id
-                 LEFT JOIN sys.sql_modules m ON m.object_id=o.object_id
-                 LEFT JOIN sys.triggers tr ON tr.object_id=o.object_id
-                 LEFT JOIN sys.objects po ON po.object_id=o.parent_object_id LEFT JOIN sys.schemas ps ON ps.schema_id=po.schema_id
-                 WHERE {filter} ORDER BY o.name"
-            ))
-            .await
-            .map_err(failed)?;
-        rows.iter()
-            .map(|r| {
-                let (schema, name) = (text(r, 0)?, text(r, 1)?);
-                let oid = number(r, 8).map_err(failed)?;
-                if matches!(required(r, 9).map_err(failed)?.trim(), "TA" | "PC" | "FS" | "FT") {
-                    return Ok((oid, Found::Clr { schema, name }));
-                }
-                let Some(definition) = r[2].clone() else {
-                    return Ok((oid, Found::Unreadable { schema, name }));
-                };
-                let disabled_on = match r[5].as_deref() {
-                    Some("1") => Some(ddl::qualified(&text(r, 6)?, &text(r, 7)?)),
-                    _ => None,
-                };
-                let module = ddl::Module { schema, name, definition, ansi_nulls: bit(r, 3)?, quoted_identifier: bit(r, 4)?, disabled_on, properties: vec![], grants: vec![] };
-                Ok((oid, Found::Text(module)))
-            })
-            .collect()
-    }
-
-    async fn properties(&mut self, filter: &str) -> Result<Vec<ddl::Property>, DetailError> {
-        let rows = self
-            .rows(&format!(
-                "SELECT ep.name,CONVERT(nvarchar(max),ep.value),CONVERT(sysname,SQL_VARIANT_PROPERTY(ep.value,'BaseType')),s.name,
-                    CASE o.type WHEN 'U' THEN 'TABLE' WHEN 'V' THEN 'VIEW' WHEN 'P' THEN 'PROCEDURE' WHEN 'PC' THEN 'PROCEDURE' ELSE 'FUNCTION' END,o.name,
-                    CASE WHEN ep.class=7 THEN 'INDEX' WHEN ep.class=2 THEN 'PARAMETER' WHEN ep.minor_id>0 THEN 'COLUMN' WHEN c.type='TR' THEN 'TRIGGER' WHEN c.object_id IS NOT NULL THEN 'CONSTRAINT' END,
-                    CASE WHEN ep.class=7 THEN i.name WHEN ep.class=2 THEN pa.name WHEN ep.minor_id>0 THEN col.name ELSE c.name END
-                 FROM sys.extended_properties ep
-                 LEFT JOIN sys.objects c ON ep.class=1 AND ep.minor_id=0 AND c.object_id=ep.major_id AND c.parent_object_id<>0
-                 JOIN sys.objects o ON o.object_id=COALESCE(c.parent_object_id,ep.major_id)
-                 JOIN sys.schemas s ON s.schema_id=o.schema_id
-                 LEFT JOIN sys.indexes i ON ep.class=7 AND i.object_id=ep.major_id AND i.index_id=ep.minor_id
-                 LEFT JOIN sys.parameters pa ON ep.class=2 AND pa.object_id=ep.major_id AND pa.parameter_id=ep.minor_id
-                 LEFT JOIN sys.columns col ON ep.class=1 AND ep.minor_id>0 AND col.object_id=ep.major_id AND col.column_id=ep.minor_id
-                 WHERE ep.class IN (1,2,7) AND {filter}
-                 ORDER BY 7,8,1"
-            ))
-            .await
-            .map_err(failed)?;
-        rows.iter()
-            .map(|r| {
-                let mut levels = vec![("SCHEMA".to_owned(), text(r, 3)?), (text(r, 4)?, text(r, 5)?)];
-                if let Some(level) = r[6].clone() {
-                    levels.push((level, text(r, 7)?));
-                }
-                Ok(ddl::Property { name: text(r, 0)?, value: r[1].clone(), base_type: r[2].clone(), levels })
-            })
-            .collect()
-    }
-
-    async fn grants(&mut self, oid: i32) -> Result<Vec<Grant>, DetailError> {
-        let rows = self
-            .rows(&format!(
-                "SELECT p.permission_name,COL_NAME(p.major_id,p.minor_id),dp.name,p.state
-                 FROM sys.database_permissions p JOIN sys.database_principals dp ON dp.principal_id=p.grantee_principal_id
-                 WHERE p.class=1 AND p.major_id={oid} ORDER BY dp.name,p.permission_name,p.minor_id"
-            ))
-            .await
-            .map_err(failed)?;
-        rows.iter()
-            .map(|r| {
-                let change = match required(r, 3).map_err(failed)?.trim() {
-                    "W" => Change::GrantedWithGrantOption,
-                    "D" => Change::Denied,
-                    "R" => Change::Revoked,
-                    _ => Change::Granted,
-                };
-                Ok(Grant { privilege: text(r, 0)?, column: r[1].as_deref().map(quote_ident), grantee: quote_ident(&text(r, 2)?), change })
-            })
-            .collect()
-    }
-
-    async fn classifications(&mut self, oid: i32, f: &Features) -> Result<Vec<ddl::Classification>, DetailError> {
-        let Some(rank) = f.classifications else { return Ok(vec![]) };
-        let rows = self
-            .rows(&format!(
-                "SELECT c.name,sc.label,CONVERT(nvarchar(36),sc.label_id),sc.information_type,CONVERT(nvarchar(36),sc.information_type_id),{rank}
-                 FROM sys.sensitivity_classifications sc JOIN sys.columns c ON c.object_id=sc.major_id AND c.column_id=sc.minor_id
-                 WHERE sc.class=1 AND sc.major_id={oid} ORDER BY c.column_id"
-            ))
-            .await
-            .map_err(failed)?;
-        rows.iter()
-            .map(|r| Ok(ddl::Classification { column: text(r, 0)?, label: r[1].clone(), label_id: r[2].clone(), information_type: r[3].clone(), information_type_id: r[4].clone(), rank: r[5].clone() }))
-            .collect()
-    }
-
-    async fn columns(&mut self, oid: i32) -> Result<Vec<ddl::Column>, DetailError> {
-        let rows = self
-            .rows(&format!(
-                "SELECT c.name,COALESCE(t.name,ut.name),ut.is_user_defined,SCHEMA_NAME(ut.schema_id),ut.name,c.max_length,c.precision,c.scale,c.is_nullable,
-                    CASE WHEN c.collation_name<>CONVERT(sysname,DATABASEPROPERTYEX(DB_NAME(),'Collation')) THEN c.collation_name END,
-                    CONVERT(nvarchar(40),ic.seed_value),CONVERT(nvarchar(40),ic.increment_value),cc.definition,cc.is_persisted,dc.name,dc.definition,
-                    COALESCE(ic.is_not_for_replication,0),c.is_sparse,c.is_column_set,c.is_rowguidcol,mc.masking_function,c.generated_always_type,c.is_hidden,
-                    CASE WHEN c.is_ansi_padded=0 AND t.name IN ('char','varchar','binary','varbinary') THEN 1 ELSE 0 END,c.is_filestream,
-                    CASE WHEN c.encryption_type IS NULL THEN 0 ELSE 1 END,SCHEMA_NAME(xsc.schema_id),xsc.name,c.is_xml_document
-                 FROM sys.columns c
-                 JOIN sys.types ut ON ut.user_type_id=c.user_type_id
-                 LEFT JOIN sys.types t ON t.user_type_id=c.system_type_id AND t.system_type_id=t.user_type_id
-                 LEFT JOIN sys.identity_columns ic ON ic.object_id=c.object_id AND ic.column_id=c.column_id
-                 LEFT JOIN sys.computed_columns cc ON cc.object_id=c.object_id AND cc.column_id=c.column_id
-                 LEFT JOIN sys.default_constraints dc ON dc.object_id=c.default_object_id
-                 LEFT JOIN sys.masked_columns mc ON mc.object_id=c.object_id AND mc.column_id=c.column_id
-                 LEFT JOIN sys.xml_schema_collections xsc ON xsc.xml_collection_id=c.xml_collection_id AND c.xml_collection_id<>0
-                 WHERE c.object_id={oid} ORDER BY c.column_id"
-            ))
-            .await
-            .map_err(failed)?;
-        rows.iter()
-            .map(|r| {
-                let type_name = match (&r[26], &r[27]) {
-                    (Some(schema), Some(collection)) => format!("xml({} {})", if bit(r, 28)? { "DOCUMENT" } else { "CONTENT" }, ddl::qualified(schema, collection)),
-                    _ if bit(r, 2)? => ddl::qualified(&text(r, 3)?, &text(r, 4)?),
-                    _ => display(required(r, 1).map_err(failed)?, number(r, 5).map_err(failed)?, number(r, 6).map_err(failed)?, number(r, 7).map_err(failed)?),
-                };
-                let computed = match &r[12] {
-                    Some(definition) => Some(ddl::Computed { definition: definition.clone(), persisted: bit(r, 13)? }),
-                    None => None,
-                };
-                Ok(ddl::Column {
-                    name: text(r, 0)?,
-                    type_name,
-                    collation: r[9].clone(),
-                    nullable: bit(r, 8)?,
-                    identity: r[10].clone().zip(r[11].clone()),
-                    not_for_replication: bit(r, 16)?,
-                    computed,
-                    default: r[14].clone().zip(r[15].clone()),
-                    sparse: bit(r, 17)?,
-                    column_set: bit(r, 18)?,
-                    rowguidcol: bit(r, 19)?,
-                    masked: r[20].clone(),
-                    generated: number(r, 21).map_err(failed)?,
-                    hidden: bit(r, 22)?,
-                    ansi_padding_off: bit(r, 23)?,
-                    filestream: bit(r, 24)?,
-                    encrypted: bit(r, 25)?,
-                })
-            })
-            .collect()
-    }
-
-    async fn keys(&mut self, oid: i32, filter: &str, f: &Features) -> Result<Vec<ddl::Key>, DetailError> {
-        let rows = self
-            .rows(&format!(
-                "SELECT k.name,k.type,i.type,c.name,ic.is_descending_key,{} FROM sys.key_constraints k
-                 JOIN sys.indexes i ON i.object_id=k.parent_object_id AND i.index_id=k.unique_index_id
-                 {STORAGE_JOINS}
-                 JOIN sys.index_columns ic ON ic.object_id=i.object_id AND ic.index_id=i.index_id
-                 JOIN sys.columns c ON c.object_id=ic.object_id AND c.column_id=ic.column_id
-                 WHERE k.parent_object_id={oid} AND ic.key_ordinal>0 AND {filter}
-                 ORDER BY CASE k.type WHEN 'PK' THEN 0 ELSE 1 END,k.name,ic.key_ordinal",
-                storage_columns(f)
-            ))
-            .await
-            .map_err(failed)?;
-        let mut keys: Vec<ddl::Key> = vec![];
-        for r in &rows {
-            let name = text(r, 0)?;
-            let column = (text(r, 3)?, bit(r, 4)?);
-            match keys.last_mut() {
-                Some(k) if k.name == name => k.columns.push(column),
-                _ => keys.push(ddl::Key {
-                    name,
-                    primary: required(r, 1).map_err(failed)?.trim() == "PK",
-                    clustered: required(r, 2).map_err(failed)? == "1",
-                    columns: vec![column],
-                    storage: storage(r, 5)?,
-                }),
+fn modules(rows: &[Row]) -> Result<Vec<(i32, Found)>, DetailError> {
+    rows.iter()
+        .map(|r| {
+            let (schema, name) = (text(r, 0)?, text(r, 1)?);
+            let oid = number(r, 8).map_err(failed)?;
+            if matches!(required(r, 9).map_err(failed)?.trim(), "TA" | "PC" | "FS" | "FT") {
+                return Ok((oid, Found::Clr { schema, name }));
             }
-        }
-        Ok(keys)
-    }
-
-    async fn checks(&mut self, oid: i32) -> Result<Vec<ddl::Check>, DetailError> {
-        let rows = self
-            .rows(&format!("SELECT name,definition,is_disabled,is_not_trusted,is_not_for_replication FROM sys.check_constraints WHERE parent_object_id={oid} ORDER BY name"))
-            .await
-            .map_err(failed)?;
-        rows.iter().map(|r| Ok(ddl::Check { name: text(r, 0)?, definition: text(r, 1)?, state: state(r, 2)? })).collect()
-    }
-
-    async fn foreign_keys(&mut self, oid: i32) -> Result<Vec<ddl::ForeignKey>, DetailError> {
-        let rows = self
-            .rows(&format!(
-                "SELECT fk.name,c.name,rs.name,ro.name,rc.name,fk.delete_referential_action_desc,fk.update_referential_action_desc,fk.is_disabled,fk.is_not_trusted,fk.is_not_for_replication
-                 FROM sys.foreign_keys fk JOIN sys.foreign_key_columns fc ON fc.constraint_object_id=fk.object_id
-                 JOIN sys.columns c ON c.object_id=fc.parent_object_id AND c.column_id=fc.parent_column_id
-                 JOIN sys.objects ro ON ro.object_id=fc.referenced_object_id JOIN sys.schemas rs ON rs.schema_id=ro.schema_id
-                 JOIN sys.columns rc ON rc.object_id=fc.referenced_object_id AND rc.column_id=fc.referenced_column_id
-                 WHERE fk.parent_object_id={oid} ORDER BY fk.name,fc.constraint_column_id"
-            ))
-            .await
-            .map_err(failed)?;
-        let mut keys: Vec<ddl::ForeignKey> = vec![];
-        for r in &rows {
-            let name = text(r, 0)?;
-            let (column, ref_column) = (text(r, 1)?, text(r, 4)?);
-            match keys.last_mut() {
-                Some(k) if k.name == name => {
-                    k.columns.push(column);
-                    k.ref_columns.push(ref_column);
-                }
-                _ => keys.push(ddl::ForeignKey {
-                    name,
-                    columns: vec![column],
-                    ref_schema: text(r, 2)?,
-                    ref_table: text(r, 3)?,
-                    ref_columns: vec![ref_column],
-                    on_delete: text(r, 5)?,
-                    on_update: text(r, 6)?,
-                    state: state(r, 7)?,
-                }),
-            }
-        }
-        Ok(keys)
-    }
-
-    /// Clustered indexes come first, because a view's other indexes need its clustered index.
-    async fn indexes(&mut self, oid: i32, filter: &str, f: &Features) -> Result<Vec<ddl::Index>, DetailError> {
-        let rows = self
-            .rows(&format!(
-                "SELECT i.name,i.is_unique,i.type,i.filter_definition,c.name,ic.is_descending_key,ic.is_included_column,{},o.type,{}
-                 FROM sys.indexes i JOIN sys.objects o ON o.object_id=i.object_id
-                 {STORAGE_JOINS}
-                 JOIN sys.index_columns ic ON ic.object_id=i.object_id AND ic.index_id=i.index_id
-                 JOIN sys.columns c ON c.object_id=ic.object_id AND c.column_id=ic.column_id
-                 WHERE i.object_id={oid} AND i.index_id>0 AND i.is_hypothetical=0 AND {filter}
-                 ORDER BY CASE WHEN i.type IN (1,5) THEN 0 ELSE 1 END,i.name,ic.is_included_column,ic.key_ordinal,ic.index_column_id",
-                f.columnstore_order,
-                storage_columns(f)
-            ))
-            .await
-            .map_err(failed)?;
-        let mut indexes: Vec<(ddl::Index, Vec<(u32, String)>)> = vec![];
-        for r in &rows {
-            let name = text(r, 0)?;
-            let (index, order) = match indexes.last_mut() {
-                Some((i, order)) if i.name == name => (i, order),
-                _ => {
-                    let index = ddl::Index {
-                        name,
-                        kind: number(r, 2).map_err(failed)?,
-                        unique: bit(r, 1)?,
-                        keys: vec![],
-                        include: vec![],
-                        order: vec![],
-                        filter: r[3].clone(),
-                        on_view: required(r, 8).map_err(failed)?.trim() == "V",
-                        storage: storage(r, 9)?,
-                    };
-                    indexes.push((index, vec![]));
-                    let (i, order) = indexes.last_mut().expect("pushed above");
-                    (i, order)
-                }
+            let Some(definition) = r[2].clone() else {
+                return Ok((oid, Found::Unreadable { schema, name }));
             };
-            let column = text(r, 4)?;
-            let ordinal: u32 = number(r, 7).map_err(failed)?;
-            if ordinal > 0 {
-                order.push((ordinal, column.clone()));
+            let disabled_on = match r[5].as_deref() {
+                Some("1") => Some(ddl::qualified(&text(r, 6)?, &text(r, 7)?)),
+                _ => None,
+            };
+            let module = ddl::Module { schema, name, definition, ansi_nulls: bit(r, 3)?, quoted_identifier: bit(r, 4)?, disabled_on, properties: vec![], grants: vec![] };
+            Ok((oid, Found::Text(module)))
+        })
+        .collect()
+}
+
+fn triggers_from(rows: &[Row]) -> Result<Vec<ddl::Trigger>, DetailError> {
+    Ok(modules(rows)?
+        .into_iter()
+        .map(|(_, m)| match m {
+            Found::Text(module) => ddl::Trigger::Text(module),
+            Found::Clr { schema, name } => ddl::Trigger::Clr { schema, name },
+            Found::Unreadable { schema, name } => ddl::Trigger::Encrypted { schema, name },
+        })
+        .collect())
+}
+
+fn properties_sql(filter: &str) -> String {
+    format!(
+        "SELECT ep.name,CONVERT(nvarchar(max),ep.value),CONVERT(sysname,SQL_VARIANT_PROPERTY(ep.value,'BaseType')),s.name,
+            CASE o.type WHEN 'U' THEN 'TABLE' WHEN 'V' THEN 'VIEW' WHEN 'P' THEN 'PROCEDURE' WHEN 'PC' THEN 'PROCEDURE' ELSE 'FUNCTION' END,o.name,
+            CASE WHEN ep.class=7 THEN 'INDEX' WHEN ep.class=2 THEN 'PARAMETER' WHEN ep.minor_id>0 THEN 'COLUMN' WHEN c.type='TR' THEN 'TRIGGER' WHEN c.object_id IS NOT NULL THEN 'CONSTRAINT' END,
+            CASE WHEN ep.class=7 THEN i.name WHEN ep.class=2 THEN pa.name WHEN ep.minor_id>0 THEN col.name ELSE c.name END
+         FROM sys.extended_properties ep
+         LEFT JOIN sys.objects c ON ep.class=1 AND ep.minor_id=0 AND c.object_id=ep.major_id AND c.parent_object_id<>0
+         JOIN sys.objects o ON o.object_id=COALESCE(c.parent_object_id,ep.major_id)
+         JOIN sys.schemas s ON s.schema_id=o.schema_id
+         LEFT JOIN sys.indexes i ON ep.class=7 AND i.object_id=ep.major_id AND i.index_id=ep.minor_id
+         LEFT JOIN sys.parameters pa ON ep.class=2 AND pa.object_id=ep.major_id AND pa.parameter_id=ep.minor_id
+         LEFT JOIN sys.columns col ON ep.class=1 AND ep.minor_id>0 AND col.object_id=ep.major_id AND col.column_id=ep.minor_id
+         WHERE ep.class IN (1,2,7) AND {filter}
+         ORDER BY 7,8,1"
+    )
+}
+
+fn properties(rows: &[Row]) -> Result<Vec<ddl::Property>, DetailError> {
+    rows.iter()
+        .map(|r| {
+            let mut levels = vec![("SCHEMA".to_owned(), text(r, 3)?), (text(r, 4)?, text(r, 5)?)];
+            if let Some(level) = r[6].clone() {
+                levels.push((level, text(r, 7)?));
             }
-            if bit(r, 6)? {
-                index.include.push(column);
-            } else {
-                index.keys.push((column, bit(r, 5)?));
-            }
-        }
-        Ok(indexes
-            .into_iter()
-            .map(|(mut index, mut order)| {
-                order.sort();
-                index.order = order.into_iter().map(|(_, c)| c).collect();
-                index
+            Ok(ddl::Property { name: text(r, 0)?, value: r[1].clone(), base_type: r[2].clone(), levels })
+        })
+        .collect()
+}
+
+/// `ids` is an object ID or a query of them.
+fn grants_sql(ids: &str) -> String {
+    format!(
+        "SELECT p.permission_name,COL_NAME(p.major_id,p.minor_id),dp.name,p.state
+         FROM sys.database_permissions p JOIN sys.database_principals dp ON dp.principal_id=p.grantee_principal_id
+         WHERE p.class=1 AND p.major_id IN ({ids}) ORDER BY dp.name,p.permission_name,p.minor_id"
+    )
+}
+
+fn grants_from(rows: &[Row]) -> Result<Vec<Grant>, DetailError> {
+    rows.iter()
+        .map(|r| {
+            let change = match required(r, 3).map_err(failed)?.trim() {
+                "W" => Change::GrantedWithGrantOption,
+                "D" => Change::Denied,
+                "R" => Change::Revoked,
+                _ => Change::Granted,
+            };
+            Ok(Grant { privilege: text(r, 0)?, column: r[1].as_deref().map(quote_ident), grantee: quote_ident(&text(r, 2)?), change })
+        })
+        .collect()
+}
+
+fn classifications_sql(oid: i32, rank: &str) -> String {
+    format!(
+        "SELECT c.name,sc.label,CONVERT(nvarchar(36),sc.label_id),sc.information_type,CONVERT(nvarchar(36),sc.information_type_id),{rank}
+         FROM sys.sensitivity_classifications sc JOIN sys.columns c ON c.object_id=sc.major_id AND c.column_id=sc.minor_id
+         WHERE sc.class=1 AND sc.major_id={oid} ORDER BY c.column_id"
+    )
+}
+
+fn classifications_from(rows: &[Row]) -> Result<Vec<ddl::Classification>, DetailError> {
+    rows.iter()
+        .map(|r| Ok(ddl::Classification { column: text(r, 0)?, label: r[1].clone(), label_id: r[2].clone(), information_type: r[3].clone(), information_type_id: r[4].clone(), rank: r[5].clone() }))
+        .collect()
+}
+
+fn columns_sql(oid: i32) -> String {
+    format!(
+        "SELECT c.name,COALESCE(t.name,ut.name),ut.is_user_defined,SCHEMA_NAME(ut.schema_id),ut.name,c.max_length,c.precision,c.scale,c.is_nullable,
+            CASE WHEN c.collation_name<>CONVERT(sysname,DATABASEPROPERTYEX(DB_NAME(),'Collation')) THEN c.collation_name END,
+            CONVERT(nvarchar(40),ic.seed_value),CONVERT(nvarchar(40),ic.increment_value),cc.definition,cc.is_persisted,dc.name,dc.definition,
+            COALESCE(ic.is_not_for_replication,0),c.is_sparse,c.is_column_set,c.is_rowguidcol,mc.masking_function,c.generated_always_type,c.is_hidden,
+            CASE WHEN c.is_ansi_padded=0 AND t.name IN ('char','varchar','binary','varbinary') THEN 1 ELSE 0 END,c.is_filestream,
+            CASE WHEN c.encryption_type IS NULL THEN 0 ELSE 1 END,SCHEMA_NAME(xsc.schema_id),xsc.name,c.is_xml_document
+         FROM sys.columns c
+         JOIN sys.types ut ON ut.user_type_id=c.user_type_id
+         LEFT JOIN sys.types t ON t.user_type_id=c.system_type_id AND t.system_type_id=t.user_type_id
+         LEFT JOIN sys.identity_columns ic ON ic.object_id=c.object_id AND ic.column_id=c.column_id
+         LEFT JOIN sys.computed_columns cc ON cc.object_id=c.object_id AND cc.column_id=c.column_id
+         LEFT JOIN sys.default_constraints dc ON dc.object_id=c.default_object_id
+         LEFT JOIN sys.masked_columns mc ON mc.object_id=c.object_id AND mc.column_id=c.column_id
+         LEFT JOIN sys.xml_schema_collections xsc ON xsc.xml_collection_id=c.xml_collection_id AND c.xml_collection_id<>0
+         WHERE c.object_id={oid} ORDER BY c.column_id"
+    )
+}
+
+fn columns_from(rows: &[Row]) -> Result<Vec<ddl::Column>, DetailError> {
+    rows.iter()
+        .map(|r| {
+            let type_name = match (&r[26], &r[27]) {
+                (Some(schema), Some(collection)) => format!("xml({} {})", if bit(r, 28)? { "DOCUMENT" } else { "CONTENT" }, ddl::qualified(schema, collection)),
+                _ if bit(r, 2)? => ddl::qualified(&text(r, 3)?, &text(r, 4)?),
+                _ => display(required(r, 1).map_err(failed)?, number(r, 5).map_err(failed)?, number(r, 6).map_err(failed)?, number(r, 7).map_err(failed)?),
+            };
+            let computed = match &r[12] {
+                Some(definition) => Some(ddl::Computed { definition: definition.clone(), persisted: bit(r, 13)? }),
+                None => None,
+            };
+            Ok(ddl::Column {
+                name: text(r, 0)?,
+                type_name,
+                collation: r[9].clone(),
+                nullable: bit(r, 8)?,
+                identity: r[10].clone().zip(r[11].clone()),
+                not_for_replication: bit(r, 16)?,
+                computed,
+                default: r[14].clone().zip(r[15].clone()),
+                sparse: bit(r, 17)?,
+                column_set: bit(r, 18)?,
+                rowguidcol: bit(r, 19)?,
+                masked: r[20].clone(),
+                generated: number(r, 21).map_err(failed)?,
+                hidden: bit(r, 22)?,
+                ansi_padding_off: bit(r, 23)?,
+                filestream: bit(r, 24)?,
+                encrypted: bit(r, 25)?,
             })
-            .collect())
+        })
+        .collect()
+}
+
+fn keys_sql(oid: i32, filter: &str, f: &Features) -> String {
+    format!(
+        "SELECT k.name,k.type,i.type,c.name,ic.is_descending_key,{} FROM sys.key_constraints k
+         JOIN sys.indexes i ON i.object_id=k.parent_object_id AND i.index_id=k.unique_index_id
+         {STORAGE_JOINS}
+         JOIN sys.index_columns ic ON ic.object_id=i.object_id AND ic.index_id=i.index_id
+         JOIN sys.columns c ON c.object_id=ic.object_id AND c.column_id=ic.column_id
+         WHERE k.parent_object_id={oid} AND ic.key_ordinal>0 AND {filter}
+         ORDER BY CASE k.type WHEN 'PK' THEN 0 ELSE 1 END,k.name,ic.key_ordinal",
+        storage_columns(f)
+    )
+}
+
+fn keys_from(rows: &[Row]) -> Result<Vec<ddl::Key>, DetailError> {
+    let mut keys: Vec<ddl::Key> = vec![];
+    for r in rows {
+        let name = text(r, 0)?;
+        let column = (text(r, 3)?, bit(r, 4)?);
+        match keys.last_mut() {
+            Some(k) if k.name == name => k.columns.push(column),
+            _ => keys.push(ddl::Key {
+                name,
+                primary: required(r, 1).map_err(failed)?.trim() == "PK",
+                clustered: required(r, 2).map_err(failed)? == "1",
+                columns: vec![column],
+                storage: storage(r, 5)?,
+            }),
+        }
     }
+    Ok(keys)
+}
+
+fn foreign_keys_sql(oid: i32) -> String {
+    format!(
+        "SELECT fk.name,c.name,rs.name,ro.name,rc.name,fk.delete_referential_action_desc,fk.update_referential_action_desc,fk.is_disabled,fk.is_not_trusted,fk.is_not_for_replication
+         FROM sys.foreign_keys fk JOIN sys.foreign_key_columns fc ON fc.constraint_object_id=fk.object_id
+         JOIN sys.columns c ON c.object_id=fc.parent_object_id AND c.column_id=fc.parent_column_id
+         JOIN sys.objects ro ON ro.object_id=fc.referenced_object_id JOIN sys.schemas rs ON rs.schema_id=ro.schema_id
+         JOIN sys.columns rc ON rc.object_id=fc.referenced_object_id AND rc.column_id=fc.referenced_column_id
+         WHERE fk.parent_object_id={oid} ORDER BY fk.name,fc.constraint_column_id"
+    )
+}
+
+fn foreign_keys_from(rows: &[Row]) -> Result<Vec<ddl::ForeignKey>, DetailError> {
+    let mut keys: Vec<ddl::ForeignKey> = vec![];
+    for r in rows {
+        let name = text(r, 0)?;
+        let (column, ref_column) = (text(r, 1)?, text(r, 4)?);
+        match keys.last_mut() {
+            Some(k) if k.name == name => {
+                k.columns.push(column);
+                k.ref_columns.push(ref_column);
+            }
+            _ => keys.push(ddl::ForeignKey {
+                name,
+                columns: vec![column],
+                ref_schema: text(r, 2)?,
+                ref_table: text(r, 3)?,
+                ref_columns: vec![ref_column],
+                on_delete: text(r, 5)?,
+                on_update: text(r, 6)?,
+                state: state(r, 7)?,
+            }),
+        }
+    }
+    Ok(keys)
+}
+
+/// Clustered indexes come first, because a view's other indexes need its clustered index.
+fn indexes_sql(oid: i32, filter: &str, f: &Features) -> String {
+    format!(
+        "SELECT i.name,i.is_unique,i.type,i.filter_definition,c.name,ic.is_descending_key,ic.is_included_column,{},o.type,{}
+         FROM sys.indexes i JOIN sys.objects o ON o.object_id=i.object_id
+         {STORAGE_JOINS}
+         JOIN sys.index_columns ic ON ic.object_id=i.object_id AND ic.index_id=i.index_id
+         JOIN sys.columns c ON c.object_id=ic.object_id AND c.column_id=ic.column_id
+         WHERE i.object_id={oid} AND i.index_id>0 AND i.is_hypothetical=0 AND {filter}
+         ORDER BY CASE WHEN i.type IN (1,5) THEN 0 ELSE 1 END,i.name,ic.is_included_column,ic.key_ordinal,ic.index_column_id",
+        f.columnstore_order,
+        storage_columns(f)
+    )
+}
+
+fn indexes_from(rows: &[Row]) -> Result<Vec<ddl::Index>, DetailError> {
+    let mut indexes: Vec<(ddl::Index, Vec<(u32, String)>)> = vec![];
+    for r in rows {
+        let name = text(r, 0)?;
+        let (index, order) = match indexes.last_mut() {
+            Some((i, order)) if i.name == name => (i, order),
+            _ => {
+                let index = ddl::Index {
+                    name,
+                    kind: number(r, 2).map_err(failed)?,
+                    unique: bit(r, 1)?,
+                    keys: vec![],
+                    include: vec![],
+                    order: vec![],
+                    filter: r[3].clone(),
+                    on_view: required(r, 8).map_err(failed)?.trim() == "V",
+                    storage: storage(r, 9)?,
+                };
+                indexes.push((index, vec![]));
+                let (i, order) = indexes.last_mut().expect("pushed above");
+                (i, order)
+            }
+        };
+        let column = text(r, 4)?;
+        let ordinal: u32 = number(r, 7).map_err(failed)?;
+        if ordinal > 0 {
+            order.push((ordinal, column.clone()));
+        }
+        if bit(r, 6)? {
+            index.include.push(column);
+        } else {
+            index.keys.push((column, bit(r, 5)?));
+        }
+    }
+    Ok(indexes
+        .into_iter()
+        .map(|(mut index, mut order)| {
+            order.sort();
+            index.order = order.into_iter().map(|(_, c)| c).collect();
+            index
+        })
+        .collect())
 }
 
 enum Found {
