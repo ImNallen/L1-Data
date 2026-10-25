@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { clearMocks, mockIPC } from "@tauri-apps/api/mocks";
-import { cleanup, render, screen } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { renderToStaticMarkup } from "react-dom/server";
 import { afterEach, expect, it, vi } from "vitest";
@@ -30,6 +30,7 @@ const pages: number[] = [];
 const cells: number[] = [];
 
 afterEach(() => {
+  vi.useRealTimers();
   cleanup();
   clearMocks();
   dropRowCaches("r1");
@@ -59,7 +60,6 @@ function serve({ cutRows = [0], cell = async (row: number) => long(row) }: { cut
 
 const position = () => screen.getByTestId("record-position").textContent;
 const valueOf = (col: number) => screen.getByTestId(`record-value-${col}`).textContent;
-const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
 it("lists every column with its type glyph and its full value", async () => {
   serve();
@@ -94,21 +94,28 @@ it.each(["shiftKey", "altKey", "metaKey", "ctrlKey"])("leaves an arrow with %s t
   expect([position(), event.defaultPrevented]).toEqual(["Row 2 of 600", false]);
 });
 
-it("reads full values only for the row it stays on, and drops a read for a row it has left", async () => {
+it("reads full values only for a row it stays on for 120 ms, and ignores a read that ends after it left the row", async () => {
+  vi.useFakeTimers();
   let release: (value: string) => void = () => {};
   serve({ cutRows: [0, 1, 2], cell: (row) => (row === 1 ? new Promise((resolve) => (release = resolve)) : Promise.resolve(long(row))) });
-  const user = userEvent.setup();
+  const down = () => fireEvent.keyDown(screen.getByTestId("record-fields"), { key: "ArrowDown" });
+  const advance = (ms: number) => act(() => vi.advanceTimersByTimeAsync(ms));
   render(<RecordView meta={meta} row={0} onClose={() => {}} />);
-  await vi.waitFor(() => expect(valueOf(0)).toBe("1"));
-  await user.keyboard("{ArrowDown}");
-  await vi.waitFor(() => expect(cells).toEqual([1]));
-  expect(valueOf(2)).toBe(`${long(1).slice(0, 2_000)}…`);
+  await advance(119);
+  expect([valueOf(0), cells]).toEqual(["1", []]);
 
-  await user.keyboard("{ArrowDown}");
-  await vi.waitFor(() => expect(valueOf(2)).toBe(long(2)));
+  down();
+  await advance(119);
+  expect([valueOf(2), cells]).toEqual([`${long(1).slice(0, 2_000)}…`, []]);
+  await advance(1);
+  expect(cells).toEqual([1]);
+
+  down();
+  await advance(120);
+  expect([valueOf(2), cells]).toEqual([long(2), [1, 2]]);
   release(long(1));
-  await sleep(50);
-  expect([position(), valueOf(2), cells]).toEqual(["Row 3 of 600", long(2), [1, 2]]);
+  await advance(0);
+  expect([position(), valueOf(2)]).toEqual(["Row 3 of 600", long(2)]);
 });
 
 it("keeps paging with the arrow keys after a click on Next, and keeps focus on a button at the last row", async () => {
