@@ -146,6 +146,15 @@ EXEC sp_rename 'dbo.old_t', 'renamed_t';
 GO
 CREATE TABLE dbo.sparse_set (id int PRIMARY KEY, s1 int SPARSE NULL, s2 varchar(10) SPARSE NULL, cs xml COLUMN_SET FOR ALL_SPARSE_COLUMNS);
 GO
+ALTER DATABASE CURRENT SET CHANGE_TRACKING = ON;
+GO
+ALTER TABLE dbo.heap_pk ENABLE CHANGE_TRACKING WITH (TRACK_COLUMNS_UPDATED = ON);
+ALTER TABLE dbo.sparse_set ENABLE CHANGE_TRACKING;
+GO
+CREATE TABLE dbo.lob (id int PRIMARY KEY, tx ntext NULL);
+EXEC sp_tableoption N'dbo.lob', 'text in row', '500';
+EXEC sp_tableoption N'[we]]ird s].[Par ent]', 'large value types out of row', 1;
+GO
 CREATE TABLE dbo.cci (id int NOT NULL, v int NULL);
 GO
 CREATE CLUSTERED COLUMNSTORE INDEX CCI ON dbo.cci ORDER (id) WITH (DATA_COMPRESSION = COLUMNSTORE_ARCHIVE, COMPRESSION_DELAY = 10);
