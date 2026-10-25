@@ -124,7 +124,7 @@ fn tls_failure(message: String, entra: bool) -> ConnectError {
     let message = if entra {
         format!("The server's certificate could not be verified, so the Microsoft Entra ID token was not sent. Entra ID sign-in needs a server with a publicly trusted certificate, such as Azure SQL. Check the host name, or ask the server's administrator for a publicly trusted certificate. Reason: {reason}.")
     } else {
-        format!("The server's certificate could not be verified. Give the server a certificate this computer trusts, or choose Require under TLS to connect without checking it. Reason: {reason}.")
+        format!("The server's certificate could not be verified. Check the host name, give the server a certificate this computer trusts, or choose Require under TLS to connect without checking it. Reason: {reason}.")
     };
     ConnectError::Tls { message }
 }
