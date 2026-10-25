@@ -351,7 +351,7 @@ async fn refresh_that_loses_a_deadlock_to_another_users_ddl_still_converges() {
             }
         }).await.expect("Catalog refresh did not wait behind the other user's TRUNCATE");
         other.ok(other.tab, "DROP TABLE dbo.dropped").await;
-        other.engine.console_commit(other.tab).await.unwrap();
+        other.engine.console_commit(other.tab, None).await.unwrap();
         other.cleanup().await;
         let catalog = h.ready_after(&database, shown).await;
         assert!(catalog.relation("dbo", "created").is_some() && catalog.relation("dbo", "dropped").is_none());
