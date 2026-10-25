@@ -2453,6 +2453,47 @@ async fn a_rollback_to_a_savepoint_keeps_the_writes_before_it_held() {
 }
 
 #[tokio::test]
+async fn pointing_a_tab_at_another_connection_drops_the_writes_its_session_held() {
+    let mut h = Harness::start().await;
+    let oracle = h.oracle().await;
+    let table = unique("t_guard");
+    oracle.batch_execute(&format!("create table public.{table} (n int)")).await.unwrap();
+    set_environment(&h, Some(Environment::Staging)).await;
+    let tab = h.sql_tab(TxnMode::AutoCommit).await;
+    h.run_ok(tab, &format!("insert into public.{table} values (1)")).await;
+    let production = ConnectionDraft { environment: Some(Environment::Production), ..draft_from_url(&url(), "prod").unwrap() };
+    let production = h.engine.save_connection(production).await.unwrap().id;
+    let config = ConsoleConfig { connection_id: production, database: h.database.clone(), schema: None, mode: TxnMode::AutoCommit };
+    h.engine.console_configure(tab, config).await.unwrap();
+    h.run_ok(tab, "select 1").await;
+    asked_to_run(&h, tab, script(&format!("insert into public.{table} values (2)")), None).await;
+    oracle.batch_execute(&format!("drop table public.{table}")).await.unwrap();
+}
+
+#[tokio::test]
+async fn a_staged_apply_off_production_stays_held_until_commit_asks() {
+    let mut h = Harness::start().await;
+    h.engine.connect(h.conn).await.unwrap();
+    set_environment(&h, Some(Environment::Staging)).await;
+    let setup = h.sql_tab(TxnMode::AutoCommit).await;
+    let table = edit_table(&mut h, setup).await;
+    let tab = h.sql_tab(TxnMode::Manual).await;
+    let mut edits = changes(&table);
+    edits.inserts.push(vec![cell("name", Some("d"))]);
+    assert!(!h.engine.table_apply(tab, edits, None).await.unwrap().committed);
+    set_environment(&h, Some(Environment::Production)).await;
+
+    let asked = match h.engine.console_commit(tab, None).await {
+        Err(TxnError::ConfirmWrites { confirmation }) => confirmation,
+        other => panic!("expected ConfirmWrites, got {other:?}"),
+    };
+    assert_eq!(asked.holds.statements, [format!("INSERT INTO \"public\".\"{table}\" (\"name\") VALUES ('d')")]);
+    h.engine.console_rollback(tab).await.unwrap();
+    set_environment(&h, None).await;
+    h.run_ok(setup, &format!("drop table public.{table}")).await;
+}
+
+#[tokio::test]
 async fn writes_stay_held_until_the_engine_sees_their_transaction_end() {
     let mut h = Harness::start().await;
     let oracle = h.oracle().await;
@@ -2529,7 +2570,10 @@ async fn a_transaction_prepared_off_production_commits_on_production_only_with_t
     let oracle = h.oracle().await;
     let slots: String = oracle.query_one("show max_prepared_transactions", &[]).await.unwrap().get(0);
     if slots == "0" {
-        eprintln!("skipped: the server has max_prepared_transactions = 0");
+        assert!(
+            std::env::var_os("L1_DATA_TEST_PG_NO_PREPARED").is_some(),
+            "the server has max_prepared_transactions = 0. Run `pnpm db:up` to recreate it with slots, or set L1_DATA_TEST_PG_NO_PREPARED=1 to skip this test"
+        );
         return;
     }
     let table = unique("t_guard");
