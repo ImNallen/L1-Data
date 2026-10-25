@@ -1,6 +1,6 @@
 use std::ops::Range;
 
-use super::keywords::{NEVER_A_FUNCTION, RESERVED, TYPE_OR_FUNCTION_NAME};
+use super::keywords::{RESERVED, TYPE_OR_FUNCTION_NAME};
 use super::lex::{LexKind, lex};
 use super::relations::{VETTED, VETTED_SIZES};
 use super::split::split_statements;
@@ -1224,6 +1224,7 @@ const TSQL_FUNCTIONS: &[&str] = &[
 
 #[cfg(test)]
 mod tests {
+    use super::super::keywords::NEVER_A_FUNCTION;
     use super::*;
     use DatabaseKind::{Postgres, SqlServer};
 
