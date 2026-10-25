@@ -364,9 +364,11 @@ fn owned_sequence(r: &Row) -> ddl::Sequence {
 }
 
 fn column(r: &Row) -> ddl::Column {
-    let identity = match r.get::<_, &str>(3) {
-        "" => None,
-        kind => Some(ddl::Identity {
+    // From PostgreSQL 17 a partition shares its identity with its topmost ancestor, which owns
+    // the sequence, and `PARTITION OF` gives it the identity, so it has none of its own to script.
+    let identity = match (r.get::<_, &str>(3), r.get::<_, Option<&str>>(10)) {
+        ("", _) | (_, None) => None,
+        (kind, Some(_)) => Some(ddl::Identity {
             always: kind == "a",
             sequence: ddl::Sequence {
                 schema: r.get(9),
