@@ -781,11 +781,9 @@ async fn insert_exports_replay_identity_and_leave_out_computed_and_rowversion_co
     }
 }
 
-#[tokio::test]
-async fn a_batch_that_runs_exec_on_production_waits_for_the_digest() {
-    let mut h = Harness::open(TxnMode::AutoCommit).await;
+async fn set_environment(h: &Harness, environment: Option<Environment>) {
     let old = h.engine.boot().connections.into_iter().find(|c| c.id == h.connection).unwrap();
-    let production = ConnectionDraft {
+    let draft = ConnectionDraft {
         database_kind: DatabaseKind::SqlServer,
         id: Some(h.connection),
         name: old.name,
@@ -798,15 +796,25 @@ async fn a_batch_that_runs_exec_on_production_waits_for_the_digest() {
         password: PasswordInput::Keep,
         color: None,
         ssh: None,
-        environment: Some(Environment::Production),
+        environment,
     };
-    h.engine.save_connection(production).await.unwrap();
+    h.engine.save_connection(draft).await.unwrap();
+}
+
+async fn asked_to_run(h: &Harness, text: &str, confirmed: Option<WriteDigest>) -> WriteConfirmation {
+    match h.engine.console_run(h.tab, RunRequest::Script { text: text.into(), target: RunTarget::All }, confirmed).await {
+        Err(RunError::ConfirmWrites { confirmation }) => confirmation,
+        other => panic!("{text}: expected ConfirmWrites, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn a_batch_that_runs_exec_on_production_waits_for_the_digest() {
+    let mut h = Harness::open(TxnMode::AutoCommit).await;
+    set_environment(&h, Some(Environment::Production)).await;
     let text = "CREATE TABLE #p1_guard(id int)\nGO\nSELECT 1\nGO\nEXEC sp_who";
     let request = || RunRequest::Script { text: text.into(), target: RunTarget::All };
-    let asked = match h.engine.console_run(h.tab, request(), None).await {
-        Err(RunError::ConfirmWrites { confirmation }) => confirmation,
-        other => panic!("expected ConfirmWrites, got {other:?}"),
-    };
+    let asked = asked_to_run(&h, text, None).await;
     assert_eq!((asked.connection.as_str(), asked.database.as_str(), asked.writes), ("SQL Server test", "shop", 2));
     assert_eq!(asked.statements, ["CREATE TABLE #p1_guard(id int)", "EXEC sp_who"]);
     let state = h.ok("SELECT OBJECT_ID('tempdb..#p1_guard')").await;
@@ -817,4 +825,21 @@ async fn a_batch_that_runs_exec_on_production_waits_for_the_digest() {
     assert!(matches!(state.run, RunState::Finished { outcome: RunOutcome::Ok, .. }), "{:?}", state.run);
     let state = h.ok("SELECT OBJECT_ID('tempdb..#p1_guard')").await;
     assert!(h.rows(Harness::rowsets(&state)[0])[0][0].is_some());
+}
+
+#[tokio::test]
+async fn every_batch_on_production_asks_while_the_transaction_holds_writes_that_ran_before() {
+    let mut h = Harness::open(TxnMode::AutoCommit).await;
+    h.ok("CREATE TABLE #held (id int)").await;
+    assert_eq!(h.ok("BEGIN TRAN; INSERT INTO #held VALUES (1)").await.txn, TxnState::Open);
+    set_environment(&h, Some(Environment::Production)).await;
+    for text in ["IF @@TRANCOUNT > 0 COMMIT TRANSACTION", "SELECT 1\nCOMMIT", "PRINT 'x'; COMMIT TRAN", "SELECT @@TRANCOUNT"] {
+        asked_to_run(&h, text, None).await;
+        assert_eq!(h.engine.boot().consoles.into_iter().find(|c| c.tab_id == h.tab).unwrap().txn, TxnState::Open, "{text}: a refused batch sends nothing");
+    }
+    let asked = asked_to_run(&h, "IF @@TRANCOUNT > 0 COMMIT TRANSACTION", None).await;
+    let id = h.engine.console_run(h.tab, RunRequest::Script { text: "IF @@TRANCOUNT > 0 COMMIT TRANSACTION".into(), target: RunTarget::All }, Some(asked.digest)).await.unwrap().run_id;
+    assert_eq!(h.finish(id).await.txn, TxnState::Idle);
+    let state = h.ok("SELECT @@TRANCOUNT, COUNT_BIG(*) FROM #held").await;
+    assert_eq!(h.rows(Harness::rowsets(&state)[0])[0], vec![Some("0".into()), Some("1".into())], "the confirmed batch committed the held write");
 }
