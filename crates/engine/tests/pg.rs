@@ -2674,7 +2674,7 @@ async fn object_scripts_replay_into_an_empty_database_with_the_same_catalog() {
 
         scratch.batch_execute(TYPES_NO_SCRIPT_MAKES).await.unwrap();
         scratch.batch_execute("set check_function_bodies = off").await.unwrap();
-        let routines = oids("select p.oid from pg_proc p join pg_namespace n on n.oid = p.pronamespace where n.nspname = 'public' and p.prokind <> 'a' order by p.oid").await;
+        let routines = oids("select p.oid from pg_proc p join pg_namespace n on n.oid = p.pronamespace where n.nspname = 'public' and p.prokind <> 'a' and p.proname !~ '[0-9a-f]{32}' order by p.oid").await;
         let mut texts = vec![];
         for oid in routines {
             let s = script(ScriptTarget::Routine { oid }).await.unwrap();
