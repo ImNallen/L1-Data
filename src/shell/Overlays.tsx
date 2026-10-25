@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from "react";
+import { RecordView } from "../features/results/RecordView";
 import { useWorkspace, type Overlay } from "../state/workspace";
 import { Button, Modal } from "../ui/primitives";
 
@@ -84,6 +85,7 @@ export function Overlays() {
   return (
     <>
       {overlay.kind === "ask" && <AskDialog key={overlay.seq} question={overlay} />}
+      {overlay.kind === "record" && <RecordView key={`${overlay.meta.ref.runId}:${overlay.row}`} meta={overlay.meta} row={overlay.row} onClose={close} />}
       <Modal open={overlay.kind === "cell"} onOpenChange={onOpenChange} title={overlay.kind === "cell" ? overlay.title : ""} width={720} testId="cell-dialog">
         {overlay.kind === "cell" && (
           <pre className="selectable max-h-[52vh] overflow-auto rounded-lg border border-control bg-bg p-3 font-mono text-ui-12.5 leading-5 whitespace-pre-wrap text-fg">
