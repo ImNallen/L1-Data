@@ -5,7 +5,7 @@ pub(crate) mod limits;
 
 use std::collections::HashMap;
 use std::ffi::OsString;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::{Arc, Mutex, Weak};
 use std::time::Duration;
 
@@ -13,12 +13,12 @@ use serde_json::Value;
 
 use crate::Shared;
 use crate::console::now_ms;
+use crate::shell_path::{self, AgentPath, is_executable};
 use crate::model::{AgentError, AppEvent, Decision, EffortId, ModelId, ModelOption, ProbeOutcome, ProviderConfig, ProviderInfo, ProviderKind, ProviderState, ToolCallId, TurnOutcome};
 
 pub(crate) use crate::BoxFuture;
 
 const HEALTH_TICK: Duration = Duration::from_secs(5);
-const LOGIN_SHELL_TIMEOUT: Duration = Duration::from_secs(3);
 
 pub(crate) trait Provider: Send + Sync {
     fn info(&self) -> ProviderInfo;
@@ -140,18 +140,6 @@ pub(crate) struct LaunchSpec {
     pub cwd: PathBuf,
 }
 
-/// The PATH an agent binary named without a directory is looked up on, and the PATH the agent
-/// runs with. `LoginShell` is the app's: a Finder-launched app gets launchd's PATH, which misses
-/// where `claude` and `node` live, so the login shell's PATH comes first, then the inherited one,
-/// then the usual install directories. `Fixed` is exactly the given PATH, with no shell and nothing
-/// added; tests pass an empty one, so a bare `claude` probes `NotFound` and nothing installed on
-/// the machine runs.
-#[derive(Debug, Clone)]
-pub enum AgentPath {
-    LoginShell,
-    Fixed(OsString),
-}
-
 pub(crate) struct HostEnv {
     pub path: OsString,
     pub home: PathBuf,
@@ -162,25 +150,12 @@ pub(crate) struct HostEnv {
 impl HostEnv {
     pub(crate) async fn capture(agent_path: &AgentPath, cwd: PathBuf) -> Self {
         let home = std::env::var_os("HOME").map(PathBuf::from).unwrap_or_default();
-        let path = match agent_path {
-            AgentPath::Fixed(path) => path.clone(),
-            AgentPath::LoginShell => {
-                let inherited = std::env::var_os("PATH").unwrap_or_default();
-                let shell_path = login_shell_path().await.unwrap_or_default();
-                let mut dirs: Vec<PathBuf> = std::env::split_paths(&shell_path).chain(std::env::split_paths(&inherited)).filter(|p| !p.as_os_str().is_empty()).collect();
-                for extra in [home.join(".local/bin"), home.join(".claude/local"), PathBuf::from("/opt/homebrew/bin"), PathBuf::from("/usr/local/bin")] {
-                    if !dirs.contains(&extra) {
-                        dirs.push(extra);
-                    }
-                }
-                std::env::join_paths(&dirs).unwrap_or(inherited)
-            }
-        };
+        let path = shell_path::search_path(agent_path, &home).await;
         Self { path, home, cwd }
     }
 
     pub(crate) fn dirs(&self) -> Vec<PathBuf> {
-        std::env::split_paths(&self.path).filter(|p| !p.as_os_str().is_empty()).collect()
+        shell_path::dirs(&self.path)
     }
 
     pub(crate) fn expand_home(&self, path: &str) -> PathBuf {
@@ -204,33 +179,9 @@ impl HostEnv {
     }
 }
 
-fn is_executable(path: &Path) -> bool {
-    let Ok(meta) = std::fs::metadata(path) else { return false };
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        meta.is_file() && meta.permissions().mode() & 0o111 != 0
-    }
-    #[cfg(not(unix))]
-    {
-        meta.is_file()
-    }
-}
-
 pub(crate) fn capitalize(word: &str) -> String {
     let mut chars = word.chars();
     chars.next().map(|c| c.to_uppercase().collect::<String>() + chars.as_str()).unwrap_or_default()
-}
-
-async fn login_shell_path() -> Option<OsString> {
-    let shell = std::env::var_os("SHELL")?;
-    let output = tokio::time::timeout(LOGIN_SHELL_TIMEOUT, tokio::process::Command::new(shell).args(["-lc", "printf %s \"$PATH\""]).kill_on_drop(true).output()).await.ok()?.ok()?;
-    if !output.status.success() {
-        return None;
-    }
-    let text = String::from_utf8_lossy(&output.stdout);
-    let path = text.lines().last()?.trim();
-    (!path.is_empty()).then(|| OsString::from(path))
 }
 
 pub(crate) struct Providers {

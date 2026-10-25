@@ -11,6 +11,7 @@ mod results;
 mod saved;
 mod secrets;
 mod session;
+mod shell_path;
 mod sql;
 mod store;
 mod text;
@@ -41,7 +42,7 @@ use view::{ConnectionView, Known, Selection};
 
 pub use assistant::SHUTDOWN_BOUND;
 pub use connection::draft_from_url;
-pub use provider::AgentPath;
+pub use shell_path::AgentPath;
 pub use secrets::{KeyStore, KeyringKeyStore, MemoryKeyStore, SecretError};
 pub use store::StoreError;
 pub use tunnel::openssh_known_hosts;
