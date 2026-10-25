@@ -25,7 +25,6 @@ const RELATION: &str = "SELECT c.relkind::text, n.nspname, c.relname, c.relpersi
      LEFT JOIN pg_foreign_table ft ON ft.ftrelid = c.oid LEFT JOIN pg_foreign_server fs ON fs.oid = ft.ftserver
      WHERE c.oid = $1";
 
-/// The catalog columns a server reads differ by version, and the app supports PostgreSQL 12 and later.
 struct Queries {
     columns: String,
     statistics: String,
@@ -136,8 +135,6 @@ const ROUTINE: &str = "SELECT p.prokind::text, p.proname, CASE WHEN p.prokind <>
         obj_description(p.oid, 'pg_proc'), n.nspname, pg_get_function_identity_arguments(p.oid)
      FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace WHERE p.oid = $1";
 
-/// The changes an ACL makes to its default, one row per privilege, keyed by `keys`. A NULL ACL is
-/// the default, so `filter` leaves it out.
 fn acl_changes(from: &str, acl: &str, default: &str, filter: &str, keys: &str) -> String {
     let side = |acl: &str, granted: bool| format!("SELECT {keys}, a.grantee, a.privilege_type, a.is_grantable, {granted} FROM {from} CROSS JOIN LATERAL aclexplode({acl}) a WHERE {filter}");
     format!("({} EXCEPT {}) UNION ALL ({} EXCEPT {})", side(acl, true), side(default, true), side(default, false), side(acl, false))

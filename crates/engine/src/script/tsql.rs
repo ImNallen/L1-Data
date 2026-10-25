@@ -156,7 +156,6 @@ pub struct Module {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Trigger {
     Text(Module),
-    /// SQL Server keeps no T-SQL text for a CLR trigger.
     Clr { schema: String, name: String },
     Encrypted { schema: String, name: String },
 }
@@ -249,7 +248,6 @@ pub fn index(i: &Index, table: &str, props: &[Property]) -> Option<Ddl> {
     Some(standalone(text, &i.name, i.storage.disabled, table, props, warnings))
 }
 
-/// A key's index opens as the constraint, because a unique index would replay without it.
 pub fn key_script(k: &Key, table: &str, props: &[Property]) -> Ddl {
     let mut warnings = vec![];
     let text = format!("ALTER TABLE {table} ADD {};\nGO\n", key(k, table, &mut warnings));
@@ -279,8 +277,7 @@ pub fn module(m: &Module) -> Ddl {
 }
 
 /// Indexes disable last, because a disabled clustered index makes its table unreadable to every
-/// later step. An index or trigger the script leaves out takes its extended properties with it,
-/// because adding them would fail on the replay.
+/// later step.
 fn dependents<'a>(name: &str, disabled_keys: impl Iterator<Item = &'a str>, indexes: &'a [Index], triggers: &[Trigger], props: &[Property], warnings: &mut Vec<String>) -> Vec<String> {
     let mut parts = vec![];
     let mut left_out = vec![];
@@ -429,8 +426,6 @@ impl Place {
     }
 }
 
-/// `STATISTICS_INCREMENTAL` fails on an index that is not partitioned, as every replayed index
-/// is, and SQL Server has no statement that sets `SUPPRESS_DUP_KEY_MESSAGES`.
 fn storage_warnings(s: &Storage, index: &str, table: &str, warnings: &mut Vec<String>) {
     let of = if index.is_empty() { String::new() } else { format!(" for index {}", ident(index)) };
     if let Some(place) = &s.place {

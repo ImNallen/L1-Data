@@ -120,7 +120,6 @@ CREATE TABLE app."select" ("from" int, "Mixed" int);
 GRANT SELECT ON app."select" TO pg_read_all_data;
 GRANT UPDATE ("Mixed") ON app."select" TO pg_read_all_data;
 GRANT USAGE ON SEQUENCE app.ren_custom_seq TO pg_read_all_data;
--- a SECURITY DEFINER function nobody but its owner may run
 CREATE FUNCTION app.sec_def(int) RETURNS int LANGUAGE sql SECURITY DEFINER AS 'SELECT 1';
 REVOKE EXECUTE ON FUNCTION app.sec_def(int) FROM PUBLIC;
 -- matview not populated, with a clustered index and column statistics
@@ -130,10 +129,8 @@ ALTER MATERIALIZED VIEW app.mv CLUSTER ON mv_x;
 ALTER MATERIALIZED VIEW app.mv ALTER COLUMN x SET STATISTICS 200;
 COMMENT ON COLUMN app.mv.x IS 'mv col comment';
 CREATE TABLE "order"."group" (id int);
--- a typed table with column options and a key
 CREATE TABLE app.pets OF app.pet (kind WITH OPTIONS DEFAULT 'cat' NOT NULL, name WITH OPTIONS NOT NULL, PRIMARY KEY (id));
 CREATE TABLE app.bare_pets OF app.pet;
--- an expression index with a statistics target, an index on only a partitioned parent, a published table, and a table whose unique index build failed
 CREATE INDEX "Lower a" ON app.opt ((lower(a)));
 ALTER INDEX app."Lower a" ALTER COLUMN 1 SET STATISTICS 300;
 CREATE TABLE app.pt (k int) PARTITION BY LIST (k);
@@ -142,7 +139,6 @@ CREATE INDEX pt_only ON ONLY app.pt (k);
 CREATE PUBLICATION hostile_pub FOR TABLE app.refd;
 CREATE TABLE app.dups (v int);
 INSERT INTO app.dups VALUES (1), (1);
--- a foreign key to its own table through a unique index that no constraint owns
 CREATE TABLE app.tree (id int NOT NULL, parent int);
 CREATE UNIQUE INDEX tree_id ON app.tree (id);
 ALTER TABLE app.tree ADD CONSTRAINT tree_parent FOREIGN KEY (parent) REFERENCES app.tree (id);

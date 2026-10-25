@@ -310,7 +310,6 @@ impl MsSession {
         }
         failed.map_or(Ok(rows), Err)
     }
-    /// The rows of each result set a batch returns, in order.
     pub(super) async fn results(&mut self, sql: &str) -> Result<Vec<Vec<Vec<Option<String>>>>, QueryError> {
         let mut stream = self.query(sql);
         let mut sets: Vec<Vec<Vec<Option<String>>>> = Vec::new();

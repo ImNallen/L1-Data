@@ -32,7 +32,6 @@ pub struct Table {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Unscripted {
     pub privileges: Vec<Grant>,
-    /// The privileges on each sequence the script creates for the table, by schema and name.
     pub sequence_privileges: Vec<((String, String), Vec<Grant>)>,
     pub security_labels: bool,
     pub publications: Vec<String>,
@@ -125,8 +124,6 @@ pub struct Constraint {
     pub name: String,
     pub definition: String,
     pub comment: Option<String>,
-    /// A foreign key that references its own table through a unique index no constraint owns,
-    /// which exists only once the script has created the table's indexes.
     pub after_indexes: bool,
 }
 
@@ -138,7 +135,6 @@ pub struct Index {
     pub clustered: bool,
     pub replica_identity: bool,
     pub tablespace: Option<String>,
-    /// Statistics targets by index column number.
     pub statistics: Vec<(i32, i32)>,
     pub invalid: bool,
     pub partitioned: bool,

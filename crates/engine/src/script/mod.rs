@@ -15,8 +15,6 @@ impl Ddl {
     }
 }
 
-/// One privilege a replay would not recreate. The script warns about privileges and grants none,
-/// because the grantees may not exist where it replays.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Grant {
     pub privilege: String,

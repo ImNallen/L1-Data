@@ -20,7 +20,6 @@ fn text(row: &[Option<String>], i: usize) -> Result<String, DetailError> {
     Ok(required(row, i).map_err(failed)?.to_owned())
 }
 
-/// Each column a server version may lack, by the catalog column that marks it.
 const FEATURES: &str = "SELECT COL_LENGTH('sys.indexes','optimize_for_sequential_key'),COL_LENGTH('sys.index_columns','column_store_order_ordinal'),
     COL_LENGTH('sys.partitions','xml_compression'),COL_LENGTH('sys.tables','ledger_type'),COL_LENGTH('sys.tables','is_node'),COL_LENGTH('sys.tables','history_retention_period'),
     COL_LENGTH('sys.indexes','suppress_dup_key_messages'),COL_LENGTH('sys.sensitivity_classifications','label'),COL_LENGTH('sys.sensitivity_classifications','rank')";
@@ -111,8 +110,6 @@ fn storage(r: &[Option<String>], at: usize) -> Result<ddl::Storage, DetailError>
 
 type Row = Vec<Option<String>>;
 
-/// The queries of one script, sent as one batch, because each round trip to the server costs
-/// more than the catalog query it carries.
 #[derive(Default)]
 struct Batch(Vec<String>);
 
@@ -155,7 +152,6 @@ impl MsSession {
         }
     }
 
-    /// The server's version cannot change while the session lives, so its features are read once.
     async fn features(&mut self) -> Result<Features, DetailError> {
         if let Some(f) = self.script_features {
             return Ok(f);
@@ -327,7 +323,6 @@ fn properties(rows: &[Row]) -> Result<Vec<ddl::Property>, DetailError> {
         .collect()
 }
 
-/// `ids` is an object ID or a query of them.
 fn grants_sql(ids: &str) -> String {
     format!(
         "SELECT p.permission_name,COL_NAME(p.major_id,p.minor_id),dp.name,p.state
