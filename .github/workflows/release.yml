@@ -265,10 +265,14 @@ jobs:
 
       - name: Build latest.json without publishing
         env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
           TAG: ${{ needs.plan.outputs.tag }}
           VERSION: ${{ needs.plan.outputs.version }}
         run: |
-          node scripts/updater-manifest.mjs manifest assets "$TAG" "$VERSION" --dry-run latest.json
+          set -euo pipefail
+          gh api --paginate --slurp "repos/$GH_REPO/releases?per_page=100" > releases.json
+          node scripts/updater-manifest.mjs manifest assets "$TAG" "$VERSION" --dry-run releases.json latest.json
           {
             echo "### Dry run of $TAG"
             echo "Nothing was published. This is the latest.json the release would serve."
@@ -343,7 +347,8 @@ jobs:
           set -euo pipefail
           gh release upload "$TAG" assets/* --clobber
           gh release view "$TAG" --json body,assets > release.json
-          node scripts/updater-manifest.mjs manifest assets "$TAG" "$VERSION" release.json latest.json
+          gh api --paginate --slurp "repos/$GH_REPO/releases?per_page=100" > releases.json
+          node scripts/updater-manifest.mjs manifest assets "$TAG" "$VERSION" release.json releases.json latest.json
           gh release upload "$TAG" latest.json --clobber
           gh release download "$TAG" --pattern latest.json --dir uploaded --clobber
           cmp latest.json uploaded/latest.json

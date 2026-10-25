@@ -6,7 +6,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import test from "node:test";
-import { buildManifest, stagePlan, verifySignature } from "./updater-manifest.mjs";
+import { parseReleases } from "./release-plan.mjs";
+import { buildManifest, changeLog, stagePlan, verifySignature } from "./updater-manifest.mjs";
 
 const script = fileURLToPath(new URL("./updater-manifest.mjs", import.meta.url));
 
@@ -46,6 +47,7 @@ const build = (overrides = {}) =>
     tag,
     version,
     notes: "notes",
+    history: [],
     pubDate: "2026-10-23T08:30:00.000Z",
     publicKey: tauriPublicKey,
     files: files(),
@@ -95,6 +97,7 @@ test("builds the feed with one universal macOS download for both darwin keys", (
   assert.deepEqual(build(), {
     version,
     notes: "notes",
+    changes: [{ version, items: [] }],
     pub_date: "2026-10-23T08:30:00.000Z",
     platforms: {
       "darwin-aarch64": { ...sig, url: download(`L1-Data_${version}_universal.app.tar.gz`) },
@@ -103,6 +106,104 @@ test("builds the feed with one universal macOS download for both darwin keys", (
       "windows-x86_64": { ...sig, url: download(`L1-Data_${version}_x64-setup.exe`) },
     },
   });
+});
+
+const generatedNotes = [
+  "## What's Changed",
+  "* feat(app): name the run target, mark Production, and fix tree keyboard access by @ImNallen in https://github.com/ImNallen/L1Data/pull/50",
+  "* fix(ui): cancel a grid cell edit on Escape by @ImNallen in https://github.com/ImNallen/L1Data/pull/51",
+  "",
+  "## New Contributors",
+  "* @someone made their first contribution in https://github.com/ImNallen/L1Data/pull/40",
+  "",
+  "**Full Changelog**: https://github.com/ImNallen/L1Data/compare/v0.1.1-nightly.20261024.37...v0.1.1-nightly.20261025.45",
+].join("\n");
+const generatedItems = [
+  { title: "feat(app): name the run target, mark Production, and fix tree keyboard access", author: "ImNallen", pr: 50 },
+  { title: "fix(ui): cancel a grid cell edit on Escape", author: "ImNallen", pr: 51 },
+];
+const itemsOf = (notes) => changeLog(version, notes, [])[0].items;
+const release = (tagName, body = "", extra = {}) => ({ tag_name: tagName, draft: false, published_at: "2026-10-20T00:00:00Z", body, ...extra });
+
+test("lists the pull requests of a GitHub-generated body, with LF or CRLF", () => {
+  assert.deepEqual(itemsOf(generatedNotes), generatedItems);
+  assert.deepEqual(itemsOf(generatedNotes.replaceAll("\n", "\r\n")), generatedItems);
+  assert.deepEqual(build({ notes: generatedNotes }).changes, [{ version, items: generatedItems }]);
+});
+
+test("keeps only the What's Changed section of a generated body, including its categories", () => {
+  const notes = [
+    "Intro line",
+    "* not a change",
+    "## What's Changed",
+    "### Features",
+    "* feat(engine): add a thing by @ImNallen in https://github.com/ImNallen/L1Data/pull/9",
+    "### Dependencies",
+    "* chore(deps): bump vite from 7.1.0 to 7.2.0 by @dependabot[bot] in https://github.com/ImNallen/L1Data/pull/60",
+    "## Other",
+    "* outside the section",
+  ].join("\n");
+  assert.deepEqual(itemsOf(notes), [
+    { title: "feat(engine): add a thing", author: "ImNallen", pr: 9 },
+    { title: "chore(deps): bump vite from 7.1.0 to 7.2.0", author: "dependabot[bot]", pr: 60 },
+  ]);
+});
+
+test("lists every bullet of a hand-written body outside New Contributors", () => {
+  const notes = [
+    "A faster grid.",
+    "",
+    "- Open large results without a pause",
+    "* fix(ui): keep the cursor on save by @ImNallen in https://github.com/ImNallen/L1Data/pull/7",
+    "* see https://github.com/ImNallen/L1Data/pull/8 for details",
+    "",
+    "## New Contributors",
+    "* @someone made their first contribution in https://github.com/ImNallen/L1Data/pull/40",
+    "## Thanks",
+    "- Everyone who filed a bug",
+  ].join("\r\n");
+  assert.deepEqual(itemsOf(notes), [
+    { title: "Open large results without a pause", author: null, pr: null },
+    { title: "fix(ui): keep the cursor on save", author: "ImNallen", pr: 7 },
+    { title: "see https://github.com/ImNallen/L1Data/pull/8 for details", author: null, pr: null },
+    { title: "Everyone who filed a bug", author: null, pr: null },
+  ]);
+  assert.deepEqual(itemsOf(""), []);
+});
+
+test("follows this release with the older published releases of its channel, newest first", () => {
+  const history = parseReleases([
+    release("v0.1.5-nightly.20261022.40", "* night 40"),
+    release("v0.1.4", "* stable 0.1.4"),
+    release("v0.1.5-nightly.20261023.41", "* night 41"),
+    release(tag, "* this release"),
+    release("v0.1.5-nightly.20261024.43", "* newer night"),
+    release("v0.1.5-nightly.20261023.39", "* draft", { draft: true }),
+    release("v0.1.5-nightly.20261021.38", "* unpublished", { published_at: null }),
+    release("nightly", "* the feed"),
+    release("v0.1.3", "* stable 0.1.3"),
+    release("v0.2.0", "* newer stable"),
+  ]);
+  const titles = (changes) => changes.map((change) => [change.version, change.items.map((item) => item.title)]);
+  assert.deepEqual(titles(changeLog(version, "* built now", history)), [
+    [version, ["built now"]],
+    ["0.1.5-nightly.20261023.41", ["night 41"]],
+    ["0.1.5-nightly.20261022.40", ["night 40"]],
+  ]);
+  assert.deepEqual(titles(changeLog("0.1.5", "* stable now", history)), [
+    ["0.1.5", ["stable now"]],
+    ["0.1.4", ["stable 0.1.4"]],
+    ["0.1.3", ["stable 0.1.3"]],
+  ]);
+});
+
+test("caps the change log at 30 releases", () => {
+  const history = parseReleases(Array.from({ length: 40 }, (_, i) => release(`v0.1.5-nightly.20261022.${i + 1}`)));
+  const changes = changeLog(version, "", history);
+  assert.equal(changes.length, 30);
+  assert.equal(changes[0].version, version);
+  assert.equal(changes[1].version, "0.1.5-nightly.20261022.40");
+  assert.equal(changes[29].version, "0.1.5-nightly.20261022.12");
 });
 
 test("refuses a bundle that was not built or not fully uploaded", () => {
@@ -167,13 +268,20 @@ test("CLI stages tauri output and writes a dry-run feed from it", async (t) => {
 
   const out = join(root, "latest.json");
   const env = { GITHUB_REPOSITORY: "ImNallen/L1Data", UPDATER_PUBKEY: tauriPublicKey };
-  const missingKey = run(["manifest", assets, tag, version, "--dry-run", out], { ...env, UPDATER_PUBKEY: "" });
+  const missingKey = run(["manifest", assets, tag, version, "--dry-run", join(root, "none.json"), out], { ...env, UPDATER_PUBKEY: "" });
   assert.equal(missingKey.status, 1);
   assert.equal(missingKey.stderr, "UPDATER_PUBKEY must hold the updater public key\n");
 
-  const result = run(["manifest", assets, tag, version, "--dry-run", out], env);
+  const releases = join(root, "releases.json");
+  const earlier = "## What's Changed\n* fix(ui): cancel a grid cell edit on Escape by @ImNallen in https://github.com/ImNallen/L1Data/pull/51\n";
+  await writeFile(releases, JSON.stringify([[release("v0.1.5-nightly.20261022.40", earlier)], [release("v0.1.4", "* stable")]]));
+  const result = run(["manifest", assets, tag, version, "--dry-run", releases, out], env);
   assert.equal(result.status, 0, result.stderr);
   assert.equal(result.stdout, `latest.json for ${tag}: 4 platforms point at 3 verified downloads.\n`);
   const written = JSON.parse(await readFile(out, "utf8"));
-  assert.deepEqual({ ...written, pub_date: "x" }, { ...build({ notes: "" }), pub_date: "x" });
+  assert.deepEqual(written.changes, [
+    { version, items: [] },
+    { version: "0.1.5-nightly.20261022.40", items: [{ title: "fix(ui): cancel a grid cell edit on Escape", author: "ImNallen", pr: 51 }] },
+  ]);
+  assert.deepEqual({ ...written, changes: [], pub_date: "x" }, { ...build({ notes: "" }), changes: [], pub_date: "x" });
 });
