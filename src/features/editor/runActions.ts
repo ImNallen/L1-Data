@@ -169,13 +169,17 @@ function deferPageForPendingWork(tabId: TabId, target: PageTarget | undefined): 
   return true;
 }
 
-/** A held write may still be open or may have committed already, so each sentence must hold for both. */
-function heldWrites(asked: WriteConfirmation, outcome: (it: string) => string): string {
+/** A held write may still be open or may have committed already, and a run may be in either mode, so each sentence must hold for all of them. */
+function heldWrites(asked: WriteConfirmation, outcome: (it: string) => string = covered): string {
   const one = asked.holds.count === 1;
   return [
     `${one ? "A write" : `${asked.holds.count} writes`} to ${asked.connection} / ${asked.database} ran on this tab before the connection was marked Production.`,
     `If ${one ? "it is" : "they are"} still in this tab's transaction, ${outcome(one ? "it" : "them")}.`,
   ].join(" ");
+}
+
+function covered(it: string): string {
+  return `confirming covers ${it}, so a later commit does not ask about ${it} again`;
 }
 
 function shownWrites(asked: WriteConfirmation): { statements: string[]; note: string } {
@@ -192,7 +196,7 @@ async function writesConfirmed(tab: Tab, asked: WriteConfirmation): Promise<bool
   const { statements, note } = shownWrites(asked);
   const body = [
     n > 0 && `This run sends ${n} ${unit} that ${n === 1 ? "writes" : "write"} to ${asked.connection} / ${asked.database}.`,
-    h > 0 && heldWrites(asked, (it) => `this run can commit ${it}`),
+    h > 0 && heldWrites(asked),
     note,
   ];
   const ok = await confirm({
@@ -291,7 +295,7 @@ export function cancelActive(): boolean {
 async function commitConfirmed(tab: Tab, asked: WriteConfirmation): Promise<boolean> {
   const { statements, note } = shownWrites(asked);
   const ok = await confirm({
-    title: `Commit ${plural(asked.holds.count, "write")} on Production?`,
+    title: "Commit on Production?",
     body: [heldWrites(asked, (it) => `this commit keeps ${it}`), note].filter(Boolean).join(" "),
     statements,
     confirmLabel: "Commit writes",
@@ -504,7 +508,7 @@ async function editsConfirmed(tab: TableTab, edits: TableEdits, asked: WriteConf
     title: `Apply ${plural(asked.sends.count, "change")} on Production?`,
     body: [
       `This sends ${what} to ${tab.table.schema}.${tab.table.table} on ${asked.connection} / ${asked.database}.`,
-      asked.holds.count > 0 && heldWrites(asked, (it) => `confirming covers ${it}, so a later commit does not ask about ${it} again`),
+      asked.holds.count > 0 && heldWrites(asked),
     ]
       .filter(Boolean)
       .join(" "),

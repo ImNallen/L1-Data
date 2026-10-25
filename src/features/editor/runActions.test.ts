@@ -935,7 +935,7 @@ describe("a run the engine asks about", () => {
     await vi.waitFor(() => expect(question()).not.toBeNull());
     expect(question()).toMatchObject({
       title: "Run on Production?",
-      body: "2 writes to prod-postgres / shop ran on this tab before the connection was marked Production. If they are still in this tab's transaction, this run can commit them.",
+      body: "2 writes to prod-postgres / shop ran on this tab before the connection was marked Production. If they are still in this tab's transaction, confirming covers them, so a later commit does not ask about them again.",
       statements: ["insert into t values (1)", "delete from t"],
     });
     expect(question()?.choices).toEqual([{ id: "btn", label: "Run", variant: "danger" }]);
@@ -951,7 +951,7 @@ describe("a run the engine asks about", () => {
     await vi.waitFor(() => expect(question()).not.toBeNull());
     expect(question()).toMatchObject({
       title: "Run 2 writes on Production?",
-      body: "This run sends 2 statements that write to prod-postgres / shop. 4 writes to prod-postgres / shop ran on this tab before the connection was marked Production. If they are still in this tab's transaction, this run can commit them. 5 of 6 are shown.",
+      body: "This run sends 2 statements that write to prod-postgres / shop. 4 writes to prod-postgres / shop ran on this tab before the connection was marked Production. If they are still in this tab's transaction, confirming covers them, so a later commit does not ask about them again. 5 of 6 are shown.",
       statements: ["delete from a", "delete from b", "delete from c", "update orders set n = 1", "delete from orders"],
     });
   });
@@ -1128,7 +1128,7 @@ describe("a commit the engine asks about", () => {
     const done = endTransaction(id, "commit");
     await vi.waitFor(() => expect(question()).not.toBeNull());
     expect(question()).toMatchObject({
-      title: "Commit 1 write on Production?",
+      title: "Commit on Production?",
       body: "A write to prod-postgres / shop ran on this tab before the connection was marked Production. If it is still in this tab's transaction, this commit keeps it.",
       statements: ["insert into t values (1)"],
     });
