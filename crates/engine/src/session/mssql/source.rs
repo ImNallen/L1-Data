@@ -279,8 +279,9 @@ fn modules(rows: &[Row]) -> Result<Vec<(i32, Found)>, DetailError> {
                 Some("1") => Some(ddl::qualified(&text(r, 6)?, &text(r, 7)?)),
                 _ => None,
             };
+            let parent = r[6].clone().zip(r[7].clone()).filter(|_| matches!(required(r, 9).map(str::trim), Ok("TR")));
             let order = r[10].as_deref().map_or(vec![], |o| o.split(',').filter_map(|e| e.split_once(' ')).map(|(when, event)| (when.to_owned(), event.to_owned())).collect());
-            let module = ddl::Module { schema, name, definition, ansi_nulls: bit(r, 3)?, quoted_identifier: bit(r, 4)?, disabled_on, order, properties: vec![], privileges: vec![] };
+            let module = ddl::Module { schema, name, definition, ansi_nulls: bit(r, 3)?, quoted_identifier: bit(r, 4)?, disabled_on, order, parent, properties: vec![], privileges: vec![] };
             Ok((oid, Found::Text(module)))
         })
         .collect()

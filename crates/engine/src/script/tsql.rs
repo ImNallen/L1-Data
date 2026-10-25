@@ -167,6 +167,8 @@ pub struct Module {
     pub disabled_on: Option<String>,
     /// The events this trigger fires `First` or `Last` for, as `sp_settriggerorder` set them.
     pub order: Vec<(String, String)>,
+    /// A DML trigger's table, by schema and name.
+    pub parent: Option<(String, String)>,
     pub properties: Vec<Property>,
     pub privileges: Vec<Privilege>,
 }
@@ -564,21 +566,29 @@ fn index_text(i: &Index, table: &str, warnings: &mut Vec<String>) -> Option<Stri
 fn module_text(m: &Module, warnings: &mut Vec<String>) -> String {
     let name = qualified(&m.schema, &m.name);
     let definition = m.definition.trim();
-    let current = match module_name(definition) {
-        None => {
-            warnings.push(format!("current name in the CREATE header on {name}"));
-            None
+    let stale = |parts: &[String], schema: &str, object: &str| match parts {
+        [_] => true,
+        [s, n] => s != schema || n != object,
+        _ => false,
+    };
+    let mut edits = vec![];
+    match module_name(definition) {
+        None => warnings.push(format!("current name in the CREATE header on {name}")),
+        Some(header) => {
+            if stale(&header.parts, &m.schema, &m.name) {
+                edits.push((header.span, name.clone()));
+            }
+            if let (Some((on, span)), Some((schema, table))) = (header.on, &m.parent)
+                && stale(&on, schema, table)
+            {
+                edits.push((span, qualified(schema, table)));
+            }
         }
-        Some(header) => match header.parts.as_slice() {
-            [_] => Some((header.span, name.clone())),
-            [s, n] if *s != m.schema || *n != m.name => Some((header.span, name.clone())),
-            _ => None,
-        },
-    };
-    let definition = match current {
-        Some((span, current)) => format!("{}{current}{}", &definition[..span.start], &definition[span.end..]),
-        None => definition.to_owned(),
-    };
+    }
+    let mut definition = definition.to_owned();
+    for (span, current) in edits.into_iter().rev() {
+        definition.replace_range(span, &current);
+    }
     let mut out = format!("{}{definition}\nGO\n", set_options(m.ansi_nulls, m.quoted_identifier));
     if !m.order.is_empty() {
         let lines: String = m.order.iter().map(|(when, event)| format!("EXEC sys.sp_settriggerorder @triggername = {}, @order = N'{when}', @stmttype = N'{event}';\n", quote_literal(&name))).collect();
@@ -681,6 +691,7 @@ mod tests {
                 quoted_identifier: false,
                 disabled_on: Some("[dbo].[tickets]".into()),
                 order: vec![("First".into(), "UPDATE".into())],
+                parent: Some(("dbo".into(), "tickets".into())),
                 properties: vec![],
                 privileges: vec![],
             })],
@@ -1147,6 +1158,14 @@ GO
             text("CREATE PROCEDURE p AS SELECT 'unclosed", "dbo"),
             Ddl { text: format!("{HEAD}CREATE PROCEDURE p AS SELECT 'unclosed\nGO\n"), warnings: vec!["current name in the CREATE header on [dbo].[newname]".into()] }
         );
+    }
+
+    #[test]
+    fn a_trigger_on_a_renamed_or_moved_table_replays_on_its_current_table() {
+        let trigger = |definition: &str| module(&Module { schema: "dbo".into(), name: "trg".into(), definition: definition.into(), ansi_nulls: true, quoted_identifier: true, parent: Some(("dbo".into(), "new_t".into())), ..Default::default() });
+        assert_eq!(trigger("CREATE TRIGGER dbo.trg ON dbo.old_t AFTER INSERT AS SELECT 1").text, format!("{HEAD}CREATE TRIGGER dbo.trg ON [dbo].[new_t] AFTER INSERT AS SELECT 1\nGO\n"));
+        assert_eq!(trigger("CREATE TRIGGER old_name ON old_t AFTER INSERT AS SELECT 1").text, format!("{HEAD}CREATE TRIGGER [dbo].[trg] ON [dbo].[new_t] AFTER INSERT AS SELECT 1\nGO\n"));
+        assert_eq!(trigger("CREATE TRIGGER dbo.trg ON dbo.new_t AFTER INSERT AS SELECT 1").text, format!("{HEAD}CREATE TRIGGER dbo.trg ON dbo.new_t AFTER INSERT AS SELECT 1\nGO\n"));
     }
 
     #[test]

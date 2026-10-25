@@ -1012,10 +1012,10 @@ impl Harness {
                 UNION ALL
                 SELECT CONCAT(N'trigger ',t.name,' ',t.is_disabled,' ',m.uses_ansi_nulls,' ',m.uses_quoted_identifier,' ',TRIM(CHAR(13)+CHAR(10)+CHAR(9)+' ' FROM m.definition),' ',
                               (SELECT STRING_AGG(CONCAT(te.type_desc,te.is_first,te.is_last),',') WITHIN GROUP (ORDER BY te.type) FROM sys.trigger_events te WHERE te.object_id=t.object_id))
-                FROM sys.triggers t JOIN sys.sql_modules m ON m.object_id=t.object_id WHERE t.parent_id=o.object_id AND t.name<>'enc_trg'
+                FROM sys.triggers t JOIN sys.sql_modules m ON m.object_id=t.object_id WHERE t.parent_id=o.object_id AND t.name NOT IN ('enc_trg','renamed_trg')
                 UNION ALL
                 SELECT CONCAT(N'module ',m.uses_ansi_nulls,' ',m.uses_quoted_identifier,' ',TRIM(CHAR(13)+CHAR(10)+CHAR(9)+' ' FROM m.definition))
-                FROM sys.sql_modules m WHERE m.object_id=o.object_id AND o.name NOT IN ('newname','moved','bare_moved','bare_in')
+                FROM sys.sql_modules m WHERE m.object_id=o.object_id AND o.name NOT IN ('newname','moved','bare_moved','bare_in','renamed_trg')
                 UNION ALL
                 SELECT CONCAT(N'property ',ep.class,' ',CASE ep.class WHEN 7 THEN (SELECT name FROM sys.indexes WHERE object_id=ep.major_id AND index_id=ep.minor_id)
                                                                   WHEN 2 THEN (SELECT name FROM sys.parameters WHERE object_id=ep.major_id AND parameter_id=ep.minor_id)
@@ -1051,7 +1051,7 @@ async fn hostile_object_scripts_replay_every_property_or_warn() {
     h.ok(&format!("CREATE DATABASE [{source}]; CREATE DATABASE [{replay}]")).await;
     let mut src = Harness::open(TxnMode::AutoCommit).await;
     let mut dst = Harness::open(TxnMode::AutoCommit).await;
-    let outcome = AssertUnwindSafe(async {
+    let outcome = AssertUnwindSafe(Box::pin(async {
         let db = src.target(&source).await;
         src.ok(include_str!("fixtures/script-hostile-mssql.sql")).await;
         dst.target(&replay).await;
@@ -1115,13 +1115,15 @@ async fn hostile_object_scripts_replay_every_property_or_warn() {
         scripted.sort();
         assert_eq!(
             scripted,
-            ["Par ent", "bare_in", "bare_moved", "cci", "f_scalar", "go_in_comment", "heap_pk", "moved", "newname", "parted", "qi_off", "refd", "refr", "sparse_set", "temporal", "temporal_history", "tree", "v_bound", "warned"]
+            ["Par ent", "bare_in", "bare_moved", "cci", "f_scalar", "go_in_comment", "heap_pk", "moved", "newname", "parted", "qi_off", "refd", "refr", "renamed_t", "sparse_set", "temporal", "temporal_history", "tree", "v_bound", "warned"]
         );
 
         dst.replay_in_dependency_order(tables).await;
         dst.replay_in_dependency_order(modules).await;
         assert_eq!(dst.hostile_facts().await, src.hostile_facts().await);
 
+        let retargeted = dst.all_rows("SELECT OBJECT_DEFINITION(OBJECT_ID(N'dbo.renamed_trg')),OBJECT_NAME(parent_id) FROM sys.triggers WHERE name=N'renamed_trg'").await;
+        assert_eq!(retargeted, [[Some("CREATE TRIGGER dbo.renamed_trg ON [dbo].[renamed_t] AFTER INSERT AS SET NOCOUNT ON;".to_owned()), Some("renamed_t".to_owned())]]);
         let renamed = dst
             .all_rows(
                 "SELECT OBJECT_DEFINITION(OBJECT_ID(N'dbo.newname')),OBJECT_ID(N'dbo.oldname'),OBJECT_DEFINITION(OBJECT_ID(N'[we]]ird s].moved')),OBJECT_ID(N'dbo.moved'),
@@ -1169,7 +1171,7 @@ async fn hostile_object_scripts_replay_every_property_or_warn() {
             filtered.text,
             "SET ANSI_NULLS, ANSI_PADDING, ANSI_WARNINGS, ARITHABORT, CONCAT_NULL_YIELDS_NULL, QUOTED_IDENTIFIER ON;\nSET NUMERIC_ROUNDABORT OFF;\nGO\nCREATE UNIQUE NONCLUSTERED INDEX [UX ü] ON [we]]ird s].[Par ent] ([unicode ü] ASC) WHERE ([unicode ü] IS NOT NULL);\nGO\n\nEXEC sys.sp_addextendedproperty @name = N'MS_Description', @value = N'unique when set', @level0type = N'SCHEMA', @level0name = N'we]ird s', @level1type = N'TABLE', @level1name = N'Par ent', @level2type = N'INDEX', @level2name = N'UX ü';\nGO\n"
         );
-    })
+    }))
     .catch_unwind()
     .await;
     drop(src);

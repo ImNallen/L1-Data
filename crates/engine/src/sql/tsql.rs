@@ -566,6 +566,8 @@ pub(crate) fn relation_names(text: &str) -> Vec<NameRef> {
 pub(crate) struct ModuleName {
     pub parts: Vec<String>,
     pub span: std::ops::Range<usize>,
+    /// A trigger's `ON` table, as written.
+    pub on: Option<(Vec<String>, std::ops::Range<usize>)>,
 }
 
 pub(crate) fn module_name(text: &str) -> Option<ModuleName> {
@@ -581,7 +583,12 @@ pub(crate) fn module_name(text: &str) -> Option<ModuleName> {
         return None;
     }
     let (parts, after) = name_path(&tokens, at + 1)?;
-    (parts.len() <= 2).then(|| ModuleName { parts, span: tokens[at + 1].start..tokens[after - 1].end })
+    let on = (word_at(&tokens, at, "TRIGGER") && word_at(&tokens, after, "ON"))
+        .then(|| name_path(&tokens, after + 1))
+        .flatten()
+        .filter(|(on, _)| on.len() <= 2)
+        .map(|(on, end)| (on, tokens[after + 1].start..tokens[end - 1].end));
+    (parts.len() <= 2).then(|| ModuleName { parts, span: tokens[at + 1].start..tokens[after - 1].end, on })
 }
 
 pub(crate) fn quote_ident(name: &str) -> String {
@@ -996,6 +1003,11 @@ mod tests {
         assert_eq!(name("CREATE OR ALTER PROC [we]]ird s].[p]]q] AS SELECT 1"), Some((parts(&["we]ird s", "p]q"]), "[we]]ird s].[p]]q]")));
         assert_eq!(name("create function \"a\"\"b\" . \"c\" () RETURNS int AS BEGIN RETURN 1 END"), Some((parts(&["a\"b", "c"]), "\"a\"\"b\" . \"c\"")));
         assert_eq!(name("CREATE TRIGGER dbo.t ON dbo.x AFTER INSERT AS SELECT 1"), Some((parts(&["dbo", "t"]), "dbo.t")));
+        let text = "CREATE TRIGGER t ON /* x */ [old t] AFTER INSERT AS SELECT 1";
+        let on = module_name(text).unwrap().on.unwrap();
+        assert_eq!((on.0, &text[on.1]), (parts(&["old t"]), "[old t]"));
+        assert_eq!(module_name("CREATE TRIGGER t ON DATABASE FOR CREATE_TABLE AS SELECT 1").unwrap().on.unwrap().0, parts(&["DATABASE"]));
+        assert_eq!(module_name("CREATE PROCEDURE p AS SELECT 1").unwrap().on, None);
         assert_eq!(name("CREATE VIEW dbo./* gap */v AS SELECT 1"), Some((parts(&["dbo", "v"]), "dbo./* gap */v")));
         for text in ["ALTER VIEW dbo.v AS SELECT 1", "CREATE TABLE dbo.t (a int)", "CREATE PROCEDURE a.b.c AS SELECT 1", "CREATE PROCEDURE 'x' AS SELECT 1", "CREATE PROCEDURE p AS SELECT 'unclosed"] {
             assert_eq!(module_name(text), None, "{text}");

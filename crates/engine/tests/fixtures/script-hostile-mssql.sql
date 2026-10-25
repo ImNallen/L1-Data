@@ -138,6 +138,12 @@ CREATE UNIQUE INDEX UX_tree ON dbo.tree (id);
 ALTER TABLE dbo.tree ADD CONSTRAINT FK_tree FOREIGN KEY (parent) REFERENCES dbo.tree (id);
 ALTER TABLE dbo.tree NOCHECK CONSTRAINT FK_tree;
 GO
+CREATE TABLE dbo.old_t (id int);
+GO
+CREATE TRIGGER dbo.renamed_trg ON dbo.old_t AFTER INSERT AS SET NOCOUNT ON;
+GO
+EXEC sp_rename 'dbo.old_t', 'renamed_t';
+GO
 CREATE TABLE dbo.sparse_set (id int PRIMARY KEY, s1 int SPARSE NULL, s2 varchar(10) SPARSE NULL, cs xml COLUMN_SET FOR ALL_SPARSE_COLUMNS);
 GO
 CREATE TABLE dbo.cci (id int NOT NULL, v int NULL);
