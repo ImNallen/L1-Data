@@ -208,6 +208,7 @@ impl MsSession {
             let mut cancelled = false;
             let mut failed = None;
             let mut completed = false;
+            let mut fatal = None;
             {
                 let events = native_query(lease.client(), sql);
                 let mut events = std::pin::pin!(events);
@@ -219,7 +220,8 @@ impl MsSession {
                     };
                     match next {
                         Some(Ok(event)) => {
-                            completed |= matches!(event, QueryEvent::Complete { .. });
+                            completed |= matches!(event, QueryEvent::Complete { .. } | QueryEvent::ServerError(_));
+                            if let QueryEvent::ServerError(e) = &event && e.severity == "FATAL" { fatal.get_or_insert_with(|| e.message.clone()); }
                             yield Ok(event);
                         }
                         Some(Err(e)) => { failed = Some(e); break; }
@@ -237,6 +239,10 @@ impl MsSession {
                 let e = failed.unwrap();
                 lease.retire(e.message.clone());
                 yield Err(e);
+                return;
+            }
+            if let Some(message) = fatal {
+                lease.retire(message);
                 return;
             }
             let observed = if *cancel.borrow() != 0 {
@@ -260,19 +266,18 @@ impl MsSession {
     pub(super) async fn rows(&mut self, sql: &str) -> Result<Vec<Vec<Option<String>>>, QueryError> {
         let mut stream = self.query(sql);
         let mut rows = Vec::new();
+        let mut failed = None;
         while let Some(event) = stream.next().await {
-            if let QueryEvent::Row(row) = event? {
-                rows.push(row);
+            match event? {
+                QueryEvent::Row(row) => rows.push(row),
+                QueryEvent::ServerError(e) => { failed.get_or_insert(e); }
+                _ => {}
             }
         }
-        Ok(rows)
+        failed.map_or(Ok(rows), Err)
     }
     pub(super) async fn batch(&mut self, sql: &str) -> Result<(), QueryError> {
-        let mut stream = self.query(sql);
-        while let Some(event) = stream.next().await {
-            event?;
-        }
-        Ok(())
+        self.rows(sql).await.map(drop)
     }
     pub(super) async fn finish_transaction(&mut self, commit: bool) -> Result<(), QueryError> {
         self.batch(if commit { "WHILE @@TRANCOUNT > 0 COMMIT TRANSACTION" } else { "IF @@TRANCOUNT > 0 ROLLBACK TRANSACTION" }).await
@@ -288,8 +293,15 @@ fn native_query<'a>(client: &'a mut TdsClient, sql: &'a str) -> QueryStream<'a> 
         let stream = client.simple_query(sql).await.map_err(query_error)?;
         let mut stream = std::pin::pin!(stream);
         let mut in_result = false;
+        let mut reported = false;
         let mut conversion_error = None;
-        while let Some(item) = stream.try_next().await.map_err(query_error)? {
+        loop {
+            let item = match stream.try_next().await {
+                Ok(Some(item)) => item,
+                Ok(None) => break,
+                Err(tiberius::error::Error::Server(_)) if reported => break,
+                Err(e) => Err(query_error(e))?,
+            };
             if conversion_error.is_some() { continue; }
             match item {
                 QueryItem::Metadata(meta) => {
@@ -308,6 +320,11 @@ fn native_query<'a>(client: &'a mut TdsClient, sql: &'a str) -> QueryStream<'a> 
                     yield QueryEvent::Row(cells);
                 }
                 QueryItem::Info(info) => yield QueryEvent::Notice(notice(&info)),
+                QueryItem::Error(e) => {
+                    in_result = false;
+                    reported = true;
+                    yield QueryEvent::ServerError(query_error(tiberius::error::Error::Server(e)));
+                }
                 QueryItem::Done(count) if in_result => {
                     in_result = false;
                     yield QueryEvent::Complete { affected_rows: count };

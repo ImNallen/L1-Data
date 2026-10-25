@@ -1,4 +1,4 @@
-use crate::tds::codec::TokenInfo;
+use crate::tds::codec::{TokenError, TokenInfo};
 use crate::tds::stream::ReceivedToken;
 use crate::{row::ColumnType, Column, Row};
 use futures_util::{
@@ -13,7 +13,7 @@ use std::{
 };
 
 /// A set of `Streams` of [`QueryItem`] values: result metadata, rows, server
-/// messages, and the end of each statement.
+/// messages and errors, and the end of each statement.
 ///
 /// The `QueryStream` needs to be polled empty before sending another query to
 /// the [`Client`], failing to do so causes a flush before the next query,
@@ -81,7 +81,7 @@ use std::{
 ///         QueryItem::Row(row) => {
 ///             assert_eq!(Some(2), row.get(0));
 ///         }
-///         QueryItem::Info(_) | QueryItem::Done(_) => {}
+///         QueryItem::Info(_) | QueryItem::Error(_) | QueryItem::Done(_) => {}
 ///     }
 /// }
 /// # Ok(())
@@ -277,7 +277,7 @@ where
                 // a result set on the fly rather than discard a leading row.
                 current.get_or_insert_with(Vec::new).push(row);
             }
-            QueryItem::Info(_) | QueryItem::Done(_) => {}
+            QueryItem::Info(_) | QueryItem::Error(_) | QueryItem::Done(_) => {}
         }
     }
 
@@ -319,6 +319,9 @@ pub enum QueryItem {
     /// A message from `PRINT`, a low-severity `RAISERROR`, or the server, in
     /// stream order.
     Info(TokenInfo),
+    /// A server error, in stream order. The batch can go on after it, and the
+    /// stream still ends with the first error once its items run out.
+    Error(TokenError),
     /// The end of a statement, with the rows it returned or changed. `None`
     /// under `SET NOCOUNT ON`, for statements that count no rows, such as DDL,
     /// and for a `SELECT` that sent no result set, such as `SET @x = 1`.
@@ -418,6 +421,7 @@ impl<'a> Stream for QueryStream<'a> {
                     Poll::Ready(Some(Ok(QueryItem::Row(row))))
                 }
                 ReceivedToken::Info(info) => Poll::Ready(Some(Ok(QueryItem::Info(info)))),
+                ReceivedToken::Error(error) => Poll::Ready(Some(Ok(QueryItem::Error(error)))),
                 ReceivedToken::Done(done) | ReceivedToken::DoneInProc(done) => {
                     let rows = done.row_count(std::mem::take(&mut this.in_result));
                     Poll::Ready(Some(Ok(QueryItem::Done(rows))))
@@ -702,6 +706,16 @@ mod tests {
             info("before"),
             token_meta("first"),
             token_row(),
+            ReceivedToken::Error(TokenError {
+                code: 8134,
+                state: 1,
+                class: 16,
+                message: "failed".into(),
+                server: String::new(),
+                procedure: String::new(),
+                line: 1,
+            }),
+            info("terminated"),
             ReceivedToken::Done(Default::default()),
             info("after"),
         ])
@@ -714,12 +728,21 @@ mod tests {
                 QueryItem::Info(info) => format!("info {}", info.message()),
                 QueryItem::Metadata(_) => "metadata".into(),
                 QueryItem::Row(_) => "row".into(),
+                QueryItem::Error(error) => format!("error {}", error.message()),
                 QueryItem::Done(rows) => format!("done {rows:?}"),
             })
             .collect();
         assert_eq!(
             shape,
-            ["info before", "metadata", "row", "done None", "info after"]
+            [
+                "info before",
+                "metadata",
+                "row",
+                "error failed",
+                "info terminated",
+                "done None",
+                "info after"
+            ]
         );
     }
 

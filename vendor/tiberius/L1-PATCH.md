@@ -20,10 +20,13 @@ It rejects incomplete responses, missing login fields, and untracked
 distributed or bound-session transaction changes. Cancellation safety is
 unchanged. The caller must discard abandoned or cancelled clients.
 
-`QueryStream` also yields `QueryItem::Info` for each INFO token and
-`QueryItem::Done` for each DONE and DONEINPROC token, in server order. Upstream
-dropped both, so `PRINT` output, low-severity `RAISERROR` messages, and
-affected-row counts were lost. `query`, `simple_query`, and `Query::query` no
+`QueryStream` also yields `QueryItem::Info` for each INFO token,
+`QueryItem::Error` for each ERROR token, and `QueryItem::Done` for each DONE and
+DONEINPROC token, in server order. Upstream dropped all three, so `PRINT`
+output, low-severity `RAISERROR` messages, and affected-row counts were lost,
+and an error could be reported only after the messages that followed it. The
+stream still ends with the first error once its items run out, so callers that
+collect results still fail. `query`, `simple_query`, and `Query::query` no
 longer skip the tokens before the first result set, which held back messages
 until a result set arrived. `Done` carries the row count only when the server
 set DONE_COUNT. Like SqlClient, it also drops the count of a `SELECT` that sent

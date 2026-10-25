@@ -161,10 +161,58 @@ async fn print_and_low_severity_raiserror_reach_the_output_log_in_server_order()
     let (_, log) = h.logged("RAISERROR('informational', 10, 1); RAISERROR('careful', 5, 1); PRINT 'after'").await;
     assert_eq!(lines(&log), ["NOTICE: informational", "WARNING: careful", "NOTICE: after", "Commands completed successfully"]);
 
-    let (state, log) = h.logged("PRINT 'before'; RAISERROR('fail', 16, 1)").await;
-    assert_eq!(lines(&log)[0], "NOTICE: before");
-    assert!(lines(&log).last().unwrap().ends_with("fail"), "{log:?}");
+    let (state, log) = h.logged("PRINT 'a'; RAISERROR('boom', 16, 1); PRINT 'b'").await;
+    assert_eq!(lines(&log), ["NOTICE: a", "ERROR: boom", "NOTICE: b"]);
     assert!(matches!(state.run, RunState::Finished { outcome: RunOutcome::Failed, .. }), "{:?}", state.run);
+    let RunState::Finished { statements, .. } = &state.run else { unreachable!() };
+    assert!(matches!(&statements[0].status, StmtStatus::Failed { error } if error.message == "boom"), "{:?}", statements[0].status);
+
+    let (_, log) = h.logged("RAISERROR('e1', 16, 1); RAISERROR('e2', 16, 1)").await;
+    assert_eq!(lines(&log), ["ERROR: e1", "ERROR: e2"]);
+
+    let (_, log) = h.logged("CREATE TABLE #u (id int PRIMARY KEY); INSERT #u VALUES (1); INSERT #u VALUES (1); INSERT #u VALUES (2); DROP TABLE #u").await;
+    let log = lines(&log);
+    assert_eq!(log.len(), 4, "{log:?}");
+    assert_eq!(log[0], "1 row affected");
+    assert!(log[1].starts_with("ERROR: Violation of PRIMARY KEY constraint"), "{log:?}");
+    assert_eq!(log[2..], ["NOTICE: The statement has been terminated.", "1 row affected"]);
+}
+
+#[tokio::test]
+async fn a_fatal_error_in_the_batch_retires_the_session() {
+    let mut h = Harness::open(TxnMode::AutoCommit).await;
+    let (state, log) = h.logged("PRINT 'before'; RAISERROR('fatal', 20, 1) WITH LOG; PRINT 'never'").await;
+    assert_eq!(lines(&log)[..2], ["NOTICE: before", "FATAL: fatal"]);
+    assert!(!lines(&log).contains(&"NOTICE: never".into()), "{log:?}");
+    assert!(log.iter().any(|body| matches!(body, OutputBody::Info { message } if message.starts_with("Session reset"))), "{log:?}");
+    let RunState::Finished { statements, .. } = &state.run else { unreachable!() };
+    assert!(matches!(&statements[0].status, StmtStatus::Failed { error } if error.severity == "FATAL" && error.message == "fatal"), "{:?}", statements[0].status);
+    h.ok("SELECT 1 AS one").await;
+}
+
+fn rowset_states(state: &ConsoleState) -> Vec<(RowsState, u64)> {
+    let RunState::Finished { statements, .. } = &state.run else { panic!("not finished") };
+    statements
+        .iter()
+        .flat_map(|s| &s.outputs)
+        .filter_map(|o| match o {
+            RunOutput::Rows { result, state } => Some((*state, result.rows_seen)),
+            _ => None,
+        })
+        .collect()
+}
+
+#[tokio::test]
+async fn an_error_cuts_off_only_the_result_set_it_ends() {
+    let mut h = Harness::open(TxnMode::AutoCommit).await;
+    let (state, log) = h.logged("SELECT x FROM (VALUES (1),(2),(0),(3)) v(x) WHERE 10 / x > 0").await;
+    assert_eq!(rowset_states(&state), [(RowsState::Failed, 2)]);
+    assert_eq!(lines(&log), ["ERROR: Divide by zero error encountered."]);
+    assert!(matches!(state.run, RunState::Finished { outcome: RunOutcome::Failed, .. }), "{:?}", state.run);
+
+    let (state, log) = h.logged("SELECT 1 AS a; SELECT 1/0 AS b; SELECT 3 AS c").await;
+    assert_eq!(rowset_states(&state), [(RowsState::Complete, 1), (RowsState::Failed, 0), (RowsState::Complete, 1)]);
+    assert_eq!(lines(&log), ["rows 1", "ERROR: Divide by zero error encountered.", "rows 1"]);
 }
 
 #[tokio::test]

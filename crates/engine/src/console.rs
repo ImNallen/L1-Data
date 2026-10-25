@@ -417,7 +417,9 @@ pub async fn run_task(console: Arc<Console>, shared: Arc<Shared>, mut session: S
             Console::statements_mut(inner)[index].status = StmtStatus::Preparing;
         }).await?;
         let unit_started = Instant::now();
-        let result = run_outputs(&console, &shared, &mut session, &plan, index, &caps, &stop).await?;
+        let ran = run_outputs(&console, &shared, &mut session, &plan, index, &caps, &stop).await?;
+        let logged = matches!(ran, Err(Failed { logged: true, .. }));
+        let result = ran.map_err(|failed| failed.error);
         let cancelled = stop.load(Ordering::Relaxed) && result.is_err();
         let result = result.map_err(|mut e| {
             e.position = e.position.map(|p| DocOffset(map.to_utf16(stmt.span.start).0.saturating_add(p.0)));
@@ -442,7 +444,7 @@ pub async fn run_task(console: Arc<Console>, shared: Arc<Shared>, mut session: S
         }).await?;
         if let Some((db, owed)) = due { shared.schedule_refreshes(db, owed); }
         let mut lines = notice_lines(&mut session);
-        if let Err(error) = &result { lines.push(OutputBody::Error { statement: Some(i), error: error.clone() }); }
+        if let Err(error) = &result && !logged { lines.push(OutputBody::Error { statement: Some(i), error: error.clone() }); }
         console.output_all(&shared, run_id, lines);
         shared.record_history(HistoryInsert {
             database_kind: plan.connection.database_kind,
@@ -521,7 +523,7 @@ async fn set_status(console: &Console, shared: &Shared, run_id: RunId, index: u1
 
 pub fn notice_lines(session: &mut Session) -> Vec<OutputBody> { session.drain_notices() }
 
-async fn run_outputs(console: &Console, shared: &Shared, session: &mut Session, plan: &RunPlan, index: usize, caps: &Caps, stop: &AtomicBool) -> Result<Result<(Option<u64>, Vec<String>), QueryError>, Orphaned> {
+async fn run_outputs(console: &Console, shared: &Shared, session: &mut Session, plan: &RunPlan, index: usize, caps: &Caps, stop: &AtomicBool) -> Result<Result<(Option<u64>, Vec<String>), Failed>, Orphaned> {
     let sql = plan.statements[index].span.text(&plan.text);
     let run_id = plan.run_id;
     let started = Instant::now();
@@ -531,6 +533,7 @@ async fn run_outputs(console: &Console, shared: &Shared, session: &mut Session, 
     let mut rows: Option<u64> = None;
     let mut tags = Vec::new();
     let mut failure = None;
+    let mut reported = None;
     let mut nth: u16 = 0;
     let mut rerun: Option<Rerun> = None;
     let mut log = Vec::new();
@@ -600,6 +603,11 @@ async fn run_outputs(console: &Console, shared: &Shared, session: &mut Session, 
                 }
             }
             Ok(QueryEvent::Notice(body)) => log.push(body),
+            Ok(QueryEvent::ServerError(error)) => {
+                if let Some((set, out)) = active.take() { end_rows(&set, &mut outputs[out], started, RowsState::Failed); }
+                log.push(OutputBody::Error { statement: Some(index as u16), error: error.clone() });
+                reported.get_or_insert(error);
+            }
         }
         if last_emit.elapsed() >= STREAM_EMIT_INTERVAL {
             last_emit = Instant::now();
@@ -611,11 +619,25 @@ async fn run_outputs(console: &Console, shared: &Shared, session: &mut Session, 
     drop(stream);
     if let Some((set, out)) = active {
         if failure.is_none() { finish_rows(&mut log, index, &set, &mut outputs[out], started, &mut rows); }
-        else { set.set_elapsed(elapsed_ms(started)); outputs[out] = RunOutput::Rows { result: set.meta(), state: if stop.load(Ordering::Relaxed) { RowsState::Cancelled } else { RowsState::Failed } }; }
+        else { end_rows(&set, &mut outputs[out], started, if stop.load(Ordering::Relaxed) { RowsState::Cancelled } else { RowsState::Failed }); }
     }
     console.output_all(shared, run_id, log);
     console.edit(shared, run_id, |inner| Console::statements_mut(inner)[index].outputs = outputs).await?;
-    Ok(match failure { Some(error) => Err(error), None => Ok((rows, tags)) })
+    Ok(match (failure, reported) {
+        (Some(error), _) => Err(Failed { error, logged: false }),
+        (None, Some(error)) => Err(Failed { error, logged: true }),
+        (None, None) => Ok((rows, tags)),
+    })
+}
+
+struct Failed {
+    error: QueryError,
+    logged: bool,
+}
+
+fn end_rows(set: &ResultSet, output: &mut RunOutput, started: Instant, state: RowsState) {
+    set.set_elapsed(elapsed_ms(started));
+    *output = RunOutput::Rows { result: set.meta(), state };
 }
 
 fn finish_rows(log: &mut Vec<OutputBody>, index: usize, set: &ResultSet, output: &mut RunOutput, started: Instant, rows: &mut Option<u64>) {

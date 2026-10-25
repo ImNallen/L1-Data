@@ -413,6 +413,9 @@ async fn pump(job: &Job, session: &mut Session, encoder: &mut Encoder, writer: &
             }
             Some(Ok(QueryEvent::Prepared | QueryEvent::Complete { .. })) => {}
             Some(Ok(QueryEvent::Notice(body))) => job.console.output(&job.shared, job.run_id, body),
+            Some(Ok(QueryEvent::ServerError(e))) => {
+                halt.get_or_insert(Halt::Query(e));
+            }
             Some(Ok(QueryEvent::Columns(columns))) => {
                 let index = set.map_or(0, |i| i.saturating_add(1));
                 set = Some(index);
