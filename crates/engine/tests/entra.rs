@@ -61,6 +61,15 @@ fn refused_port() -> u16 {
     std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port()
 }
 
+/// A port that accepts each connection and closes it, so a sign-in gets past the dial and fails
+/// at the TDS handshake.
+fn closing_port() -> u16 {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    std::thread::spawn(move || listener.incoming().for_each(drop));
+    port
+}
+
 fn entra(host: &str, port: u16) -> ConnectionDraft {
     ConnectionDraft {
         database_kind: DatabaseKind::SqlServer,
@@ -97,9 +106,9 @@ async fn an_entra_connection_needs_no_user_and_saves_no_password() {
 #[tokio::test]
 async fn sessions_share_one_token_until_its_refresh_point() {
     let h = Harness::with_az("ok").await;
-    let id = h.engine.save_connection(entra("127.0.0.1", refused_port())).await.unwrap().id;
+    let id = h.engine.save_connection(entra("127.0.0.1", closing_port())).await.unwrap().id;
     for _ in 0..3 {
-        assert!(matches!(h.engine.connect(id).await, Err(ConnectError::Network { .. })));
+        assert!(h.engine.connect(id).await.is_err());
     }
     assert_eq!(h.calls(), 1, "{}", std::fs::read_to_string(h.log()).unwrap());
 }
@@ -107,17 +116,25 @@ async fn sessions_share_one_token_until_its_refresh_point() {
 #[tokio::test]
 async fn a_token_inside_the_refresh_margin_is_fetched_again() {
     let h = Harness::with_az("short-expiry").await;
-    let id = h.engine.save_connection(entra("127.0.0.1", refused_port())).await.unwrap().id;
+    let id = h.engine.save_connection(entra("127.0.0.1", closing_port())).await.unwrap().id;
     for _ in 0..2 {
-        assert!(matches!(h.engine.connect(id).await, Err(ConnectError::Network { .. })));
+        assert!(h.engine.connect(id).await.is_err());
     }
     assert_eq!(h.calls(), 2);
 }
 
 #[tokio::test]
+async fn an_unreachable_host_fails_before_az_runs() {
+    let h = Harness::with_az("ok").await;
+    let id = h.engine.save_connection(entra("127.0.0.1", refused_port())).await.unwrap().id;
+    assert!(matches!(h.engine.connect(id).await, Err(ConnectError::Network { .. })));
+    assert_eq!(h.calls(), 0);
+}
+
+#[tokio::test]
 async fn concurrent_sign_ins_share_one_az_call_and_its_failure() {
     let h = Harness::with_slow_az("signed-out", 1).await;
-    let draft = entra("127.0.0.1", refused_port());
+    let draft = entra("127.0.0.1", closing_port());
     let started = std::time::Instant::now();
     let tries = tokio::join!(h.engine.test_connection(draft.clone()), h.engine.test_connection(draft.clone()), h.engine.test_connection(draft.clone()));
     for result in [tries.0, tries.1, tries.2] {
@@ -132,7 +149,7 @@ async fn concurrent_sign_ins_share_one_az_call_and_its_failure() {
 #[tokio::test]
 async fn a_signed_out_cli_fails_as_auth_naming_az_login() {
     let h = Harness::with_az("signed-out").await;
-    let Err(ConnectError::Auth { message }) = h.engine.test_connection(entra("127.0.0.1", refused_port())).await else { panic!("expected Auth") };
+    let Err(ConnectError::Auth { message }) = h.engine.test_connection(entra("127.0.0.1", closing_port())).await else { panic!("expected Auth") };
     assert!(message.starts_with("Run `az login`, then try again.") && message.contains("Please run 'az login'"), "{message}");
     assert_eq!(h.calls(), 1);
 }
@@ -140,7 +157,7 @@ async fn a_signed_out_cli_fails_as_auth_naming_az_login() {
 #[tokio::test]
 async fn a_missing_cli_fails_as_auth_naming_the_install_and_az_login() {
     let h = Harness::without_az().await;
-    let Err(ConnectError::Auth { message }) = h.engine.test_connection(entra("127.0.0.1", refused_port())).await else { panic!("expected Auth") };
+    let Err(ConnectError::Auth { message }) = h.engine.test_connection(entra("127.0.0.1", closing_port())).await else { panic!("expected Auth") };
     assert!(message.starts_with("Install the Azure CLI, run `az login`, then try again."), "{message}");
 }
 
@@ -155,7 +172,7 @@ async fn an_entra_token_is_never_sent_over_tls_that_skips_verification() {
 #[tokio::test]
 async fn the_engine_config_az_binary_replaces_az_on_the_path() {
     let h = Harness::with_az_binary("signed-out").await;
-    let Err(ConnectError::Auth { message }) = h.engine.test_connection(entra("127.0.0.1", refused_port())).await else { panic!("expected Auth") };
+    let Err(ConnectError::Auth { message }) = h.engine.test_connection(entra("127.0.0.1", closing_port())).await else { panic!("expected Auth") };
     assert!(message.contains("Please run 'az login'"), "{message}");
     assert_eq!(h.calls(), 1);
 }

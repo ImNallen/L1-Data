@@ -120,6 +120,7 @@ fn refuses_login(code: u32, entra: bool) -> bool {
 impl MsSession {
     pub(super) async fn open(p: &ConnectParams) -> Result<Self, ConnectError> {
         let mut cfg = config(p)?;
+        let stream = p.dial().await?;
         let token = match &p.entra {
             Some(az) => Some(az.token().await?),
             None => None,
@@ -127,7 +128,6 @@ impl MsSession {
         if let Some(token) = &token {
             cfg.authentication(AuthMethod::aad_token(token));
         }
-        let stream = p.dial().await?;
         let connection = Client::connect(cfg, stream.compat_write());
         let connected = tokio::time::timeout(CONNECT_TIMEOUT, connection).await.map_err(|_| ConnectError::Network { message: "SQL Server connection timed out".into() })?;
         let client = match connected {

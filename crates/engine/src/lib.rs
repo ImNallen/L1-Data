@@ -1837,8 +1837,8 @@ mod tests {
         assert!(saved.has_password);
         let engine = Engine::open(cfg(Arc::new(NoKeychain))).await.unwrap();
         let entra = ConnectionDraft { id: Some(saved.id), password: PasswordInput::Keep, sql_server_auth: Some(SqlServerAuth::EntraAzureCli), ..login };
-        let Err(ConnectError::Auth { message }) = engine.test_connection(entra).await else { panic!("the keychain was read") };
-        assert!(message.starts_with("Install the Azure CLI"), "{message}");
+        let tried = engine.test_connection(entra).await;
+        assert!(matches!(tried, Err(ConnectError::Network { .. })), "the keychain was read: {tried:?}");
     }
 
     #[tokio::test]
