@@ -293,7 +293,6 @@ fn native_query<'a>(client: &'a mut TdsClient, sql: &'a str) -> QueryStream<'a> 
             if conversion_error.is_some() { continue; }
             match item {
                 QueryItem::Metadata(meta) => {
-                    if in_result { yield QueryEvent::Complete { affected_rows: None }; }
                     let columns = match meta.columns().iter().map(values::metadata).collect::<Result<Vec<_>, _>>() {
                         Ok(columns) => columns,
                         Err(e) => { conversion_error = Some(e); continue; }
