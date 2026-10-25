@@ -237,3 +237,63 @@ async fn postgres_keeps_existing_routine_insertion_for_functions_procedures_and_
         std::panic::resume_unwind(error);
     }
 }
+
+#[cfg(feature = "pg-tests")]
+#[tokio::test]
+async fn postgres_catalog_quotes_only_the_names_that_need_it() {
+    let h = Harness::open(DatabaseKind::Postgres).await;
+    let schema = format!("L1 Quote {}", uuid::Uuid::new_v4().simple());
+    let outcome = AssertUnwindSafe(async {
+        h.sql(&format!("CREATE SCHEMA \"{schema}\"")).await;
+        h.sql(&format!("CREATE TABLE \"{schema}\".\"Line Items\" (\"order\" int, \"MixedCase\" int, plain int)")).await;
+        h.sql(&format!("CREATE FUNCTION \"{schema}\".\"MyFunc\"() RETURNS int LANGUAGE sql AS 'SELECT 7'")).await;
+        h.engine.refresh_catalog(h.db.clone()).await.unwrap();
+        let catalog = h.engine.catalog(h.db.clone()).await.unwrap();
+        let s = catalog.schemas.iter().find(|s| s.name == schema).unwrap();
+        let r = s.relations.iter().find(|r| r.name == "Line Items").unwrap();
+        let f = routine(&catalog, &schema, "MyFunc");
+        assert_eq!((s.quoted.as_str(), r.quoted.as_str()), (format!("\"{schema}\"").as_str(), "\"Line Items\""));
+        assert_eq!(r.columns.iter().map(|c| c.quoted.as_str()).collect::<Vec<_>>(), ["\"order\"", "\"MixedCase\"", "plain"]);
+        assert_eq!((f.quoted.as_str(), f.insert_text.as_str()), ("\"MyFunc\"", "\"MyFunc\"()"));
+        assert_eq!(h.sql(&format!("SELECT {}.{}", s.quoted, f.insert_text)).await, vec![vec![Some("7".into())]]);
+        let columns = r.columns.iter().map(|c| format!("t.{}", c.quoted)).collect::<Vec<_>>().join(", ");
+        h.sql(&format!("INSERT INTO {}.{} VALUES (1, 2, 3)", s.quoted, r.quoted)).await;
+        assert_eq!(h.sql(&format!("SELECT {columns} FROM {}.{} t", s.quoted, r.quoted)).await, vec![vec![Some("1".into()), Some("2".into()), Some("3".into())]]);
+    })
+    .catch_unwind()
+    .await;
+    h.cleanup(vec![format!("DROP SCHEMA IF EXISTS \"{schema}\" CASCADE")], &format!("SELECT to_regnamespace('\"{schema}\"')")).await;
+    if let Err(error) = outcome {
+        std::panic::resume_unwind(error);
+    }
+}
+
+#[cfg(feature = "mssql-tests")]
+#[tokio::test]
+async fn sql_server_catalog_brackets_only_the_names_that_need_it() {
+    let h = Harness::open(DatabaseKind::SqlServer).await;
+    let schema = format!("l1_quote_{}", uuid::Uuid::new_v4().simple());
+    let outcome = AssertUnwindSafe(async {
+        h.sql(&format!("CREATE SCHEMA [{schema}]")).await;
+        h.sql(&format!("CREATE TABLE [{schema}].[order] ([select] int, Plain int, [two words] int)")).await;
+        h.engine.refresh_catalog(h.db.clone()).await.unwrap();
+        let catalog = h.engine.catalog(h.db.clone()).await.unwrap();
+        let s = catalog.schemas.iter().find(|s| s.name == schema).unwrap();
+        let r = s.relations.iter().find(|r| r.name == "order").unwrap();
+        assert_eq!((s.quoted.as_str(), r.quoted.as_str()), (schema.as_str(), "[order]"));
+        assert_eq!(r.columns.iter().map(|c| c.quoted.as_str()).collect::<Vec<_>>(), ["[select]", "Plain", "[two words]"]);
+        let columns = r.columns.iter().map(|c| format!("t.{}", c.quoted)).collect::<Vec<_>>().join(", ");
+        h.sql(&format!("INSERT INTO {}.{} VALUES (1, 2, 3)", s.quoted, r.quoted)).await;
+        assert_eq!(h.sql(&format!("SELECT {columns} FROM {}.{} t", s.quoted, r.quoted)).await, vec![vec![Some("1".into()), Some("2".into()), Some("3".into())]]);
+    })
+    .catch_unwind()
+    .await;
+    h.cleanup(
+        vec![format!("DROP TABLE IF EXISTS [{schema}].[order]"), format!("IF SCHEMA_ID(N'{schema}') IS NOT NULL DROP SCHEMA [{schema}]")],
+        &format!("SELECT SCHEMA_ID(N'{schema}')"),
+    )
+    .await;
+    if let Err(error) = outcome {
+        std::panic::resume_unwind(error);
+    }
+}

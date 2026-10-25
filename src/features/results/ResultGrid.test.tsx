@@ -72,6 +72,7 @@ it("looks primary keys up in the catalog of the database the rows came from", ()
     schemas: [
       {
         name: "public",
+        quoted: "public",
         system: false,
         tableCount: 1,
         relations: [

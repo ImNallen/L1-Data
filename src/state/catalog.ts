@@ -1,6 +1,6 @@
 import type { Completion } from "@codemirror/autocomplete";
 import { create } from "zustand";
-import { commands, type Catalog, type ColumnInfo, type ColumnSource, type DatabaseKind, type DatabaseRef, type RelKind, type Relation } from "../ipc/bindings";
+import { commands, type Catalog, type ColumnInfo, type ColumnSource, type DatabaseRef, type RelKind, type Relation } from "../ipc/bindings";
 import { dbKey, type DbKey } from "./dbKey";
 
 export type CatalogView = {
@@ -12,11 +12,6 @@ export type CatalogView = {
 
 export function isViewKind(kind: RelKind): boolean {
   return kind === "View" || kind === "MaterializedView";
-}
-
-export function quoteName(kind: DatabaseKind, name: string): string {
-  if (kind === "SqlServer") return /^[A-Za-z_][\w@$#]*$/.test(name) ? name : `[${name.replaceAll("]", "]]")}]`;
-  return /^[a-z_][a-z0-9_$]*$/.test(name) ? name : `"${name.replaceAll('"', '""')}"`;
 }
 
 export function buildCatalogView(catalog: Catalog): CatalogView {
@@ -38,7 +33,7 @@ export function buildCatalogView(catalog: Catalog): CatalogView {
     const bare = schema.name === catalog.defaultSchema;
     for (const fn of schema.functions) {
       if (fn.kind === "Procedure" || fn.returns === "trigger") continue;
-      const qualified = bare || catalog.databaseKind === "SqlServer" ? fn.insertText : `${quoteName(catalog.databaseKind, schema.name)}.${fn.insertText}`;
+      const qualified = bare || catalog.databaseKind === "SqlServer" ? fn.insertText : `${schema.quoted}.${fn.insertText}`;
       functions.push({ label: bare ? fn.name : `${schema.name}.${fn.name}`, detail: `(${fn.args})`, type: "function", apply: qualified });
     }
   }

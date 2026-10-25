@@ -348,6 +348,8 @@ pub struct Catalog {
 #[serde(rename_all = "camelCase")]
 pub struct SchemaInfo {
     pub name: String,
+    /// `name` as SQL writes it, quoted only when it must be.
+    pub quoted: String,
     /// `information_schema` or a `pg_` prefix, which Postgres reserves for its own schemas.
     pub system: bool,
     /// Tables, partitioned tables, and foreign tables, which the tree lists as tables. Counted by
@@ -372,6 +374,8 @@ pub struct Relation {
     pub qualified_name: String,
     pub oid: u32,
     pub name: String,
+    /// `name` as SQL writes it, quoted only when it must be.
+    pub quoted: String,
     pub kind: RelKind,
     /// `None` when `reltuples = -1` (never analyzed).
     pub row_estimate: Option<i64>,
@@ -385,6 +389,8 @@ pub struct ColumnInfo {
     pub writable: bool,
     pub attnum: i16,
     pub name: String,
+    /// `name` as SQL writes it, quoted only when it must be.
+    pub quoted: String,
     pub type_display: String,
     pub category: TypeCategory,
     pub not_null: bool,
@@ -398,6 +404,8 @@ pub struct ColumnInfo {
 pub struct FunctionInfo {
     pub oid: u32,
     pub name: String,
+    /// `name` as a call writes it, quoted only when it must be.
+    pub quoted: String,
     pub args: String,
     pub returns: String,
     pub kind: FnKind,
@@ -860,7 +868,7 @@ pub struct ScopeRelation {
     /// How the statement refers to it, as written: its alias, else its name. `None` for a subquery without an alias.
     pub reference: Option<String>,
     pub source: RelationSource,
-    /// The names a column alias list gives the first columns, as in `orders o(a, b)`, folded as the server folds them.
+    /// The names a column alias list gives the first columns, as in `orders o(a, b)`, as SQL writes them.
     pub column_aliases: Vec<String>,
 }
 
@@ -869,7 +877,8 @@ pub struct ScopeRelation {
 pub enum RelationSource {
     /// A catalog table or view. Unquoted PostgreSQL names are folded to lower case.
     Table { schema: Option<String>, name: String },
-    /// A CTE, a subquery, or a table function: the columns its select list names, plus every column of each `star` table.
+    /// A CTE, a subquery, or a table function: the columns its select list names, as SQL writes them, plus every
+    /// column of each `star` table.
     Derived { columns: Vec<String>, star: Vec<TableName> },
 }
 

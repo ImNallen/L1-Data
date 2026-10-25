@@ -163,6 +163,32 @@ pub fn quote_ident(name: &str) -> String {
     format!("\"{}\"", name.replace('"', "\"\""))
 }
 
+/// `name` as SQL writes it: bare when the server reads the bare word back as `name`, else quoted.
+pub fn sql_name(kind: DatabaseKind, name: &str) -> String {
+    name_in(kind, name, &[sql::RESERVED, sql::TYPE_OR_FUNCTION_NAME])
+}
+
+/// A function's name as a call writes it. PostgreSQL also quotes a column-name keyword there, such as `int`.
+pub fn sql_function_name(kind: DatabaseKind, name: &str) -> String {
+    name_in(kind, name, &[sql::NEVER_A_FUNCTION])
+}
+
+fn name_in(kind: DatabaseKind, name: &str, postgres_keywords: &[&[&str]]) -> String {
+    let mut chars = name.chars();
+    match kind {
+        DatabaseKind::Postgres => {
+            let plain = chars.next().is_some_and(|c| c.is_ascii_lowercase() || c == '_')
+                && chars.all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_' || c == '$');
+            if plain && !postgres_keywords.iter().any(|k| k.contains(&name)) { name.to_owned() } else { quote_ident(name) }
+        }
+        DatabaseKind::SqlServer => {
+            let plain = chars.next().is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
+                && chars.all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '@' | '$' | '#'));
+            if plain && !sql::tsql::RESERVED.contains(&name.to_ascii_uppercase().as_str()) { name.to_owned() } else { sql::tsql::quote_ident(name) }
+        }
+    }
+}
+
 pub fn quote_literal(value: &str) -> String {
     format!("'{}'", value.replace('\'', "''"))
 }
@@ -280,6 +306,19 @@ mod tests {
 
     fn r(from: u32, to: u32) -> DocRange {
         DocRange { from: DocOffset(from), to: DocOffset(to) }
+    }
+
+    #[test]
+    fn a_name_is_quoted_only_where_the_bare_word_would_read_differently() {
+        let pg = |name| sql_name(DatabaseKind::Postgres, name);
+        assert_eq!(
+            ["orders", "order$1", "Line Items", "a\"b", "order", "Orders", "left", "int", "café"].map(pg),
+            ["orders", "order$1", "\"Line Items\"", "\"a\"\"b\"", "\"order\"", "\"Orders\"", "\"left\"", "int", "\"café\""]
+        );
+        let pg_call = |name| sql_function_name(DatabaseKind::Postgres, name);
+        assert_eq!(["answer", "MyFunc", "int", "left"].map(pg_call), ["answer", "\"MyFunc\"", "\"int\"", "left"]);
+        let ms = |name| sql_name(DatabaseKind::SqlServer, name);
+        assert_eq!(["Orders", "line items", "a]b", "order", "Order", "x#1", "9lives"].map(ms), ["Orders", "[line items]", "[a]]b]", "[order]", "[Order]", "x#1", "[9lives]"]);
     }
 
     #[test]

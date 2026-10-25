@@ -6,6 +6,7 @@ use super::relations::{VETTED, VETTED_SIZES};
 use super::split::split_statements;
 use super::tsql;
 use crate::model::{DatabaseKind, Expect, Qualifier, RelationSource, ScopeRelation, TableName};
+use crate::text::sql_name;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum Class {
@@ -861,8 +862,18 @@ impl<'a> Walk<'a> {
             rels.extend(visible.iter().filter(|r| !self.aliased_elsewhere(r, frame_rels)));
             child = Some(&self.frames[f]);
         }
-        let relations =
-            rels.iter().map(|r| ScopeRelation { reference: r.written.clone(), source: r.source.clone(), column_aliases: r.column_aliases.clone() }).collect();
+        let quoted = |names: &[String]| names.iter().map(|n| sql_name(self.kind, n)).collect::<Vec<_>>();
+        let relations = rels
+            .iter()
+            .map(|r| ScopeRelation {
+                reference: r.written.clone(),
+                source: match &r.source {
+                    RelationSource::Derived { columns, star } => RelationSource::Derived { columns: quoted(columns), star: star.clone() },
+                    table => table.clone(),
+                },
+                column_aliases: quoted(&r.column_aliases),
+            })
+            .collect();
         let mut ctes: Vec<String> = Vec::new();
         let recursing = chain.windows(2).filter_map(|w| self.recursing(w[1], w[0]));
         let defined = chain.iter().enumerate().flat_map(|(k, &f)| {
@@ -1443,7 +1454,7 @@ mod tests {
     fn a_column_alias_list_renames_the_first_columns() {
         let aliases = |s: &Scope| s.relations.iter().map(|r| r.column_aliases.clone()).collect::<Vec<_>>();
         let s = pg("select * from orders o(a, \"B\") where o.|");
-        assert_eq!((refs(&s), aliases(&s)), (vec![(Some("o"), &table(None, "orders"))], vec![vec!["a".to_owned(), "B".to_owned()]]));
+        assert_eq!((refs(&s), aliases(&s)), (vec![(Some("o"), &table(None, "orders"))], vec![vec!["a".to_owned(), "\"B\"".to_owned()]]));
         let s = pg("select * from unnest(array[1]) as u(x) where u.|");
         assert_eq!(aliases(&s), [["x"]]);
         let s = ms("SELECT * FROM (VALUES (1, 2)) AS v(a, b) WHERE v.|");
@@ -1506,6 +1517,14 @@ mod tests {
         assert_eq!(derived("with x as (select id, name from a union select id, title from b) select * from x where |", Postgres).0, ["id", "name"]);
         assert_eq!(derived("with x as (update orders set total = 0 returning id) select * from x where |", Postgres), (vec![], vec![]));
         assert_eq!(pg("with x as (update orders set total = 0 returning id) select * from x where |").ctes, ["x"]);
+    }
+
+    #[test]
+    fn derived_columns_come_as_sql_writes_them() {
+        let s = pg("with x as (select 1 as \"Total\", 2 as \"order\", 3 n) select * from x where |");
+        assert_eq!(refs(&s), [(Some("x"), &RelationSource::Derived { columns: vec!["\"Total\"".into(), "\"order\"".into(), "n".into()], star: vec![] })]);
+        let s = ms("WITH x AS (SELECT 1 AS [Total], 2 AS [order]) SELECT * FROM x WHERE |");
+        assert_eq!(refs(&s), [(Some("x"), &RelationSource::Derived { columns: vec!["Total".into(), "[order]".into()], star: vec![] })]);
     }
 
     #[test]

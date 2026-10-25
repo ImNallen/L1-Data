@@ -23,11 +23,11 @@ const SHOP: TableSpec[] = [
 ];
 
 const SHOP_FUNCTIONS: FunctionInfo[] = [
-  { oid: 17001, name: "apply_coupon", insertText: "apply_coupon()", args: "amount numeric, code text", returns: "numeric", kind: "Function" },
-  { oid: 17002, name: "customer_ltv", insertText: "customer_ltv()", args: "cust bigint", returns: "numeric", kind: "Function" },
-  { oid: 17003, name: "order_count", insertText: "order_count()", args: "cust bigint", returns: "bigint", kind: "Function" },
-  { oid: 17004, name: "slow_echo", insertText: "slow_echo()", args: "secs double precision", returns: "double precision", kind: "Function" },
-  { oid: 17005, name: "touch_order", insertText: "touch_order()", args: "oid bigint", returns: "void", kind: "Function" },
+  { oid: 17001, name: "apply_coupon", quoted: "apply_coupon", insertText: "apply_coupon()", args: "amount numeric, code text", returns: "numeric", kind: "Function" },
+  { oid: 17002, name: "customer_ltv", quoted: "customer_ltv", insertText: "customer_ltv()", args: "cust bigint", returns: "numeric", kind: "Function" },
+  { oid: 17003, name: "order_count", quoted: "order_count", insertText: "order_count()", args: "cust bigint", returns: "bigint", kind: "Function" },
+  { oid: 17004, name: "slow_echo", quoted: "slow_echo", insertText: "slow_echo()", args: "secs double precision", returns: "double precision", kind: "Function" },
+  { oid: 17005, name: "touch_order", quoted: "touch_order", insertText: "touch_order()", args: "oid bigint", returns: "void", kind: "Function" },
 ];
 
 const LAB: TableSpec[] = [{ name: "type_zoo", rows: 2, columns: ["id|integer|pk", `tstz|${TSTZ}|null`, "m|lab.mood|null"] }];
@@ -36,12 +36,13 @@ function relation(spec: TableSpec, oid: number, schema: string): Relation {
   return {
     oid,
     name: spec.name,
+    quoted: spec.name,
     qualifiedName: `${schema}.${spec.name}`,
     kind: spec.kind ?? "Table",
     rowEstimate: spec.rows,
     columns: spec.columns.map((c, i): ColumnInfo => {
       const [name = "", typeDisplay = "", ...flags] = c.split("|");
-      return { writable: true, attnum: i + 1, name, typeDisplay, category: "Other", notNull: !flags.includes("null"), pk: flags.includes("pk"), fk: false };
+      return { writable: true, attnum: i + 1, name, quoted: name, typeDisplay, category: "Other", notNull: !flags.includes("null"), pk: flags.includes("pk"), fk: false };
     }),
   };
 }
@@ -55,9 +56,10 @@ export function shopCatalog(connectionId: ConnectionId, version: number): Catalo
     version,
     defaultSchema: "public",
     schemas: [
-      { name: "lab", system: false, tableCount: tableCount(LAB), relations: LAB.map((s, i) => relation(s, 16_900 + i, "lab")), functions: [] },
+      { name: "lab", quoted: "lab", system: false, tableCount: tableCount(LAB), relations: LAB.map((s, i) => relation(s, 16_900 + i, "lab")), functions: [] },
       {
         name: "public",
+        quoted: "public",
         system: false,
         tableCount: tableCount(SHOP),
         relations: SHOP.map((s, i) => relation(s, 16_400 + i, "public")),

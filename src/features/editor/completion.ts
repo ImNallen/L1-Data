@@ -1,13 +1,13 @@
 import type { Completion, CompletionContext as EditorContext, CompletionResult, CompletionSource } from "@codemirror/autocomplete";
 import type { EditorView } from "@codemirror/view";
 import { commands, type CompletionContext, type DatabaseKind, type Relation, type ScopeRelation } from "../../ipc/bindings";
-import { isViewKind, quoteName, type CatalogView } from "../../state/catalog";
+import { isViewKind, type CatalogView } from "../../state/catalog";
 import { detailKey, useRelationDetail } from "../../state/relationDetail";
 import { shortType } from "../results/format";
 
 type Complete = Extract<CompletionContext, { kind: "Complete" }>;
 type Resolved = { schema: string; rel: Relation };
-type Column = { name: string; detail: string };
+type Column = { name: string; insert: string; detail: string };
 
 const BOOST = { join: 99, column: 4, reference: 3, relation: 2, function: 1, keyword: -1 };
 
@@ -41,27 +41,26 @@ function resolveTable(view: CatalogView | undefined, schema: string | null, name
 }
 
 function renamed(columns: Column[], aliases: string[], detail: string): Column[] {
-  return [...aliases.map((name, i) => ({ name, detail: columns[i]?.detail ?? detail })), ...columns.slice(aliases.length)];
+  return [...aliases.map((name, i) => ({ name, insert: name, detail: columns[i]?.detail ?? detail })), ...columns.slice(aliases.length)];
+}
+
+function catalogColumns(found: Resolved | undefined, from: string): Column[] {
+  return found?.rel.columns.map((c) => ({ name: c.name, insert: c.quoted, detail: `${shortType(c.typeDisplay)} · ${from}` })) ?? [];
 }
 
 function columnsOf(view: CatalogView | undefined, rel: ScopeRelation): Column[] {
   const from = rel.reference ?? "";
-  if (rel.source.kind === "Table") {
-    const found = resolveTable(view, rel.source.schema, rel.source.name);
-    return renamed(found?.rel.columns.map((c) => ({ name: c.name, detail: `${shortType(c.typeDisplay)} · ${from}` })) ?? [], rel.columnAliases, from);
-  }
-  const named = rel.source.columns.map((name) => ({ name, detail: from }));
-  const starred = rel.source.star.flatMap(
-    (t) => resolveTable(view, t.schema, t.name)?.rel.columns.map((c) => ({ name: c.name, detail: `${shortType(c.typeDisplay)} · ${from}` })) ?? [],
-  );
+  if (rel.source.kind === "Table") return renamed(catalogColumns(resolveTable(view, rel.source.schema, rel.source.name), from), rel.columnAliases, from);
+  const named = rel.source.columns.map((name) => ({ name, insert: name, detail: from }));
+  const starred = rel.source.star.flatMap((t) => catalogColumns(resolveTable(view, t.schema, t.name), from));
   return renamed([...named, ...starred], rel.columnAliases, from);
 }
 
-function columnOptions(view: CatalogView | undefined, rel: ScopeRelation, kind: DatabaseKind): Completion[] {
-  return columnsOf(view, rel).map((c) => ({ label: c.name, apply: quoteName(kind, c.name), type: "property", detail: c.detail, boost: BOOST.column }));
+function columnOptions(view: CatalogView | undefined, rel: ScopeRelation): Completion[] {
+  return columnsOf(view, rel).map((c) => ({ label: c.name, apply: c.insert, type: "property", detail: c.detail, boost: BOOST.column }));
 }
 
-function relationOption(rel: Relation, kind: DatabaseKind, label = rel.name, apply = quoteName(kind, rel.name)): Completion {
+function relationOption(rel: Relation, label = rel.name, apply = rel.quoted): Completion {
   const view = isViewKind(rel.kind);
   return { label, apply, type: view ? "type" : "class", detail: view ? "view" : "table", boost: BOOST.relation };
 }
@@ -71,7 +70,7 @@ function keywordOptions(reply: Complete): Completion[] {
 }
 
 /** Keys load per relation in scope, so a catalog refresh never reads every key in the database. */
-async function joinConditions(view: CatalogView, reply: Complete, target: number, kind: DatabaseKind): Promise<Completion[]> {
+async function joinConditions(view: CatalogView, reply: Complete, target: number): Promise<Completion[]> {
   const resolve = (r: ScopeRelation | undefined) => {
     const found = r?.source.kind === "Table" && r.reference ? resolveTable(view, r.source.schema, r.source.name) : undefined;
     return found && r?.reference ? [{ ...found, ref: r.reference, aliases: r.columnAliases }] : [];
@@ -86,8 +85,8 @@ async function joinConditions(view: CatalogView, reply: Complete, target: number
   await Promise.race([loaded, new Promise((resolve) => setTimeout(resolve, JOIN_DETAIL_WAIT_MS))]);
   const keysOf = (oid: number) => useRelationDetail.getState().entries[detailKey(db, oid)]?.detail?.keys ?? [];
   const col = (r: (typeof others)[number], name: string) => {
-    const alias = r.aliases[r.rel.columns.findIndex((c) => c.name === name)];
-    return `${r.ref}.${alias ?? quoteName(kind, name)}`;
+    const i = r.rel.columns.findIndex((c) => c.name === name);
+    return `${r.ref}.${r.aliases[i] ?? r.rel.columns[i]?.quoted ?? name}`;
   };
   const conditions: string[] = [];
   for (const o of others) {
@@ -107,22 +106,22 @@ async function joinConditions(view: CatalogView, reply: Complete, target: number
   return [...new Set(conditions)].map((label) => ({ label, type: "text", detail: "foreign key", boost: BOOST.join }));
 }
 
-function qualifiedOptions(view: CatalogView | undefined, reply: Complete, kind: DatabaseKind): Completion[] {
+function qualifiedOptions(view: CatalogView | undefined, reply: Complete): Completion[] {
   const q = reply.qualifier;
   if (!q) return [];
   if (q.kind === "Relation") {
     const rel = reply.relations[q.index];
-    return rel ? columnOptions(view, rel, kind) : [];
+    return rel ? columnOptions(view, rel) : [];
   }
   if (!view) return [];
   const [first, second] = q.parts;
   if (q.parts.length === 2 && first !== undefined && second !== undefined) {
     const found = resolveTable(view, first, second);
-    return found ? found.rel.columns.map((c) => ({ label: c.name, apply: quoteName(kind, c.name), type: "property", detail: shortType(c.typeDisplay) })) : [];
+    return found ? found.rel.columns.map((c) => ({ label: c.name, apply: c.quoted, type: "property", detail: shortType(c.typeDisplay) })) : [];
   }
   const schema = q.parts.length === 1 && first !== undefined ? schemaNamed(view, first) : undefined;
   if (!schema) return [];
-  const relations = schema.relations.map((r) => relationOption(r, kind));
+  const relations = schema.relations.map((r) => relationOption(r));
   if (reply.expect.kind === "Relation") return relations;
   const functions = schema.functions
     .filter((f) => f.kind !== "Procedure")
@@ -130,24 +129,24 @@ function qualifiedOptions(view: CatalogView | undefined, reply: Complete, kind: 
       label: f.name,
       detail: `(${f.args})`,
       type: "function",
-      apply: insertCallWithCursorInside(kind === "SqlServer" ? `${quoteName(kind, f.name)}()` : f.insertText),
+      apply: insertCallWithCursorInside(`${f.quoted}()`),
       boost: BOOST.function,
     }));
   return [...relations, ...functions];
 }
 
-export async function completionOptions(view: CatalogView | undefined, reply: Complete, kind: DatabaseKind): Promise<Completion[]> {
-  if (reply.qualifier) return qualifiedOptions(view, reply, kind);
+export async function completionOptions(view: CatalogView | undefined, reply: Complete): Promise<Completion[]> {
+  if (reply.qualifier) return qualifiedOptions(view, reply);
   const expect = reply.expect;
   if (expect.kind === "Keyword" || expect.kind === "Alias") return keywordOptions(reply);
   if (expect.kind === "Relation") {
     const schema = view?.catalog.defaultSchema;
-    const local = view?.catalog.schemas.find((s) => s.name === schema)?.relations.map((r) => relationOption(r, kind)) ?? [];
+    const local = view?.catalog.schemas.find((s) => s.name === schema)?.relations.map((r) => relationOption(r)) ?? [];
     const ctes = reply.ctes.map((name): Completion => ({ label: name, type: "type", detail: "CTE", boost: BOOST.relation }));
     return [...ctes, ...local, ...(view?.qualifiedTables ?? []), ...keywordOptions(reply)];
   }
-  const joins = expect.kind === "JoinCondition" && view ? await joinConditions(view, reply, expect.target, kind) : [];
-  const columns = reply.relations.flatMap((r) => columnOptions(view, r, kind));
+  const joins = expect.kind === "JoinCondition" && view ? await joinConditions(view, reply, expect.target) : [];
+  const columns = reply.relations.flatMap((r) => columnOptions(view, r));
   const references = reply.relations.flatMap((r): Completion[] => (r.reference ? [{ label: r.reference, type: "variable", boost: BOOST.reference }] : []));
   const catalogFunctions = (view?.functions ?? []).map((f) => ({
     ...f,
@@ -170,7 +169,7 @@ export function engineCompletion(view: CatalogView | undefined, kind: DatabaseKi
     if (!ctx.explicit && !/[\w$#.\s]/.test(before)) return null;
     const reply = await commands.completionContext(ctx.state.doc.toString(), ctx.pos, kind);
     if (ctx.aborted || reply.kind === "None" || !opensUnasked(ctx, reply.expect)) return null;
-    const options = await completionOptions(view, reply, kind);
+    const options = await completionOptions(view, reply);
     if (ctx.aborted || !options.length) return null;
     return { from: reply.from, options, validFor: /^[\w$#]*$/ };
   };

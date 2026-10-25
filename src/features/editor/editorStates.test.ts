@@ -59,7 +59,7 @@ async function completeAtEnd(
   text: string,
   engine: Reply | { kind: "None" },
   { keys = {}, explicit = true, catalog = shopCatalog("c1", 1), kind = catalog.databaseKind }: Setup = {},
-): Promise<{ labels: string[]; sent: unknown[] }> {
+): Promise<{ labels: string[]; applies: unknown[]; sent: unknown[] }> {
   const sent: unknown[] = [];
   mockIPC((cmd, args) => {
     if (cmd === "completion_context") {
@@ -78,11 +78,13 @@ async function completeAtEnd(
   const pos = state.doc.length;
   const context = new CompletionContext(state, pos, explicit);
   const labels: string[] = [];
+  const applies: unknown[] = [];
   for (const source of state.languageDataAt<(c: CompletionContext) => Promise<CompletionResult | null> | CompletionResult | null>("autocomplete", pos)) {
     const result = await source(context);
-    if (result) labels.push(...result.options.map((o) => o.label));
+    labels.push(...(result?.options.map((o) => o.label) ?? []));
+    applies.push(...(result?.options.map((o) => o.apply ?? o.label) ?? []));
   }
-  return { labels, sent };
+  return { labels, applies, sent };
 }
 
 const oidOf = (name: string) => shopCatalog("c1", 1).schemas[1]!.relations.find((r) => r.name === name)!.oid;
@@ -208,6 +210,18 @@ it("names the first columns as a column alias list renames them, also in a join 
   const join = reply({ kind: "JoinCondition", target: 1 }, [renamed, table("c", "customers")]);
   const { labels } = await completeAtEnd("select * from orders o(oid, cid) join customers c on ", join, { keys: { [oidOf("orders")]: ORDER_KEYS } });
   expect(labels[0]).toBe("c.id = o.cid");
+});
+
+it("inserts each catalog name as the engine quotes it", async () => {
+  const catalog = shopCatalog("c1", 1);
+  const orders = catalog.schemas[1]!.relations.find((r) => r.name === "orders")!;
+  Object.assign(orders, { name: "Orders", quoted: '"Orders"' });
+  Object.assign(orders.columns[2]!, { name: "order", quoted: '"order"' });
+  const qualified = reply({ kind: "Expression" }, [table("o", "Orders")], { qualifier: { kind: "Relation", index: 0 } });
+  const { labels, applies } = await completeAtEnd('select * from "Orders" o where o.', qualified, { catalog });
+  expect(applies[labels.indexOf("order")]).toBe('"order"');
+  const relations = await completeAtEnd("select * from ", reply({ kind: "Relation" }), { catalog });
+  expect(relations.applies[relations.labels.indexOf("Orders")]).toBe('"Orders"');
 });
 
 it("matches a name in another case only where the server would", async () => {

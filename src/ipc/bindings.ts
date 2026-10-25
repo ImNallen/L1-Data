@@ -288,6 +288,8 @@ export type ColumnInfo = {
 	writable: boolean,
 	attnum: number,
 	name: string,
+	/**  `name` as SQL writes it, quoted only when it must be. */
+	quoted: string,
 	typeDisplay: string,
 	category: TypeCategory,
 	notNull: boolean,
@@ -698,6 +700,8 @@ export type FormatError = { kind: "Unsupported" } |
 export type FunctionInfo = {
 	oid: number,
 	name: string,
+	/**  `name` as a call writes it, quoted only when it must be. */
+	quoted: string,
 	args: string,
 	returns: string,
 	kind: FnKind,
@@ -1008,6 +1012,8 @@ export type Relation = {
 	qualifiedName: string,
 	oid: number,
 	name: string,
+	/**  `name` as SQL writes it, quoted only when it must be. */
+	quoted: string,
 	kind: RelKind,
 	/**  `None` when `reltuples = -1` (never analyzed). */
 	rowEstimate: number | null,
@@ -1037,7 +1043,10 @@ export type RelationDetail = {
 export type RelationSource = 
 /**  A catalog table or view. Unquoted PostgreSQL names are folded to lower case. */
 { kind: "Table"; schema: string | null; name: string } | 
-/**  A CTE, a subquery, or a table function: the columns its select list names, plus every column of each `star` table. */
+/**
+ *  A CTE, a subquery, or a table function: the columns its select list names, as SQL writes them, plus every
+ *  column of each `star` table.
+ */
 { kind: "Derived"; columns: string[]; star: TableName[] };
 
 /**  What one release changed, as the feed lists it. Display only. */
@@ -1200,6 +1209,8 @@ export type SchemaCount = { kind: "Unknown" } | { kind: "Probing" } | { kind: "K
 
 export type SchemaInfo = {
 	name: string,
+	/**  `name` as SQL writes it, quoted only when it must be. */
+	quoted: string,
 	/**  `information_schema` or a `pg_` prefix, which Postgres reserves for its own schemas. */
 	system: boolean,
 	/**
@@ -1215,7 +1226,7 @@ export type ScopeRelation = {
 	/**  How the statement refers to it, as written: its alias, else its name. `None` for a subquery without an alias. */
 	reference: string | null,
 	source: RelationSource,
-	/**  The names a column alias list gives the first columns, as in `orders o(a, b)`, folded as the server folds them. */
+	/**  The names a column alias list gives the first columns, as in `orders o(a, b)`, as SQL writes them. */
 	columnAliases: string[],
 };
 

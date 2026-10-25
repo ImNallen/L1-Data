@@ -167,7 +167,7 @@ mod tests {
     #[test]
     fn count_big_and_column_filters_escape_every_like_metacharacter() {
         let columns = ["na]me", "prefix", "空", "x"].map(|name| ColumnInfo {
-            name: name.into(), type_display: "nvarchar(max)".into(), category: TypeCategory::Text,
+            name: name.into(), quoted: name.into(), type_display: "nvarchar(max)".into(), category: TypeCategory::Text,
             attnum: 1, writable: true, not_null: false, pk: false, fk: false,
         });
         let query = TableQuery {
