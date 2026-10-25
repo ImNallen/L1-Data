@@ -128,6 +128,14 @@ impl ConsoleInner {
         }
     }
 
+    /// Every way a session leaves the tab goes through here, so its transaction state and held writes leave with it.
+    pub fn end_session(&mut self, next: SessionSlot) -> SessionSlot {
+        self.txn = TxnState::Idle;
+        self.txn_depth = None;
+        self.unasked = WriteList::default();
+        std::mem::replace(&mut self.session, next)
+    }
+
     pub fn finish_refreshes(&mut self, committed: bool) -> Option<(DatabaseRef, Owed)> {
         if self.txn != TxnState::Idle { return None; }
         self.end_refreshes(committed)
@@ -333,10 +341,7 @@ impl Console {
         match lost {
             Some(reason) => {
                 let transaction = session.transaction_loss(txn);
-                inner.txn = TxnState::Idle;
-                inner.unasked = WriteList::default();
-                inner.txn_depth = None;
-                inner.session = SessionSlot::Lost { reason, transaction };
+                inner.end_session(SessionSlot::Lost { reason, transaction });
                 inner.finish_refreshes(false)
             }
             None => {
@@ -351,13 +356,10 @@ impl Console {
     /// statement in flight is Cancelled and the rest Skipped.
     pub async fn drop_session(&self, shared: &Arc<Shared>) {
         let mut inner = self.inner.lock().await;
-        let session = std::mem::replace(&mut inner.session, SessionSlot::Empty);
+        let session = inner.end_session(SessionSlot::Empty);
         if let SessionSlot::Busy { stop, .. } = &session {
             stop.store(true, Ordering::Relaxed);
         }
-        inner.txn = TxnState::Idle;
-        inner.txn_depth = None;
-        inner.unasked = WriteList::default();
         let due = inner.finish_refreshes(false);
         if let RunState::Running { run_id, started_at_ms, statements } = &mut inner.run {
             let mut in_flight = true;

@@ -1226,8 +1226,7 @@ impl Engine {
         }
         let due = if target_changed {
             let due = inner.finish_refreshes(false);
-            inner.session = SessionSlot::Empty;
-            inner.txn_depth = None;
+            inner.end_session(SessionSlot::Empty);
             due
         } else { None };
         inner.config = view.clone();
