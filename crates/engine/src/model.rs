@@ -54,9 +54,11 @@ impl<'de> Deserialize<'de> for ConnectionConfig {
             ssh: Option<SshTunnel>,
             #[serde(default)]
             environment: Option<Environment>,
+            #[serde(default)]
+            sql_server_auth: Option<SqlServerAuth>,
         }
-        let Stored { database_kind, id, name, host, port, database, user, ssl_mode, ca_cert_path, has_password, color, ssh, environment } = Stored::deserialize(d)?;
-        Ok(Self { database_kind, id, name, host, port, database, user, ssl_mode, ca_cert_path, has_password, color, ssh, environment })
+        let Stored { database_kind, id, name, host, port, database, user, ssl_mode, ca_cert_path, has_password, color, ssh, environment, sql_server_auth } = Stored::deserialize(d)?;
+        Ok(Self { database_kind, id, name, host, port, database, user, ssl_mode, ca_cert_path, has_password, color, ssh, environment, sql_server_auth })
     }
 }
 
@@ -87,6 +89,28 @@ pub struct ConnectionConfig {
     /// resolved and dialed by that server.
     pub ssh: Option<SshTunnel>,
     pub environment: Option<Environment>,
+    /// `None` is a SQL login, as on every connection saved before this field existed.
+    pub sql_server_auth: Option<SqlServerAuth>,
+}
+
+/// How a SQL Server connection signs in. `EntraAzureCli` sends an access token from the user's
+/// `az login` and saves no password. `Unknown` is a method a newer build saved. Connect and save
+/// refuse it, so the row keeps its method until the user picks one this build knows.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Type)]
+pub enum SqlServerAuth {
+    SqlLogin,
+    EntraAzureCli,
+    Unknown,
+}
+
+impl<'de> Deserialize<'de> for SqlServerAuth {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        Ok(match serde_json::Value::deserialize(d)?.as_str() {
+            Some("SqlLogin") => Self::SqlLogin,
+            Some("EntraAzureCli") => Self::EntraAzureCli,
+            _ => Self::Unknown,
+        })
+    }
 }
 
 /// What the user says the connection points at. The UI marks `Production` and asks before a run on it writes.
@@ -154,6 +178,7 @@ pub struct ConnectionDraft {
     pub color: Option<String>,
     pub ssh: Option<SshTunnelDraft>,
     pub environment: Option<Environment>,
+    pub sql_server_auth: Option<SqlServerAuth>,
 }
 
 #[derive(Debug, Clone, Serialize, Type)]
@@ -1530,6 +1555,8 @@ impl Default for Settings {
 #[serde(rename_all = "camelCase")]
 pub struct BootSnapshot {
     pub connections: Vec<ConnectionConfig>,
+    /// Saved connections that do not parse, such as ones a newer build saved. They are not in `connections`.
+    pub unreadable_connections: u32,
     pub live: Vec<ConnectionState>,
     pub consoles: Vec<ConsoleState>,
     pub workspace: Workspace,
@@ -2885,12 +2912,33 @@ mod database_compatibility_tests {
 
     #[test]
     fn a_production_connection_round_trips() {
-        let saved = serde_json::json!({"databaseKind":"Postgres", "id":Uuid::nil(), "name":"prod-postgres", "host":"db.internal", "port":5432, "database":"shop", "user":"reader", "sslMode":"VerifyFull", "caCertPath":null, "hasPassword":true, "color":"red", "ssh":null, "environment":"Production"});
+        let saved = serde_json::json!({"databaseKind":"Postgres", "id":Uuid::nil(), "name":"prod-postgres", "host":"db.internal", "port":5432, "database":"shop", "user":"reader", "sslMode":"VerifyFull", "caCertPath":null, "hasPassword":true, "color":"red", "ssh":null, "environment":"Production", "sqlServerAuth":null});
         let config: ConnectionConfig = serde_json::from_value(saved.clone()).unwrap();
         assert_eq!(config.environment, Some(Environment::Production));
         assert_eq!(serde_json::to_value(&config).unwrap(), saved);
         let unset = serde_json::to_value(ConnectionConfig { environment: None, ..config }).unwrap();
         assert_eq!(unset["environment"], serde_json::Value::Null);
+    }
+
+    #[test]
+    fn sql_server_connections_saved_before_entra_load_as_sql_login() {
+        let saved = serde_json::json!({"databaseKind":"SqlServer", "id":Uuid::nil(), "name":"legacy", "host":"localhost", "port":1433, "database":"shop", "user":"sa", "sslMode":"Require", "caCertPath":null, "hasPassword":true, "color":null, "ssh":null, "environment":null});
+        assert_eq!(serde_json::from_value::<ConnectionConfig>(saved).unwrap().sql_server_auth, None);
+    }
+
+    #[test]
+    fn each_sql_server_auth_round_trips_and_a_newer_one_loads_as_unknown() {
+        let mut saved = serde_json::json!({"databaseKind":"SqlServer", "id":Uuid::nil(), "name":"azure", "host":"db.example.net", "port":1433, "database":"shop", "user":"", "sslMode":"VerifyFull", "caCertPath":null, "hasPassword":false, "color":null, "ssh":null, "environment":null, "sqlServerAuth":null});
+        for (wire, auth) in [(serde_json::Value::Null, None), ("SqlLogin".into(), Some(SqlServerAuth::SqlLogin)), ("EntraAzureCli".into(), Some(SqlServerAuth::EntraAzureCli))] {
+            saved["sqlServerAuth"] = wire;
+            let config: ConnectionConfig = serde_json::from_value(saved.clone()).unwrap();
+            assert_eq!(config.sql_server_auth, auth);
+            assert_eq!(serde_json::to_value(&config).unwrap(), saved);
+        }
+        for newer in [serde_json::json!("EntraDeviceCode"), serde_json::json!({"EntraServicePrincipal":{"clientId":"x"}}), serde_json::json!(7)] {
+            saved["sqlServerAuth"] = newer.clone();
+            assert_eq!(serde_json::from_value::<ConnectionConfig>(saved.clone()).unwrap().sql_server_auth, Some(SqlServerAuth::Unknown), "{newer}");
+        }
     }
 
     /// The hand-written reader defaults these fields for old rows; the wire type must still require them.
@@ -2905,5 +2953,7 @@ mod database_compatibility_tests {
         assert!(block("ConnectionDraft").contains("\tssh: SshTunnelDraft | null,"), "{}", block("ConnectionDraft"));
         assert!(block("ConnectionConfig").contains("\tenvironment: Environment | null,"), "{}", block("ConnectionConfig"));
         assert!(block("ConnectionDraft").contains("\tenvironment: Environment | null,"), "{}", block("ConnectionDraft"));
+        assert!(block("ConnectionConfig").contains("\tsqlServerAuth: SqlServerAuth | null,"), "{}", block("ConnectionConfig"));
+        assert!(block("ConnectionDraft").contains("\tsqlServerAuth: SqlServerAuth | null,"), "{}", block("ConnectionDraft"));
     }
 }

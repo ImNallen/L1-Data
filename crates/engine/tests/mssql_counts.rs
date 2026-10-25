@@ -24,7 +24,7 @@ impl Harness {
         let fixture = FIXTURES.lock().await;
         let dir = tempfile::tempdir().unwrap();
         let engine = Engine::open(EngineConfig {
-            data_dir: dir.path().into(), keys: Arc::new(MemoryKeyStore::default()), agent_path: AgentPath::Fixed("".into()), user_known_hosts: None,
+            data_dir: dir.path().into(), keys: Arc::new(MemoryKeyStore::default()), agent_path: AgentPath::Fixed("".into()), az_binary: None, user_known_hosts: None,
             updates: Arc::new(engine::ScriptedTransport::named("off").unwrap()),
         }).await.unwrap();
         let connection = engine.save_connection(ConnectionDraft {
@@ -34,6 +34,7 @@ impl Harness {
             database: "shop".into(), user: "sa".into(),
             password: PasswordInput::Set(std::env::var("L1_DATA_TEST_MSSQL_PASSWORD").unwrap_or_else(|_| "L1Data_dev_Str0ng".into())),
             ssl_mode: SslMode::Require, ca_cert_path: None, color: None, ssh: None, environment: None,
+            sql_server_auth: None,
         }).await.unwrap();
         engine.connect(connection.id).await.unwrap();
         let h = Self {

@@ -12,6 +12,7 @@ import { installCloseFlush, startPersistence } from "./features/editor/persisten
 import { browseTemplate, installRunBehavior, openSqlTab } from "./features/editor/runActions";
 import { startAssistantSync } from "./features/assistant/assistantActions";
 import { startUpdateSync } from "./features/updates/updateActions";
+import { unreadableConnectionsNotice } from "./features/connections/connectionForm";
 
 /** The catalog store holds exactly the catalogs the connection snapshots serve, and the detail store only their relations. */
 function startCatalogSync() {
@@ -44,6 +45,8 @@ export async function boot(): Promise<void> {
     seedEditor(saved.id, saved.text ?? template ?? "", saved.file ? (saved.file.dirty ? "unknown" : "seeded") : "none");
   }
   useWorkspace.getState().restore(snapshot.workspace, snapshot.connections, snapshot.settings);
+  const unreadable = unreadableConnectionsNotice(snapshot.unreadableConnections);
+  if (unreadable) useWorkspace.getState().notify(unreadable);
   useWorkspace.getState().resolveDatabases(useLive.getState().connections);
   useLive.subscribe((s, prev) => {
     if (s.connections !== prev.connections) useWorkspace.getState().resolveDatabases(s.connections);

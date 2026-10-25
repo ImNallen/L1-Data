@@ -100,6 +100,7 @@ fn engine_config(app: &tauri::App) -> Result<EngineConfig, Box<dyn Error>> {
         data_dir,
         keys,
         agent_path: AgentPath::LoginShell,
+        az_binary: None,
         user_known_hosts: engine::openssh_known_hosts(),
         updates: Arc::new(updater::TauriTransport::new(app.handle().clone())),
     })

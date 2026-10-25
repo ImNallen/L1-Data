@@ -17,7 +17,7 @@ struct Harness {
 impl Harness {
     async fn open(mode: TxnMode) -> Self {
         let dir = tempfile::tempdir().unwrap();
-        let engine = Engine::open(EngineConfig { data_dir: dir.path().into(), keys: Arc::new(MemoryKeyStore::default()), agent_path: AgentPath::Fixed("".into()), user_known_hosts: None, updates: Arc::new(engine::ScriptedTransport::named("off").unwrap()) }).await.unwrap();
+        let engine = Engine::open(EngineConfig { data_dir: dir.path().into(), keys: Arc::new(MemoryKeyStore::default()), agent_path: AgentPath::Fixed("".into()), az_binary: None, user_known_hosts: None, updates: Arc::new(engine::ScriptedTransport::named("off").unwrap()) }).await.unwrap();
         let events = engine.subscribe();
         let config = engine
             .save_connection(ConnectionDraft {
@@ -34,6 +34,7 @@ impl Harness {
                 color: None,
                 ssh: None,
                 environment: None,
+                sql_server_auth: None,
             })
             .await
             .unwrap();
@@ -309,6 +310,7 @@ async fn connection_kind_is_immutable_and_history_records_sql_server() {
         color: None,
         ssh: None,
         environment: None,
+        sql_server_auth: None,
     };
     assert!(matches!(h.engine.save_connection(changed).await, Err(SaveError::Invalid { .. })));
     assert!(h.engine.boot().connections.iter().find(|c| c.id == h.connection).unwrap().has_password);

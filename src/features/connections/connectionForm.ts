@@ -1,4 +1,4 @@
-import type { ConnectionConfig, DatabaseKind, Environment, PasswordInput, SshAuth, SshTunnelDraft, SslMode } from "../../ipc/bindings";
+import type { ConnectionConfig, DatabaseKind, Environment, PasswordInput, SqlServerAuth, SshAuth, SshTunnelDraft, SslMode } from "../../ipc/bindings";
 import { connectionColorId, type ConnectionColorId } from "./connectionColors";
 
 export type SshAuthKind = SshAuth["kind"];
@@ -11,6 +11,7 @@ export type Fields = {
   port: string;
   database: string;
   user: string;
+  sqlServerAuth: SqlServerAuth;
   sslMode: SslMode;
   caCertPath: string;
   color: ConnectionColorId | null;
@@ -38,6 +39,7 @@ export function initialFields(c: ConnectionConfig | undefined, databaseKind: Dat
     port: String(c?.port ?? (sqlServer ? 1433 : 5432)),
     database: c?.database ?? (sqlServer ? "master" : "postgres"),
     user: c?.user ?? (sqlServer ? "sa" : "postgres"),
+    sqlServerAuth: c?.sqlServerAuth ?? "SqlLogin",
     sslMode: c?.sslMode ?? (sqlServer ? "VerifyFull" : "Prefer"),
     caCertPath: c?.caCertPath ?? "",
     color: connectionColorId(c?.color ?? null),
@@ -66,6 +68,30 @@ export function isDirty(existing: ConnectionConfig | undefined, form: FormState)
   const fieldChanged = (Object.keys(start) as (keyof Fields)[]).some((k) => start[k] !== form.fields[k]);
   // The initial edits are never `set`, so comparing kinds is enough.
   return fieldChanged || form.password.kind !== initialPassword(existing).kind || form.sshSecret.kind !== initialSshSecret(existing).kind || form.url !== "";
+}
+
+export function toSqlServerAuth(fields: Fields): SqlServerAuth | null {
+  return fields.databaseKind === "SqlServer" ? fields.sqlServerAuth : null;
+}
+
+export function signsInWithEntra(fields: Fields): boolean {
+  return toSqlServerAuth(fields) === "EntraAzureCli";
+}
+
+export function takesPassword(fields: Fields): boolean {
+  return fields.databaseKind === "Postgres" || fields.sqlServerAuth === "SqlLogin";
+}
+
+export function toUser(fields: Fields): string {
+  return takesPassword(fields) ? fields.user.trim() : "";
+}
+
+export function toPassword(fields: Fields, edit: PasswordEdit): PasswordInput {
+  return takesPassword(fields) ? toPasswordInput(edit) : "Clear";
+}
+
+export function entraNeedsVerifiedTls(fields: Fields): boolean {
+  return signsInWithEntra(fields) && fields.sslMode === "Require";
 }
 
 export function parsePort(text: string): number | null {
@@ -115,4 +141,11 @@ export function sshValid(fields: Fields): boolean {
     fields.sshUser.trim() !== "" &&
     (fields.sshAuth !== "Key" || fields.sshKeyPath.trim() !== "")
   );
+}
+
+export function unreadableConnectionsNotice(count: number): string | null {
+  if (count === 0) return null;
+  return count === 1
+    ? "1 saved connection could not be read, so it is hidden. A newer version of L1 Data may have saved it."
+    : `${count} saved connections could not be read, so they are hidden. A newer version of L1 Data may have saved them.`;
 }

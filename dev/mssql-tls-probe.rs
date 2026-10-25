@@ -14,6 +14,7 @@ fn main() {
             data_dir: PathBuf::from(&args[1]),
             keys: Arc::new(MemoryKeyStore::default()),
             agent_path: AgentPath::Fixed("".into()),
+            az_binary: None,
             user_known_hosts: None,
             updates: Arc::new(engine::ScriptedTransport::named("off").unwrap()),
         })
@@ -38,6 +39,7 @@ fn main() {
                 color: None,
                 ssh: None,
                 environment: None,
+                sql_server_auth: None,
             })
             .await;
         println!("{}", serde_json::to_string(&result).unwrap());

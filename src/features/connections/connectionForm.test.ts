@@ -1,6 +1,21 @@
 import { expect, it } from "vitest";
 import type { ConnectionConfig } from "../../ipc/bindings";
-import { initialFields, initialSshSecret, isDirty, sshValid, toSshDraft, type FormState, type PasswordEdit } from "./connectionForm";
+import {
+  entraNeedsVerifiedTls,
+  initialFields,
+  initialSshSecret,
+  isDirty,
+  signsInWithEntra,
+  sshValid,
+  takesPassword,
+  toPassword,
+  toSqlServerAuth,
+  toSshDraft,
+  toUser,
+  unreadableConnectionsNotice,
+  type FormState,
+  type PasswordEdit,
+} from "./connectionForm";
 
 const saved: ConnectionConfig = {
   id: "c1",
@@ -16,6 +31,7 @@ const saved: ConnectionConfig = {
   color: "red",
   ssh: null,
   environment: null,
+  sqlServerAuth: null,
 };
 
 const savedFields = {
@@ -27,6 +43,7 @@ const savedFields = {
   port: "5433",
   database: "shop",
   user: "l1data",
+  sqlServerAuth: "SqlLogin",
   sslMode: "Require",
   color: "red",
   sshEnabled: false,
@@ -47,6 +64,7 @@ const newFields = {
   port: "5432",
   database: "postgres",
   user: "postgres",
+  sqlServerAuth: "SqlLogin",
   sslMode: "Prefer",
   color: null,
   sshEnabled: false,
@@ -105,6 +123,57 @@ it("starts SQL Server with SQL login, master and verified TLS", () => {
   expect(isDirty(undefined, { fields: initialFields(undefined, "SqlServer"), password: { kind: "clear" }, sshSecret: { kind: "clear" }, url: "" })).toBe(true);
 });
 
+it("opens a connection saved before Entra as a SQL login, and a saved Entra one as Entra", () => {
+  const sqlServer: ConnectionConfig = { ...saved, databaseKind: "SqlServer", sqlServerAuth: null };
+  expect(initialFields(sqlServer).sqlServerAuth).toBe("SqlLogin");
+  expect(isDirty(sqlServer, { fields: initialFields(sqlServer), password: { kind: "keep" }, sshSecret: { kind: "clear" }, url: "" })).toBe(false);
+  const azure: ConnectionConfig = { ...sqlServer, sqlServerAuth: "EntraAzureCli", hasPassword: false, user: "" };
+  expect(signsInWithEntra(initialFields(azure))).toBe(true);
+  expect(
+    isDirty(azure, { fields: { ...initialFields(azure), sqlServerAuth: "SqlLogin" }, password: { kind: "clear" }, sshSecret: { kind: "clear" }, url: "" }),
+  ).toBe(true);
+});
+
+it("sends a sign-in choice only for SQL Server", () => {
+  const entra = { ...initialFields(undefined, "SqlServer"), sqlServerAuth: "EntraAzureCli" } as const;
+  expect(toSqlServerAuth(entra)).toBe("EntraAzureCli");
+  expect(toSqlServerAuth(initialFields(undefined, "SqlServer"))).toBe("SqlLogin");
+  expect(toSqlServerAuth({ ...entra, databaseKind: "Postgres" })).toBeNull();
+  expect(signsInWithEntra({ ...entra, databaseKind: "Postgres" })).toBe(false);
+});
+
+it("sends no user name for Entra, whose user field is hidden", () => {
+  const sqlServer = initialFields(undefined, "SqlServer");
+  expect(toUser({ ...sqlServer, user: " sa " })).toBe("sa");
+  expect(toUser({ ...sqlServer, sqlServerAuth: "EntraAzureCli" })).toBe("");
+});
+
+it("sends no password for Entra, even one typed under SQL login before the switch", () => {
+  const sqlServer = initialFields(undefined, "SqlServer");
+  const entra = { ...sqlServer, sqlServerAuth: "EntraAzureCli" } as const;
+  const typed: PasswordEdit = { kind: "set", value: "hunter2" };
+  expect(toPassword(sqlServer, typed)).toEqual({ Set: "hunter2" });
+  expect(toPassword(entra, typed)).toBe("Clear");
+  expect(toPassword(entra, { kind: "keep" })).toBe("Clear");
+  expect(toPassword({ ...entra, databaseKind: "Postgres" }, typed)).toEqual({ Set: "hunter2" });
+});
+
+it("asks for a user and password only for PostgreSQL and a SQL login", () => {
+  const sqlServer = initialFields(undefined, "SqlServer");
+  expect(takesPassword(initialFields(undefined))).toBe(true);
+  expect(takesPassword(sqlServer)).toBe(true);
+  expect(takesPassword({ ...sqlServer, sqlServerAuth: "EntraAzureCli" })).toBe(false);
+  expect(takesPassword({ ...sqlServer, sqlServerAuth: "Unknown" })).toBe(false);
+  expect(toUser({ ...sqlServer, sqlServerAuth: "Unknown" })).toBe("");
+});
+
+it("refuses Entra over TLS that skips the certificate check", () => {
+  const entra = { ...initialFields(undefined, "SqlServer"), sqlServerAuth: "EntraAzureCli" } as const;
+  expect(entraNeedsVerifiedTls(entra)).toBe(false);
+  expect(entraNeedsVerifiedTls({ ...entra, sslMode: "Require" })).toBe(true);
+  expect(entraNeedsVerifiedTls({ ...entra, sslMode: "Require", sqlServerAuth: "SqlLogin" })).toBe(false);
+});
+
 const tunneled: ConnectionConfig = {
   ...saved,
   ssh: { host: "bastion", port: 2222, user: "tunnel", auth: { kind: "Key", path: "~/.ssh/id_ed25519" }, hasSecret: true },
@@ -159,4 +228,10 @@ it("needs a host, a port, a user, and a key path for key auth before a tunnel ca
   expect(sshValid(form({ sshUser: "" }).fields)).toBe(false);
   expect(sshValid(form({ sshKeyPath: "" }).fields)).toBe(false);
   expect(sshValid(form({ sshKeyPath: "", sshAuth: "Agent" }).fields)).toBe(true);
+});
+
+it("names how many saved connections could not be read, and says nothing when all could", () => {
+  expect(unreadableConnectionsNotice(0)).toBeNull();
+  expect(unreadableConnectionsNotice(1)).toBe("1 saved connection could not be read, so it is hidden. A newer version of L1 Data may have saved it.");
+  expect(unreadableConnectionsNotice(2)).toBe("2 saved connections could not be read, so they are hidden. A newer version of L1 Data may have saved them.");
 });

@@ -24,6 +24,7 @@ impl Harness {
             data_dir: dir.path().into(),
             keys: Arc::new(MemoryKeyStore::default()),
             agent_path: AgentPath::Fixed("".into()),
+            az_binary: None,
             user_known_hosts: None,
             updates: Arc::new(engine::ScriptedTransport::named("off").unwrap()),
         }).await.unwrap();
@@ -41,6 +42,7 @@ impl Harness {
             color: None,
             ssh: None,
             environment: None,
+            sql_server_auth: None,
         }).await.unwrap().id;
         engine.connect(connection).await.unwrap();
         let tab = TabId(uuid::Uuid::new_v4());

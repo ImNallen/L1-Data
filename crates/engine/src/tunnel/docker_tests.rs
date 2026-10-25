@@ -27,7 +27,7 @@ impl Rig {
     async fn start(known: bool) -> Self {
         let dir = tempfile::tempdir().unwrap();
         let user_known_hosts = known.then(|| Path::new(FIXTURE).join("known_hosts"));
-        let engine = Engine::open(EngineConfig { data_dir: dir.path().join("data"), keys: Arc::new(MemoryKeyStore::default()), agent_path: AgentPath::Fixed("".into()), user_known_hosts, updates: Arc::new(crate::ScriptedTransport::named("off").unwrap()) })
+        let engine = Engine::open(EngineConfig { data_dir: dir.path().join("data"), keys: Arc::new(MemoryKeyStore::default()), agent_path: AgentPath::Fixed("".into()), az_binary: None, user_known_hosts, updates: Arc::new(crate::ScriptedTransport::named("off").unwrap()) })
             .await
             .unwrap();
         Self { events: engine.subscribe(), engine, dir }
@@ -92,6 +92,7 @@ fn postgres(ssh: SshTunnelDraft) -> ConnectionDraft {
         color: None,
         ssh: Some(ssh),
         environment: None,
+        sql_server_auth: None,
     }
 }
 

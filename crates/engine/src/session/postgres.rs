@@ -261,6 +261,7 @@ pub fn draft_from_url(url: &str, name: &str) -> Result<ConnectionDraft, String> 
         color: None,
         ssh: None,
         environment: None,
+        sql_server_auth: None,
     })
 }
 

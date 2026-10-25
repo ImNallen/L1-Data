@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::path::Path;
 use std::sync::Mutex;
 
@@ -66,6 +67,18 @@ const MIGRATIONS: [&str; 8] = [
 ",
 ];
 
+fn parse_connection(logged: &mut HashSet<String>, id: String, json: &str) -> Option<ConnectionConfig> {
+    match serde_json::from_str(json) {
+        Ok(config) => Some(config),
+        Err(e) => {
+            if logged.insert(id.clone()) {
+                eprintln!("connection {id} is skipped because it does not parse: {e}");
+            }
+            None
+        }
+    }
+}
+
 pub struct Store {
     state: Mutex<StoreState>,
 }
@@ -74,6 +87,12 @@ struct StoreState {
     conn: Connection,
     history_revision: u64,
     saved_revision: u64,
+    unreadable_logged: HashSet<String>,
+}
+
+pub struct SavedConnections {
+    pub configs: Vec<ConnectionConfig>,
+    pub unreadable: u32,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -131,7 +150,7 @@ impl Store {
             tx.pragma_update(None, "user_version", (i + 1) as i64)?;
             tx.commit()?;
         }
-        Ok(Self { state: Mutex::new(StoreState { conn, history_revision: 0, saved_revision: 1 }) })
+        Ok(Self { state: Mutex::new(StoreState { conn, history_revision: 0, saved_revision: 1, unreadable_logged: HashSet::new() }) })
     }
 
     fn with<T>(&self, f: impl FnOnce(&Connection) -> Result<T, StoreError>) -> Result<T, StoreError> {
@@ -151,12 +170,28 @@ impl Store {
         f(conn, saved_revision)
     }
 
-    pub fn connections(&self) -> Result<Vec<ConnectionConfig>, StoreError> {
-        self.with(|c| {
-            let mut stmt = c.prepare("SELECT json FROM connections ORDER BY rowid")?;
-            let rows = stmt.query_map([], |r| r.get::<_, String>(0))?;
-            rows.map(|json| Ok(serde_json::from_str(&json?)?)).collect()
-        })
+    pub fn connections(&self) -> Result<SavedConnections, StoreError> {
+        let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        let StoreState { conn, unreadable_logged, .. } = &mut *state;
+        let mut stmt = conn.prepare("SELECT id, json FROM connections ORDER BY rowid")?;
+        let rows = stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?;
+        let mut saved = SavedConnections { configs: Vec::new(), unreadable: 0 };
+        for row in rows {
+            let (id, json) = row?;
+            match parse_connection(unreadable_logged, id, &json) {
+                Some(config) => saved.configs.push(config),
+                None => saved.unreadable += 1,
+            }
+        }
+        Ok(saved)
+    }
+
+    pub fn connection(&self, id: ConnectionId) -> Result<Option<ConnectionConfig>, StoreError> {
+        let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        let StoreState { conn, unreadable_logged, .. } = &mut *state;
+        let id = id.0.to_string();
+        let json: Option<String> = conn.query_row("SELECT json FROM connections WHERE id = ?1", [&id], |r| r.get(0)).optional()?;
+        Ok(json.and_then(|json| parse_connection(unreadable_logged, id, &json)))
     }
 
     pub fn upsert_connection(&self, config: &ConnectionConfig) -> Result<(), StoreError> {
@@ -460,6 +495,23 @@ mod tests {
     }
 
     #[test]
+    fn a_connection_row_that_fails_to_parse_is_skipped_and_the_rest_load() {
+        let (s, _dir) = store();
+        let config = |name: &str| ConnectionConfig { database_kind: crate::model::DatabaseKind::Postgres, id: ConnectionId(uuid::Uuid::new_v4()), name: name.into(), host: "localhost".into(), port: 5432, database: "shop".into(), user: "u".into(), ssl_mode: SslMode::Prefer, ca_cert_path: None, has_password: false, color: None, ssh: None, environment: None, sql_server_auth: None };
+        let (first, last) = (config("first"), config("last"));
+        s.upsert_connection(&first).unwrap();
+        s.with(|c| Ok(c.execute(r#"INSERT INTO connections (id, json) VALUES ('newer', '{"sslMode":"VerifyPinned"}')"#, [])?)).unwrap();
+        s.upsert_connection(&last).unwrap();
+        for _ in 0..2 {
+            let saved = s.connections().unwrap();
+            assert_eq!(saved.configs.iter().map(|c| c.id).collect::<Vec<_>>(), [first.id, last.id]);
+            assert_eq!(saved.unreadable, 1, "every scan counts the row the UI tells the user about");
+        }
+        assert_eq!(s.connection(last.id).unwrap().map(|c| c.name), Some("last".into()));
+        assert!(s.connection(ConnectionId(uuid::Uuid::new_v4())).unwrap().is_none());
+    }
+
+    #[test]
     fn migrations_run_once_and_data_survives_reopen() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("t.sqlite3");
@@ -476,6 +528,7 @@ mod tests {
             color: None,
             ssh: None,
             environment: None,
+            sql_server_auth: None,
         };
         {
             let s = Store::open(&path).unwrap();
@@ -484,14 +537,14 @@ mod tests {
             s.insert_history_and_prune(entry("select 1")).unwrap();
         }
         let s = Store::open(&path).unwrap();
-        let loaded = s.connections().unwrap();
+        let loaded = s.connections().unwrap().configs;
         assert_eq!(loaded.len(), 1);
         assert_eq!((loaded[0].id, loaded[0].port), (config.id, 5433));
         assert_eq!(s.kv_get::<Settings>("settings").unwrap().unwrap().max_rows, 7);
         assert!(s.kv_get::<Settings>("missing").unwrap().is_none());
         assert_eq!(s.history(&HistoryQuery { text: None, connection_id: None, before_id: None, limit: 10 }).unwrap().entries[0].sql, "select 1");
         s.delete_connection(config.id).unwrap();
-        assert!(s.connections().unwrap().is_empty());
+        assert!(s.connections().unwrap().configs.is_empty());
     }
 
     #[test]

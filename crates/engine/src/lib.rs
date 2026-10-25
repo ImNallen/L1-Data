@@ -2,6 +2,7 @@ mod assistant;
 mod catalog;
 mod connection;
 mod console;
+mod entra;
 mod export;
 mod files;
 mod history;
@@ -11,6 +12,7 @@ mod results;
 mod saved;
 mod secrets;
 mod session;
+mod shell_path;
 mod sql;
 mod store;
 mod text;
@@ -41,7 +43,7 @@ use view::{ConnectionView, Known, Selection};
 
 pub use assistant::SHUTDOWN_BOUND;
 pub use connection::draft_from_url;
-pub use provider::AgentPath;
+pub use shell_path::AgentPath;
 pub use secrets::{KeyStore, KeyringKeyStore, MemoryKeyStore, SecretError};
 pub use store::StoreError;
 pub use tunnel::openssh_known_hosts;
@@ -53,6 +55,8 @@ pub struct EngineConfig {
     pub data_dir: PathBuf,
     pub keys: Arc<dyn KeyStore>,
     pub agent_path: AgentPath,
+    /// The program Entra ID sign-in runs in place of `az` on the PATH.
+    pub az_binary: Option<PathBuf>,
     /// The OpenSSH known_hosts that SSH tunnels also trust, read at each dial and never written.
     /// The app passes `openssh_known_hosts()`. Tests pass `None`, so they never read the
     /// developer's file.
@@ -89,6 +93,7 @@ pub(crate) struct Shared {
     next_chat_rev: AtomicU64,
     tunnels: tunnel::Tunnels,
     updates: update::Updates,
+    az: Arc<entra::AzCli>,
 }
 
 /// A saved SSH secret applies only to the auth kind it was saved for.
@@ -102,6 +107,7 @@ const DB_FILE: &str = "l1-data.sqlite3";
 const KV_WORKSPACE: &str = "workspace";
 const KV_SETTINGS: &str = "settings";
 const BOOT_CHATS: u32 = 200;
+const NEWER_SIGN_IN: &str = "This connection signs in with a method from a newer version of L1 Data.";
 
 impl Shared {
     pub(crate) fn emit(&self, ev: AppEvent) {
@@ -150,7 +156,7 @@ impl Shared {
     }
 
     fn config(&self, id: ConnectionId) -> Option<ConnectionConfig> {
-        self.store.connections().ok()?.into_iter().find(|c| c.id == id)
+        self.store.connection(id).ok()?
     }
 
     fn resolve_workspace(&self, workspace: &mut Workspace) {
@@ -164,6 +170,7 @@ impl Shared {
     }
 
     fn params(&self, config: &ConnectionConfig, database: &str) -> Result<ConnectParams, ConnectError> {
+        let entra = self.entra(config.database_kind, config.sql_server_auth)?;
         let password = if config.has_password { self.saved_secret(config.id, SecretSlot::Database)? } else { None };
         let via = match &config.ssh {
             Some(t) => {
@@ -172,7 +179,14 @@ impl Shared {
             }
             None => None,
         };
-        Ok(ConnectParams::for_database(config, database, password, via))
+        Ok(ConnectParams::for_database(config, database, password, via, entra))
+    }
+
+    fn entra(&self, kind: DatabaseKind, auth: Option<SqlServerAuth>) -> Result<Option<Arc<entra::AzCli>>, ConnectError> {
+        match (kind, auth) {
+            (DatabaseKind::SqlServer, Some(SqlServerAuth::Unknown)) => Err(ConnectError::Auth { message: format!("{NEWER_SIGN_IN} Update L1 Data, or edit the connection and choose a sign-in method.") }),
+            _ => Ok(connection::uses_entra(kind, auth).then(|| self.az.clone())),
+        }
     }
 
     /// Parameters for a console session on `database`, from the config as saved now.
@@ -719,6 +733,7 @@ impl Engine {
             view_edits: tokio::sync::Mutex::new(()),
             timezone: iana_time_zone::get_timezone().unwrap_or_else(|_| "UTC".into()),
             runtime: tokio::runtime::Handle::current(),
+            az: Arc::new(entra::AzCli::new(cfg.agent_path.clone(), cfg.az_binary)),
             providers: provider::Providers::new(cfg.agent_path),
             assistant: assistant::Assistant::new(),
             process_groups: Arc::new(provider::agent::ProcessGroups::default()),
@@ -751,9 +766,9 @@ impl Engine {
         let s = &self.shared;
         let live = s.connections.read().unwrap().iter().map(|(id, e)| e.state(*id)).collect();
         let consoles = s.consoles.read().unwrap().values().map(|c| c.latest.lock().unwrap().clone()).collect();
-        let connections = s.store.connections().unwrap_or_else(|e| {
+        let saved = s.store.connections().unwrap_or_else(|e| {
             eprintln!("connections load failed: {e}");
-            Vec::new()
+            store::SavedConnections { configs: Vec::new(), unreadable: 0 }
         });
         let mut workspace = s.store.kv_get(KV_WORKSPACE).unwrap_or_else(|e| {
             eprintln!("workspace load failed: {e}");
@@ -773,7 +788,7 @@ impl Engine {
             eprintln!("saved queries load failed: {e}");
             SavedQueries { rev: 0, items: Vec::new() }
         });
-        BootSnapshot { connections, live, consoles, workspace, settings: s.settings(), providers: s.provider_states(), chats, updates: s.updates.state(), saved_queries }
+        BootSnapshot { connections: saved.configs, unreadable_connections: saved.unreadable, live, consoles, workspace, settings: s.settings(), providers: s.provider_states(), chats, updates: s.updates.state(), saved_queries }
     }
 
     pub async fn save_connection(&self, d: ConnectionDraft) -> Result<ConnectionConfig, SaveError> {
@@ -791,7 +806,13 @@ impl Engine {
         if d.database.trim().is_empty() {
             return Err(invalid("database is required"));
         }
-        if d.user.trim().is_empty() {
+        let sql_server_auth = d.sql_server_auth.filter(|_| d.database_kind == DatabaseKind::SqlServer);
+        let newer_sign_in = || SaveError::Invalid { message: format!("{NEWER_SIGN_IN} Choose SQL login or Microsoft Entra ID.") };
+        if sql_server_auth == Some(SqlServerAuth::Unknown) {
+            return Err(newer_sign_in());
+        }
+        let entra = connection::uses_entra(d.database_kind, sql_server_auth);
+        if !entra && d.user.trim().is_empty() {
             return Err(invalid("user is required"));
         }
         if let Some(t) = &d.ssh {
@@ -812,9 +833,13 @@ impl Engine {
         if existing.as_ref().is_some_and(|c| c.database_kind != d.database_kind) {
             return Err(invalid("An existing connection cannot change database kind. Create a new connection."));
         }
+        if sql_server_auth.is_none() && existing.as_ref().is_some_and(|c| c.sql_server_auth == Some(SqlServerAuth::Unknown)) {
+            return Err(newer_sign_in());
+        }
         let id = d.id.unwrap_or_else(|| ConnectionId(uuid::Uuid::new_v4()));
         let store = |e: StoreError| SaveError::Store { message: e.to_string() };
-        let has_password = match &d.password {
+        let password = if entra { &PasswordInput::Clear } else { &d.password };
+        let has_password = match password {
             PasswordInput::Set(pw) => {
                 let sealed = s.vault.seal(id, SecretSlot::Database, pw).map_err(|e| SaveError::Keychain { message: e.to_string() })?;
                 s.store.set_secret(id, SecretSlot::Database, &sealed).map_err(store)?;
@@ -841,13 +866,14 @@ impl Engine {
             host: d.host.trim().to_owned(),
             port: d.port,
             database: d.database.trim().to_owned(),
-            user: d.user.trim().to_owned(),
+            user: if entra { String::new() } else { d.user.trim().to_owned() },
             ssl_mode: d.ssl_mode,
             ca_cert_path: d.ca_cert_path.filter(|p| !p.trim().is_empty()),
             has_password,
             color: d.color,
             ssh,
             environment: d.environment,
+            sql_server_auth,
         };
         s.store.upsert_connection(&config).map_err(store)?;
         Ok(config)
@@ -898,7 +924,9 @@ impl Engine {
 
     pub async fn test_connection(&self, d: ConnectionDraft) -> Result<ServerInfo, ConnectError> {
         let s = &self.shared;
+        let entra = s.entra(d.database_kind, d.sql_server_auth)?;
         let password = match (&d.password, d.id) {
+            _ if entra.is_some() => None,
             (PasswordInput::Set(pw), _) => Some(pw.clone()),
             (PasswordInput::Clear, _) | (PasswordInput::Keep, None) => None,
             (PasswordInput::Keep, Some(id)) => s.saved_secret(id, SecretSlot::Database)?,
@@ -915,7 +943,7 @@ impl Engine {
             }
             None => None,
         };
-        let session = Session::open(&ConnectParams::from_draft(&d, password, via), None, &s.timezone).await?;
+        let session = Session::open(&ConnectParams::from_draft(&d, password, via, entra), None, &s.timezone).await?;
         Ok(session.server)
     }
 
@@ -1639,6 +1667,7 @@ mod tests {
             data_dir: dir.path().join("nested"),
             keys: Arc::new(MemoryKeyStore::default()),
             agent_path: AgentPath::Fixed("".into()),
+            az_binary: None,
             user_known_hosts: None,
             updates: Arc::new(crate::ScriptedTransport::named("off").unwrap()),
         })
@@ -1661,7 +1690,37 @@ mod tests {
             color: None,
             ssh: None,
             environment: None,
+            sql_server_auth: None,
         }
+    }
+
+    #[tokio::test]
+    async fn boot_counts_the_saved_connections_it_cannot_read() {
+        let (engine, _dir) = engine().await;
+        let kept = engine.save_connection(draft("kept")).await.unwrap();
+        engine.shared.store.with_saved(|c, _| c.execute(r#"INSERT INTO connections (id, json) VALUES ('newer', '{"sslMode":"VerifyPinned"}')"#, []).unwrap());
+        let boot = engine.boot();
+        assert_eq!((boot.connections.iter().map(|c| c.id).collect::<Vec<_>>(), boot.unreadable_connections), (vec![kept.id], 1));
+    }
+
+    #[tokio::test]
+    async fn a_sign_in_method_from_a_newer_build_loads_but_never_connects_or_saves() {
+        let (engine, _dir) = engine().await;
+        let login = ConnectionDraft { database_kind: DatabaseKind::SqlServer, port: 1, password: PasswordInput::Clear, sql_server_auth: Some(SqlServerAuth::SqlLogin), ..draft("newer") };
+        let saved = engine.save_connection(login.clone()).await.unwrap();
+        engine.shared.store.upsert_connection(&ConnectionConfig { sql_server_auth: Some(SqlServerAuth::Unknown), ..saved.clone() }).unwrap();
+        assert_eq!(engine.boot().connections.iter().map(|c| c.sql_server_auth).collect::<Vec<_>>(), [Some(SqlServerAuth::Unknown)]);
+        let Err(ConnectError::Auth { message }) = engine.connect(saved.id).await else { panic!("a newer method must not connect as another one") };
+        assert!(message.contains("newer version of L1 Data"), "{message}");
+        let newer = ConnectionDraft { id: Some(saved.id), sql_server_auth: Some(SqlServerAuth::Unknown), ..login };
+        let Err(ConnectError::Auth { message }) = engine.test_connection(newer.clone()).await else { panic!("a newer method must not test as another one") };
+        assert!(message.contains("newer version of L1 Data"), "{message}");
+        let Err(SaveError::Invalid { message }) = engine.save_connection(newer.clone()).await else { panic!("a newer method must not be rewritten") };
+        assert!(message.contains("newer version of L1 Data"), "{message}");
+        let Err(SaveError::Invalid { message }) = engine.save_connection(ConnectionDraft { sql_server_auth: None, ..newer.clone() }).await else { panic!("a save that names no method must not replace a newer one") };
+        assert!(message.contains("newer version of L1 Data"), "{message}");
+        let chosen = engine.save_connection(ConnectionDraft { sql_server_auth: Some(SqlServerAuth::SqlLogin), ..newer }).await.unwrap();
+        assert_eq!(chosen.sql_server_auth, Some(SqlServerAuth::SqlLogin), "naming a method replaces the newer one");
     }
 
     #[tokio::test]
@@ -1761,7 +1820,7 @@ mod tests {
     #[tokio::test]
     async fn passwordless_save_clear_and_delete_never_touch_the_keychain() {
         let dir = tempfile::tempdir().unwrap();
-        let engine = Engine::open(EngineConfig { data_dir: dir.path().to_owned(), keys: Arc::new(NoKeychain), agent_path: AgentPath::Fixed("".into()), user_known_hosts: None, updates: Arc::new(crate::ScriptedTransport::named("off").unwrap()) }).await.unwrap();
+        let engine = Engine::open(EngineConfig { data_dir: dir.path().to_owned(), keys: Arc::new(NoKeychain), agent_path: AgentPath::Fixed("".into()), az_binary: None, user_known_hosts: None, updates: Arc::new(crate::ScriptedTransport::named("off").unwrap()) }).await.unwrap();
         let saved = engine.save_connection(ConnectionDraft { password: PasswordInput::Clear, ..draft("dev") }).await.unwrap();
         let kept = engine
             .save_connection(ConnectionDraft { id: Some(saved.id), password: PasswordInput::Keep, ..draft("dev") })
@@ -1774,13 +1833,31 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn testing_an_entra_draft_never_reads_the_saved_password() {
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = |keys: Arc<dyn KeyStore>| EngineConfig { data_dir: dir.path().to_owned(), keys, agent_path: AgentPath::Fixed("".into()), az_binary: None, user_known_hosts: None, updates: Arc::new(crate::ScriptedTransport::named("off").unwrap()) };
+        let login = ConnectionDraft { database_kind: DatabaseKind::SqlServer, port: 1, ssl_mode: SslMode::VerifyFull, sql_server_auth: Some(SqlServerAuth::SqlLogin), ..draft("azure") };
+        let saved = {
+            let engine = Engine::open(cfg(Arc::new(MemoryKeyStore::default()))).await.unwrap();
+            let saved = engine.save_connection(login.clone()).await.unwrap();
+            engine.shutdown().await;
+            saved
+        };
+        assert!(saved.has_password);
+        let engine = Engine::open(cfg(Arc::new(NoKeychain))).await.unwrap();
+        let entra = ConnectionDraft { id: Some(saved.id), password: PasswordInput::Keep, sql_server_auth: Some(SqlServerAuth::EntraAzureCli), ..login };
+        let tried = engine.test_connection(entra).await;
+        assert!(matches!(tried, Err(ConnectError::Network { .. })), "the keychain was read: {tried:?}");
+    }
+
+    #[tokio::test]
     async fn settings_a_newer_build_saved_load_as_the_defaults_and_stay_saved() {
         let (engine, dir) = engine().await;
         let newer = serde_json::json!({ "colorScheme": "Sepia", "maxRows": 5 });
         engine.shared.store.kv_set(KV_SETTINGS, &newer).unwrap();
         engine.shutdown().await;
         drop(engine);
-        let config = EngineConfig { data_dir: dir.path().join("nested"), keys: Arc::new(MemoryKeyStore::default()), agent_path: AgentPath::Fixed("".into()), user_known_hosts: None, updates: Arc::new(crate::ScriptedTransport::named("off").unwrap()) };
+        let config = EngineConfig { data_dir: dir.path().join("nested"), keys: Arc::new(MemoryKeyStore::default()), agent_path: AgentPath::Fixed("".into()), az_binary: None, user_known_hosts: None, updates: Arc::new(crate::ScriptedTransport::named("off").unwrap()) };
         let reopened = Engine::open(config).await.unwrap();
         assert_eq!(reopened.boot().settings.max_rows, Settings::default().max_rows);
         assert_eq!(reopened.shared.store.kv_get::<serde_json::Value>(KV_SETTINGS).unwrap(), Some(newer));
@@ -1790,7 +1867,7 @@ mod tests {
     async fn connections_settings_and_workspace_persist_across_open() {
         let dir = tempfile::tempdir().unwrap();
         let keys = Arc::new(MemoryKeyStore::default());
-        let cfg = || EngineConfig { data_dir: dir.path().to_owned(), keys: keys.clone(), agent_path: AgentPath::Fixed("".into()), user_known_hosts: None, updates: Arc::new(crate::ScriptedTransport::named("off").unwrap()) };
+        let cfg = || EngineConfig { data_dir: dir.path().to_owned(), keys: keys.clone(), agent_path: AgentPath::Fixed("".into()), az_binary: None, user_known_hosts: None, updates: Arc::new(crate::ScriptedTransport::named("off").unwrap()) };
         let password = |engine: &Engine, id| engine.shared.saved_secret(id, SecretSlot::Database).unwrap();
         let saved = {
             let engine = Engine::open(cfg()).await.unwrap();
@@ -1876,7 +1953,7 @@ mod tests {
     #[tokio::test]
     async fn an_invalid_tunnel_is_rejected_before_any_secret_is_sealed() {
         let dir = tempfile::tempdir().unwrap();
-        let engine = Engine::open(EngineConfig { data_dir: dir.path().to_owned(), keys: Arc::new(NoKeychain), agent_path: AgentPath::Fixed("".into()), user_known_hosts: None, updates: Arc::new(crate::ScriptedTransport::named("off").unwrap()) }).await.unwrap();
+        let engine = Engine::open(EngineConfig { data_dir: dir.path().to_owned(), keys: Arc::new(NoKeychain), agent_path: AgentPath::Fixed("".into()), az_binary: None, user_known_hosts: None, updates: Arc::new(crate::ScriptedTransport::named("off").unwrap()) }).await.unwrap();
         let tunnel = SshTunnelDraft { host: "bastion".into(), port: 22, user: "tunnel".into(), auth: SshAuth::Password, secret: PasswordInput::Set("pw".into()) };
         for bad in [
             SshTunnelDraft { host: " ".into(), ..tunnel.clone() },

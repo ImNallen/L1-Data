@@ -16,6 +16,7 @@ const config = (id: string): ConnectionConfig => ({
   color: null,
   ssh: null,
   environment: null,
+  sqlServerAuth: null,
 });
 
 describe("workspace.upsertConfig", () => {

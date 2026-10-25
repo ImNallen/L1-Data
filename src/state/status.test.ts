@@ -177,6 +177,7 @@ describe("workspace snapshot", () => {
       color: null,
       ssh: null,
       environment: null,
+      sqlServerAuth: null,
     },
   };
   const tabs: Tab[] = [

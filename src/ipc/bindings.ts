@@ -149,6 +149,8 @@ export type Attachment = {
 
 export type BootSnapshot = {
 	connections: ConnectionConfig[],
+	/**  Saved connections that do not parse, such as ones a newer build saved. They are not in `connections`. */
+	unreadableConnections: number,
 	live: ConnectionState[],
 	consoles: ConsoleState[],
 	workspace: Workspace,
@@ -341,6 +343,8 @@ export type ConnectionConfig = {
 	 */
 	ssh: SshTunnel | null,
 	environment: Environment | null,
+	/**  `None` is a SQL login, as on every connection saved before this field existed. */
+	sqlServerAuth: SqlServerAuth | null,
 };
 
 export type ConnectionDraft = {
@@ -358,6 +362,7 @@ export type ConnectionDraft = {
 	color: string | null,
 	ssh: SshTunnelDraft | null,
 	environment: Environment | null,
+	sqlServerAuth: SqlServerAuth | null,
 };
 
 export type ConnectionId = string;
@@ -1220,6 +1225,13 @@ export type SourceLimits = {
 	name: string,
 	outcome: LimitsOutcome,
 };
+
+/**
+ *  How a SQL Server connection signs in. `EntraAzureCli` sends an access token from the user's
+ *  `az login` and saves no password. `Unknown` is a method a newer build saved. Connect and save
+ *  refuse it, so the row keeps its method until the user picks one this build knows.
+ */
+export type SqlServerAuth = "SqlLogin" | "EntraAzureCli" | "Unknown";
 
 export type SqlTypeRef = {
 	/**  `"bigint"`, `"integer[]"`, `"order_status"`. */

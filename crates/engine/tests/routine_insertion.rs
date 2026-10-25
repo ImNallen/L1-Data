@@ -20,7 +20,7 @@ impl Harness {
     async fn open(kind: DatabaseKind) -> Self {
         let dir = tempfile::tempdir().unwrap();
         let engine =
-            Engine::open(EngineConfig { data_dir: dir.path().into(), keys: Arc::new(MemoryKeyStore::default()), agent_path: AgentPath::Fixed("".into()), user_known_hosts: None, updates: Arc::new(engine::ScriptedTransport::named("off").unwrap()) })
+            Engine::open(EngineConfig { data_dir: dir.path().into(), keys: Arc::new(MemoryKeyStore::default()), agent_path: AgentPath::Fixed("".into()), az_binary: None, user_known_hosts: None, updates: Arc::new(engine::ScriptedTransport::named("off").unwrap()) })
                 .await
                 .unwrap();
         let draft = match kind {
@@ -42,6 +42,7 @@ impl Harness {
                 color: None,
                 ssh: None,
                 environment: None,
+                sql_server_auth: None,
             },
         };
         let config = engine.save_connection(draft).await.unwrap();

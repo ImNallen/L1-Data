@@ -11,7 +11,7 @@ use crate::{AgentPath, Engine, EngineConfig, MemoryKeyStore};
 
 async fn open(dir: &Path, transport: &Arc<ScriptedTransport>) -> Arc<Engine> {
     let updates = transport.clone();
-    Engine::open(EngineConfig { data_dir: dir.into(), keys: Arc::new(MemoryKeyStore::default()), agent_path: AgentPath::Fixed("".into()), user_known_hosts: None, updates })
+    Engine::open(EngineConfig { data_dir: dir.into(), keys: Arc::new(MemoryKeyStore::default()), agent_path: AgentPath::Fixed("".into()), az_binary: None, user_known_hosts: None, updates })
         .await
         .unwrap()
 }

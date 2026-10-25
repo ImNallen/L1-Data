@@ -4,6 +4,7 @@ mod values;
 
 use super::{QueryEvent, QueryStream, error};
 use crate::connection::{CONNECT_TIMEOUT, ConnectParams};
+use crate::entra::AzCli;
 use crate::model::*;
 use futures_util::{StreamExt, TryStreamExt};
 use std::time::Duration;
@@ -91,6 +92,9 @@ fn config(p: &ConnectParams) -> Result<Config, ConnectError> {
     config.authentication(AuthMethod::sql_server(&p.user, p.password.as_deref().unwrap_or("")));
     config.encryption(EncryptionLevel::Required);
     match (p.ssl_mode, &p.ca_cert_path) {
+        (SslMode::Require, None) if p.entra.is_some() => {
+            return Err(ConnectError::Tls { message: "Choose Verify full for Microsoft Entra ID. Its token works on every Azure SQL database you can reach, so it goes only to a verified server.".into() });
+        }
         (SslMode::Require, None) => config.trust_cert(),
         (SslMode::VerifyFull, None) => {}
         (SslMode::VerifyFull, Some(_)) => {
@@ -107,16 +111,57 @@ fn config(p: &ConnectParams) -> Result<Config, ConnectError> {
     Ok(config)
 }
 
+const LOGIN_FAILED: u32 = 18456;
+const UNTRUSTED_DOMAIN_LOGIN: u32 = 18452;
+
+const CERTIFICATE_REJECTED: &str = "the server's certificate was rejected during the TLS handshake: ";
+/// The vendored driver's advice for developers, such as `Config::trust_cert()`, starts here. It
+/// names settings the app does not have.
+const DEVELOPER_ADVICE: &str = " To connect anyway";
+
+fn tls_failure(message: String, entra: bool) -> ConnectError {
+    let Some(rest) = message.strip_prefix(CERTIFICATE_REJECTED) else { return ConnectError::Tls { message: format!("TLS failed: {message}") } };
+    let reason = rest.split_once(DEVELOPER_ADVICE).map_or(rest, |(reason, _)| reason).trim_end_matches('.');
+    let message = if entra {
+        format!("The server's certificate could not be verified, so the Microsoft Entra ID token was not sent. Entra ID sign-in needs a server with a publicly trusted certificate, such as Azure SQL. Check the host name, or ask the server's administrator for a publicly trusted certificate. Reason: {reason}.")
+    } else {
+        format!("The server's certificate could not be verified. Check the host name, give the server a certificate this computer trusts, or choose Require under TLS to connect without checking it. Reason: {reason}.")
+    };
+    ConnectError::Tls { message }
+}
+
+async fn login_refused(code: u32, message: &str, entra: Option<(&AzCli, &str)>) -> Option<ConnectError> {
+    if code != LOGIN_FAILED && !(entra.is_some() && code == UNTRUSTED_DOMAIN_LOGIN) {
+        return None;
+    }
+    if let Some((az, token)) = entra {
+        az.forget(token).await;
+    }
+    Some(ConnectError::Auth { message: message.to_owned() })
+}
+
 impl MsSession {
     pub(super) async fn open(p: &ConnectParams) -> Result<Self, ConnectError> {
-        let cfg = config(p)?;
+        let mut cfg = config(p)?;
         let stream = p.dial().await?;
+        let token = match &p.entra {
+            Some(az) => Some(az.token().await?),
+            None => None,
+        };
+        if let Some(token) = &token {
+            cfg.authentication(AuthMethod::aad_token(token));
+        }
         let connection = Client::connect(cfg, stream.compat_write());
-        let client = tokio::time::timeout(CONNECT_TIMEOUT, connection).await.map_err(|_| ConnectError::Network { message: "SQL Server connection timed out".into() })?.map_err(|e| match e {
-            tiberius::error::Error::Tls(message) => ConnectError::Tls { message },
-            tiberius::error::Error::Server(e) if e.code() == 18456 => ConnectError::Auth { message: e.message().to_owned() },
-            e => ConnectError::Server(query_error(e)),
-        })?;
+        let connected = tokio::time::timeout(CONNECT_TIMEOUT, connection).await.map_err(|_| ConnectError::Network { message: "SQL Server connection timed out".into() })?;
+        let client = match connected {
+            Ok(client) => client,
+            Err(tiberius::error::Error::Tls(message)) => return Err(tls_failure(message, token.is_some())),
+            Err(tiberius::error::Error::Server(e)) => {
+                let entra = p.entra.as_deref().zip(token.as_deref());
+                return Err(login_refused(e.code(), e.message(), entra).await.unwrap_or_else(|| ConnectError::Server(query_error(tiberius::error::Error::Server(e)))));
+            }
+            Err(e) => return Err(ConnectError::Server(query_error(e))),
+        };
         let state = client.session_state().map_err(|e| ConnectError::Server(query_error(e)))?;
         let backend_pid = i32::from(state.server_process_id);
         let (major, minor, build) = state.server_version;
@@ -300,6 +345,71 @@ impl MsSession {
     }
 }
 
+#[cfg(all(test, unix))]
+mod login_tests {
+    use super::*;
+    use crate::shell_path::AgentPath;
+    use std::os::unix::fs::PermissionsExt;
+
+    struct FakeAz {
+        az: AzCli,
+        log: std::path::PathBuf,
+        _dir: tempfile::TempDir,
+    }
+
+    impl FakeAz {
+        fn new() -> Self {
+            let dir = tempfile::tempdir().unwrap();
+            let (program, log) = (dir.path().join("az"), dir.path().join("az.log"));
+            std::fs::write(&program, format!("#!/bin/sh\necho call >> '{}'\necho '{{\"accessToken\":\"token\",\"expires_on\":9999999999}}'\n", log.display())).unwrap();
+            std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o755)).unwrap();
+            Self { az: AzCli::new(AgentPath::Fixed("".into()), Some(program)), log, _dir: dir }
+        }
+
+        async fn calls_after_another_token(&self) -> usize {
+            assert_eq!(self.az.token().await.unwrap(), "token");
+            std::fs::read_to_string(&self.log).unwrap().lines().count()
+        }
+    }
+
+    #[tokio::test]
+    async fn a_refused_entra_login_fails_as_auth_and_drops_the_token() {
+        for code in [18456, 18452] {
+            let fake = FakeAz::new();
+            let token = fake.az.token().await.unwrap();
+            let refused = login_refused(code, "Login failed for user '<token-identified principal>'.", Some((&fake.az, &token))).await;
+            assert!(matches!(refused, Some(ConnectError::Auth { ref message }) if message.starts_with("Login failed")), "{code}: {refused:?}");
+            assert_eq!(fake.calls_after_another_token().await, 2, "{code} drops the token, so the next sign-in runs az");
+        }
+    }
+
+    #[test]
+    fn a_rejected_certificate_names_what_the_user_can_do_and_keeps_the_reason() {
+        let rejected = "the server's certificate was rejected during the TLS handshake: invalid peer certificate: UnknownIssuer. To connect anyway you can: (1) trust a specific CA certificate with `Config::trust_cert_ca(path)`; (3) skip certificate validation entirely with `Config::trust_cert()`.".to_owned();
+        for (entra, advice) in [(true, "publicly trusted certificate"), (false, "choose Require")] {
+            let ConnectError::Tls { message } = tls_failure(rejected.clone(), entra) else { panic!("a TLS failure stays Tls") };
+            assert!(message.starts_with("The server's certificate could not be verified") && message.contains(advice), "{message}");
+            assert!(message.ends_with("Reason: invalid peer certificate: UnknownIssuer."), "{message}");
+            assert!(!message.contains("Config::") && !message.contains("trust_cert"), "{message}");
+        }
+        let old_cert = "the server's certificate was rejected during the TLS handshake: invalid peer certificate: Other(OtherError(UnsupportedCertVersion)). The SQL Server presented a certificate rustls considers too old (an outdated X.509 version), which frequently happens with the self-signed certificate SQL Server auto-generates. To connect anyway you can: (3) skip certificate validation entirely with `Config::trust_cert()`.".to_owned();
+        let ConnectError::Tls { message } = tls_failure(old_cert, false) else { panic!("a TLS failure stays Tls") };
+        assert!(message.ends_with("Reason: invalid peer certificate: Other(OtherError(UnsupportedCertVersion)). The SQL Server presented a certificate rustls considers too old (an outdated X.509 version), which frequently happens with the self-signed certificate SQL Server auto-generates."), "{message}");
+        let ConnectError::Tls { message } = tls_failure("invalid dns name".into(), true) else { panic!("a TLS failure stays Tls") };
+        assert_eq!(message, "TLS failed: invalid dns name");
+    }
+
+    #[tokio::test]
+    async fn other_login_errors_keep_the_token_and_a_sql_login_keeps_trunks_mapping() {
+        let fake = FakeAz::new();
+        let token = fake.az.token().await.unwrap();
+        assert!(login_refused(4060, "Cannot open database", Some((&fake.az, &token))).await.is_none(), "a missing database is not a refused token");
+        assert_eq!(fake.calls_after_another_token().await, 1);
+        assert!(matches!(login_refused(18456, "Login failed for user 'sa'.", None).await, Some(ConnectError::Auth { .. })));
+        assert!(login_refused(18452, "untrusted domain", None).await.is_none());
+    }
+}
+
 #[cfg(all(test, feature = "mssql-tests"))]
 mod tests {
     use super::*;
@@ -315,6 +425,7 @@ mod tests {
             ssl_mode: SslMode::Require,
             ca_cert_path: None,
             via: None,
+            entra: None,
         }
     }
 
@@ -396,6 +507,8 @@ mod tests {
         p.ssl_mode = SslMode::Disable;
         assert!(matches!(MsSession::open(&p).await, Err(ConnectError::Tls { .. })));
         p.ssl_mode = SslMode::VerifyFull;
+        let Err(ConnectError::Tls { message }) = MsSession::open(&p).await else { panic!("the dev server's certificate is self-signed") };
+        assert!(message.starts_with("The server's certificate could not be verified.") && message.contains("choose Require") && !message.contains("trust_cert"), "{message}");
         p.ca_cert_path = Some("not-a-real-ca.pem".into());
         assert!(matches!(MsSession::open(&p).await, Err(ConnectError::Tls { .. })));
     }
