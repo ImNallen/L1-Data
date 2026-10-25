@@ -267,6 +267,8 @@ struct Frame {
     first_output: Option<Output>,
     /// The enclosing frame's clause when this one opened.
     outer: Clause,
+    /// For a `LATERAL` or `APPLY` subquery, how many of the enclosing frame's FROM items stand to its left.
+    left: Option<usize>,
 }
 
 impl Frame {
@@ -286,6 +288,7 @@ impl Frame {
             seen: false,
             first_output: None,
             outer,
+            left: None,
         }
     }
 }
@@ -647,7 +650,10 @@ impl<'a> Walk<'a> {
         if self.frames[parent].clause == Clause::Select {
             self.frames[parent].item_lexemes.push(i);
         }
-        self.frames.push(Frame::new(Some(parent), query, origin, clause));
+        let lateral = origin == Origin::Derived && i.checked_sub(1).is_some_and(|p| self.is_word(p, "LATERAL") || self.is_word(p, "APPLY"));
+        let mut frame = Frame::new(Some(parent), query, origin, clause);
+        frame.left = lateral.then(|| self.frames[parent].rels.len());
+        self.frames.push(frame);
         self.stack.push(self.frames.len() - 1);
     }
 
@@ -769,15 +775,18 @@ impl<'a> Walk<'a> {
             chain.push(f);
             id = self.frames[f].parent;
         }
-        let seen_from = chain.iter().position(|&f| matches!(self.frames[f].origin, Origin::CteBody | Origin::Derived)).map_or(chain.len(), |p| p + 1);
         let mut rels: Vec<&Rel> = Vec::new();
-        for &f in &chain[..seen_from] {
+        let mut child: Option<&Frame> = None;
+        for &f in &chain {
             let frame_rels = &self.frames[f].rels;
-            let visible = match snap.clause {
-                Clause::On { target, .. } if f == snap.frame => &frame_rels[..(target + 1).min(frame_rels.len())],
-                _ => frame_rels,
+            let visible = match (child.map(|c| (c.origin, c.left)), snap.clause) {
+                (Some((Origin::Derived, Some(left))), _) => &frame_rels[..left.min(frame_rels.len())],
+                (Some((Origin::Derived | Origin::CteBody, None)), _) => &[],
+                (None, Clause::On { target, .. }) => &frame_rels[..(target + 1).min(frame_rels.len())],
+                _ => &frame_rels[..],
             };
             rels.extend(visible.iter().filter(|r| !self.aliased_elsewhere(r, frame_rels)));
+            child = Some(&self.frames[f]);
         }
         let relations = rels.iter().map(|r| ScopeRelation { reference: r.written.clone(), source: r.source.clone() }).collect();
         let mut ctes: Vec<String> = Vec::new();
@@ -1164,6 +1173,31 @@ mod tests {
         assert_eq!(pg("select * from (|").expect, Expect::Relation);
         assert_eq!(pg("select count(|) from orders").expect, Expect::Expression);
         assert_eq!(refs(&pg("insert into orders (|")), [(Some("orders"), &table(None, "orders"))]);
+    }
+
+    #[test]
+    fn a_lateral_subquery_sees_the_from_items_to_its_left() {
+        let (customers, orders) = (table(None, "customers"), table(None, "orders"));
+        let both = vec![(Some("c"), &customers), (Some("o"), &orders)];
+        for s in [
+            pg("select * from orders o, lateral (select * from customers c where c.id = o.|) x"),
+            pg("select * from orders o join lateral (select * from customers c where c.id = o.|) x on true"),
+            pg("select * from orders o, lateral (select * from customers c where c.id = o.|) x, products p"),
+            ms("SELECT * FROM orders o CROSS APPLY (SELECT * FROM customers c WHERE c.id = o.|) x"),
+            ms("SELECT * FROM orders o OUTER APPLY (SELECT * FROM customers c WHERE c.id = o.|) x"),
+        ] {
+            assert_eq!((refs(&s), s.qualifier.clone()), (both.clone(), Some(Qualifier::Relation { index: 1 })));
+        }
+        let s = pg("select * from orders o, (select * from customers c where c.id = o.|) x");
+        assert_eq!((refs(&s), s.qualifier.clone()), (vec![(Some("c"), &table(None, "customers"))], Some(Qualifier::Name { parts: vec!["o".into()] })));
+    }
+
+    #[test]
+    fn a_from_subquery_inside_a_correlated_subquery_sees_the_outer_query() {
+        let s = pg("select * from orders o where exists (select * from (select * from customers c where c.id = o.|) d)");
+        assert_eq!((refs(&s), s.qualifier.clone()), (vec![(Some("c"), &table(None, "customers")), (Some("o"), &table(None, "orders"))], Some(Qualifier::Relation { index: 1 })));
+        let s = pg("select * from orders o where exists (select * from products p, (select * from customers c where c.|) d)");
+        assert_eq!(refs(&s), [(Some("c"), &table(None, "customers")), (Some("o"), &table(None, "orders"))]);
     }
 
     #[test]
