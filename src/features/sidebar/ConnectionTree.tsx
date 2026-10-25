@@ -35,10 +35,11 @@ import {
   type Relation,
   type RelationDetail,
   type SchemaInfo,
+  type ScriptTarget,
   type TypeCategory,
 } from "../../ipc/bindings";
 import { isViewKind, useCatalog, viewFor } from "../../state/catalog";
-import { connectErrorText } from "../../ipc/errors";
+import { connectErrorText, detailErrorText } from "../../ipc/errors";
 import { DATABASE_LABEL, databaseKindFor } from "../../state/databaseKind";
 import { dbKey, sameDb } from "../../state/dbKey";
 import { instanceOf, useLive } from "../../state/live";
@@ -198,6 +199,33 @@ function NewMenu({ db }: { db: DatabaseRef }) {
   );
 }
 
+export async function openObjectScript(db: DatabaseRef, target: ScriptTarget): Promise<void> {
+  const res = await commands.objectScript(db, target);
+  if (res.status === "error") return useWorkspace.getState().notify(detailErrorText(res.error));
+  openSqlTab({ db, text: res.data.text, title: res.data.title });
+}
+
+function ScriptMenuItem({ db, target, label }: { db: DatabaseRef; target: ScriptTarget; label: string }) {
+  return (
+    <ContextMenuItem
+      testId={target.kind === "Relation" ? "tree-menu-script-create" : "tree-menu-open-source"}
+      onSelect={() => void openObjectScript(db, target)}
+    >
+      {label}
+    </ContextMenuItem>
+  );
+}
+
+function RelationMenu({ db, rel }: { db: DatabaseRef; rel: Relation }) {
+  return (
+    <>
+      <ScriptMenuItem db={db} target={{ kind: "Relation", oid: rel.oid }} label="Script as CREATE" />
+      <ContextMenuSeparator />
+      <NewMenu db={db} />
+    </>
+  );
+}
+
 function Count({ children }: { children: ReactNode }) {
   return <span className="shrink-0 pl-2 text-ui-11.5 text-muted tabular-nums">{children}</span>;
 }
@@ -268,7 +296,21 @@ const KEY_GLYPHS: Record<KeyKind["kind"], ReactNode> = {
   Check: glyph(CheckCheckIcon),
 };
 
-function TextRow({ path, depth, icon, name, text }: { path: string; depth: number; icon: ReactNode; name: string; text: RowText }) {
+function TextRow({
+  path,
+  depth,
+  icon,
+  name,
+  text,
+  contextMenu,
+}: {
+  path: string;
+  depth: number;
+  icon: ReactNode;
+  name: string;
+  text: RowText;
+  contextMenu?: ReactNode;
+}) {
   return (
     <Row
       path={path}
@@ -278,6 +320,7 @@ function TextRow({ path, depth, icon, name, text }: { path: string; depth: numbe
       icon={icon}
       label={<DetailName name={name} title={name} detail={text.trailing} />}
       second={text.second}
+      contextMenu={contextMenu}
     />
   );
 }
@@ -285,7 +328,7 @@ function TextRow({ path, depth, icon, name, text }: { path: string; depth: numbe
 type DetailGroup = { id: string; label: string; count: number | null; rows: () => ReactNode };
 
 /** Columns come from the catalog. The other groups wait for `relation_detail` and hide when empty. */
-function detailGroups(path: string, depth: number, schema: string, rel: Relation, detail: RelationDetail | null): DetailGroup[] {
+function detailGroups(path: string, depth: number, db: DatabaseRef, schema: string, rel: Relation, detail: RelationDetail | null): DetailGroup[] {
   const at = (group: string, name: string) => `${path}/#${group}/${name}`;
   const columns: DetailGroup = {
     id: "columns",
@@ -330,7 +373,15 @@ function detailGroups(path: string, depth: number, schema: string, rel: Relation
       count: detail.indexes.length,
       rows: () =>
         detail.indexes.map((i) => (
-          <TextRow key={i.name} path={at("indexes", i.name)} depth={depth} icon={glyph(ListFilterIcon)} name={i.name} text={indexText(i)} />
+          <TextRow
+            key={i.name}
+            path={at("indexes", i.name)}
+            depth={depth}
+            icon={glyph(ListFilterIcon)}
+            name={i.name}
+            text={indexText(i)}
+            contextMenu={<ScriptMenuItem db={db} target={{ kind: "Index", relationOid: rel.oid, name: i.name }} label="Open source" />}
+          />
         )),
     },
     {
@@ -339,7 +390,15 @@ function detailGroups(path: string, depth: number, schema: string, rel: Relation
       count: detail.triggers.length,
       rows: () =>
         detail.triggers.map((t) => (
-          <TextRow key={t.name} path={at("triggers", t.name)} depth={depth} icon={glyph(ZapIcon)} name={t.name} text={triggerText(t)} />
+          <TextRow
+            key={t.name}
+            path={at("triggers", t.name)}
+            depth={depth}
+            icon={glyph(ZapIcon)}
+            name={t.name}
+            text={triggerText(t)}
+            contextMenu={<ScriptMenuItem db={db} target={{ kind: "Trigger", relationOid: rel.oid, name: t.name }} label="Open source" />}
+          />
         )),
     },
   ];
@@ -372,7 +431,7 @@ function RelationGroups({
   }, [key, version, rel.oid]);
   return (
     <>
-      {detailGroups(path, depth + 1, schema, rel, entry?.detail ?? null).map((g) => (
+      {detailGroups(path, depth + 1, db, schema, rel, entry?.detail ?? null).map((g) => (
         <Group key={g.id} path={`${path}/#${g.id}`} depth={depth} label={g.label} count={g.count} expanded={expanded}>
           {g.rows()}
         </Group>
@@ -429,7 +488,7 @@ function RelationRow({
         onClick={() => select({ db, schema, relation: rel.name })}
         onToggle={toggle}
         onDoubleClick={() => openTableTab({ db, schema, relation: rel.name })}
-        contextMenu={<NewMenu db={db} />}
+        contextMenu={<RelationMenu db={db} rel={rel} />}
         icon={relationIcon(rel)}
         title={rel.name}
         label={rel.name}
@@ -459,6 +518,7 @@ export function FunctionRow({
       expandable={false}
       keepChevronSpace
       icon={glyph(SquareFunctionIcon)}
+      contextMenu={<ScriptMenuItem db={db} target={{ kind: "Routine", oid: fn.oid }} label="Open source" />}
       onDoubleClick={() => {
         const { active, tabs, configs, notify } = useWorkspace.getState();
         const target = tabTarget(active ? tabs[active] : undefined);
@@ -851,7 +911,7 @@ function FilteredRelationNode({
         onClick={() => select({ db, schema, relation: rel.name })}
         onToggle={expandable ? () => expanded.toggle(me) : undefined}
         onDoubleClick={() => openTableTab({ db, schema, relation: rel.name })}
-        contextMenu={<NewMenu db={db} />}
+        contextMenu={<RelationMenu db={db} rel={rel} />}
         icon={relationIcon(rel)}
         title={rel.name}
         label={<Highlight text={rel.name} ranges={ranges} />}
