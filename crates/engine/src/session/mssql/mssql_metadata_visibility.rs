@@ -143,6 +143,10 @@ async fn select_only_login_keeps_relation_detail_and_actual_assistant_descriptio
             CREATE USER [{login}] FOR LOGIN [{login}];
             GRANT SELECT ON OBJECT::dbo.[{table}] TO [{login}]")).await;
         h.sql(owner_tab, &format!("CREATE TRIGGER dbo.[{stem}_tr] ON dbo.[{table}] AFTER INSERT, UPDATE AS BEGIN SET NOCOUNT ON; END")).await;
+        h.sql(owner_tab, &format!("
+            EXEC sys.sp_addextendedproperty N'MS_Description', N'hidden check', N'SCHEMA', N'dbo', N'TABLE', N'{table}', N'CONSTRAINT', N'{stem}_ck';
+            EXEC sys.sp_addextendedproperty N'MS_Description', N'hidden default', N'SCHEMA', N'dbo', N'TABLE', N'{table}', N'CONSTRAINT', N'{stem}_df';
+            ADD SENSITIVITY CLASSIFICATION TO dbo.[{table}].n WITH (LABEL = N'Hidden')")).await;
         h.engine.refresh_catalog(db(owner)).await.unwrap();
         let owner_catalog = h.engine.catalog(db(owner)).await.unwrap();
         let relation = owner_catalog.relation("dbo", &table).unwrap();
@@ -196,8 +200,13 @@ async fn select_only_login_keeps_relation_detail_and_actual_assistant_descriptio
             format!("check constraint [{stem}_ck] on {path}, whose definition this login cannot read"),
             format!("filtered index [{stem}_ix] on {path}, whose filter this login cannot read"),
             format!("trigger [dbo].[{stem}_tr] on {path}, whose text is encrypted or hidden from this login"),
+            format!("a complete privilege list for {path}, because this login lacks VIEW DEFINITION on the database"),
+            format!("every sensitivity classification on {path}, because this login lacks VIEW ANY SENSITIVITY CLASSIFICATION"),
         ] {
             assert!(script.warnings.contains(&warning), "{warning} missing from {:?}", script.warnings);
+        }
+        for left_out in [format!("N'{stem}_ck'"), format!("N'{stem}_df'")] {
+            assert!(!script.text.contains(&left_out), "The extended property on a constraint the script leaves out replays without it: {}", script.text);
         }
         let detail = h.engine.relation_detail(db(reader), relation.oid).await;
         let described = tools::execute(&h.engine.shared, Some(&db(reader)), ParsedCall::DescribeTables { tables: vec![format!("dbo.{table}")] }).await;
