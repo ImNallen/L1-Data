@@ -1555,6 +1555,8 @@ impl Default for Settings {
 #[serde(rename_all = "camelCase")]
 pub struct BootSnapshot {
     pub connections: Vec<ConnectionConfig>,
+    /// Saved connections that do not parse, such as ones a newer build saved. They are not in `connections`.
+    pub unreadable_connections: u32,
     pub live: Vec<ConnectionState>,
     pub consoles: Vec<ConsoleState>,
     pub workspace: Workspace,

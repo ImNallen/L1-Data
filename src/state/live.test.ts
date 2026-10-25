@@ -79,6 +79,7 @@ function savedAt(rev: number, names: string[]): SavedQueries {
 function bootWith(savedQueries: SavedQueries): BootSnapshot {
   return {
     connections: [],
+    unreadableConnections: 0,
     live: [],
     consoles: [],
     providers: [],
@@ -146,6 +147,7 @@ describe("live.apply", () => {
     });
     const boot: BootSnapshot = {
       connections: [],
+      unreadableConnections: 0,
       live: [{ id: CONN, rev: 4, status: { kind: "Connecting" } }],
       consoles: [consoleAt(1)],
       workspace: {
@@ -189,6 +191,7 @@ describe("live.apply", () => {
     ]);
     const boot = hydrateLive(early, {
       connections: [],
+      unreadableConnections: 0,
       live: [],
       consoles: [],
       workspace: {

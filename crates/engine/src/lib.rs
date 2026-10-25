@@ -156,7 +156,7 @@ impl Shared {
     }
 
     fn config(&self, id: ConnectionId) -> Option<ConnectionConfig> {
-        self.store.connections().ok()?.into_iter().find(|c| c.id == id)
+        self.store.connection(id).ok()?
     }
 
     fn resolve_workspace(&self, workspace: &mut Workspace) {
@@ -766,9 +766,9 @@ impl Engine {
         let s = &self.shared;
         let live = s.connections.read().unwrap().iter().map(|(id, e)| e.state(*id)).collect();
         let consoles = s.consoles.read().unwrap().values().map(|c| c.latest.lock().unwrap().clone()).collect();
-        let connections = s.store.connections().unwrap_or_else(|e| {
+        let saved = s.store.connections().unwrap_or_else(|e| {
             eprintln!("connections load failed: {e}");
-            Vec::new()
+            store::SavedConnections { configs: Vec::new(), unreadable: 0 }
         });
         let mut workspace = s.store.kv_get(KV_WORKSPACE).unwrap_or_else(|e| {
             eprintln!("workspace load failed: {e}");
@@ -788,7 +788,7 @@ impl Engine {
             eprintln!("saved queries load failed: {e}");
             SavedQueries { rev: 0, items: Vec::new() }
         });
-        BootSnapshot { connections, live, consoles, workspace, settings: s.settings(), providers: s.provider_states(), chats, updates: s.updates.state(), saved_queries }
+        BootSnapshot { connections: saved.configs, unreadable_connections: saved.unreadable, live, consoles, workspace, settings: s.settings(), providers: s.provider_states(), chats, updates: s.updates.state(), saved_queries }
     }
 
     pub async fn save_connection(&self, d: ConnectionDraft) -> Result<ConnectionConfig, SaveError> {
@@ -1692,6 +1692,15 @@ mod tests {
             environment: None,
             sql_server_auth: None,
         }
+    }
+
+    #[tokio::test]
+    async fn boot_counts_the_saved_connections_it_cannot_read() {
+        let (engine, _dir) = engine().await;
+        let kept = engine.save_connection(draft("kept")).await.unwrap();
+        engine.shared.store.with_saved(|c, _| c.execute(r#"INSERT INTO connections (id, json) VALUES ('newer', '{"sslMode":"VerifyPinned"}')"#, []).unwrap());
+        let boot = engine.boot();
+        assert_eq!((boot.connections.iter().map(|c| c.id).collect::<Vec<_>>(), boot.unreadable_connections), (vec![kept.id], 1));
     }
 
     #[tokio::test]

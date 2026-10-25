@@ -134,3 +134,10 @@ export function sshValid(fields: Fields): boolean {
     (fields.sshAuth !== "Key" || fields.sshKeyPath.trim() !== "")
   );
 }
+
+export function unreadableConnectionsNotice(count: number): string | null {
+  if (count === 0) return null;
+  return count === 1
+    ? "1 saved connection could not be read, so it is hidden. A newer version of L1 Data may have saved it."
+    : `${count} saved connections could not be read, so they are hidden. A newer version of L1 Data may have saved them.`;
+}

@@ -149,6 +149,8 @@ export type Attachment = {
 
 export type BootSnapshot = {
 	connections: ConnectionConfig[],
+	/**  Saved connections that do not parse, such as ones a newer build saved. They are not in `connections`. */
+	unreadableConnections: number,
 	live: ConnectionState[],
 	consoles: ConsoleState[],
 	workspace: Workspace,

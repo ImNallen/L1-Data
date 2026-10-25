@@ -10,6 +10,7 @@ import {
   toSqlServerAuth,
   toSshDraft,
   toUser,
+  unreadableConnectionsNotice,
   type FormState,
   type PasswordEdit,
 } from "./connectionForm";
@@ -206,4 +207,10 @@ it("needs a host, a port, a user, and a key path for key auth before a tunnel ca
   expect(sshValid(form({ sshUser: "" }).fields)).toBe(false);
   expect(sshValid(form({ sshKeyPath: "" }).fields)).toBe(false);
   expect(sshValid(form({ sshKeyPath: "", sshAuth: "Agent" }).fields)).toBe(true);
+});
+
+it("names how many saved connections could not be read, and says nothing when all could", () => {
+  expect(unreadableConnectionsNotice(0)).toBeNull();
+  expect(unreadableConnectionsNotice(1)).toBe("1 saved connection could not be read, so it is hidden. A newer version of L1 Data may have saved it.");
+  expect(unreadableConnectionsNotice(2)).toBe("2 saved connections could not be read, so they are hidden. A newer version of L1 Data may have saved them.");
 });
