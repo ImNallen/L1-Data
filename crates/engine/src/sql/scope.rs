@@ -220,6 +220,8 @@ enum Origin {
     Derived,
     CteBody,
     CteColumns,
+    /// A parenthesized join, whose relations join the enclosing query's when it closes.
+    JoinGroup,
     Other,
 }
 
@@ -641,15 +643,21 @@ impl<'a> Walk<'a> {
 
     fn open(&mut self, i: usize) {
         let parent = *self.stack.last().unwrap();
-        let first = (i + 1..self.sig.len()).find(|j| !self.typed.contains(j)).and_then(|j| self.word(j));
+        let next = (i + 1..self.sig.len()).find(|j| !self.typed.contains(j));
+        let first = next.and_then(|j| self.word(j));
         let clause = self.frames[parent].clause;
         let cte_body = clause == Clause::Cte
             && self.frames[parent].pending_cte.is_some()
             && i.checked_sub(1).is_some_and(|p| self.is_word(p, "AS") || self.is_word(p, "MATERIALIZED"));
         let query = matches!(first.as_deref(), Some("SELECT" | "WITH" | "VALUES"))
             || cte_body && matches!(first.as_deref(), Some("INSERT" | "UPDATE" | "DELETE" | "MERGE"));
+        let names_a_relation = next.is_some_and(|j| matches!(self.sig[j].class, Class::Word | Class::Name | Class::Open));
         let origin = match clause {
             Clause::Relation { slot: Slot::Expect, .. } if query => Origin::Derived,
+            Clause::Relation { role: role @ (Role::From | Role::Join | Role::Using), slot: Slot::Expect } if names_a_relation => {
+                self.frames[parent].clause = Clause::Relation { role, slot: Slot::Aliased };
+                Origin::JoinGroup
+            }
             Clause::Cte if cte_body => Origin::CteBody,
             Clause::Cte if self.frames[parent].pending_cte.is_some() => Origin::CteColumns,
             _ => Origin::Other,
@@ -663,7 +671,10 @@ impl<'a> Walk<'a> {
             self.frames[parent].item_lexemes.push(i);
         }
         let lateral = origin == Origin::Derived && i.checked_sub(1).is_some_and(|p| self.is_word(p, "LATERAL") || self.is_word(p, "APPLY"));
-        let mut frame = Frame::new(Some(parent), query, origin, clause);
+        let mut frame = Frame::new(Some(parent), query || origin == Origin::JoinGroup, origin, clause);
+        if origin == Origin::JoinGroup {
+            frame.clause = Clause::Relation { role: Role::From, slot: Slot::Expect };
+        }
         let p = &self.frames[parent];
         let start = if self.kind == DatabaseKind::SqlServer { p.tree } else { 0 };
         frame.lateral = lateral.then(|| start..p.rels.len());
@@ -701,6 +712,11 @@ impl<'a> Walk<'a> {
                         (columns, star) = (explicit, Vec::new());
                     }
                     self.frames[parent].ctes.push(Cte { key, written, columns, star });
+                }
+            }
+            Origin::JoinGroup => {
+                for rel in self.frames[id].rels.clone() {
+                    self.push_rel(rel);
                 }
             }
             Origin::Statement | Origin::Other => {}
@@ -795,7 +811,7 @@ impl<'a> Walk<'a> {
             let frame_rels = &self.frames[f].rels;
             let visible = match (child.map(|c| (c.origin, c.lateral.clone())), snap.clause) {
                 (Some((Origin::Derived, Some(left))), _) => frame_rels.get(left).unwrap_or_default(),
-                (Some((Origin::Derived | Origin::CteBody, None)), _) => &[],
+                (Some((Origin::Derived | Origin::CteBody | Origin::JoinGroup, None)), _) => &[],
                 (None, Clause::On { tree, target, .. }) => &frame_rels[tree.min(target)..(target + 1).min(frame_rels.len())],
                 _ => &frame_rels[..],
             };
@@ -1317,6 +1333,23 @@ mod tests {
         }
         let s = ms("MERGE INTO orders t USING customers s ON |");
         assert_eq!((refs(&s), s.expect), (vec![(Some("t"), &o), (Some("s"), &c)], Expect::JoinCondition { target: 1 }));
+    }
+
+    #[test]
+    fn a_parenthesized_join_adds_its_relations_to_the_query() {
+        let (o, c, a) = (table(None, "orders"), table(None, "customers"), table(None, "addresses"));
+        for s in [pg("select * from (orders o join customers c on |)"), ms("SELECT * FROM (orders o JOIN customers c ON |)"), pg("select * from products p, (orders o join customers c on |)")] {
+            assert_eq!((refs(&s), s.expect), (vec![(Some("o"), &o), (Some("c"), &c)], Expect::JoinCondition { target: 1 }));
+        }
+        let s = pg("select c.| from (orders o join customers c on c.id = o.customer_id)");
+        assert_eq!((refs(&s), s.qualifier.clone()), (vec![(Some("o"), &o), (Some("c"), &c)], Some(Qualifier::Relation { index: 1 })));
+        for s in [
+            pg("select * from ((orders o join customers c on c.id = o.customer_id) join addresses a on |)"),
+            pg("select * from (orders o join customers c on true) join addresses a on |"),
+        ] {
+            assert_eq!((refs(&s), s.expect), (vec![(Some("o"), &o), (Some("c"), &c), (Some("a"), &a)], Expect::JoinCondition { target: 2 }));
+        }
+        assert_eq!(pg("select * from (orders o join |").expect, Expect::Relation);
     }
 
     #[test]
