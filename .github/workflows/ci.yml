@@ -162,7 +162,7 @@ jobs:
       - name: Apply dev/mssql-seed.sql
         env:
           MSSQL_CONTAINER: ${{ job.services.sqlserver.id }}
-        run: docker exec -i "$MSSQL_CONTAINER" /opt/mssql-tools18/bin/sqlcmd -S localhost -U sa -P L1Data_dev_Str0ng -C -b < dev/mssql-seed.sql
+        run: docker exec -i "$MSSQL_CONTAINER" /opt/mssql-tools18/bin/sqlcmd -S localhost -U sa -P L1Data_dev_Str0ng -C -b -I < dev/mssql-seed.sql
 
       - name: cargo build -p dev-bridge -p engine
         run: cargo build -p dev-bridge -p engine

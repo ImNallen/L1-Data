@@ -845,3 +845,125 @@ async fn every_batch_on_production_asks_while_the_transaction_holds_writes_that_
     let state = h.ok("SELECT @@TRANCOUNT, COUNT_BIG(*) FROM #held").await;
     assert_eq!(h.rows(Harness::rowsets(&state)[0])[0], vec![Some("0".into()), Some("1".into())], "the confirmed batch committed the held write");
 }
+
+impl Harness {
+    async fn all_rows(&mut self, sql: &str) -> Vec<Vec<Option<String>>> {
+        let state = self.ok(sql).await;
+        let set = Harness::rowsets(&state)[0];
+        self.engine.result_page(set.r#ref, 0, set.row_count).unwrap().rows
+    }
+
+    async fn replay_in_dependency_order(&mut self, mut scripts: Vec<String>) {
+        while !scripts.is_empty() {
+            let mut failed = vec![];
+            for script in &scripts {
+                let state = self.run(script).await;
+                if !matches!(state.run, RunState::Finished { outcome: RunOutcome::Ok, .. }) {
+                    failed.push(script.clone());
+                }
+            }
+            assert!(failed.len() < scripts.len(), "no script replays: {failed:#?}");
+            scripts = failed;
+        }
+    }
+
+    async fn catalog_facts(&mut self) -> Vec<String> {
+        let seeded = format!("o.name NOT LIKE '%{}%'", "[0-9a-f]".repeat(32));
+        self.all_rows(&format!(
+            "SELECT s.name+'.'+o.name+' '+LEFT(f.fact COLLATE DATABASE_DEFAULT,80)+' '+CONVERT(char(64),HASHBYTES('SHA2_256',f.fact COLLATE DATABASE_DEFAULT),2)
+             FROM sys.objects o JOIN sys.schemas s ON s.schema_id=o.schema_id
+             CROSS APPLY (
+                SELECT CONCAT(N'object ',o.type)
+                UNION ALL
+                SELECT CONCAT(N'column ',c.column_id,' ',c.name,' ',TYPE_NAME(c.user_type_id),' ',c.max_length,' ',c.precision,' ',c.scale,' ',c.is_nullable,' ',c.collation_name,' ',
+                              CONVERT(nvarchar(40),ic.seed_value),' ',CONVERT(nvarchar(40),ic.increment_value),' ',cc.definition,' ',cc.is_persisted,' ',dc.name,' ',dc.definition)
+                FROM sys.columns c LEFT JOIN sys.identity_columns ic ON ic.object_id=c.object_id AND ic.column_id=c.column_id
+                LEFT JOIN sys.computed_columns cc ON cc.object_id=c.object_id AND cc.column_id=c.column_id
+                LEFT JOIN sys.default_constraints dc ON dc.object_id=c.default_object_id
+                WHERE c.object_id=o.object_id AND o.type='U'
+                UNION ALL
+                SELECT CONCAT(N'index ',i.name,' ',i.type,' ',i.is_unique,' ',i.is_primary_key,' ',i.is_unique_constraint,' ',i.filter_definition,' ',
+                              (SELECT STRING_AGG(CONCAT(c.name,' ',ic.is_descending_key,' ',ic.is_included_column),',') WITHIN GROUP (ORDER BY ic.is_included_column,ic.key_ordinal,ic.index_column_id)
+                               FROM sys.index_columns ic JOIN sys.columns c ON c.object_id=ic.object_id AND c.column_id=ic.column_id WHERE ic.object_id=i.object_id AND ic.index_id=i.index_id))
+                FROM sys.indexes i WHERE i.object_id=o.object_id AND i.index_id>0
+                UNION ALL
+                SELECT CONCAT(N'foreign key ',fk.name,' ',fk.delete_referential_action,' ',fk.update_referential_action,' ',
+                              (SELECT STRING_AGG(CONCAT(c.name,'>',OBJECT_SCHEMA_NAME(fc.referenced_object_id),'.',OBJECT_NAME(fc.referenced_object_id),'.',rc.name),',') WITHIN GROUP (ORDER BY fc.constraint_column_id)
+                               FROM sys.foreign_key_columns fc JOIN sys.columns c ON c.object_id=fc.parent_object_id AND c.column_id=fc.parent_column_id
+                               JOIN sys.columns rc ON rc.object_id=fc.referenced_object_id AND rc.column_id=fc.referenced_column_id WHERE fc.constraint_object_id=fk.object_id))
+                FROM sys.foreign_keys fk WHERE fk.parent_object_id=o.object_id
+                UNION ALL
+                SELECT CONCAT(N'check ',k.name,' ',k.definition) FROM sys.check_constraints k WHERE k.parent_object_id=o.object_id
+                UNION ALL
+                SELECT CONCAT(N'trigger ',t.name,' ',t.is_disabled,' ',m.uses_ansi_nulls,' ',m.uses_quoted_identifier,' ',TRIM(CHAR(13)+CHAR(10)+CHAR(9)+' ' FROM m.definition))
+                FROM sys.triggers t JOIN sys.sql_modules m ON m.object_id=t.object_id WHERE t.parent_id=o.object_id
+                UNION ALL
+                SELECT CONCAT(N'module ',m.uses_ansi_nulls,' ',m.uses_quoted_identifier,' ',TRIM(CHAR(13)+CHAR(10)+CHAR(9)+' ' FROM m.definition)) FROM sys.sql_modules m WHERE m.object_id=o.object_id
+             ) f(fact)
+             WHERE o.type IN ('U','V','P','FN','IF','TF') AND s.name IN ('dbo','lab') AND {seeded}
+             ORDER BY 1"
+        ))
+        .await
+        .into_iter()
+        .map(|r| r[0].clone().unwrap())
+        .collect()
+    }
+}
+
+#[tokio::test]
+async fn object_scripts_replay_into_an_empty_database_with_the_same_catalog() {
+    let mut h = Harness::open(TxnMode::AutoCommit).await;
+    let name = format!("t_script_{}", uuid::Uuid::new_v4().simple());
+    h.ok(&format!("CREATE DATABASE [{name}]")).await;
+    let mut scratch = Harness::open(TxnMode::AutoCommit).await;
+    let outcome = AssertUnwindSafe(async {
+        scratch.engine.console_configure(scratch.tab, ConsoleConfig { connection_id: scratch.connection, database: name.clone(), schema: Some("dbo".into()), mode: TxnMode::AutoCommit }).await.unwrap();
+        scratch.ok("CREATE SCHEMA lab").await;
+        let catalog = h.engine.catalog(h.db()).await.unwrap();
+        let seeded = |name: &str| !name.as_bytes().windows(32).any(|w| w.iter().all(u8::is_ascii_hexdigit));
+        let mut tables = vec![];
+        let mut modules = vec![];
+        for schema in catalog.schemas.iter().filter(|s| s.name == "dbo" || s.name == "lab") {
+            for rel in schema.relations.iter().filter(|r| seeded(&r.name)) {
+                let script = h.engine.object_script(h.db(), ScriptTarget::Relation { oid: rel.oid }).await.unwrap();
+                assert_eq!(script.title, format!("{}.sql", rel.name));
+                if rel.kind == RelKind::Table { tables.push(script.text) } else { modules.push(script.text) }
+            }
+            for f in schema.functions.iter().filter(|f| seeded(&f.name)) {
+                modules.push(h.engine.object_script(h.db(), ScriptTarget::Routine { oid: f.oid }).await.unwrap().text);
+            }
+        }
+        scratch.replay_in_dependency_order(tables).await;
+        scratch.replay_in_dependency_order(modules).await;
+        assert_eq!(scratch.catalog_facts().await, h.catalog_facts().await);
+
+        let relation = |schema: &str, name: &str| catalog.schemas.iter().find(|s| s.name == schema).unwrap().relations.iter().find(|r| r.name == name).unwrap().oid;
+        let tickets = h.engine.object_script(h.db(), ScriptTarget::Relation { oid: relation("dbo", "tickets") }).await.unwrap().text;
+        for part in [
+            "CREATE TABLE [dbo].[tickets] (\n",
+            "[id] int IDENTITY(100,5) NOT NULL,",
+            "[code] nvarchar(20) COLLATE Latin1_General_BIN2 NOT NULL,",
+            "[quantity] int NOT NULL CONSTRAINT [DF_tickets_quantity] DEFAULT ((1)),",
+            "[total] AS ([price]*[quantity]) PERSISTED,",
+            "CONSTRAINT [PK_tickets] PRIMARY KEY CLUSTERED ([id] ASC),",
+            "SET QUOTED_IDENTIFIER ON\nGO\nCREATE   TRIGGER dbo.tickets_touch",
+        ] {
+            assert!(tickets.contains(part), "{part} missing from {tickets}");
+        }
+        let procedure = catalog.schemas.iter().flat_map(|s| &s.functions).find(|f| f.name == "cancel_order").unwrap().oid;
+        let text = h.engine.object_script(h.db(), ScriptTarget::Routine { oid: procedure }).await.unwrap().text;
+        assert!(text.starts_with("SET ANSI_NULLS ON\nGO\nSET QUOTED_IDENTIFIER ON\nGO\nCREATE   PROCEDURE dbo.cancel_order @order_id int AS\n") && text.ends_with("END;\nGO\n"), "{text}");
+        let index = h.engine.object_script(h.db(), ScriptTarget::Index { relation_oid: relation("dbo", "orders"), name: "IX_orders_customer".into() }).await.unwrap();
+        assert_eq!((index.title.as_str(), index.text.as_str()), ("IX_orders_customer.sql", "CREATE NONCLUSTERED INDEX [IX_orders_customer] ON [dbo].[orders] ([customer_id] ASC);\nGO\n"));
+        let trigger = h.engine.object_script(h.db(), ScriptTarget::Trigger { relation_oid: relation("dbo", "tickets"), name: "tickets_touch".into() }).await.unwrap();
+        assert!(trigger.text.contains("CREATE   TRIGGER dbo.tickets_touch ON dbo.tickets AFTER UPDATE AS"), "{}", trigger.text);
+        assert!(matches!(h.engine.object_script(h.db(), ScriptTarget::Index { relation_oid: relation("dbo", "orders"), name: "missing".into() }).await, Err(DetailError::Gone)));
+    })
+    .catch_unwind()
+    .await;
+    drop(scratch);
+    h.ok(&format!("ALTER DATABASE [{name}] SET SINGLE_USER WITH ROLLBACK IMMEDIATE; DROP DATABASE [{name}]")).await;
+    if let Err(panic) = outcome {
+        std::panic::resume_unwind(panic);
+    }
+}

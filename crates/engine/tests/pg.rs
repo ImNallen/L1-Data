@@ -2610,3 +2610,115 @@ async fn ddl_committed_by_commit_and_chain_refreshes_the_catalog() {
     assert!(catalog.relation("public", &table).is_some(), "the chained commit kept the table");
     h.run_ok(tab, &format!("drop table public.{table}")).await;
 }
+
+const TYPES_NO_SCRIPT_MAKES: &str = "create schema lab; create type lab.mood as enum ('sad', 'ok', 'happy')";
+
+const SEED_RELATIONS: &str = "n.nspname IN ('public', 'lab') AND c.relkind IN ('r', 'p', 'v', 'm') AND c.relname !~ '[0-9a-f]{32}'";
+
+async fn catalog_facts(client: &tokio_postgres::Client) -> Vec<String> {
+    let sql = format!(
+        "SELECT n.nspname || '.' || c.relname || ' ' || f.fact
+         FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace,
+         LATERAL (
+            SELECT concat_ws(' ', 'relation', c.relkind, c.relpersistence, pg_get_partkeydef(c.oid), pg_get_expr(c.relpartbound, c.oid), obj_description(c.oid, 'pg_class'))
+            UNION ALL
+            SELECT concat_ws(' ', 'column', a.attnum, a.attname, format_type(a.atttypid, a.atttypmod), a.attnotnull, a.attidentity, a.attgenerated,
+                             pg_get_expr(d.adbin, d.adrelid), a.attcollation::regcollation, col_description(c.oid, a.attnum),
+                             (SELECT concat_ws(' ', s.seqtypid::regtype, s.seqstart, s.seqincrement, s.seqmin, s.seqmax, s.seqcache, s.seqcycle) FROM pg_sequence s
+                              WHERE s.seqrelid = pg_get_serial_sequence(quote_ident(n.nspname) || '.' || quote_ident(c.relname), a.attname)::regclass))
+            FROM pg_attribute a LEFT JOIN pg_attrdef d ON d.adrelid = a.attrelid AND d.adnum = a.attnum
+            WHERE a.attrelid = c.oid AND a.attnum > 0 AND NOT a.attisdropped
+            UNION ALL
+            SELECT concat_ws(' ', 'constraint', k.conname, pg_get_constraintdef(k.oid), k.convalidated) FROM pg_constraint k WHERE k.conrelid = c.oid
+            UNION ALL
+            SELECT concat_ws(' ', 'index', pg_get_indexdef(i.indexrelid)) FROM pg_index i WHERE i.indrelid = c.oid
+            UNION ALL
+            SELECT concat_ws(' ', 'trigger', pg_get_triggerdef(t.oid), t.tgenabled) FROM pg_trigger t WHERE t.tgrelid = c.oid AND NOT t.tgisinternal
+            UNION ALL
+            SELECT concat_ws(' ', 'query', pg_get_viewdef(c.oid)) WHERE c.relkind IN ('v', 'm')
+         ) f(fact)
+         WHERE {SEED_RELATIONS}
+         ORDER BY 1"
+    );
+    client.query(&sql, &[]).await.unwrap().iter().map(|r| r.get(0)).collect()
+}
+
+async fn replay_in_dependency_order(client: &tokio_postgres::Client, mut scripts: Vec<String>) {
+    while !scripts.is_empty() {
+        let mut failed = vec![];
+        for script in &scripts {
+            if let Err(e) = client.batch_execute(script).await {
+                failed.push((script.clone(), e.as_db_error().map(|e| e.message().to_owned())));
+            }
+        }
+        assert!(failed.len() < scripts.len(), "no script replays: {failed:#?}");
+        scripts = failed.into_iter().map(|(script, _)| script).collect();
+    }
+}
+
+#[tokio::test]
+async fn object_scripts_replay_into_an_empty_database_with_the_same_catalog() {
+    let h = Harness::start().await;
+    h.engine.connect(h.conn).await.unwrap();
+    let (shop, connection) = tokio_postgres::connect(&url(), NoTls).await.unwrap();
+    tokio::spawn(connection);
+    let name = unique("t_script");
+    shop.batch_execute(&format!("create database {name}")).await.unwrap();
+    let mut config: tokio_postgres::Config = url().parse().unwrap();
+    let (scratch, connection) = config.dbname(&name).connect(NoTls).await.unwrap();
+    tokio::spawn(connection);
+
+    let outcome = futures_util::FutureExt::catch_unwind(std::panic::AssertUnwindSafe(async {
+        let script = async |target: ScriptTarget| h.engine.object_script(h.db(), target).await;
+        let oids = async |sql: &str| shop.query(sql, &[]).await.unwrap().iter().map(|r| r.get::<_, u32>(0)).collect::<Vec<_>>();
+
+        scratch.batch_execute(TYPES_NO_SCRIPT_MAKES).await.unwrap();
+        scratch.batch_execute("set check_function_bodies = off").await.unwrap();
+        let routines = oids("select p.oid from pg_proc p join pg_namespace n on n.oid = p.pronamespace where n.nspname = 'public' and p.prokind <> 'a' order by p.oid").await;
+        let mut texts = vec![];
+        for oid in routines {
+            let s = script(ScriptTarget::Routine { oid }).await.unwrap();
+            assert!(s.text.starts_with("CREATE OR REPLACE "), "{}", s.text);
+            texts.push(s.text);
+        }
+        replay_in_dependency_order(&scratch, texts).await;
+
+        let relations = oids(&format!("select c.oid from pg_class c join pg_namespace n on n.oid = c.relnamespace where {SEED_RELATIONS} and not c.relispartition order by c.oid")).await;
+        let mut texts = vec![];
+        for oid in relations {
+            texts.push(script(ScriptTarget::Relation { oid }).await.unwrap().text);
+        }
+        replay_in_dependency_order(&scratch, texts).await;
+        assert_eq!(catalog_facts(&scratch).await, catalog_facts(&shop).await);
+
+        let oid = async |name: &str| oids(&format!("select '{name}'::regclass::oid")).await[0];
+        let orders = script(ScriptTarget::Relation { oid: oid("public.orders").await }).await.unwrap();
+        assert_eq!(orders.title, "orders.sql");
+        assert!(orders.text.starts_with("CREATE TABLE public.orders (\n    id bigint GENERATED ALWAYS AS IDENTITY NOT NULL,\n"), "{}", orders.text);
+        for line in [
+            "    CONSTRAINT orders_customer_id_fkey FOREIGN KEY (customer_id) REFERENCES public.customers(id),\n",
+            "CREATE INDEX orders_open_idx ON public.orders USING btree (status) WHERE (status <> 'paid'::text);\n",
+            "CREATE TRIGGER orders_audit AFTER INSERT OR DELETE OR UPDATE ON public.orders FOR EACH ROW EXECUTE FUNCTION public.audit_order();\n",
+        ] {
+            assert!(orders.text.contains(line), "{line} missing from {}", orders.text);
+        }
+        let partition = script(ScriptTarget::Relation { oid: oid("public.order_events_2026_h1").await }).await.unwrap();
+        assert_eq!(partition.text, "CREATE TABLE public.order_events_2026_h1 PARTITION OF public.order_events\n    FOR VALUES FROM ('2026-01-01') TO ('2026-07-01');\n");
+        let index = script(ScriptTarget::Index { relation_oid: oid("public.orders").await, name: "orders_open_idx".into() }).await.unwrap();
+        assert_eq!((index.title.as_str(), index.text.as_str()), ("orders_open_idx.sql", "CREATE INDEX orders_open_idx ON public.orders USING btree (status) WHERE (status <> 'paid'::text);\n"));
+        let trigger = script(ScriptTarget::Trigger { relation_oid: oid("public.orders").await, name: "orders_set_updated_at".into() }).await.unwrap();
+        assert_eq!(trigger.text, "CREATE TRIGGER orders_set_updated_at BEFORE UPDATE ON public.orders FOR EACH ROW EXECUTE FUNCTION public.set_updated_at();\n");
+
+        let aggregate = oids("select 'public.product_of(numeric)'::regprocedure::oid").await[0];
+        assert!(matches!(script(ScriptTarget::Routine { oid: aggregate }).await, Err(DetailError::Failed { message }) if message == "Aggregates cannot be scripted yet."));
+        assert!(matches!(script(ScriptTarget::Index { relation_oid: oid("public.orders").await, name: "missing".into() }).await, Err(DetailError::Gone)));
+        let detail = h.engine.relation_detail(h.db(), oid("public.orders").await).await.unwrap();
+        assert_eq!(detail.triggers.len(), 2, "the metadata session left the script's read-only transaction");
+    }))
+    .await;
+    drop(scratch);
+    shop.batch_execute(&format!("drop database {name} with (force)")).await.unwrap();
+    if let Err(panic) = outcome {
+        std::panic::resume_unwind(panic);
+    }
+}

@@ -70,6 +70,38 @@ BEGIN
   );
 END;
 GO
+IF OBJECT_ID(N'dbo.tickets', N'U') IS NULL
+BEGIN
+  CREATE TABLE dbo.tickets (
+    id int IDENTITY(100, 5) CONSTRAINT PK_tickets PRIMARY KEY,
+    code nvarchar(20) COLLATE Latin1_General_BIN2 NOT NULL CONSTRAINT UQ_tickets_code UNIQUE,
+    price decimal(10, 2) NOT NULL,
+    quantity int NOT NULL CONSTRAINT DF_tickets_quantity DEFAULT 1,
+    total AS (price * quantity) PERSISTED,
+    updated_at datetime2(3) NULL
+  );
+END;
+GO
+CREATE OR ALTER TRIGGER dbo.tickets_touch ON dbo.tickets AFTER UPDATE AS
+BEGIN
+  SET NOCOUNT ON;
+  UPDATE t SET updated_at = SYSUTCDATETIME() FROM dbo.tickets t JOIN inserted i ON i.id = t.id;
+END;
+GO
+CREATE OR ALTER VIEW dbo.paid_orders AS
+  SELECT o.id, o.customer_id, o.total FROM dbo.orders o WHERE o.status = N'paid';
+GO
+CREATE OR ALTER PROCEDURE dbo.cancel_order @order_id int AS
+BEGIN
+  SET NOCOUNT ON;
+  UPDATE dbo.orders SET status = N'cancelled' WHERE id = @order_id;
+END;
+GO
+CREATE OR ALTER FUNCTION dbo.order_count(@customer_id int) RETURNS int AS
+BEGIN
+  RETURN (SELECT COUNT(*) FROM dbo.orders WHERE customer_id = @customer_id);
+END;
+GO
 USE reporting;
 GO
 IF OBJECT_ID(N'dbo.customers', N'U') IS NULL
