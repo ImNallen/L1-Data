@@ -833,7 +833,7 @@ impl<'a> Walk<'a> {
             _ if named(n - 1) && self.word(item[n - 1]).is_some_and(|w| ["END", "NULL", "TRUE", "FALSE"].contains(&w.as_str())) => Item::Unnamed,
             1 if named(0) => name(0),
             _ if named(n - 1) && (self.is_word(item[n - 2], "AS") || matches!(class(n - 2), Class::Dot | Class::Word | Class::Name | Class::Close | Class::Str | Class::Number)) => name(n - 1),
-            3 if pg && named(0) && class(1) == Class::Open && class(2) == Class::Close => name(0),
+            _ if pg && n >= 3 && n % 2 == 1 && class(n - 2) == Class::Open && class(n - 1) == Class::Close && (0..n - 2).all(|k| if k % 2 == 0 { named(k) } else { class(k) == Class::Dot }) => name(n - 3),
             _ => Item::Unnamed,
         }
     }
@@ -1628,6 +1628,7 @@ mod tests {
         assert_eq!(derived("with x as (select id::text, count(*), a + b, total n from orders) select * from x where |", Postgres).0, ["id", "count", "n"]);
         let windows = "with x as (select count(*) filter (where total > 0), sum(total) over (), rank() over w, percentile_cont(0.5) within group (order by total) from orders) select * from x where |";
         assert_eq!(derived(windows, Postgres).0, ["count", "sum", "rank", "percentile_cont"]);
+        assert_eq!(derived("with x as (select pg_catalog.abs(total), lab.mood_of(id), now() from orders) select * from x where |", Postgres).0, ["abs", "mood_of", "now"]);
         let casts = "with x as (select total::double precision, id::numeric(10,2), t::timestamp(3) with time zone, a::int[], b::pg_catalog.int4, c::text d, e::numeric as f from orders) select * from x where |";
         assert_eq!(derived(casts, Postgres).0, ["total", "id", "t", "a", "b", "d", "f"]);
         assert_eq!(derived("WITH x AS (SELECT TOP 5 amount = o.total, o.id FROM orders o) SELECT * FROM x WHERE |", SqlServer).0, ["amount", "id"]);
