@@ -163,13 +163,11 @@ pub fn quote_ident(name: &str) -> String {
     format!("\"{}\"", name.replace('"', "\"\""))
 }
 
-/// `name` as SQL writes it: bare when the server reads the bare word back as `name`, else quoted.
-pub fn sql_name(kind: DatabaseKind, name: &str) -> String {
+pub fn quote_if_needed(kind: DatabaseKind, name: &str) -> String {
     name_in(kind, name, &[sql::RESERVED, sql::TYPE_OR_FUNCTION_NAME])
 }
 
-/// A function's name as a call writes it. PostgreSQL also quotes a column-name keyword there, such as `int`.
-pub fn sql_function_name(kind: DatabaseKind, name: &str) -> String {
+pub fn quote_function_if_needed(kind: DatabaseKind, name: &str) -> String {
     name_in(kind, name, &[sql::NEVER_A_FUNCTION])
 }
 
@@ -310,14 +308,14 @@ mod tests {
 
     #[test]
     fn a_name_is_quoted_only_where_the_bare_word_would_read_differently() {
-        let pg = |name| sql_name(DatabaseKind::Postgres, name);
+        let pg = |name| quote_if_needed(DatabaseKind::Postgres, name);
         assert_eq!(
             ["orders", "order$1", "Line Items", "a\"b", "order", "Orders", "left", "int", "café"].map(pg),
             ["orders", "order$1", "\"Line Items\"", "\"a\"\"b\"", "\"order\"", "\"Orders\"", "\"left\"", "int", "\"café\""]
         );
-        let pg_call = |name| sql_function_name(DatabaseKind::Postgres, name);
+        let pg_call = |name| quote_function_if_needed(DatabaseKind::Postgres, name);
         assert_eq!(["answer", "MyFunc", "int", "left"].map(pg_call), ["answer", "\"MyFunc\"", "\"int\"", "left"]);
-        let ms = |name| sql_name(DatabaseKind::SqlServer, name);
+        let ms = |name| quote_if_needed(DatabaseKind::SqlServer, name);
         assert_eq!(["Orders", "line items", "a]b", "order", "Order", "x#1", "9lives"].map(ms), ["Orders", "[line items]", "[a]]b]", "[order]", "[Order]", "x#1", "[9lives]"]);
     }
 

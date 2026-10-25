@@ -21,22 +21,21 @@ function insertCallWithCursorInside(text: string) {
   };
 }
 
-/** The engine folds a PostgreSQL name as the server does, so only SQL Server's default collations match in any case. */
-function named<T extends { name: string }>(view: CatalogView, items: T[], name: string): T | undefined {
+function serverMatch<T extends { name: string }>(view: CatalogView, items: T[], name: string): T | undefined {
   const exact = items.find((i) => i.name === name);
   if (exact || view.catalog.databaseKind !== "SqlServer") return exact;
   return items.find((i) => i.name.toLowerCase() === name.toLowerCase());
 }
 
 function schemaNamed(view: CatalogView, name: string) {
-  return named(view, view.catalog.schemas, name);
+  return serverMatch(view, view.catalog.schemas, name);
 }
 
 function resolveTable(view: CatalogView | undefined, schema: string | null, name: string): Resolved | undefined {
   if (!view) return undefined;
   const target = schema ?? view.catalog.defaultSchema;
   const s = target === null ? undefined : schemaNamed(view, target);
-  const rel = s && named(view, s.relations, name);
+  const rel = s && serverMatch(view, s.relations, name);
   return s && rel ? { schema: s.name, rel } : undefined;
 }
 
@@ -163,11 +162,7 @@ function opensUnasked(ctx: EditorContext, expect: Complete["expect"]): boolean {
   return ctx.matchBefore(/[\w$#]+/) !== null || ctx.state.sliceDoc(ctx.pos - 1, ctx.pos) === "." || expect.kind === "JoinCondition";
 }
 
-/**
- * Each request sends the whole document, so on a large file the replies fall behind the typing. One request stays in
- * flight, a request made meanwhile waits, and a newer one replaces it, so only the newest document is sent next.
- */
-function oneInFlight<T>(send: (ctx: EditorContext) => Promise<T>): (ctx: EditorContext) => Promise<T | null> {
+function inFlightThenNewest<T>(send: (ctx: EditorContext) => Promise<T>): (ctx: EditorContext) => Promise<T | null> {
   let busy = false;
   let waiting: { ctx: EditorContext; resolve: (reply: Promise<T | null>) => void } | null = null;
   const start = (ctx: EditorContext): Promise<T> => {
@@ -199,7 +194,7 @@ function declined(ctx: EditorContext): CompletionResult {
 }
 
 export function engineCompletion(view: CatalogView | undefined, kind: DatabaseKind): CompletionSource {
-  const ask = oneInFlight((ctx) => commands.completionContext(ctx.state.doc.toString(), ctx.pos, kind));
+  const ask = inFlightThenNewest((ctx) => commands.completionContext(ctx.state.doc.toString(), ctx.pos, kind));
   return async (ctx: EditorContext): Promise<CompletionResult | null> => {
     const before = ctx.state.sliceDoc(ctx.pos - 1, ctx.pos);
     if (!ctx.explicit && !/[\w$#.\s]/.test(before)) return null;

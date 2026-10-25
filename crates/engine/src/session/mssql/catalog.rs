@@ -2,7 +2,7 @@ use super::{MsSession, error, number, object_id, required};
 use crate::connection::DatabaseInfo;
 use crate::model::*;
 use crate::sql::tsql::{quote_ident, quote_literal};
-use crate::text::sql_name;
+use crate::text::quote_if_needed;
 use std::collections::HashMap;
 
 const SYSTEM: &str = "(s.name IN ('sys', 'INFORMATION_SCHEMA') OR s.schema_id BETWEEN 16384 AND 16393)";
@@ -73,7 +73,7 @@ impl MsSession {
             .iter()
             .map(|r| {
                 let name = required(r, 0)?;
-                Ok(SchemaInfo { name: name.into(), quoted: sql_name(DatabaseKind::SqlServer, name), system: number::<u8>(r, 1)? != 0, table_count: number(r, 2)?, relations: vec![], functions: vec![] })
+                Ok(SchemaInfo { name: name.into(), quoted: quote_if_needed(DatabaseKind::SqlServer, name), system: number::<u8>(r, 1)? != 0, table_count: number(r, 2)?, relations: vec![], functions: vec![] })
             })
             .collect::<Result<Vec<_>, QueryError>>()?;
         let schema_index: HashMap<String, usize> = schemas.iter().enumerate().map(|(i, s)| (s.name.clone(), i)).collect();
@@ -98,7 +98,7 @@ impl MsSession {
             schemas[si].relations.push(Relation {
                 oid,
                 qualified_name: format!("{}.{}", quote_ident(schema), quote_ident(&name)),
-                quoted: sql_name(DatabaseKind::SqlServer, &name),
+                quoted: quote_if_needed(DatabaseKind::SqlServer, &name),
                 name,
                 kind: if required(&r, 3)?.trim() == "V" { RelKind::View } else { RelKind::Table },
                 row_estimate: r[4].as_deref().map(str::parse).transpose().map_err(|_| error("Invalid row estimate"))?,
@@ -121,7 +121,7 @@ impl MsSession {
             schemas[si].relations[ri].columns.push(ColumnInfo {
                 attnum: number(&r, 1)?,
                 name: required(&r, 2)?.into(),
-                quoted: sql_name(DatabaseKind::SqlServer, required(&r, 2)?),
+                quoted: quote_if_needed(DatabaseKind::SqlServer, required(&r, 2)?),
                 type_display: display(name, number(&r, 4)?, number(&r, 5)?, number(&r, 6)?),
                 category: category(name),
                 not_null: number::<u8>(&r, 7)? == 0,
@@ -139,7 +139,7 @@ impl MsSession {
             schemas[si].functions.push(FunctionInfo {
                 oid,
                 name: required(&r, 2)?.into(),
-                quoted: sql_name(DatabaseKind::SqlServer, required(&r, 2)?),
+                quoted: quote_if_needed(DatabaseKind::SqlServer, required(&r, 2)?),
                 args: String::new(),
                 returns: required(&r, 4)?.into(),
                 kind: if matches!(required(&r, 3)?.trim(), "P" | "PC") { FnKind::Procedure } else { FnKind::Function },

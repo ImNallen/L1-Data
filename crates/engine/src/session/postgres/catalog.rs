@@ -5,7 +5,7 @@ use tokio_postgres::Client;
 use crate::connection::DatabaseInfo;
 use crate::model::{Catalog, DatabaseKind, ColumnInfo, DatabaseRef, DbAccess, FnKind, FunctionInfo, RelKind, Relation, SchemaInfo};
 use super::types;
-use crate::text::{sql_function_name, sql_name};
+use crate::text::{quote_function_if_needed, quote_if_needed};
 
 /// Postgres reserves the `pg_` prefix for its own schemas. `view::is_system_schema` is the same
 /// rule in Rust.
@@ -88,7 +88,7 @@ pub async fn load(client: &Client, db: DatabaseRef, version: u64, extra_schemas:
         .iter()
         .map(|r| SchemaInfo {
             name: r.get(0),
-            quoted: sql_name(DatabaseKind::Postgres, r.get(0)),
+            quoted: quote_if_needed(DatabaseKind::Postgres, r.get(0)),
             system: r.get(1),
             table_count: r.get::<_, i32>(2) as u32,
             relations: Vec::new(),
@@ -128,7 +128,7 @@ pub async fn load(client: &Client, db: DatabaseRef, version: u64, extra_schemas:
         schemas[si].relations.push(Relation {
             oid,
             name: r.get(2),
-            quoted: sql_name(DatabaseKind::Postgres, r.get(2)),
+            quoted: quote_if_needed(DatabaseKind::Postgres, r.get(2)),
             qualified_name: format!("{}.{}", crate::text::quote_ident(&schema), crate::text::quote_ident(r.get(2))),
             kind,
             row_estimate: (reltuples >= 0.0).then_some(reltuples.round() as i64),
@@ -162,7 +162,7 @@ pub async fn load(client: &Client, db: DatabaseRef, version: u64, extra_schemas:
             writable: r.get(10),
             attnum: r.get(1),
             name: r.get(2),
-            quoted: sql_name(DatabaseKind::Postgres, r.get(2)),
+            quoted: quote_if_needed(DatabaseKind::Postgres, r.get(2)),
             type_display: r.get(3),
             category: types::catalog_category(r.get(7), r.get(8), r.get(9)),
             not_null: r.get(4),
@@ -194,11 +194,11 @@ pub async fn load(client: &Client, db: DatabaseRef, version: u64, extra_schemas:
         schemas[si].functions.push(FunctionInfo {
             oid: r.get(0),
             name: r.get(2),
-            quoted: sql_function_name(DatabaseKind::Postgres, r.get(2)),
+            quoted: quote_function_if_needed(DatabaseKind::Postgres, r.get(2)),
             args: r.get(3),
             returns: r.get(4),
             kind,
-            insert_text: format!("{}()", sql_function_name(DatabaseKind::Postgres, r.get(2))),
+            insert_text: format!("{}()", quote_function_if_needed(DatabaseKind::Postgres, r.get(2))),
         });
     }
 

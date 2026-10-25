@@ -6,7 +6,7 @@ use super::relations::{VETTED, VETTED_SIZES};
 use super::split::split_statements;
 use super::tsql;
 use crate::model::{DatabaseKind, Expect, Qualifier, RelationSource, ScopeRelation, TableName};
-use crate::text::sql_name;
+use crate::text::quote_if_needed;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum Class {
@@ -192,8 +192,7 @@ enum Clause {
     Cte,
     Select,
     Relation { role: Role, slot: Slot },
-    /// `tree` is the first FROM item of the join tree the `ON` belongs to, and `target` the item it joins.
-    On { tree: usize, target: usize, fresh: bool },
+    On { tree_start: usize, target: usize, fresh: bool },
     Where,
     GroupBy,
     Having,
@@ -222,9 +221,7 @@ enum Origin {
     Derived,
     CteBody,
     CteColumns,
-    /// A parenthesized join, whose relations join the enclosing query's when it closes.
-    JoinGroup,
-    /// The column alias list after a relation's alias.
+    ParenthesizedJoin,
     ColumnAliases,
     Other,
 }
@@ -268,7 +265,6 @@ struct Frame {
     /// For a CTE's column list.
     group_names: Vec<String>,
     pending_cte: Option<(String, String, Option<Vec<String>>)>,
-    /// `WITH RECURSIVE`, so a CTE's body can name the CTE.
     recursive: bool,
     /// A set operator or an `INSERT`'s query after the cursor ends the part of the statement the cursor is in.
     sealed: bool,
@@ -280,10 +276,8 @@ struct Frame {
     /// For a `LATERAL` or `APPLY` subquery, the enclosing frame's FROM items it can see: those to its left, and for
     /// `APPLY` only those of its own join tree.
     lateral: Option<Range<usize>>,
-    /// The first FROM item of the join tree being read. A comma starts the next one.
-    tree: usize,
-    /// How many CTEs the enclosing frame had defined when this one opened.
-    earlier_ctes: usize,
+    tree_start: usize,
+    ctes_before: usize,
 }
 
 impl Frame {
@@ -305,8 +299,8 @@ impl Frame {
             first_output: None,
             outer,
             lateral: None,
-            tree: 0,
-            earlier_ctes: 0,
+            tree_start: 0,
+            ctes_before: 0,
         }
     }
 }
@@ -329,8 +323,7 @@ struct Walk<'a> {
     parts: Vec<String>,
     /// The cursor's word starts its line after a lexeme a statement can end on, so it may begin the next statement.
     line_start: bool,
-    /// The part of the cursor's word before the cursor, upper case.
-    prefix: String,
+    typed_upper: String,
     frames: Vec<Frame>,
     stack: Vec<usize>,
     snapshot: Option<Snapshot>,
@@ -381,7 +374,7 @@ impl<'a> Walk<'a> {
             typed: typed_span,
             parts,
             line_start,
-            prefix: text[from..at.max(from)].to_ascii_uppercase(),
+            typed_upper: text[from..at.max(from)].to_ascii_uppercase(),
             frames: vec![Frame::new(None, true, Origin::Statement, Clause::Start)],
             stack: vec![0],
             snapshot: None,
@@ -450,8 +443,8 @@ impl<'a> Walk<'a> {
             }
             return i + 1;
         }
-        if let Clause::On { tree, target, fresh: true } = self.frames[id].clause {
-            self.frames[id].clause = Clause::On { tree, target, fresh: false };
+        if let Clause::On { tree_start, target, fresh: true } = self.frames[id].clause {
+            self.frames[id].clause = Clause::On { tree_start, target, fresh: false };
         }
         if let Some(w) = self.word(i) {
             if let Some(next) = self.enter_clause(i, &w) {
@@ -464,7 +457,7 @@ impl<'a> Walk<'a> {
             (Clause::Select, _) => self.top().item_lexemes.push(i),
             (Clause::Relation { role: Role::From | Role::Join | Role::Using, .. } | Clause::On { .. }, Class::Comma) => {
                 let f = self.top();
-                f.tree = f.rels.len();
+                f.tree_start = f.rels.len();
                 f.clause = Clause::Relation { role: Role::From, slot: Slot::Expect };
             }
             (Clause::Relation { role, slot: Slot::Expect }, Class::Word | Class::Name) => return self.relation(i, role),
@@ -520,7 +513,7 @@ impl<'a> Walk<'a> {
             "GROUP" if prev.as_deref() == Some("WITHIN") => return None,
             "ON" => match clause {
                 Clause::Relation { role: Role::From | Role::Join | Role::Using, slot: Slot::Named | Slot::Aliased } if !self.top().rels.is_empty() => {
-                    Clause::On { tree: self.top().tree, target: self.top().rels.len() - 1, fresh: true }
+                    Clause::On { tree_start: self.top().tree_start, target: self.top().rels.len() - 1, fresh: true }
                 }
                 _ => Clause::Other,
             },
@@ -574,7 +567,7 @@ impl<'a> Walk<'a> {
         let f = self.top();
         let merge_source = matches!(to, Clause::Relation { role: Role::Using, .. }) && f.rels.iter().any(|r| r.role == Role::Into);
         if matches!(to, Clause::Relation { role: Role::From | Role::Using, .. }) && !merge_source {
-            f.tree = f.rels.len();
+            f.tree_start = f.rels.len();
         }
         f.clause = to;
         Some(i + 1)
@@ -652,7 +645,7 @@ impl<'a> Walk<'a> {
             if let Some(c) = self.frames[f].ctes.iter().find(|c| same(self.kind, &c.key, name)) {
                 return Some(c.clone());
             }
-            if let Some(c) = child.and_then(|body| self.recursing(f, body)).filter(|c| same(self.kind, &c.key, name)) {
+            if let Some(c) = child.and_then(|body| self.cte_naming_itself(f, body)).filter(|c| same(self.kind, &c.key, name)) {
                 return Some(c);
             }
             child = Some(f);
@@ -661,9 +654,7 @@ impl<'a> Walk<'a> {
         None
     }
 
-    /// The CTE whose `body`, a child of `frame`, is still being read, when that body may name it: in T-SQL, or after
-    /// `WITH RECURSIVE`. Its columns are its column list, else the first branch's output.
-    fn recursing(&self, frame: usize, body: usize) -> Option<Cte> {
+    fn cte_naming_itself(&self, frame: usize, body: usize) -> Option<Cte> {
         let f = &self.frames[frame];
         let (key, written, explicit) = f.pending_cte.as_ref()?;
         if self.frames[body].origin != Origin::CteBody || !(f.recursive || self.kind == DatabaseKind::SqlServer) {
@@ -691,7 +682,7 @@ impl<'a> Walk<'a> {
             Clause::Relation { slot: Slot::Expect, .. } if query => Origin::Derived,
             Clause::Relation { role: role @ (Role::From | Role::Join | Role::Using), slot: Slot::Expect } if names_a_relation => {
                 self.frames[parent].clause = Clause::Relation { role, slot: Slot::Aliased };
-                Origin::JoinGroup
+                Origin::ParenthesizedJoin
             }
             Clause::Cte if cte_body => Origin::CteBody,
             Clause::Cte if self.frames[parent].pending_cte.is_some() => Origin::CteColumns,
@@ -706,14 +697,14 @@ impl<'a> Walk<'a> {
             self.frames[parent].item_lexemes.push(i);
         }
         let lateral = origin == Origin::Derived && i.checked_sub(1).is_some_and(|p| self.is_word(p, "LATERAL") || self.is_word(p, "APPLY"));
-        let mut frame = Frame::new(Some(parent), query || origin == Origin::JoinGroup, origin, clause);
-        if origin == Origin::JoinGroup {
+        let mut frame = Frame::new(Some(parent), query || origin == Origin::ParenthesizedJoin, origin, clause);
+        if origin == Origin::ParenthesizedJoin {
             frame.clause = Clause::Relation { role: Role::From, slot: Slot::Expect };
         }
         let p = &self.frames[parent];
-        let start = if self.kind == DatabaseKind::SqlServer { p.tree } else { 0 };
+        let start = if self.kind == DatabaseKind::SqlServer { p.tree_start } else { 0 };
         frame.lateral = lateral.then(|| start..p.rels.len());
-        frame.earlier_ctes = p.ctes.len();
+        frame.ctes_before = p.ctes.len();
         self.frames.push(frame);
         self.stack.push(self.frames.len() - 1);
     }
@@ -757,7 +748,7 @@ impl<'a> Walk<'a> {
                     rel.column_aliases = names;
                 }
             }
-            Origin::JoinGroup => {
+            Origin::ParenthesizedJoin => {
                 for rel in self.frames[id].rels.clone() {
                     self.push_rel(rel);
                 }
@@ -855,14 +846,14 @@ impl<'a> Walk<'a> {
             let frame_rels = &self.frames[f].rels;
             let visible = match (child.map(|c| (c.origin, c.lateral.clone())), snap.clause) {
                 (Some((Origin::Derived, Some(left))), _) => frame_rels.get(left).unwrap_or_default(),
-                (Some((Origin::Derived | Origin::CteBody | Origin::JoinGroup, None)), _) => &[],
-                (None, Clause::On { tree, target, .. }) => &frame_rels[tree.min(target)..(target + 1).min(frame_rels.len())],
+                (Some((Origin::Derived | Origin::CteBody | Origin::ParenthesizedJoin, None)), _) => &[],
+                (None, Clause::On { tree_start, target, .. }) => &frame_rels[tree_start.min(target)..(target + 1).min(frame_rels.len())],
                 _ => &frame_rels[..],
             };
             rels.extend(visible.iter().filter(|r| !self.aliased_elsewhere(r, frame_rels)));
             child = Some(&self.frames[f]);
         }
-        let quoted = |names: &[String]| names.iter().map(|n| sql_name(self.kind, n)).collect::<Vec<_>>();
+        let quoted = |names: &[String]| names.iter().map(|n| quote_if_needed(self.kind, n)).collect::<Vec<_>>();
         let relations = rels
             .iter()
             .map(|r| ScopeRelation {
@@ -875,20 +866,20 @@ impl<'a> Walk<'a> {
             })
             .collect();
         let mut ctes: Vec<String> = Vec::new();
-        let recursing = chain.windows(2).filter_map(|w| self.recursing(w[1], w[0]));
+        let cte_naming_itself = chain.windows(2).filter_map(|w| self.cte_naming_itself(w[1], w[0]));
         let defined = chain.iter().enumerate().flat_map(|(k, &f)| {
             let frame = &self.frames[f];
             let body = k.checked_sub(1).map(|c| &self.frames[chain[c]]).filter(|b| b.origin == Origin::CteBody);
             let seen = match body {
                 Some(_) if frame.recursive => frame.ctes.len(),
-                Some(b) if self.kind == DatabaseKind::SqlServer => b.earlier_ctes + 1,
-                Some(b) => b.earlier_ctes,
+                Some(b) if self.kind == DatabaseKind::SqlServer => b.ctes_before + 1,
+                Some(b) => b.ctes_before,
                 None => frame.ctes.len(),
             };
             let visible = &frame.ctes[..seen.min(frame.ctes.len())];
             visible.iter().cloned()
         });
-        for c in recursing.chain(defined) {
+        for c in cte_naming_itself.chain(defined) {
             if !ctes.contains(&c.written) {
                 ctes.push(c.written);
             }
@@ -896,8 +887,8 @@ impl<'a> Walk<'a> {
         let qualifier = (!self.parts.is_empty()).then(|| self.qualifier(&rels));
         let frame = &self.frames[snap.frame];
         let (mut expect, mut keywords) = if frame.query { self.expect(snap, frame) } else { self.expect_in_group(snap, frame) };
-        if let (Expect::JoinCondition { target }, Clause::On { tree, .. }) = (&mut expect, snap.clause) {
-            let before = frame.rels.get(tree..*target as usize).unwrap_or_default();
+        if let (Expect::JoinCondition { target }, Clause::On { tree_start, .. }) = (&mut expect, snap.clause) {
+            let before = frame.rels.get(tree_start..*target as usize).unwrap_or_default();
             *target = before.iter().filter(|r| !self.aliased_elsewhere(r, &frame.rels)).count() as u16;
         }
         if self.line_start && matches!(expect, Expect::Keyword | Expect::Alias | Expect::Expression) {
@@ -972,7 +963,7 @@ impl<'a> Walk<'a> {
                     Role::Update => vec!["SET"],
                     Role::Table => Vec::new(),
                 };
-                let expect = if slot == Slot::Named && !self.starts_reserved(&kw) { Expect::Alias } else { Expect::Keyword };
+                let expect = if slot == Slot::Named && !self.starts_unaliasable_keyword(&kw) { Expect::Alias } else { Expect::Keyword };
                 (expect, kw)
             }
             Clause::On { target, fresh, .. } => {
@@ -1022,8 +1013,7 @@ impl<'a> Walk<'a> {
         }
     }
 
-    /// The word being typed is two or more letters of a keyword that cannot be a bare alias, such as `wh` of `WHERE`.
-    fn starts_reserved(&self, keywords: &[&str]) -> bool {
+    fn starts_unaliasable_keyword(&self, keywords: &[&str]) -> bool {
         let reserved = |word: &str| match self.kind {
             DatabaseKind::Postgres => {
                 let word = word.to_ascii_lowercase();
@@ -1031,7 +1021,7 @@ impl<'a> Walk<'a> {
             }
             DatabaseKind::SqlServer => tsql::RESERVED.contains(&word),
         };
-        self.prefix.len() >= 2 && keywords.iter().any(|k| k.starts_with(&self.prefix) && k.split(' ').next().is_some_and(reserved))
+        self.typed_upper.len() >= 2 && keywords.iter().any(|k| k.starts_with(&self.typed_upper) && k.split(' ').next().is_some_and(reserved))
     }
 
     fn after_from(&self) -> Vec<&'static str> {

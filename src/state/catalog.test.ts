@@ -10,8 +10,18 @@ describe("buildCatalogView", () => {
     expect(view.functions.map((f) => `${f.label}${f.detail}=${String(f.apply)}`)).toContain("order_count(cust bigint)=order_count()");
     const catalog = shopCatalog("conn", 7);
     catalog.schemas[0]! = { ...catalog.schemas[0]!, name: "Lab", quoted: '"Lab"' };
-    catalog.schemas[0]!.functions = [{ oid: 1, name: "mood_of", quoted: "mood_of", insertText: "mood_of()", args: "x int", returns: "lab.mood", kind: "Function" }];
-    catalog.schemas[1]!.functions.push({ oid: 2, name: "refresh_all", quoted: "refresh_all", insertText: "CALL refresh_all()", args: "", returns: "", kind: "Procedure" });
+    catalog.schemas[0]!.functions = [
+      { oid: 1, name: "mood_of", quoted: "mood_of", insertText: "mood_of()", args: "x int", returns: "lab.mood", kind: "Function" },
+    ];
+    catalog.schemas[1]!.functions.push({
+      oid: 2,
+      name: "refresh_all",
+      quoted: "refresh_all",
+      insertText: "CALL refresh_all()",
+      args: "",
+      returns: "",
+      kind: "Procedure",
+    });
     const labels = buildCatalogView(catalog).functions.map((f) => [f.label, f.apply]);
     expect(labels).toContainEqual(["Lab.mood_of", '"Lab".mood_of()']);
     expect(labels.map(([label]) => label)).not.toContain("refresh_all");

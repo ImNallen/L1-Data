@@ -141,11 +141,10 @@ it("offers columns, catalog functions with their arguments, built-ins, and the k
 
 it("offers the foreign key join condition first, with the joined relation's columns on the left", async () => {
   const text = "select * from orders o join customers c on ";
-  const { labels } = await completeAtEnd(
-    text,
-    reply({ kind: "JoinCondition", target: 1 }, [table("o", "orders"), table("c", "customers")]),
-    { keys: { [oidOf("orders")]: ORDER_KEYS }, explicit: false },
-  );
+  const { labels } = await completeAtEnd(text, reply({ kind: "JoinCondition", target: 1 }, [table("o", "orders"), table("c", "customers")]), {
+    keys: { [oidOf("orders")]: ORDER_KEYS },
+    explicit: false,
+  });
   expect(labels[0]).toBe("c.id = o.customer_id");
   expect(labels).toContain("email");
 });
@@ -248,7 +247,12 @@ it("asks again when a word typed during a declined request now opens a list", as
   configureSql("t1", buildCatalogView(shopCatalog("c1", 1)));
   const view = new EditorView({ state: editorStateOf("t1"), parent: document.body });
   try {
-    const type = (text: string) => view.dispatch({ changes: { from: view.state.doc.length, insert: text }, selection: { anchor: view.state.doc.length + text.length }, userEvent: "input.type" });
+    const type = (text: string) =>
+      view.dispatch({
+        changes: { from: view.state.doc.length, insert: text },
+        selection: { anchor: view.state.doc.length + text.length },
+        userEvent: "input.type",
+      });
     const settle = () => new Promise((resolve) => setTimeout(resolve, 150));
     type("w");
     await settle();
