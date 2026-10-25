@@ -2,7 +2,7 @@ import { emit } from "@tauri-apps/api/event";
 import { mockIPC } from "@tauri-apps/api/mocks";
 import { installDialogShim } from "./dialogShim";
 
-const BRIDGE_URL = "http://127.0.0.1:7077";
+declare const __L1_DATA_BRIDGE_URL__: string;
 
 /**
  * Turns a dev-bridge HTTP reply into what Tauri's `invoke` would have produced.
@@ -29,7 +29,7 @@ export function installBridgeShim(): void {
   mockIPC(
     async (cmd, args) => {
       if (dialogs.handles(cmd)) return dialogs.reply(cmd, args);
-      const res = await fetch(`${BRIDGE_URL}/invoke/${cmd}`, {
+      const res = await fetch(`${__L1_DATA_BRIDGE_URL__}/invoke/${cmd}`, {
         method: "POST",
         headers: { "content-type": "application/json" },
         body: JSON.stringify(args ?? {}),
@@ -38,6 +38,6 @@ export function installBridgeShim(): void {
     },
     { shouldMockEvents: true },
   );
-  const events = new EventSource(`${BRIDGE_URL}/events`);
+  const events = new EventSource(`${__L1_DATA_BRIDGE_URL__}/events`);
   events.onmessage = (frame) => void emit("app-event", JSON.parse(frame.data));
 }

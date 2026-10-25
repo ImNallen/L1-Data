@@ -1,6 +1,8 @@
 mod dispatch;
 
 use std::convert::Infallible;
+use std::net::SocketAddr;
+use std::num::NonZeroU16;
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -20,8 +22,27 @@ use tower_http::cors::CorsLayer;
 
 use dispatch::{BridgeError, dispatch};
 
-const ADDR: &str = "127.0.0.1:7077";
-const VITE_ORIGINS: [&str; 2] = ["http://localhost:5173", "http://127.0.0.1:5173"];
+struct PortVar {
+    name: &'static str,
+    default: u16,
+}
+
+const BRIDGE_PORT: PortVar = PortVar { name: "L1_DATA_BRIDGE_PORT", default: 7077 };
+const VITE_PORT: PortVar = PortVar { name: "L1_DATA_VITE_PORT", default: 5173 };
+
+impl PortVar {
+    fn parse(&self, value: Option<&str>) -> u16 {
+        let Some(value) = value else { return self.default };
+        match value.parse::<NonZeroU16>() {
+            Ok(port) if value.bytes().all(|b| b.is_ascii_digit()) => port.get(),
+            _ => panic!("{} must be a port from 1 to 65535, got {value:?}", self.name),
+        }
+    }
+
+    fn read(&self) -> u16 {
+        self.parse(std::env::var_os(self.name).map(|v| v.to_string_lossy().into_owned()).as_deref())
+    }
+}
 
 async fn invoke(State(engine): State<Arc<Engine>>, Path(cmd): Path<String>, body: Bytes) -> Response {
     let args = match parse_args(&body) {
@@ -83,6 +104,8 @@ async fn events(State(engine): State<Arc<Engine>>) -> Sse<impl Stream<Item = Res
 
 #[tokio::main]
 async fn main() {
+    let addr = SocketAddr::from(([127, 0, 0, 1], BRIDGE_PORT.read()));
+    let vite_port = VITE_PORT.read();
     let temp_dir = tempfile::tempdir().expect("create temp data dir");
     let data_dir = std::env::var_os("L1_DATA_DATA_DIR").map_or_else(|| temp_dir.path().to_owned(), Into::into);
     let scenario = std::env::var("L1_DATA_UPDATE_SCENARIO").unwrap_or_else(|_| "current".into());
@@ -98,7 +121,9 @@ async fn main() {
     .expect("open engine");
 
     let cors = CorsLayer::new()
-        .allow_origin(VITE_ORIGINS.map(HeaderValue::from_static))
+        .allow_origin(["localhost", "127.0.0.1"].map(|host| {
+            HeaderValue::from_str(&format!("http://{host}:{vite_port}")).expect("vite origin is a valid header value")
+        }))
         .allow_methods([Method::GET, Method::POST])
         .allow_headers([header::CONTENT_TYPE]);
     let app = Router::new()
@@ -107,12 +132,42 @@ async fn main() {
         .layer(cors)
         .with_state(engine.clone());
 
-    let listener = tokio::net::TcpListener::bind(ADDR).await.expect("bind dev-bridge port");
-    eprintln!("dev-bridge on http://{ADDR} (data dir {}, update scenario {scenario})", engine.data_dir().display());
+    let listener = tokio::net::TcpListener::bind(addr).await.expect("bind dev-bridge port");
+    eprintln!(
+        "dev-bridge on http://{addr} for vite on :{vite_port} (data dir {}, update scenario {scenario})",
+        engine.data_dir().display()
+    );
     // Not a graceful shutdown: that would wait for the `/events` stream, which never ends.
     tokio::select! {
         served = axum::serve(listener, app) => served.expect("serve"),
         _ = tokio::signal::ctrl_c() => eprintln!("dev-bridge: stopping assistant processes"),
     }
     engine.shutdown().await;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn an_unset_port_falls_back_to_its_default() {
+        assert_eq!(BRIDGE_PORT.parse(None), 7077);
+        assert_eq!(VITE_PORT.parse(None), 5173);
+    }
+
+    #[test]
+    fn a_set_port_replaces_the_default() {
+        assert_eq!(BRIDGE_PORT.parse(Some("7177")), 7177);
+        assert_eq!(VITE_PORT.parse(Some("65535")), 65535);
+        assert_eq!(BRIDGE_PORT.parse(Some("07177")), 7177);
+    }
+
+    #[test]
+    fn a_value_that_is_not_a_port_panics_naming_its_variable() {
+        for bad in ["abc", "", "0", "65536", "-1", " 7077", "+7077", "7077 ", "７０７７"] {
+            let payload = std::panic::catch_unwind(|| BRIDGE_PORT.parse(Some(bad))).expect_err(bad);
+            let message = payload.downcast_ref::<String>().expect("formatted panic message");
+            assert!(message.starts_with("L1_DATA_BRIDGE_PORT must be a port"), "{bad:?}: {message}");
+        }
+    }
 }

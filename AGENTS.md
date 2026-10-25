@@ -49,7 +49,7 @@ Run the checks that cover your change before you open a PR. Docker is needed onl
 | `pnpm test` | vitest units for state, formatting, and shell, then the release scripts in `scripts/` | nothing |
 | `pnpm build` | the production bundle | nothing |
 | `pnpm self-check` | the engine booted inside the Tauri binary | `pnpm db:up` |
-| `python3 dev/mssql-smoke.py` | mixed PostgreSQL and SQL Server bridge flow | both databases and `cargo build -p dev-bridge -p engine`; free `:7077` |
+| `python3 dev/mssql-smoke.py` | mixed PostgreSQL and SQL Server bridge flow | both databases and `cargo build -p dev-bridge -p engine`; a free `L1_DATA_BRIDGE_PORT`, default `:7077` |
 | `dev/bridge-smoke.sh` | the dev-bridge over HTTP, end to end | `pnpm db:up` and `cargo build -p dev-bridge` first. The script starts its own bridge. |
 | `cargo test -p engine --features claude-smoke --test claude_smoke -- --nocapture` | the assistant through the installed `claude`: its argv and environment, a resumed session, and an approval held for 75 s | `pnpm db:up` and a signed-in `claude`. It spends three Haiku turns on that account. |
 
@@ -59,10 +59,12 @@ Run the checks that cover your change before you open a PR. Docker is needed onl
 
 A passing typecheck does not show that a UI change works. Drive the real UI against the real engine:
 
-1. Run `pnpm db:up`, then `pnpm bridge`. The bridge serves the engine on `:7077` and vite serves the UI on `:5173`.
-2. Open `http://localhost:5173` in a browser tool such as agent-browser or Playwright. `src/dev/bridgeShim.ts` forwards every IPC call to the bridge, so the generated bindings run unchanged.
+1. Run `pnpm db:up`, then `pnpm bridge`. The bridge serves the engine on `:7077` and vite serves the UI on `:5173`. To run more than one bridge at once, give each its own pair of ports, as in `L1_DATA_BRIDGE_PORT=7177 L1_DATA_VITE_PORT=5273 L1_DATA_DATA_DIR=$(mktemp -d) pnpm bridge`. Vite passes the bridge port to the page, and the bridge allows requests only from the vite port. `dev/bridge-smoke.sh` and `dev/mssql-smoke.py` start their bridge on `L1_DATA_BRIDGE_PORT` too. Leave `L1_DATA_VITE_PORT` unset for `pnpm tauri dev`, because Tauri's `devUrl` is fixed at `:5173`.
+2. Open `http://localhost:5173`, or the vite port you chose, in a browser tool such as agent-browser or Playwright. `src/dev/bridgeShim.ts` forwards every IPC call to the bridge, so the generated bindings run unchanged.
 3. Select elements by `data-testid`. Add a `data-testid` to any new control you need to reach.
 4. Connect to `postgres://l1data:l1data@localhost:5433/shop` and exercise the change. Tree rows have `data-testid="tree-node-<connection>/<database>/<schema>/..."`. The count pills that open the database and schema pickers are `db-pill-<connection>` and `schema-pill-<connection>/<database>`.
+
+To compare a command's latency on two bridges, such as one built from `main` and one from your branch, run `node dev/perf/invoke.mjs <bridge-a> <bridge-b> <command> <json or @file> <runs>`. It alternates the calls between the bridges and prints the p50 and p95 of each in milliseconds as JSON. It fails on any reply that is not a successful command.
 
 Chromium has no native dialogs, so `src/dev/dialogShim.ts` answers the dialog plugin's `open` and `save` in the page. Queue the answers before the action that opens the dialog, in agent-browser's `eval`:
 

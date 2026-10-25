@@ -4,9 +4,10 @@
 # terminal needs Accessibility and Screen Recording access.
 # Usage: pnpm screenshot
 set -euo pipefail
+export L1_DATA_BRIDGE_PORT=7077 L1_DATA_VITE_PORT=5173
 
 PG_PORT=5434
-BRIDGE=http://127.0.0.1:7077
+BRIDGE="http://127.0.0.1:$L1_DATA_BRIDGE_PORT"
 OUT=docs/images/l1-data.png
 DATA_DIR=$(mktemp -d)
 PIDS=()
@@ -17,7 +18,7 @@ cleanup() {
 }
 trap cleanup EXIT
 
-for port in 7077 5173 "$PG_PORT"; do
+for port in "$L1_DATA_BRIDGE_PORT" "$L1_DATA_VITE_PORT" "$PG_PORT"; do
 	if lsof -nP -iTCP:"$port" -sTCP:LISTEN >/dev/null; then
 		echo "port $port is in use; stop pnpm bridge, vite, or the other process first" >&2
 		exit 1
@@ -95,7 +96,7 @@ wait "$BRIDGE_PID" 2>/dev/null || true
 
 pnpm -s dev >"$DATA_DIR/vite.log" 2>&1 &
 PIDS+=($!)
-until curl -s http://localhost:5173 >/dev/null; do sleep 0.2; done
+until curl -s "http://localhost:$L1_DATA_VITE_PORT" >/dev/null; do sleep 0.2; done
 
 L1_DATA_DATA_DIR="$DATA_DIR" L1_DATA_SECRET_STORE=memory ./target/debug/l1-data >"$DATA_DIR/app.log" 2>&1 &
 APP_PID=$!
