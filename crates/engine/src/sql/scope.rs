@@ -839,7 +839,7 @@ impl<'a> Walk<'a> {
                         known &= expand(r, &mut columns, &mut star);
                     }
                 }
-                Item::Unnamed => {}
+                Item::Unnamed => columns.push(String::new()),
             }
         }
         if known { (columns, star) } else { (Vec::new(), Vec::new()) }
@@ -883,6 +883,13 @@ impl<'a> Walk<'a> {
                     rel.source = RelationSource::Derived { columns: Vec::new(), star: Vec::new() };
                     rel.column_aliases.clear();
                 }
+                if let RelationSource::Derived { columns, star } = &mut rel.source
+                    && star.is_empty()
+                    && !rel.column_aliases.is_empty()
+                {
+                    let aliases = std::mem::take(&mut rel.column_aliases);
+                    *columns = aliases.iter().chain(columns.iter().skip(aliases.len())).cloned().collect();
+                }
                 if let RelationSource::Table { schema, name } = &rel.source
                     && let Some(cte) = defined_later(&TableName { schema: schema.clone(), name: name.clone() })
                 {
@@ -908,7 +915,10 @@ impl<'a> Walk<'a> {
                 ScopeRelation {
                     reference: rel.written,
                     source: match rel.source {
-                        RelationSource::Derived { columns, star } => RelationSource::Derived { columns: quoted(&columns), star },
+                        RelationSource::Derived { columns, star } => {
+                            let named: Vec<String> = columns.into_iter().filter(|c| !c.is_empty()).collect();
+                            RelationSource::Derived { columns: quoted(&named), star }
+                        }
                         table => table,
                     },
                     column_aliases: quoted(&rel.column_aliases),
@@ -1556,9 +1566,9 @@ mod tests {
         let s = pg("select * from orders o(a, \"B\") where o.|");
         assert_eq!((refs(&s), aliases(&s)), (vec![(Some("o"), &table(None, "orders"))], vec![vec!["a".to_owned(), "\"B\"".to_owned()]]));
         let s = pg("select * from unnest(array[1]) as u(x) where u.|");
-        assert_eq!(aliases(&s), [["x"]]);
+        assert_eq!(named_columns(&s), [(Some("u"), vec!["x".to_owned()])]);
         let s = ms("SELECT * FROM (VALUES (1, 2)) AS v(a, b) WHERE v.|");
-        assert_eq!(aliases(&s), [["a", "b"]]);
+        assert_eq!(named_columns(&s), [(Some("v"), vec!["a".to_owned(), "b".to_owned()])]);
         assert_eq!(aliases(&ms("SELECT * FROM orders o (NOLOCK) WHERE o.|")), [Vec::<String>::new()]);
         let s = pg("with x as (select * from generate_series(1, 3) g(n)) select * from x where |");
         assert_eq!(refs(&s), [(Some("x"), &RelationSource::Derived { columns: vec!["n".into()], star: vec![] })]);
@@ -1675,7 +1685,7 @@ mod tests {
         assert_eq!(refs(&pg("select f| from orders for update")), [(Some("orders"), &orders)]);
         assert!(!refs(&ms("SELECT * FROM orders PIVOT (SUM(total) FOR status IN ([a])) p WHERE |")).iter().any(|r| r.0 == Some("PIVOT")));
         let s = pg("select s.| from unnest(array[1]) with ordinality s(v, i)");
-        assert_eq!((s.qualifier.clone(), s.relations[0].column_aliases.clone()), (Some(Qualifier::Relation { index: 0 }), vec!["v".to_owned(), "i".to_owned()]));
+        assert_eq!((s.qualifier.clone(), named_columns(&s)), (Some(Qualifier::Relation { index: 0 }), vec![(Some("s"), vec!["v".to_owned(), "i".to_owned()])]));
         assert_eq!(refs(&ms("SELECT t.| FROM shop..orders t"))[0].0, Some("t"));
         assert_eq!(refs(&ms("SELECT orders.| FROM shop..orders"))[0].0, Some("orders"));
     }
@@ -1690,6 +1700,15 @@ mod tests {
         assert_eq!(refs(&pg("update orders set status = 'x' from orders o where |")).len(), 2);
         assert_eq!(refs(&ms("MERGE INTO orders t USING customers s ON |")).len(), 2);
         assert!(!ms("SELECT |").functions.contains(&"STRING_SPLIT"));
+    }
+
+    #[test]
+    fn an_unnamed_output_column_keeps_its_place_for_a_rename() {
+        assert_eq!(named_columns(&pg("select r.| from (select 1, id from orders) r(a)")), [(Some("r"), vec!["a".to_owned(), "id".to_owned()])]);
+        assert_eq!(named_columns(&pg("select r.| from (select 1, id from orders) r")), [(Some("r"), vec!["id".to_owned()])]);
+        assert_eq!(named_columns(&pg("with x(a, b) as (select 1, 2) select x.| from x")), [(Some("x"), vec!["a".to_owned(), "b".to_owned()])]);
+        let s = pg("select r.| from (select 1, * from orders) r(a)");
+        assert_eq!((&s.relations[0].source, s.relations[0].column_aliases.len()), (&RelationSource::Derived { columns: vec![], star: vec![] }, 0));
     }
 
     #[test]
