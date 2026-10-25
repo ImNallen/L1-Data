@@ -19,6 +19,26 @@ fn authentication(value: &str) -> Result<SqlServerAuth, String> {
     }
 }
 
+fn flag(key: &str, value: &str) -> Result<bool, String> {
+    match value.to_ascii_lowercase().as_str() {
+        "true" => Ok(true),
+        "false" => Ok(false),
+        _ => Err(format!("SQL Server {key} must be true or false")),
+    }
+}
+
+/// JDBC-style `;key=value` properties start at the first `;` after the host. A `;` before the
+/// last `@` belongs to the user info, and one after a `/` belongs to the path, as a URL reads them.
+fn split_properties(input: &str) -> (&str, Option<&str>) {
+    let Some(start) = input.find("://").map(|i| i + 3) else { return (input, None) };
+    let end = input[start..].find(['/', '?', '#']).map_or(input.len(), |i| start + i);
+    let host = input[start..end].rfind('@').map_or(start, |i| start + i + 1);
+    match input[host..end].find(';') {
+        Some(i) => (&input[..host + i], Some(&input[host + i + 1..])),
+        None => (input, None),
+    }
+}
+
 pub(super) fn parse(input: &str, name: &str) -> Result<ConnectionDraft, String> {
     if input.chars().any(char::is_control) {
         return Err("SQL Server URL cannot contain control characters".into());
@@ -28,10 +48,7 @@ pub(super) fn parse(input: &str, name: &str) -> Result<ConnectionDraft, String> 
             return Err("SQL Server URL contains invalid percent encoding".into());
         }
     }
-    let (input, properties) = match input.split_once(';') {
-        Some((url, properties)) => (url, Some(properties)),
-        None => (input, None),
-    };
+    let (input, properties) = split_properties(input);
     let (_, authority) = input.split_once("://").ok_or("Use mssql:// or sqlserver:// with a TCP host")?;
     let raw_path = authority.split(['?', '#']).next().unwrap_or_default().split_once('/').map(|(_, p)| p).unwrap_or_default();
     if raw_path.contains('/') || matches!(raw_path, "." | "..") {
@@ -78,6 +95,7 @@ pub(super) fn parse(input: &str, name: &str) -> Result<ConnectionDraft, String> 
     let mut database = (!raw_path.is_empty()).then(|| decode(raw_path)).transpose()?;
     let mut user = decode(url.username())?;
     let mut password = url.password().map(decode).transpose()?;
+    let mut encrypt = None;
     for property in properties.into_iter().flat_map(|p| p.split(';')).filter(|p| !p.is_empty()) {
         let (key, value) = property.split_once('=').ok_or("SQL Server URL properties need a name and value")?;
         let value = decode(value)?;
@@ -86,6 +104,9 @@ pub(super) fn parse(input: &str, name: &str) -> Result<ConnectionDraft, String> 
             "user" => !std::mem::replace(&mut user, value).is_empty(),
             "password" => password.replace(value).is_some(),
             "authentication" => sql_server_auth.replace(authentication(&value)?).is_some(),
+            "encrypt" if value.eq_ignore_ascii_case("mandatory") || flag(key, &value)? => encrypt.replace(()).is_some(),
+            "encrypt" => return Err("SQL Server connections are always encrypted, so encrypt must be true".into()),
+            "trustservercertificate" => ssl_mode.replace(if flag(key, &value)? { SslMode::Require } else { SslMode::VerifyFull }).is_some(),
             _ => return Err(format!("Unsupported SQL Server URL property: {key}")),
         };
         if repeated {
@@ -150,6 +171,41 @@ mod tests {
     }
 
     #[test]
+    fn a_semicolon_in_the_user_info_or_the_path_reads_as_trunk_did() {
+        let password = |url: &str| match draft_from_url(url, "").unwrap().password {
+            PasswordInput::Set(p) => p,
+            other => panic!("{url}: {other:?}"),
+        };
+        let draft = draft_from_url("sqlserver://sa:pa;ss@localhost:1434/shop", "").unwrap();
+        assert_eq!((draft.user.as_str(), draft.host.as_str(), draft.port, draft.database.as_str()), ("sa", "localhost", 1434, "shop"));
+        assert_eq!(password("sqlserver://sa:pa;ss@localhost:1434/shop"), "pa;ss");
+        assert_eq!(password("sqlserver://sa:a;b=c@localhost/shop"), "a;b=c");
+        let draft = draft_from_url("sqlserver://sa:123;database=evil@localhost/shop", "").unwrap();
+        assert_eq!((draft.user.as_str(), draft.host.as_str(), draft.port, draft.database.as_str()), ("sa", "localhost", 1433, "shop"));
+        assert_eq!(password("sqlserver://sa:123;database=evil@localhost/shop"), "123;database=evil");
+        assert_eq!(draft_from_url("sqlserver://localhost/my;db", "").unwrap().database, "my;db");
+        assert_eq!(draft_from_url("mssql://localhost/shop;database=other", "").unwrap().database, "shop;database=other");
+        assert_eq!(password("sqlserver://localhost;user=sa;password=a/b%40c"), "a/b@c");
+    }
+
+    #[test]
+    fn azure_portal_encrypt_and_trust_properties_map_to_ssl_modes() {
+        let mode = |url: &str| draft_from_url(url, "").unwrap().ssl_mode;
+        assert_eq!(mode("sqlserver://db.example.net:1433;database=shop;user=me;password=pw;encrypt=true;trustServerCertificate=false"), SslMode::VerifyFull);
+        assert_eq!(mode("sqlserver://db.example.net;Encrypt=True;TrustServerCertificate=True"), SslMode::Require);
+        assert_eq!(mode("sqlserver://db.example.net;encrypt=mandatory"), SslMode::VerifyFull);
+        for url in [
+            "sqlserver://db.example.net;encrypt=false",
+            "sqlserver://db.example.net;encrypt=strict",
+            "sqlserver://db.example.net;trustServerCertificate=maybe",
+            "sqlserver://db.example.net;encrypt=true;encrypt=true",
+            "sqlserver://db.example.net;trustServerCertificate=true;trustServerCertificate=false",
+        ] {
+            assert!(draft_from_url(url, "").is_err(), "{url}");
+        }
+    }
+
+    #[test]
     fn unsupported_or_unrepresentable_options_are_rejected() {
         for url in [
             "mssql://localhost/shop?sslmode=disable",
@@ -171,7 +227,6 @@ mod tests {
             "mssql:shop",
             "mssql://localhost/shop?Authentication=ActiveDirectoryPassword",
             "mssql://localhost/shop?authentication=ActiveDirectoryAzCli&Authentication=SqlPassword",
-            "mssql://localhost/shop;database=other",
             "mssql://localhost;database=a;databaseName=b",
             "mssql://sa@localhost;user=other",
             "mssql://localhost;encrypt=false",
