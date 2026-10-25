@@ -1,4 +1,4 @@
-# Tiberius session observations
+# Tiberius session observations and messages
 
 This directory contains the source of the published `tiberius` 0.13.0 crate.
 The registry archive SHA-256 is
@@ -20,11 +20,22 @@ It rejects incomplete responses, missing login fields, and untracked
 distributed or bound-session transaction changes. Cancellation safety is
 unchanged. The caller must discard abandoned or cancelled clients.
 
+`QueryStream` also yields `QueryItem::Info` for each INFO token and
+`QueryItem::Done` for each DONE and DONEINPROC token, in server order. Upstream
+dropped both, so `PRINT` output, low-severity `RAISERROR` messages, and
+affected-row counts were lost. `query`, `simple_query`, and `Query::query` no
+longer skip the tokens before the first result set, which held back messages
+until a result set arrived. `Done` carries the row count only when the server
+set DONE_COUNT. Like SqlClient, it also drops the count of a `SELECT` that sent
+no result set, which `SET @x = 1` and `DECLARE @x int = 1` report as one row.
+`TokenInfo` is public, with accessors like `TokenError`'s.
+
 The implementation changes only `src/client.rs`, `src/client/connection.rs`,
-`src/lib.rs`, `src/tds/context.rs`, `src/tds/codec/header.rs`, and
-`src/tds/stream/token.rs`. Protocol decoding and row conversion remain upstream.
-The application regressions are in
-`crates/engine/tests/mssql_session_state.rs`.
+`src/lib.rs`, `src/query.rs`, `src/tds/context.rs`, `src/tds/codec/header.rs`,
+`src/tds/codec/token/token_done.rs`, `src/tds/codec/token/token_info.rs`,
+`src/tds/stream/query.rs`, and `src/tds/stream/token.rs`. Protocol decoding and
+row conversion remain upstream. The application regressions are in
+`crates/engine/tests/mssql_session_state.rs` and `crates/engine/tests/mssql.rs`.
 
 SQL Server does not set DONE_INXACT, as specified in
 [MS-TDS Appendix A](https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-tds/135d0ebe-5c4c-4a94-99bf-1811eccb9f4a).

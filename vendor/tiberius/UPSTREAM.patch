@@ -115,6 +115,30 @@
      /// Uses an instance of [`Config`] to specify the connection
      /// options required to connect to the database using an established
      /// tcp connection
+@@ -229,10 +264,7 @@
+             .await?;
+ 
+         let ts = TokenStream::new(&mut self.connection);
+-        let mut result = QueryStream::new(ts.try_unfold());
+-        result.forward_to_metadata().await?;
+-
+-        Ok(result)
++        Ok(QueryStream::new(ts.try_unfold()))
+     }
+ 
+     /// Execute multiple queries, delimited with `;` and return multiple result
+@@ -288,10 +320,7 @@
+ 
+         let ts = TokenStream::new(&mut self.connection);
+ 
+-        let mut result = QueryStream::new(ts.try_unfold());
+-        result.forward_to_metadata().await?;
+-
+-        Ok(result)
++        Ok(QueryStream::new(ts.try_unfold()))
+     }
+ 
+     /// Execute a `BULK INSERT` statement, efficiently storing a large number of
 --- a/src/client/connection.rs
 +++ b/src/client/connection.rs
 @@ -1210,6 +1210,9 @@
@@ -138,6 +162,29 @@
  pub use command::{Command, SqlTableData, SqlTableDataRow, TableValue, TableValueRow};
  pub(crate) use error::Error;
  pub use from_sql::{FromSql, FromSqlOwned};
+@@ -245,7 +245,7 @@
+     codec::{
+         AltMetaDataColumn, BaseMetaDataColumn, BulkLoadRequest, ColumnData, ColumnFlag,
+         FixedLenType, IntoRow, IsolationLevel, MetaDataColumn, TokenAltMetaData, TokenAltRow,
+-        TokenRow, TypeInfo, TypeLength, VarLenContext, VarLenType,
++        TokenInfo, TokenRow, TypeInfo, TypeLength, VarLenContext, VarLenType,
+     },
+     collation::Collation,
+     numeric,
+--- a/src/query.rs
++++ b/src/query.rs
+@@ -221,10 +221,7 @@
+             .await?;
+ 
+         let ts = TokenStream::new(&mut client.connection);
+-        let mut result = QueryStream::new(ts.try_unfold());
+-        result.forward_to_metadata().await?;
+-
+-        Ok(result)
++        Ok(QueryStream::new(ts.try_unfold()))
+     }
+ }
+ 
 --- a/src/tds/codec/header.rs
 +++ b/src/tds/codec/header.rs
 @@ -56,6 +56,10 @@
@@ -151,6 +198,113 @@
      /// Builds a packet header with the given wire `length` (including the 8
      /// header bytes) and packet `id`.
      ///
+--- a/src/tds/codec/token/token_done.rs
++++ b/src/tds/codec/token/token_done.rs
+@@ -3,6 +3,8 @@
+ use bytes::BufMut;
+ use enumflags2::{bitflags, BitFlags};
+ use std::fmt;
++
++const SELECT_COMMAND: u16 = 0xC1;
+ 
+ #[derive(Debug, Default)]
+ pub struct TokenDone {
+@@ -71,6 +73,16 @@
+         self.status.contains(DoneStatus::Attention)
+     }
+ 
++    /// The statement's row count, when the server sent one. A `SELECT` that
++    /// sent no result set, such as `SET @x = 1`, counts one row, which
++    /// SqlClient also drops.
++    pub(crate) fn row_count(&self, after_result: bool) -> Option<u64> {
++        if self.cur_cmd == SELECT_COMMAND && !after_result {
++            return None;
++        }
++        self.status.contains(DoneStatus::Count).then_some(self.done_rows)
++    }
++
+     pub(crate) fn rows(&self) -> u64 {
+         // The row count is only meaningful when the DONE_COUNT status bit is
+         // set (MS-TDS §2.2.7.6); otherwise the field is not a valid count.
+@@ -148,6 +160,20 @@
+         assert!(format!("{}", done).contains("5 rows left"));
+     }
+ 
++    #[test]
++    fn row_count_drops_the_count_of_a_select_without_a_result_set() {
++        let done = |status: BitFlags<DoneStatus>, cur_cmd| TokenDone {
++            status,
++            cur_cmd,
++            done_rows: 5,
++        };
++        let count = DoneStatus::Count.into();
++        assert_eq!(done(count, 0xC5).row_count(false), Some(5));
++        assert_eq!(done(count, SELECT_COMMAND).row_count(true), Some(5));
++        assert_eq!(done(count, SELECT_COMMAND).row_count(false), None);
++        assert_eq!(done(BitFlags::empty(), 0xC5).row_count(false), None);
++    }
++
+     #[tokio::test]
+     async fn decode_reads_four_byte_rowcount_on_pre_2005_versions() {
+         // Pre-2005 servers encode the DONE rowcount in 4 bytes; the decoder must
+--- a/src/tds/codec/token/token_info.rs
++++ b/src/tds/codec/token/token_info.rs
+@@ -1,10 +1,8 @@
+ use super::token_error::decode_error_info_body;
+ use crate::SqlReadBytes;
+ 
+-// Fields are decoded from the INFO token and logged at DEBUG on receipt, but
+-// are not otherwise read; retained for `Debug` diagnostics and future surfacing
+-// of server informational messages to callers.
+-#[allow(dead_code)]
++/// A message the server sent in an INFO token, such as `PRINT` output or a
++/// `RAISERROR` at severity 10 or lower.
+ #[derive(Debug)]
+ pub struct TokenInfo {
+     /// info number
+@@ -38,6 +36,42 @@
+             procedure: body.procedure,
+             line: body.line,
+         })
++    }
++
++    /// The message number. `PRINT` sends 0 and `RAISERROR` with a message
++    /// string sends 50000.
++    pub fn number(&self) -> u32 {
++        self.number
++    }
++
++    /// The message state.
++    pub fn state(&self) -> u8 {
++        self.state
++    }
++
++    /// The class (severity). SQL Server sends severity 10 as 0.
++    pub fn class(&self) -> u8 {
++        self.class
++    }
++
++    /// The message text.
++    pub fn message(&self) -> &str {
++        &self.message
++    }
++
++    /// The server name.
++    pub fn server(&self) -> &str {
++        &self.server
++    }
++
++    /// The name of the stored procedure that sent the message.
++    pub fn procedure(&self) -> &str {
++        &self.procedure
++    }
++
++    /// The line number in the batch or procedure, or 0 when none applies.
++    pub fn line(&self) -> u32 {
++        self.line
+     }
+ }
+ 
 --- a/src/tds/context.rs
 +++ b/src/tds/context.rs
 @@ -10,6 +10,10 @@
@@ -175,9 +329,241 @@
              last_meta: None,
              alt_metas: HashMap::new(),
              spn: None,
+--- a/src/tds/stream/query.rs
++++ b/src/tds/stream/query.rs
+@@ -1,3 +1,4 @@
++use crate::tds::codec::TokenInfo;
+ use crate::tds::stream::ReceivedToken;
+ use crate::{row::ColumnType, Column, Row};
+ use futures_util::{
+@@ -11,15 +12,16 @@
+     task::{self, Poll},
+ };
+ 
+-/// A set of `Streams` of [`QueryItem`] values, which can be either result
+-/// metadata or a row.
++/// A set of `Streams` of [`QueryItem`] values: result metadata, rows, server
++/// messages, and the end of each statement.
+ ///
+ /// The `QueryStream` needs to be polled empty before sending another query to
+ /// the [`Client`], failing to do so causes a flush before the next query,
+ /// slowing it down in an undeterministic way.
+ ///
+-/// Every stream starts with metadata, describing the structure of the incoming
+-/// rows, e.g. the columns in the order they are presented in every row.
++/// Each result set starts with metadata, describing the structure of the
++/// incoming rows, e.g. the columns in the order they are presented in every
++/// row. Messages and statement ends arrive in server order around them.
+ ///
+ /// If after consuming rows from the stream, another metadata result arrives, it
+ /// means the stream has multiple results from different queries. This new
+@@ -54,11 +56,13 @@
+ ///     )
+ ///     .await?;
+ ///
+-/// // The stream consists of four items, in the following order:
++/// // The stream consists of six items, in the following order:
+ /// // - Metadata from `SELECT 1`
+ /// // - The only resulting row from `SELECT 1`
++/// // - The end of `SELECT 1`, with its row count
+ /// // - Metadata from `SELECT 2`
+ /// // - The only resulting row from `SELECT 2`
++/// // - The end of `SELECT 2`, with its row count
+ /// while let Some(item) = stream.try_next().await? {
+ ///     match item {
+ ///         // our first item is the column data always
+@@ -77,6 +81,7 @@
+ ///         QueryItem::Row(row) => {
+ ///             assert_eq!(Some(2), row.get(0));
+ ///         }
++///         QueryItem::Info(_) | QueryItem::Done(_) => {}
+ ///     }
+ /// }
+ /// # Ok(())
+@@ -92,6 +97,7 @@
+     token_stream: Peekable<BoxStream<'a, crate::Result<ReceivedToken>>>,
+     columns: Option<Arc<Vec<Column>>>,
+     result_set_index: Option<usize>,
++    in_result: bool,
+ }
+ 
+ impl<'a> Debug for QueryStream<'a> {
+@@ -111,29 +117,8 @@
+             token_stream: token_stream.peekable(),
+             columns: None,
+             result_set_index: None,
++            in_result: false,
+         }
+-    }
+-
+-    /// Moves the stream forward until having result metadata, stream end or an
+-    /// error.
+-    pub(crate) async fn forward_to_metadata(&mut self) -> crate::Result<()> {
+-        loop {
+-            let item = Pin::new(&mut self.token_stream)
+-                .peek()
+-                .await
+-                .map(|r| r.as_ref().map_err(|e| e.clone()))
+-                .transpose()?;
+-
+-            match item {
+-                Some(ReceivedToken::NewResultset(_)) => break,
+-                Some(_) => {
+-                    self.token_stream.try_next().await?;
+-                }
+-                None => break,
+-            }
+-        }
+-
+-        Ok(())
+     }
+ 
+     /// The list of columns either for the current result set, or for the next
+@@ -246,7 +231,7 @@
+         let s = self.try_filter_map(|item| async {
+             match item {
+                 QueryItem::Row(row) => Ok(Some(row)),
+-                QueryItem::Metadata(_) => Ok(None),
++                _ => Ok(None),
+             }
+         });
+ 
+@@ -292,6 +277,7 @@
+                 // a result set on the fly rather than discard a leading row.
+                 current.get_or_insert_with(Vec::new).push(row);
+             }
++            QueryItem::Info(_) | QueryItem::Done(_) => {}
+         }
+     }
+ 
+@@ -330,6 +316,12 @@
+     Row(Row),
+     /// Information of the upcoming row data.
+     Metadata(ResultMetadata),
++    /// A message from `PRINT`, a low-severity `RAISERROR`, or the server, in
++    /// stream order.
++    Info(TokenInfo),
++    /// The end of a statement, with its row count when the server sent one.
++    /// `SET NOCOUNT ON` and statements that touch no rows send no count.
++    Done(Option<u64>),
+ }
+ 
+ impl QueryItem {
+@@ -343,8 +335,8 @@
+     /// Returns a reference to the metadata, if the item is of a correct variant.
+     pub fn as_metadata(&self) -> Option<&ResultMetadata> {
+         match self {
+-            QueryItem::Row(_) => None,
+             QueryItem::Metadata(ref metadata) => Some(metadata),
++            _ => None,
+         }
+     }
+ 
+@@ -352,15 +344,15 @@
+     pub fn as_row(&self) -> Option<&Row> {
+         match self {
+             QueryItem::Row(ref row) => Some(row),
+-            QueryItem::Metadata(_) => None,
++            _ => None,
+         }
+     }
+ 
+     /// Returns the metadata, if the item is of a correct variant.
+     pub fn into_metadata(self) -> Option<ResultMetadata> {
+         match self {
+-            QueryItem::Row(_) => None,
+             QueryItem::Metadata(metadata) => Some(metadata),
++            _ => None,
+         }
+     }
+ 
+@@ -368,7 +360,7 @@
+     pub fn into_row(self) -> Option<Row> {
+         match self {
+             QueryItem::Row(row) => Some(row),
+-            QueryItem::Metadata(_) => None,
++            _ => None,
+         }
+     }
+ }
+@@ -398,6 +390,7 @@
+ 
+                     let column_meta = Arc::new(column_meta);
+                     this.columns = Some(column_meta.clone());
++                    this.in_result = true;
+ 
+                     this.result_set_index = this.result_set_index.map(|i| i + 1);
+ 
+@@ -423,6 +416,11 @@
+ 
+                     Poll::Ready(Some(Ok(QueryItem::Row(row))))
+                 }
++                ReceivedToken::Info(info) => Poll::Ready(Some(Ok(QueryItem::Info(info)))),
++                ReceivedToken::Done(done) | ReceivedToken::DoneInProc(done) => {
++                    let rows = done.row_count(std::mem::take(&mut this.in_result));
++                    Poll::Ready(Some(Ok(QueryItem::Done(rows))))
++                }
+                 _ => continue,
+             };
+         }
+@@ -687,6 +685,44 @@
+     }
+ 
+     #[tokio::test]
++    async fn query_stream_yields_messages_and_statement_ends_in_order() {
++        let info = |message: &str| {
++            ReceivedToken::Info(TokenInfo {
++                number: 0,
++                state: 1,
++                class: 0,
++                message: message.into(),
++                server: String::new(),
++                procedure: String::new(),
++                line: 1,
++            })
++        };
++        let items: Vec<QueryItem> = query_stream(vec![
++            info("before"),
++            token_meta("first"),
++            token_row(),
++            ReceivedToken::Done(Default::default()),
++            info("after"),
++        ])
++        .try_collect()
++        .await
++        .expect("items");
++        let shape: Vec<String> = items
++            .iter()
++            .map(|item| match item {
++                QueryItem::Info(info) => format!("info {}", info.message()),
++                QueryItem::Metadata(_) => "metadata".into(),
++                QueryItem::Row(_) => "row".into(),
++                QueryItem::Done(rows) => format!("done {rows:?}"),
++            })
++            .collect();
++        assert_eq!(
++            shape,
++            ["info before", "metadata", "row", "done None", "info after"]
++        );
++    }
++
++    #[tokio::test]
+     async fn query_stream_into_row_stream_skips_metadata() {
+         let rows: Vec<Row> = query_stream(vec![
+             token_meta("first"),
 --- a/src/tds/stream/token.rs
 +++ b/src/tds/stream/token.rs
-@@ -371,6 +371,9 @@
+@@ -144,9 +144,6 @@
+     #[allow(dead_code)]
+     TabName(TokenTabName),
+     EnvChange(TokenEnvChange),
+-    // Informational messages are logged at DEBUG on decode; the payload is not
+-    // otherwise consumed. TODO(surface): expose INFO messages to callers.
+-    #[allow(dead_code)]
+     Info(TokenInfo),
+     // Consumed for its `tds_version` during login (see `get_login_ack`); the
+     // remaining fields are retained for debugging but not otherwise read.
+@@ -371,6 +368,9 @@
          let change = TokenEnvChange::decode(self.conn).await?;
  
          match change {
@@ -187,7 +573,7 @@
              TokenEnvChange::PacketSize { new: new_size, .. } => {
                  // MS-TDS: a negotiated packet size must be within 512..=32767.
                  // Reject an out-of-range value from the server: the subsequent
-@@ -392,6 +395,10 @@
+@@ -392,6 +392,10 @@
              | TokenEnvChange::DefectTransaction => {
                  self.conn.context_mut().set_transaction_descriptor([0; 8]);
              }
@@ -198,7 +584,7 @@
              _ => (),
          }
  
-@@ -408,6 +415,9 @@
+@@ -408,6 +412,9 @@
  
      async fn get_login_ack(&mut self) -> crate::Result<ReceivedToken> {
          let ack = TokenLoginAck::decode(self.conn).await?;

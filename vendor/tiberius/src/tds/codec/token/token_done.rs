@@ -4,6 +4,8 @@ use bytes::BufMut;
 use enumflags2::{bitflags, BitFlags};
 use std::fmt;
 
+const SELECT_COMMAND: u16 = 0xC1;
+
 #[derive(Debug, Default)]
 pub struct TokenDone {
     status: BitFlags<DoneStatus>,
@@ -69,6 +71,16 @@ impl TokenDone {
     /// section 2.2.7.6).
     pub(crate) fn is_attention(&self) -> bool {
         self.status.contains(DoneStatus::Attention)
+    }
+
+    /// The statement's row count, when the server sent one. A `SELECT` that
+    /// sent no result set, such as `SET @x = 1`, counts one row, which
+    /// SqlClient also drops.
+    pub(crate) fn row_count(&self, after_result: bool) -> Option<u64> {
+        if self.cur_cmd == SELECT_COMMAND && !after_result {
+            return None;
+        }
+        self.status.contains(DoneStatus::Count).then_some(self.done_rows)
     }
 
     pub(crate) fn rows(&self) -> u64 {
@@ -146,6 +158,20 @@ mod tests {
         assert!(!done.is_final());
         assert_eq!(done.rows(), 5);
         assert!(format!("{}", done).contains("5 rows left"));
+    }
+
+    #[test]
+    fn row_count_drops_the_count_of_a_select_without_a_result_set() {
+        let done = |status: BitFlags<DoneStatus>, cur_cmd| TokenDone {
+            status,
+            cur_cmd,
+            done_rows: 5,
+        };
+        let count = DoneStatus::Count.into();
+        assert_eq!(done(count, 0xC5).row_count(false), Some(5));
+        assert_eq!(done(count, SELECT_COMMAND).row_count(true), Some(5));
+        assert_eq!(done(count, SELECT_COMMAND).row_count(false), None);
+        assert_eq!(done(BitFlags::empty(), 0xC5).row_count(false), None);
     }
 
     #[tokio::test]

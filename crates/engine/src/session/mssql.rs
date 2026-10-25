@@ -207,6 +207,7 @@ impl MsSession {
             }
             let mut cancelled = false;
             let mut failed = None;
+            let mut completed = false;
             {
                 let events = native_query(lease.client(), sql);
                 let mut events = std::pin::pin!(events);
@@ -217,7 +218,10 @@ impl MsSession {
                         next = events.next() => next,
                     };
                     match next {
-                        Some(Ok(event)) => yield Ok(event),
+                        Some(Ok(event)) => {
+                            completed |= matches!(event, QueryEvent::Complete { .. });
+                            yield Ok(event);
+                        }
                         Some(Err(e)) => { failed = Some(e); break; }
                         None => break,
                     }
@@ -249,7 +253,7 @@ impl MsSession {
                 },
             }
             if let Some(e) = failed { yield Err(e); }
-            else { yield Ok(QueryEvent::Complete { affected_rows: None }); }
+            else if !completed { yield Ok(QueryEvent::Complete { affected_rows: None }); }
         })
     }
 
@@ -283,18 +287,18 @@ fn native_query<'a>(client: &'a mut TdsClient, sql: &'a str) -> QueryStream<'a> 
     Box::pin(async_stream::try_stream! {
         let stream = client.simple_query(sql).await.map_err(query_error)?;
         let mut stream = std::pin::pin!(stream);
-        let mut has_rows = false;
+        let mut in_result = false;
         let mut conversion_error = None;
         while let Some(item) = stream.try_next().await.map_err(query_error)? {
             if conversion_error.is_some() { continue; }
             match item {
                 QueryItem::Metadata(meta) => {
-                    if has_rows { yield QueryEvent::Complete { affected_rows: None }; }
+                    if in_result { yield QueryEvent::Complete { affected_rows: None }; }
                     let columns = match meta.columns().iter().map(values::metadata).collect::<Result<Vec<_>, _>>() {
                         Ok(columns) => columns,
                         Err(e) => { conversion_error = Some(e); continue; }
                     };
-                    has_rows = true;
+                    in_result = true;
                     yield QueryEvent::Columns(columns);
                 }
                 QueryItem::Row(row) => {
@@ -304,10 +308,22 @@ fn native_query<'a>(client: &'a mut TdsClient, sql: &'a str) -> QueryStream<'a> 
                     };
                     yield QueryEvent::Row(cells);
                 }
+                QueryItem::Info(info) => yield QueryEvent::Notice(notice(&info)),
+                QueryItem::Done(count) if in_result => {
+                    in_result = false;
+                    yield QueryEvent::Complete { affected_rows: count };
+                }
+                QueryItem::Done(Some(count)) => yield QueryEvent::Complete { affected_rows: Some(count) },
+                QueryItem::Done(None) => {}
             }
         }
         if let Some(e) = conversion_error { Err(e)?; }
     })
+}
+
+fn notice(info: &tiberius::TokenInfo) -> OutputBody {
+    let severity = if info.class() == 0 { "NOTICE" } else { "WARNING" };
+    OutputBody::Notice { severity: severity.into(), message: info.message().to_owned(), detail: None }
 }
 
 fn observe(client: &TdsClient, database: &str) -> Result<TxnState, QueryError> {

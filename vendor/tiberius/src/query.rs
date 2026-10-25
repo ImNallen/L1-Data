@@ -221,10 +221,7 @@ impl<'a> Query<'a> {
             .await?;
 
         let ts = TokenStream::new(&mut client.connection);
-        let mut result = QueryStream::new(ts.try_unfold());
-        result.forward_to_metadata().await?;
-
-        Ok(result)
+        Ok(QueryStream::new(ts.try_unfold()))
     }
 }
 

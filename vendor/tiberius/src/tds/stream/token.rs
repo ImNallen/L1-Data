@@ -144,9 +144,6 @@ pub enum ReceivedToken {
     #[allow(dead_code)]
     TabName(TokenTabName),
     EnvChange(TokenEnvChange),
-    // Informational messages are logged at DEBUG on decode; the payload is not
-    // otherwise consumed. TODO(surface): expose INFO messages to callers.
-    #[allow(dead_code)]
     Info(TokenInfo),
     // Consumed for its `tds_version` during login (see `get_login_ack`); the
     // remaining fields are retained for debugging but not otherwise read.

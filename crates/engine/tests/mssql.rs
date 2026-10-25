@@ -71,6 +71,23 @@ impl Harness {
         assert!(matches!(state.run, RunState::Finished { outcome: RunOutcome::Ok, .. }), "{sql}: {:?}", state.run);
         state
     }
+    async fn logged(&mut self, sql: &str) -> (ConsoleState, Vec<OutputBody>) {
+        let id = self.start(sql).await.run_id;
+        let (tab, events) = (self.tab, &mut self.events);
+        let mut log = Vec::new();
+        let state = tokio::time::timeout(Duration::from_secs(30), async {
+            loop {
+                match events.recv().await.unwrap() {
+                    AppEvent::ConsoleOutput { tab_id, entries } if tab_id == tab => log.extend(entries.into_iter().filter(|e| e.run_id == id).map(|e| e.body)),
+                    AppEvent::ConsoleChanged(state) if state.tab_id == tab && matches!(state.run, RunState::Finished { run_id, .. } if run_id == id) => return state,
+                    _ => {}
+                }
+            }
+        })
+        .await
+        .expect("Engine run did not finish");
+        (state, log)
+    }
     fn rowsets(state: &ConsoleState) -> Vec<&ResultMeta> {
         let RunState::Finished { statements, .. } = &state.run else { panic!("not finished") };
         statements
@@ -105,6 +122,70 @@ async fn real_engine_streams_a_multi_result_batch_and_keeps_zero_row_sets() {
     assert_eq!(h.rows(sets[3])[0][0].as_deref(), Some("shop"));
     assert_eq!((state.txn, state.txn_depth), (TxnState::Idle, Some(0)));
     assert_eq!(sets[0].database_kind, DatabaseKind::SqlServer);
+}
+
+fn lines(log: &[OutputBody]) -> Vec<String> {
+    log.iter()
+        .filter_map(|body| match body {
+            OutputBody::Notice { severity, message, .. } => Some(format!("{severity}: {message}")),
+            OutputBody::Rows { rows, .. } => Some(format!("rows {rows}")),
+            OutputBody::Command { tag, .. } => Some(tag.clone()),
+            OutputBody::Error { error, .. } => Some(format!("{}: {}", error.severity, error.message)),
+            _ => None,
+        })
+        .collect()
+}
+
+fn summary(state: &ConsoleState) -> Vec<String> {
+    let RunState::Finished { statements, .. } = &state.run else { panic!("not finished") };
+    statements
+        .iter()
+        .flat_map(|s| &s.outputs)
+        .filter_map(|o| match o {
+            RunOutput::Command { tag, .. } => Some(tag.clone()),
+            _ => None,
+        })
+        .collect()
+}
+
+#[tokio::test]
+async fn print_and_low_severity_raiserror_reach_the_output_log_in_server_order() {
+    let mut h = Harness::open(TxnMode::AutoCommit).await;
+    let (_, log) = h.logged("PRINT 'hello'").await;
+    assert_eq!(lines(&log), ["NOTICE: hello", "Commands completed successfully"]);
+
+    let (state, log) = h.logged("PRINT '1'; SELECT 2 AS two; PRINT '3';").await;
+    assert_eq!(lines(&log), ["NOTICE: 1", "rows 1", "NOTICE: 3"]);
+    assert_eq!(Harness::rowsets(&state).len(), 1);
+
+    let (_, log) = h.logged("RAISERROR('informational', 10, 1); RAISERROR('careful', 5, 1); PRINT 'after'").await;
+    assert_eq!(lines(&log), ["NOTICE: informational", "WARNING: careful", "NOTICE: after", "Commands completed successfully"]);
+
+    let (state, log) = h.logged("PRINT 'before'; RAISERROR('fail', 16, 1)").await;
+    assert_eq!(lines(&log)[0], "NOTICE: before");
+    assert!(lines(&log).last().unwrap().ends_with("fail"), "{log:?}");
+    assert!(matches!(state.run, RunState::Finished { outcome: RunOutcome::Failed, .. }), "{:?}", state.run);
+}
+
+#[tokio::test]
+async fn sql_server_reports_each_statement_count_like_ssms() {
+    let mut h = Harness::open(TxnMode::AutoCommit).await;
+    let (state, log) = h
+        .logged("CREATE TABLE #counted (id int); DECLARE @n int = 0; INSERT #counted VALUES (1),(2),(3),(4),(5); SET @n = 1; UPDATE #counted SET id = id + 1; SELECT id FROM #counted WHERE id > 4; DELETE #counted WHERE id = 2; DROP TABLE #counted")
+        .await;
+    assert_eq!(lines(&log), ["5 rows affected", "5 rows affected", "rows 2", "1 row affected"]);
+    assert_eq!(summary(&state), ["5 rows affected", "1 row affected"]);
+
+    let (state, log) = h.logged("DECLARE @i int = 0; WHILE @i < 3 BEGIN PRINT @i; SET @i += 1; END").await;
+    assert_eq!(lines(&log), ["NOTICE: 0", "NOTICE: 1", "NOTICE: 2", "Commands completed successfully"]);
+    assert_eq!(summary(&state), ["Commands completed successfully"]);
+
+    let (state, _) = h.logged("CREATE TABLE #loop (id int); DECLARE @i int = 0; WHILE @i < 50 BEGIN INSERT #loop VALUES (@i); SET @i += 1; END; DROP TABLE #loop").await;
+    assert_eq!(summary(&state), ["1 row affected"]);
+
+    let (state, log) = h.logged("SET NOCOUNT ON; CREATE TABLE #quiet (id int); INSERT #quiet VALUES (1); DROP TABLE #quiet; SET NOCOUNT OFF").await;
+    assert_eq!(lines(&log), ["Commands completed successfully"]);
+    assert_eq!(summary(&state), ["Commands completed successfully"]);
 }
 
 #[tokio::test]

@@ -574,9 +574,18 @@ async fn run_outputs(console: &Console, shared: &Shared, session: &mut Session, 
             Ok(QueryEvent::Complete { affected_rows }) => {
                 if let Some((set, out)) = active.take() { finish_rows(console, shared, index, &set, &mut outputs[out], started, &mut rows); }
                 else {
-                    let tag = affected_rows.map_or_else(|| "Batch completed (affected rows unavailable)".into(), |n| synthesize_tag(&plan.statements[index].kind, n));
+                    let tag = match (plan.connection.database_kind, affected_rows) {
+                        (_, None) => "Commands completed successfully".into(),
+                        (DatabaseKind::Postgres, Some(n)) => synthesize_tag(&plan.statements[index].kind, n),
+                        (DatabaseKind::SqlServer, Some(1)) => "1 row affected".into(),
+                        (DatabaseKind::SqlServer, Some(n)) => format!("{n} rows affected"),
+                    };
                     let elapsed_ms = elapsed_ms(started);
                     console.output(shared, run_id, OutputBody::Command { statement: index as u16, tag: tag.clone(), elapsed_ms });
+                    if matches!(outputs.last(), Some(RunOutput::Command { .. })) {
+                        outputs.pop();
+                        tags.pop();
+                    }
                     tags.push(tag.clone());
                     outputs.push(RunOutput::Command { tag, affected_rows, elapsed_ms });
                 }
