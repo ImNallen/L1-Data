@@ -967,3 +967,164 @@ async fn object_scripts_replay_into_an_empty_database_with_the_same_catalog() {
         std::panic::resume_unwind(panic);
     }
 }
+
+impl Harness {
+    async fn target(&mut self, database: &str) -> DatabaseRef {
+        self.engine.console_configure(self.tab, ConsoleConfig { connection_id: self.connection, database: database.into(), schema: Some("dbo".into()), mode: TxnMode::AutoCommit }).await.unwrap();
+        DatabaseRef { connection_id: self.connection, database: database.into() }
+    }
+
+    async fn hostile_facts(&mut self) -> Vec<String> {
+        self.all_rows(
+            "SELECT s.name+'.'+o.name+' '+f.fact COLLATE DATABASE_DEFAULT
+             FROM sys.objects o JOIN sys.schemas s ON s.schema_id=o.schema_id
+             CROSS APPLY (
+                SELECT CONCAT(N'object ',o.type,' ',t.uses_ansi_nulls,' ',t.lock_escalation_desc,' ',t.temporal_type,' ',OBJECT_SCHEMA_NAME(t.history_table_id),'.',OBJECT_NAME(t.history_table_id),' ',
+                              t.history_retention_period,' ',t.history_retention_period_unit_desc,' ',
+                              (SELECT CONCAT(COL_NAME(pe.object_id,pe.start_column_id),'-',COL_NAME(pe.object_id,pe.end_column_id)) FROM sys.periods pe WHERE pe.object_id=o.object_id))
+                FROM (SELECT 1) one(x) LEFT JOIN sys.tables t ON t.object_id=o.object_id
+                UNION ALL
+                SELECT CONCAT(N'column ',c.column_id,' ',c.name,' ',TYPE_NAME(c.user_type_id),' ',c.max_length,' ',c.precision,' ',c.scale,' ',c.is_nullable,' ',c.collation_name,' ',
+                              CONVERT(nvarchar(40),ic.seed_value),' ',CONVERT(nvarchar(40),ic.increment_value),' ',ic.is_not_for_replication,' ',cc.definition,' ',cc.is_persisted,' ',dc.name,' ',dc.definition,' ',
+                              c.is_sparse,' ',c.is_column_set,' ',c.is_rowguidcol,' ',mc.masking_function,' ',c.generated_always_type,' ',c.is_hidden)
+                FROM sys.columns c LEFT JOIN sys.identity_columns ic ON ic.object_id=c.object_id AND ic.column_id=c.column_id
+                LEFT JOIN sys.computed_columns cc ON cc.object_id=c.object_id AND cc.column_id=c.column_id
+                LEFT JOIN sys.default_constraints dc ON dc.object_id=c.default_object_id
+                LEFT JOIN sys.masked_columns mc ON mc.object_id=c.object_id AND mc.column_id=c.column_id
+                WHERE c.object_id=o.object_id AND o.type IN ('U','V')
+                UNION ALL
+                SELECT CONCAT(N'index ',i.name,' ',i.type,' ',i.is_unique,' ',i.is_primary_key,' ',i.is_unique_constraint,' ',i.filter_definition,' ',i.fill_factor,' ',i.is_padded,' ',i.ignore_dup_key,' ',
+                              i.allow_row_locks,' ',i.allow_page_locks,' ',i.optimize_for_sequential_key,' ',i.compression_delay,' ',i.is_disabled,' ',st.no_recompute,' ',
+                              (SELECT TOP 1 CONCAT(p.data_compression_desc,' ',p.xml_compression) FROM sys.partitions p WHERE p.object_id=i.object_id AND p.index_id=i.index_id ORDER BY p.partition_number),' ',
+                              (SELECT STRING_AGG(CONCAT(c.name,' ',ic.is_descending_key,' ',ic.is_included_column,' ',ic.column_store_order_ordinal),',') WITHIN GROUP (ORDER BY ic.is_included_column,ic.key_ordinal,ic.index_column_id)
+                               FROM sys.index_columns ic JOIN sys.columns c ON c.object_id=ic.object_id AND c.column_id=ic.column_id WHERE ic.object_id=i.object_id AND ic.index_id=i.index_id AND i.index_id>0))
+                FROM sys.indexes i LEFT JOIN sys.stats st ON st.object_id=i.object_id AND st.stats_id=i.index_id WHERE i.object_id=o.object_id AND i.type<>3
+                UNION ALL
+                SELECT CONCAT(N'foreign key ',fk.name,' ',fk.delete_referential_action,' ',fk.update_referential_action,' ',fk.is_disabled,' ',fk.is_not_trusted,' ',fk.is_not_for_replication,' ',
+                              (SELECT STRING_AGG(CONCAT(c.name,'>',OBJECT_SCHEMA_NAME(fc.referenced_object_id),'.',OBJECT_NAME(fc.referenced_object_id),'.',rc.name),',') WITHIN GROUP (ORDER BY fc.constraint_column_id)
+                               FROM sys.foreign_key_columns fc JOIN sys.columns c ON c.object_id=fc.parent_object_id AND c.column_id=fc.parent_column_id
+                               JOIN sys.columns rc ON rc.object_id=fc.referenced_object_id AND rc.column_id=fc.referenced_column_id WHERE fc.constraint_object_id=fk.object_id))
+                FROM sys.foreign_keys fk WHERE fk.parent_object_id=o.object_id
+                UNION ALL
+                SELECT CONCAT(N'check ',k.name,' ',k.definition,' ',k.is_disabled,' ',k.is_not_trusted,' ',k.is_not_for_replication) FROM sys.check_constraints k WHERE k.parent_object_id=o.object_id
+                UNION ALL
+                SELECT CONCAT(N'trigger ',t.name,' ',t.is_disabled,' ',m.uses_ansi_nulls,' ',m.uses_quoted_identifier,' ',TRIM(CHAR(13)+CHAR(10)+CHAR(9)+' ' FROM m.definition))
+                FROM sys.triggers t JOIN sys.sql_modules m ON m.object_id=t.object_id WHERE t.parent_id=o.object_id
+                UNION ALL
+                SELECT CONCAT(N'module ',m.uses_ansi_nulls,' ',m.uses_quoted_identifier,' ',TRIM(CHAR(13)+CHAR(10)+CHAR(9)+' ' FROM m.definition))
+                FROM sys.sql_modules m WHERE m.object_id=o.object_id AND o.name NOT IN ('newname','moved')
+                UNION ALL
+                SELECT CONCAT(N'property ',ep.class,' ',CASE ep.class WHEN 7 THEN (SELECT name FROM sys.indexes WHERE object_id=ep.major_id AND index_id=ep.minor_id)
+                                                                  WHEN 2 THEN (SELECT name FROM sys.parameters WHERE object_id=ep.major_id AND parameter_id=ep.minor_id)
+                                                                  ELSE COL_NAME(ep.major_id,ep.minor_id) END,' ',ep.name,' ',CONVERT(nvarchar(max),ep.value),' ',CONVERT(sysname,SQL_VARIANT_PROPERTY(ep.value,'BaseType')))
+                FROM sys.extended_properties ep WHERE ep.class IN (1,2,7) AND ep.major_id=o.object_id AND SQL_VARIANT_PROPERTY(ep.value,'BaseType') IN ('nvarchar','varchar')
+             ) f(fact)
+             WHERE o.is_ms_shipped=0 AND o.type IN ('U','V','P','FN','IF','TF','TR','C','F','PK','UQ','D') AND o.name NOT IN ('enc','node_t')
+             ORDER BY 1",
+        )
+        .await
+        .into_iter()
+        .map(|r| r[0].clone().unwrap())
+        .collect()
+    }
+}
+
+fn refusal(result: Result<ObjectScript, DetailError>) -> String {
+    match result {
+        Err(DetailError::Failed { message }) => message,
+        other => panic!("expected a refusal, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn hostile_object_scripts_replay_every_property_or_warn() {
+    let mut h = Harness::open(TxnMode::AutoCommit).await;
+    let source = format!("t_hostile_{}", uuid::Uuid::new_v4().simple());
+    let replay = format!("{source}_replay");
+    h.ok(&format!("CREATE DATABASE [{source}]; CREATE DATABASE [{replay}]")).await;
+    let mut src = Harness::open(TxnMode::AutoCommit).await;
+    let mut dst = Harness::open(TxnMode::AutoCommit).await;
+    let outcome = AssertUnwindSafe(async {
+        let db = src.target(&source).await;
+        src.ok(include_str!("fixtures/script-hostile-mssql.sql")).await;
+        dst.target(&replay).await;
+        dst.ok("CREATE SCHEMA [we]]ird s]").await;
+        dst.ok("CREATE TYPE [we]]ird s].phone FROM nvarchar(20) NOT NULL").await;
+        src.engine.refresh_catalog(db.clone()).await.unwrap();
+        let catalog = src.engine.catalog(db.clone()).await.unwrap();
+
+        let warned = |name: &str| -> Vec<&str> {
+            match name {
+                "warned" => vec!["ANSI_PADDING OFF on [dbo].[warned].[pad]", "XML index [IX x] on [dbo].[warned]", "extended property [Version] of type int on [dbo].[warned]"],
+                "parted" => vec!["partition scheme [ps_hostile] on [dbo].[parted]"],
+                "temporal_history" => vec!["history table role for [dbo].[temporal] on [dbo].[temporal_history]"],
+                _ => vec![],
+            }
+        };
+        let mut tables = vec![];
+        let mut modules = vec![];
+        let mut scripted = vec![];
+        for schema in &catalog.schemas {
+            for rel in &schema.relations {
+                let result = src.engine.object_script(db.clone(), ScriptTarget::Relation { oid: rel.oid }).await;
+                if rel.name == "node_t" {
+                    assert_eq!(refusal(result), "Graph node tables cannot be scripted yet.");
+                    continue;
+                }
+                let script = result.unwrap();
+                assert_eq!(script.warnings, warned(&rel.name), "{}", rel.name);
+                scripted.push(rel.name.clone());
+                match (rel.kind, rel.name.as_str()) {
+                    (_, "temporal_history") => {}
+                    (RelKind::Table, _) => tables.push(script.text),
+                    _ => modules.push(script.text),
+                }
+            }
+            for f in &schema.functions {
+                let result = src.engine.object_script(db.clone(), ScriptTarget::Routine { oid: f.oid }).await;
+                if f.name == "enc" {
+                    let message = "SQL Server has no readable definition for [dbo].[enc]. The module is encrypted or CLR, or this login lacks VIEW DEFINITION permission.";
+                    assert_eq!(refusal(result), message);
+                    continue;
+                }
+                let script = result.unwrap();
+                assert_eq!(script.warnings, Vec::<String>::new(), "{}", f.name);
+                scripted.push(f.name.clone());
+                modules.push(script.text);
+            }
+        }
+        scripted.sort();
+        assert_eq!(
+            scripted,
+            ["Par ent", "cci", "f_scalar", "go_in_comment", "heap_pk", "moved", "newname", "parted", "qi_off", "refd", "refr", "sparse_set", "temporal", "temporal_history", "v_bound", "warned"]
+        );
+
+        dst.replay_in_dependency_order(tables).await;
+        dst.replay_in_dependency_order(modules).await;
+        assert_eq!(dst.hostile_facts().await, src.hostile_facts().await);
+
+        let renamed = dst.all_rows("SELECT OBJECT_DEFINITION(OBJECT_ID(N'dbo.newname')),OBJECT_ID(N'dbo.oldname'),OBJECT_DEFINITION(OBJECT_ID(N'[we]]ird s].moved')),OBJECT_ID(N'dbo.moved')").await;
+        assert_eq!(
+            renamed,
+            [[Some("CREATE PROCEDURE [newname] AS SELECT 1".to_owned()), None, Some("CREATE PROCEDURE /* dbo.x */ [we]]ird s].[moved] @p int AS SELECT @p".to_owned()), None]]
+        );
+        let schema_oid = |name: &str| catalog.schemas.iter().flat_map(|s| &s.relations).find(|r| r.name == name).unwrap().oid;
+        let xml = src.engine.object_script(db.clone(), ScriptTarget::Index { relation_oid: schema_oid("warned"), name: "IX x".into() }).await;
+        assert_eq!(refusal(xml), "Only clustered, nonclustered, and columnstore indexes can be scripted, and IX x is none of these.");
+        let filtered = src.engine.object_script(db.clone(), ScriptTarget::Index { relation_oid: schema_oid("Par ent"), name: "UX ü".into() }).await.unwrap();
+        assert_eq!(
+            filtered.text,
+            "SET ANSI_NULLS, ANSI_PADDING, ANSI_WARNINGS, ARITHABORT, CONCAT_NULL_YIELDS_NULL, QUOTED_IDENTIFIER ON;\nSET NUMERIC_ROUNDABORT OFF;\nGO\nCREATE UNIQUE NONCLUSTERED INDEX [UX ü] ON [we]]ird s].[Par ent] ([unicode ü] ASC) WHERE ([unicode ü] IS NOT NULL);\nGO\n"
+        );
+    })
+    .catch_unwind()
+    .await;
+    drop(src);
+    drop(dst);
+    for name in [&source, &replay] {
+        h.ok(&format!("ALTER DATABASE [{name}] SET SINGLE_USER WITH ROLLBACK IMMEDIATE; DROP DATABASE [{name}]")).await;
+    }
+    if let Err(panic) = outcome {
+        std::panic::resume_unwind(panic);
+    }
+}
