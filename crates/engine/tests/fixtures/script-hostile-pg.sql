@@ -6,6 +6,7 @@ CREATE SCHEMA "order";
 CREATE COLLATION app."my coll" (provider = icu, locale = 'sv-SE');
 CREATE DOMAIN app.posint AS integer CHECK (VALUE > 0);
 CREATE TYPE app.mood AS ENUM ('ok', 'sad');
+CREATE TYPE app.pet AS (id int, kind text, name text);
 CREATE FOREIGN DATA WRAPPER hostile_fdw;
 CREATE SERVER hostile_server FOREIGN DATA WRAPPER hostile_fdw;
 CREATE FUNCTION app."Trg Fn"() RETURNS trigger LANGUAGE plpgsql AS $$BEGIN RETURN NEW; END$$;
@@ -128,3 +129,6 @@ ALTER MATERIALIZED VIEW app.mv CLUSTER ON mv_x;
 ALTER MATERIALIZED VIEW app.mv ALTER COLUMN x SET STATISTICS 200;
 COMMENT ON COLUMN app.mv.x IS 'mv col comment';
 CREATE TABLE "order"."group" (id int);
+-- a typed table with column options and a key
+CREATE TABLE app.pets OF app.pet (kind WITH OPTIONS DEFAULT 'cat' NOT NULL, name WITH OPTIONS NOT NULL, PRIMARY KEY (id));
+CREATE TABLE app.bare_pets OF app.pet;

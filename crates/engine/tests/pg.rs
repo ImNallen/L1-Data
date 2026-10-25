@@ -2624,7 +2624,7 @@ async fn catalog_facts(client: &tokio_postgres::Client, relations: &str) -> Vec<
          LATERAL (
             SELECT concat_ws(' ', 'relation', c.relkind, c.relpersistence, pg_get_partkeydef(c.oid), pg_get_expr(c.relpartbound, c.oid), obj_description(c.oid, 'pg_class'),
                              c.reloptions, (SELECT t.reloptions FROM pg_class t WHERE t.oid = c.reltoastrelid), c.relrowsecurity, c.relforcerowsecurity, c.relreplident,
-                             c.relispopulated, am.amname, fs.srvname, ft.ftoptions,
+                             c.relispopulated, am.amname, fs.srvname, ft.ftoptions, c.reloftype::regtype,
                              (SELECT string_agg(h.inhparent::regclass::text, ',' ORDER BY h.inhseqno) FROM pg_inherits h WHERE h.inhrelid = c.oid))
             UNION ALL
             SELECT concat_ws(' ', 'column', a.attnum, a.attname, format_type(a.atttypid, a.atttypmod), a.attnotnull, a.attidentity, a.attgenerated,

@@ -7,6 +7,8 @@ pub struct Table {
     pub name: String,
     pub unlogged: bool,
     pub foreign: Option<Foreign>,
+    /// The composite type of a typed table, which supplies its columns.
+    pub of_type: Option<String>,
     pub access_method: Option<String>,
     pub options: Vec<String>,
     pub tablespace: Option<String>,
@@ -209,8 +211,8 @@ fn table_statements(t: &Table, out: &mut Vec<String>, warnings: &mut Vec<String>
     out.extend(t.owned_sequences.iter().map(create_sequence));
 
     let mut head = format!("CREATE {}{keyword} {name}", if t.unlogged { "UNLOGGED " } else { "" });
-    match &t.parent {
-        Parent::Partition { schema, name: parent, bound } => {
+    match (&t.parent, &t.of_type) {
+        (Parent::Partition { schema, name: parent, bound }, _) => {
             head.push_str(&format!(" PARTITION OF {}", qualified(schema, parent)));
             let body: Vec<_> = constraints.collect();
             if !body.is_empty() {
@@ -218,8 +220,16 @@ fn table_statements(t: &Table, out: &mut Vec<String>, warnings: &mut Vec<String>
             }
             head.push_str(&format!("\n    {bound}"));
         }
-        parent => {
-            let columns = t.columns.iter().filter(|c| c.declared).map(|c| if c.inherited.is_some() { column_head(c) } else { column(c, &t.schema, &t.name) });
+        (Parent::None, Some(of_type)) => {
+            head.push_str(&format!(" OF {of_type}"));
+            let options = t.columns.iter().map(|c| (c, column_options(c, &t.schema, &t.name))).filter(|(_, o)| !o.is_empty());
+            let body: Vec<_> = options.map(|(c, o)| format!("{} WITH OPTIONS{o}", ident(&c.name))).chain(constraints).collect();
+            if !body.is_empty() {
+                head.push_str(&format!(" (\n    {}\n)", body.join(",\n    ")));
+            }
+        }
+        (parent, _) => {
+            let columns = t.columns.iter().filter(|c| c.declared).map(|c| if c.inherited.is_some() { column_head(c) } else { format!("{}{}", column_head(c), column_options(c, &t.schema, &t.name)) });
             let body: Vec<_> = columns.chain(constraints).collect();
             head.push_str(&format!(" (\n    {}\n)", body.join(",\n    ")));
             if let Parent::Inherits(parents) = parent {
@@ -310,8 +320,8 @@ fn unscripted(u: &Unscripted, name: &str) -> Vec<String> {
     out
 }
 
-fn column(c: &Column, schema: &str, table: &str) -> String {
-    let mut out = column_head(c);
+fn column_options(c: &Column, schema: &str, table: &str) -> String {
+    let mut out = String::new();
     if let Some(identity) = &c.identity {
         out.push_str(&format!(" {}", identity_clause(identity, schema, table)));
     }
@@ -839,6 +849,20 @@ ALTER FOREIGN TABLE public.e2 ALTER COLUMN v OPTIONS (ADD column_name 'vv');
                 "the column order of app.child, because a replay puts inherited columns first",
             ]
         );
+    }
+
+    #[test]
+    fn a_typed_table_takes_its_columns_from_its_type_and_declares_only_their_options() {
+        let typed = |columns: Vec<Column>, constraints: Vec<Constraint>| Table { schema: "app".into(), name: "pets".into(), of_type: Some("app.pet".into()), columns, constraints, ..Default::default() };
+        let t = typed(
+            vec![col("id", "integer"), Column { default: Some("'cat'::text".into()), not_null: true, ..col("kind", "text") }, Column { not_null: true, ..col("name", "text") }],
+            vec![Constraint { name: "pets_pkey".into(), definition: "PRIMARY KEY (id)".into(), comment: None }],
+        );
+        assert_eq!(
+            table(&t).text,
+            "CREATE TABLE app.pets OF app.pet (\n    kind WITH OPTIONS DEFAULT 'cat'::text NOT NULL,\n    name WITH OPTIONS NOT NULL,\n    CONSTRAINT pets_pkey PRIMARY KEY (id)\n);\n"
+        );
+        assert_eq!(table(&typed(vec![col("id", "integer")], vec![])).text, "CREATE TABLE app.pets OF app.pet;\n");
     }
 
     #[test]

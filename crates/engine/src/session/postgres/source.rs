@@ -14,7 +14,8 @@ const RELATION: &str = "SELECT c.relkind::text, n.nspname, c.relname, c.relpersi
         ARRAY(SELECT hn.nspname::text FROM pg_inherits h JOIN pg_class hc ON hc.oid = h.inhparent JOIN pg_namespace hn ON hn.oid = hc.relnamespace
               WHERE h.inhrelid = c.oid AND NOT c.relispartition ORDER BY h.inhseqno),
         ARRAY(SELECT hc.relname::text FROM pg_inherits h JOIN pg_class hc ON hc.oid = h.inhparent
-              WHERE h.inhrelid = c.oid AND NOT c.relispartition ORDER BY h.inhseqno)
+              WHERE h.inhrelid = c.oid AND NOT c.relispartition ORDER BY h.inhseqno),
+        CASE WHEN c.reloftype <> 0 THEN format_type(c.reloftype, NULL) END
      FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
      LEFT JOIN pg_inherits i ON i.inhrelid = c.oid AND c.relispartition
      LEFT JOIN pg_class p ON p.oid = i.inhparent LEFT JOIN pg_namespace pn ON pn.oid = p.relnamespace
@@ -269,6 +270,7 @@ async fn table(tx: &Transaction<'_>, oid: u32, r: &Row) -> Result<ddl::Table, De
     Ok(ddl::Table {
         name: r.get(2),
         unlogged: r.get(3),
+        of_type: r.get(21),
         foreign: r.get::<_, Option<String>>(17).map(|server| ddl::Foreign { server, options: r.get(18) }),
         access_method: r.get(15),
         options: r.get(4),
