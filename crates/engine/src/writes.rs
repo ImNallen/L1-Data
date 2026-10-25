@@ -6,37 +6,38 @@ use crate::text;
 const SHOWN: usize = 3;
 const SHOWN_CHARS: usize = 2000;
 
-/// Where a guarded action runs. Saving a connection does not move the sessions it already opened, so `stored`, the
-/// connection as saved now, and `connected`, the copy its live instance connected with, can differ. A session opened
-/// on Production keeps asking until it reconnects when the edit also points the connection at another server.
 pub struct Target<'a> {
-    pub stored: &'a ConnectionConfig,
-    pub connected: &'a ConnectionConfig,
+    pub saved: &'a ConnectionConfig,
+    pub live: &'a ConnectionConfig,
     pub console: &'a ConsoleConfigView,
 }
 
-/// A guarded action sends `statements` in order. On Production, when any statement writes, it runs only when
-/// `confirmed` is the digest of these statements on this target.
-pub fn check<'a>(target: &Target<'a>, statements: &[&str], confirmed: Option<&WriteDigest>) -> Result<(), WriteConfirmation> {
-    let production = |c: &ConnectionConfig| c.environment == Some(Environment::Production);
-    let server = |c: &'a ConnectionConfig| (c.host.as_str(), c.port, c.ssh.as_ref());
-    let moved = server(target.stored) != server(target.connected);
-    if !production(target.stored) && !(moved && production(target.connected)) {
+impl Target<'_> {
+    fn on_production(&self) -> bool {
+        let production = |c: &ConnectionConfig| c.environment == Some(Environment::Production);
+        let server = |c: &ConnectionConfig| (c.host.clone(), c.port, c.ssh.clone());
+        let live_session_still_reaches_the_old_server = server(self.saved) != server(self.live);
+        production(self.saved) || (production(self.live) && live_session_still_reaches_the_old_server)
+    }
+}
+
+pub fn check(target: &Target, statements: &[&str], confirmed: Option<&WriteDigest>) -> Result<(), WriteConfirmation> {
+    if !target.on_production() {
         return Ok(());
     }
-    let kind = target.stored.database_kind;
+    let kind = target.saved.database_kind;
     let writes: Vec<&str> = statements.iter().copied().filter(|sql| text::is_write(sql, kind)).collect();
     if writes.is_empty() {
         return Ok(());
     }
     let mut hasher = Sha256::new();
-    serde_json::to_writer(&mut hasher, &(target.stored, target.connected, target.console, statements)).expect("model types serialize to JSON");
-    let digest = WriteDigest(format!("{:x}", hasher.finalize()));
+    serde_json::to_writer(&mut hasher, &(target.saved, target.live, target.console, statements)).expect("model types serialize to JSON");
+    let digest = WriteDigest::new(format!("{:x}", hasher.finalize()));
     if confirmed == Some(&digest) {
         return Ok(());
     }
     Err(WriteConfirmation {
-        connection: target.stored.name.clone(),
+        connection: target.saved.name.clone(),
         database: target.console.database.clone(),
         unit: match kind {
             DatabaseKind::Postgres => ExecutionUnitKind::Statement,
@@ -85,7 +86,7 @@ mod tests {
     }
 
     fn on<'a>(connection: &'a ConnectionConfig, console: &'a ConsoleConfigView) -> Target<'a> {
-        Target { stored: connection, connected: connection, console }
+        Target { saved: connection, live: connection, console }
     }
 
     const WORK: &[&str] = &["select 1", " insert into t values (1) ", "delete from t"];
@@ -108,11 +109,11 @@ mod tests {
         let auto = console(TxnMode::AutoCommit);
         let opened = connection(Some(Environment::Production));
         let relabelled = connection(Some(Environment::Local));
-        assert!(check(&Target { stored: &relabelled, connected: &opened, console: &auto }, WORK, None).is_ok(), "same server, new label");
+        assert!(check(&Target { saved: &relabelled, live: &opened, console: &auto }, WORK, None).is_ok(), "same server, new label");
         let moved = ConnectionConfig { host: "localhost".into(), ..relabelled.clone() };
-        let asked = check(&Target { stored: &moved, connected: &opened, console: &auto }, WORK, None).unwrap_err();
-        assert!(check(&Target { stored: &moved, connected: &opened, console: &auto }, WORK, Some(&asked.digest)).is_ok());
-        assert!(check(&Target { stored: &opened, connected: &relabelled, console: &auto }, WORK, None).is_err(), "newly marked Production");
+        let asked = check(&Target { saved: &moved, live: &opened, console: &auto }, WORK, None).unwrap_err();
+        assert!(check(&Target { saved: &moved, live: &opened, console: &auto }, WORK, Some(&asked.digest)).is_ok());
+        assert!(check(&Target { saved: &opened, live: &relabelled, console: &auto }, WORK, None).is_err(), "newly marked Production");
     }
 
     #[test]

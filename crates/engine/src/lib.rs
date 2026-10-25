@@ -1319,7 +1319,7 @@ impl Engine {
                 SessionSlot::Busy { .. } => return Err(RunError::Busy),
             }
         }
-        let target = writes::Target { stored: &current, connected: &instance.config, console: &config };
+        let target = writes::Target { saved: &current, live: &instance.config, console: &config };
         if let Err(confirmation) = writes::check(&target, &sent, confirmed.as_ref()) {
             console.publish(&mut inner, s);
             return Err(RunError::ConfirmWrites { confirmation });
@@ -1428,7 +1428,7 @@ impl Engine {
                 ("BEGIN", (config.mode == TxnMode::AutoCommit).then_some("COMMIT"), "ROLLBACK")
             };
             let sent: Vec<&str> = std::iter::once(wrap.0).chain(plan.iter().map(|edit| edit.sql.as_str())).chain(wrap.1).collect();
-            let target = writes::Target { stored: &current, connected: &instance.config, console: &config };
+            let target = writes::Target { saved: &current, live: &instance.config, console: &config };
             if let Err(confirmation) = writes::check(&target, &sent, confirmed.as_ref()) {
                 console.publish(&mut inner, s);
                 return Err(ApplyError::ConfirmWrites { confirmation });

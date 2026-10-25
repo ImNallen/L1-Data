@@ -1508,7 +1508,7 @@ export type WriteConfirmation = {
 };
 
 /**
- *  Opaque: only `writes.rs` makes one, and everything else compares two for equality. It names the exact statements a guarded action sends and the connection, database,
+ *  Opaque. It names the exact statements a guarded action sends and the connection, database,
  *  schema, and mode they run on. The engine makes one when it refuses a write on Production and accepts it back
  *  only while all of that is unchanged.
  */

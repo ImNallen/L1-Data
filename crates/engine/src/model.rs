@@ -1785,11 +1785,17 @@ pub enum RunError {
     ConfirmWrites { confirmation: WriteConfirmation },
 }
 
-/// Opaque: only `writes.rs` makes one, and everything else compares two for equality. It names the exact statements a guarded action sends and the connection, database,
+/// Opaque. It names the exact statements a guarded action sends and the connection, database,
 /// schema, and mode they run on. The engine makes one when it refuses a write on Production and accepts it back
 /// only while all of that is unchanged.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Type)]
-pub struct WriteDigest(pub String);
+pub struct WriteDigest(String);
+
+impl WriteDigest {
+    pub(crate) fn new(hex: String) -> Self {
+        Self(hex)
+    }
+}
 
 /// The engine ran nothing. Ask the user, then send the same request again with `digest`.
 #[derive(Debug, Clone, Serialize, Type)]

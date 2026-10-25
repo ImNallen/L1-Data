@@ -865,8 +865,7 @@ describe("a run the engine asks about", () => {
     useWorkspace.setState({ configs: { prod: { ...connectionConfig("prod", "prod-postgres"), environment: "Production", ...patch } } });
   }
 
-  /** Each `console_run` takes the next reply. An error reply rejects as the engine's error. */
-  function engine(...replies: (RunError | null)[]) {
+  function queueRunReplies(...replies: (RunError | null)[]) {
     const runs: { request?: unknown; confirmed?: unknown }[] = [];
     mockIPC((cmd, args) => {
       if (cmd === "script_outline") return { statements: [{ from: 0, to: 23 }], atCursor: 0, unitKind: "Statement" };
@@ -886,7 +885,7 @@ describe("a run the engine asks about", () => {
   it("shows the engine's question, then sends the same request with its digest", async () => {
     connection();
     const id = openSqlTab({ db: { connectionId: "prod", database: "shop" }, text: SCRIPT });
-    const runs = engine(asked("d1"));
+    const runs = queueRunReplies(asked("d1"));
     runActive({ kind: "all" });
     await vi.waitFor(() => expect(question()).not.toBeNull());
     expect(question()).toMatchObject({
@@ -906,7 +905,7 @@ describe("a run the engine asks about", () => {
   it("sends nothing more when ⌘↵'s question is cancelled", async () => {
     connection();
     openSqlTab({ db: { connectionId: "prod", database: "shop" }, text: SCRIPT });
-    const runs = engine(asked("d1", { writes: 1, statements: ["update orders set n = 1"] }));
+    const runs = queueRunReplies(asked("d1", { writes: 1, statements: ["update orders set n = 1"] }));
     void runOrChoose();
     await vi.waitFor(() => expect(question()?.title).toBe("Run 1 write on Production?"));
     expect(runs).toMatchObject([{ request: { target: { kind: "cursor", offset: 0 } }, confirmed: null }]);
@@ -919,7 +918,7 @@ describe("a run the engine asks about", () => {
   it("says how many are shown when the engine sends the first three", async () => {
     connection();
     openSqlTab({ db: { connectionId: "prod", database: "shop" }, text: SCRIPT });
-    engine(asked("d1", { writes: 5, statements: ["delete from a", "delete from b", "delete from c"] }));
+    queueRunReplies(asked("d1", { writes: 5, statements: ["delete from a", "delete from b", "delete from c"] }));
     runActive({ kind: "all" });
     await vi.waitFor(() => expect(question()?.body).toBe("This run sends 5 statements that write to prod-postgres / shop. The first 3 are shown."));
   });
@@ -927,7 +926,7 @@ describe("a run the engine asks about", () => {
   it("names a SQL Server batch", async () => {
     connection({ name: "prod-mssql", databaseKind: "SqlServer" });
     openSqlTab({ db: { connectionId: "prod", database: "master" }, text: "EXEC dbo.purge" });
-    engine(asked("d1", { connection: "prod-mssql", database: "master", unit: "Batch", writes: 1, statements: ["EXEC dbo.purge"] }));
+    queueRunReplies(asked("d1", { connection: "prod-mssql", database: "master", unit: "Batch", writes: 1, statements: ["EXEC dbo.purge"] }));
     runActive({ kind: "all" });
     await vi.waitFor(() => expect(question()?.body).toBe("This run sends 1 batch that writes to prod-mssql / master."));
   });
@@ -935,7 +934,7 @@ describe("a run the engine asks about", () => {
   it("asks again when the engine refuses the digest it gave", async () => {
     connection();
     openSqlTab({ db: { connectionId: "prod", database: "shop" }, text: SCRIPT });
-    const runs = engine(asked("d1"), asked("d2", { connection: "prod-renamed" }));
+    const runs = queueRunReplies(asked("d1"), asked("d2", { connection: "prod-renamed" }));
     runActive({ kind: "all" });
     await vi.waitFor(() => expect(question()).not.toBeNull());
     useWorkspace.getState().answer("btn");
@@ -948,7 +947,7 @@ describe("a run the engine asks about", () => {
   it("runs once without asking when the engine accepts", async () => {
     connection();
     openSqlTab({ db: { connectionId: "prod", database: "shop" }, text: "select 1" });
-    const runs = engine(null);
+    const runs = queueRunReplies(null);
     runActive({ kind: "all" });
     await vi.waitFor(() => expect(runs).toHaveLength(1));
     expect(runs[0]?.confirmed).toBeNull();
@@ -958,7 +957,7 @@ describe("a run the engine asks about", () => {
   it("drops the run when the tab's target changes while it asks", async () => {
     connection();
     const id = openSqlTab({ db: { connectionId: "prod", database: "shop" }, text: SCRIPT });
-    const runs = engine(asked("d1"));
+    const runs = queueRunReplies(asked("d1"));
     runActive({ kind: "all" });
     await vi.waitFor(() => expect(question()).not.toBeNull());
     useWorkspace.getState().patchConsole(id, { db: { connectionId: "prod", database: "reporting" } });
