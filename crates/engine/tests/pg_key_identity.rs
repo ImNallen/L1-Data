@@ -77,7 +77,7 @@ impl Harness {
 
     async fn request(&self, tab: TabId, request: RunRequest) -> ConsoleState {
         let mut events = self.engine.subscribe();
-        let accepted = self.engine.console_run(tab, request).await.unwrap();
+        let accepted = self.engine.console_run(tab, request, None).await.unwrap();
         tokio::time::timeout(Duration::from_secs(20), async {
             loop {
                 if let AppEvent::ConsoleChanged(state) = events.recv().await.unwrap()
@@ -205,7 +205,7 @@ async fn named_keys_refuse_updates_and_deletes_after_pk_replacement_and_catalog_
                 connection_id: h.db.connection_id, database: h.db.database.clone(), schema: None, mode,
             }).await.unwrap();
             for (kind, changes) in [("update", update), ("delete", delete)] {
-                let applied = h.engine.table_apply(h.editor, changes).await;
+                let applied = h.engine.table_apply(h.editor, changes, None).await;
                 assert!(matches!(applied, Err(ApplyError::NoPrimaryKey)), "{mode:?} {kind}: {applied:?}");
                 let observed = h.sql(h.observer, &format!("SELECT id,alternate,note FROM {target} ORDER BY id")).await;
                 let rows = h.rows(&observed);

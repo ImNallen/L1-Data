@@ -110,7 +110,7 @@ impl Harness {
     }
 
     async fn run(&self, tab: TabId, sql: &str) -> ConsoleState {
-        let accepted = self.engine.console_run(tab, RunRequest::Script { text: sql.into(), target: RunTarget::All }).await.unwrap();
+        let accepted = self.engine.console_run(tab, RunRequest::Script { text: sql.into(), target: RunTarget::All }, None).await.unwrap();
         self.finish(tab, accepted.run_id).await
     }
 
@@ -274,7 +274,7 @@ async fn cancelled_native_batch_refreshes_its_committed_ddl() {
         let state = h.ok(h.tab, "SELECT 1").await;
         let SessionState::Open { backend_pid } = state.session else { panic!("Expected native session") };
         let text = format!("CREATE TABLE {} (id int); BEGIN TRANSACTION; WAITFOR DELAY '00:00:30'", h.qualified(&table));
-        let run = h.engine.console_run(h.tab, RunRequest::Script { text, target: RunTarget::All }).await.unwrap().run_id;
+        let run = h.engine.console_run(h.tab, RunRequest::Script { text, target: RunTarget::All }, None).await.unwrap().run_id;
         h.waiting(backend_pid).await;
         assert!(h.table_exists(&table).await);
         h.engine.console_cancel(h.tab).await;
@@ -322,7 +322,7 @@ async fn force_closing_running_native_batch_refreshes_its_committed_ddl() {
         let state = h.ok(h.tab, "SELECT 1").await;
         let SessionState::Open { backend_pid } = state.session else { panic!("Expected native session") };
         let text = format!("CREATE TABLE {} (id int); BEGIN TRANSACTION; WAITFOR DELAY '00:00:30'", h.qualified(&table));
-        h.engine.console_run(h.tab, RunRequest::Script { text, target: RunTarget::All }).await.unwrap();
+        h.engine.console_run(h.tab, RunRequest::Script { text, target: RunTarget::All }, None).await.unwrap();
         h.waiting(backend_pid).await;
         assert!(h.table_exists(&table).await);
         h.engine.console_close(h.tab, true).await.unwrap();
@@ -351,7 +351,7 @@ async fn refresh_that_loses_a_deadlock_to_another_users_ddl_still_converges() {
             }
         }).await.expect("Catalog refresh did not wait behind the other user's TRUNCATE");
         other.ok(other.tab, "DROP TABLE dbo.dropped").await;
-        other.engine.console_commit(other.tab).await.unwrap();
+        other.engine.console_commit(other.tab, None).await.unwrap();
         other.cleanup().await;
         let catalog = h.ready_after(&database, shown).await;
         assert!(catalog.relation("dbo", "created").is_some() && catalog.relation("dbo", "dropped").is_none());
@@ -367,7 +367,7 @@ async fn commit_and_typed_rollback_refresh_tracked_catalogs() {
             let before = h.engine.catalog(h.db("shop")).await.unwrap().version;
             let other = h.engine.catalog(h.db("reporting")).await.unwrap().version;
             h.ok(h.tab, &format!("CREATE TABLE {} (id int); BEGIN TRANSACTION", h.qualified(&table))).await;
-            if commit { h.engine.console_commit(h.tab).await.unwrap(); }
+            if commit { h.engine.console_commit(h.tab, None).await.unwrap(); }
             else { h.ok(h.tab, "ROLLBACK TRANSACTION").await; }
             h.refreshed(before, &table).await;
             let other = h.catalog_after("reporting", other).await.version;
@@ -391,7 +391,7 @@ async fn postgres_commit_refreshes_only_its_database() {
         assert_eq!(state.txn, TxnState::Active);
         assert_eq!(h.engine.catalog(h.db("shop")).await.unwrap().version, before);
         assert!(!h.table_exists(&table).await);
-        h.engine.console_commit(h.tab).await.unwrap();
+        h.engine.console_commit(h.tab, None).await.unwrap();
         let catalog = h.catalog_after("shop", before).await;
         assert!(catalog.relation("public", &table).is_some());
         assert!(h.table_exists(&table).await);

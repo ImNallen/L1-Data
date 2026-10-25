@@ -113,7 +113,7 @@ impl<'de> Deserialize<'de> for SqlServerAuth {
     }
 }
 
-/// What the user says the connection points at. The UI marks `Production` and asks before a run on it writes.
+/// What the user says the connection points at. The UI marks `Production`, and the engine asks before a write runs on it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Type)]
 pub enum Environment {
     Local,
@@ -1782,6 +1782,42 @@ pub enum RunError {
     Connect { error: ConnectError },
     /// WHERE or ORDER BY isn't a single expression, e.g. it smuggles in a second statement.
     BadFilter,
+    ConfirmWrites { confirmation: WriteConfirmation },
+}
+
+/// Opaque. It names the exact statements a guarded action sends, the connection both as saved and as the tab's
+/// session opened it, and the tab's database, schema, mode, and transaction state. The engine makes one when it
+/// refuses a write on Production and accepts it back only while all of that is unchanged.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Type)]
+pub struct WriteDigest(String);
+
+impl WriteDigest {
+    pub(crate) fn new(hex: String) -> Self {
+        Self(hex)
+    }
+}
+
+/// The engine ran nothing. Ask the user, then send the same request again with `digest`.
+#[derive(Debug, Clone, Serialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct WriteConfirmation {
+    /// The connection's name.
+    pub connection: String,
+    pub database: String,
+    pub unit: ExecutionUnitKind,
+    pub sends: WriteList,
+    /// The writes that ran before the tab's session counted as Production, in a transaction the engine has not seen
+    /// end. Any run on the tab, and Commit, can commit them.
+    pub holds: WriteList,
+    pub digest: WriteDigest,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct WriteList {
+    pub count: u32,
+    /// The first three statements, or SQL Server batches, trimmed and cut at 2,000 characters.
+    pub statements: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Type)]
@@ -1791,6 +1827,8 @@ pub enum TxnError {
     NoTransaction,
     RolledBack,
     Query(QueryError),
+    /// Commit would keep writes that ran before the tab's session counted as Production. Nothing was sent.
+    ConfirmWrites { confirmation: WriteConfirmation },
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Type)]
@@ -1867,6 +1905,7 @@ pub enum ApplyError {
     /// Opening or committing the transaction failed.
     Transaction { error: QueryError },
     OutcomeUnknown { error: QueryError },
+    ConfirmWrites { confirmation: WriteConfirmation },
 }
 
 #[derive(Debug, Clone, Serialize, Type)]

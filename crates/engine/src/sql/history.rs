@@ -109,8 +109,10 @@ fn writes(tokens: &[Token<'_>]) -> bool {
     };
     match first.to_ascii_uppercase().as_str() {
         "INSERT" | "UPDATE" | "DELETE" | "MERGE" | "TRUNCATE" | "CREATE" | "ALTER" | "DROP"
-        | "COMMENT" | "GRANT" | "REVOKE" | "REINDEX" | "RENAME" | "IMPORT" | "SECURITY" | "CALL" | "DO" | "REFRESH"
+        | "COMMENT" | "GRANT" | "REVOKE" | "REINDEX" | "RENAME" | "IMPORT" | "SECURITY" | "CALL" | "DO" | "EXECUTE" | "REFRESH"
         | "VACUUM" | "CLUSTER" => true,
+        "PREPARE" => word(tokens.get(1), "TRANSACTION"),
+        "COMMIT" | "ROLLBACK" => word(tokens.get(1), "PREPARED"),
         "WITH" => {
             let mut i = 1;
             if word(tokens.get(i), "RECURSIVE") {
@@ -324,9 +326,13 @@ mod tests {
             "explain (analyze 1) delete from t",
             "call purge_orders()",
             "do $$ begin delete from t; end $$",
+            "execute purge_orders_plan(7)",
             "refresh materialized view v",
             "vacuum full t",
             "cluster t using t_pkey",
+            "prepare transaction 'p1'",
+            "commit prepared 'p1'",
+            "ROLLBACK PREPARED 'p1'",
         ] {
             assert!(history_is_write(sql), "{sql}");
         }
@@ -353,6 +359,9 @@ mod tests {
             "explain (analyze off) delete from t",
             "explain (analyze 0) delete from t",
             "explain analyze select pg_sleep(1)",
+            "prepare q as select 1",
+            "commit",
+            "rollback and chain",
         ] {
             assert!(!history_is_write(sql), "{sql}");
         }

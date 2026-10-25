@@ -147,6 +147,15 @@ jobs:
           echo "shop database at 127.0.0.1:5432"
           printf 'L1_DATA_TEST_PG=%s\n' "postgres://${PGUSER}:${PGPASSWORD}@127.0.0.1:5432/${PGDATABASE}" >> "$GITHUB_ENV"
 
+      - name: Allow prepared transactions
+        env:
+          PG_CONTAINER: ${{ job.services.postgres.id }}
+        run: |
+          psql "$L1_DATA_TEST_PG" -v ON_ERROR_STOP=1 -c "alter system set max_prepared_transactions = 5"
+          docker restart "$PG_CONTAINER"
+          until pg_isready -h 127.0.0.1 -U "$PGUSER" -d "$PGDATABASE"; do sleep 1; done
+          test "$(psql "$L1_DATA_TEST_PG" -Atc 'show max_prepared_transactions')" = 5
+
       - name: Apply dev/seed.sql
         run: psql "$L1_DATA_TEST_PG" -v ON_ERROR_STOP=1 -f dev/seed.sql
 

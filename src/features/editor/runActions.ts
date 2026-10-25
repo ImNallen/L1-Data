@@ -12,6 +12,7 @@ import {
   type TableQuery,
   type TableScript,
   type TxnMode,
+  type WriteConfirmation,
 } from "../../ipc/bindings";
 import { applyErrorText, configureErrorText, runErrorText, txnErrorText } from "../../ipc/errors";
 import { databaseKindFor } from "../../state/databaseKind";
@@ -168,28 +169,43 @@ function deferPageForPendingWork(tabId: TabId, target: PageTarget | undefined): 
   return true;
 }
 
-const SHOWN_WRITES = 3;
+/** A held write may still be open or may have committed already, and a run may be in either mode, so each sentence must hold for all of them. */
+function heldWrites(asked: WriteConfirmation, outcome: (it: string) => string = covered): string {
+  const one = asked.holds.count === 1;
+  return [
+    `${one ? "A write" : `${asked.holds.count} writes`} to ${asked.connection} / ${asked.database} ran on this tab before the connection was marked Production.`,
+    `If ${one ? "it is" : "they are"} still in this tab's transaction, ${outcome(one ? "it" : "them")}.`,
+  ].join(" ");
+}
+
+function covered(it: string): string {
+  return `confirming covers ${it}, so a later commit does not ask about ${it} again`;
+}
+
+function shownWrites(asked: WriteConfirmation): { statements: string[]; note: string } {
+  const statements = [...asked.holds.statements, ...asked.sends.statements];
+  const total = asked.holds.count + asked.sends.count;
+  return { statements, note: total > statements.length ? `${statements.length} of ${total} are shown.` : "" };
+}
 
 /** The answer holds only for the target it named, so a target changed meanwhile drops the run. */
-async function writesConfirmed(tab: Tab, text: string, target: RunTarget): Promise<boolean> {
-  const db = tabTarget(tab);
-  const config = db ? ws().configs[db.connectionId] : undefined;
-  if (!db || config?.environment !== "Production") return true;
-  const unchanged = () => ws().tabs[tab.id]?.console === tab.console;
-  const writeRanges = await commands.scriptWrites(text, target, config.databaseKind);
-  if (!unchanged()) return false;
-  if (writeRanges.length === 0) return true;
-  const n = writeRanges.length;
-  const unit = config.databaseKind === "SqlServer" ? (n === 1 ? "batch" : "batches") : n === 1 ? "statement" : "statements";
-  const shown = writeRanges.slice(0, SHOWN_WRITES);
-  const rest = n > shown.length ? ` The first ${shown.length} are shown.` : "";
+async function writesConfirmed(tab: Tab, asked: WriteConfirmation): Promise<boolean> {
+  const n = asked.sends.count;
+  const h = asked.holds.count;
+  const unit = asked.unit === "Batch" ? (n === 1 ? "batch" : "batches") : n === 1 ? "statement" : "statements";
+  const { statements, note } = shownWrites(asked);
+  const body = [
+    n > 0 && `This run sends ${n} ${unit} that ${n === 1 ? "writes" : "write"} to ${asked.connection} / ${asked.database}.`,
+    h > 0 && heldWrites(asked),
+    note,
+  ];
   const ok = await confirm({
-    title: `Run ${plural(n, "write")} on Production?`,
-    body: `This run sends ${n} ${unit} that ${n === 1 ? "writes" : "write"} to ${config.name} / ${db.database}.${rest}`,
-    statements: shown.map((r) => text.slice(r.from, r.to).trim()),
-    confirmLabel: "Run writes",
+    title: n > 0 ? `Run ${plural(n, "write")} on Production?` : "Run on Production?",
+    body: body.filter(Boolean).join(" "),
+    statements,
+    confirmLabel: n > 0 ? "Run writes" : "Run",
   });
-  return ok && unchanged();
+  return ok && ws().tabs[tab.id]?.console === tab.console;
 }
 
 async function runTab(tabId: TabId, target?: PageTarget, script?: RunTarget): Promise<void> {
@@ -212,13 +228,15 @@ async function runTab(tabId: TabId, target?: PageTarget, script?: RunTarget): Pr
   } else {
     const state = editorStateOf(tabId);
     text = state.doc.toString();
-    const run = script ?? selectionTarget(state);
-    if (!(await writesConfirmed(tab, text, run))) return;
-    request = { kind: "script", text, target: run };
+    request = { kind: "script", text, target: script ?? selectionTarget(state) };
     showDiagnostics(tabId, []);
   }
 
-  const res = await commands.consoleRun(tabId, request);
+  let res = await commands.consoleRun(tabId, request, null);
+  while (res.status === "error" && res.error.kind === "ConfirmWrites") {
+    if (!(await writesConfirmed(tab, res.error.confirmation))) return;
+    res = await commands.consoleRun(tabId, request, res.error.confirmation.digest);
+  }
   if (res.status === "error") {
     notify(runErrorText(res.error));
     return;
@@ -274,8 +292,29 @@ export function cancelActive(): boolean {
   return true;
 }
 
+async function commitConfirmed(tab: Tab, asked: WriteConfirmation): Promise<boolean> {
+  const { statements, note } = shownWrites(asked);
+  const ok = await confirm({
+    title: "Commit on Production?",
+    body: [heldWrites(asked, (it) => `this commit keeps ${it}`), note].filter(Boolean).join(" "),
+    statements,
+    confirmLabel: "Commit writes",
+  });
+  return ok && ws().tabs[tab.id]?.console === tab.console;
+}
+
 export async function endTransaction(tabId: TabId, verb: "commit" | "rollback"): Promise<void> {
-  const res = verb === "commit" ? await commands.consoleCommit(tabId) : await commands.consoleRollback(tabId);
+  if (verb === "rollback") {
+    const res = await commands.consoleRollback(tabId);
+    if (res.status === "error") notify(txnErrorText(res.error));
+    return;
+  }
+  const tab = ws().tabs[tabId];
+  let res = await commands.consoleCommit(tabId, null);
+  while (tab && res.status === "error" && res.error.kind === "ConfirmWrites") {
+    if (!(await commitConfirmed(tab, res.error.confirmation))) return;
+    res = await commands.consoleCommit(tabId, res.error.confirmation.digest);
+  }
   if (res.status === "error") notify(txnErrorText(res.error));
 }
 
@@ -451,15 +490,13 @@ export async function submitEdits(tabId: TabId): Promise<void> {
   const store = useTableEdits.getState();
   if (!store.beginSubmit(tabId)) return;
   try {
-    if (await editsConfirmed(tab, edits)) await applyEdits(tab, edits);
+    await applyEdits(tab, edits);
   } finally {
     store.endSubmit(tabId);
   }
 }
 
-async function editsConfirmed(tab: TableTab, edits: TableEdits): Promise<boolean> {
-  const config = ws().configs[tab.console.db.connectionId];
-  if (config?.environment !== "Production") return true;
+async function editsConfirmed(tab: TableTab, edits: TableEdits, asked: WriteConfirmation): Promise<boolean> {
   const updates = Object.keys(edits.updates).filter((k) => !(k in edits.deletes)).length;
   const parts = [
     edits.inserts.length > 0 && plural(edits.inserts.length, "insert"),
@@ -468,8 +505,14 @@ async function editsConfirmed(tab: TableTab, edits: TableEdits): Promise<boolean
   ].filter((p): p is string => p !== false);
   const what = parts.length > 1 ? `${parts.slice(0, -1).join(", ")} and ${parts.at(-1)}` : parts[0];
   const ok = await confirm({
-    title: `Apply ${plural(pendingCount(edits), "change")} on Production?`,
-    body: `This sends ${what} to ${tab.table.schema}.${tab.table.table} on ${config.name} / ${tab.console.db.database}.`,
+    title: `Apply ${plural(asked.sends.count, "change")} on Production?`,
+    body: [
+      `This sends ${what} to ${tab.table.schema}.${tab.table.table} on ${asked.connection} / ${asked.database}.`,
+      asked.holds.count > 0 && heldWrites(asked),
+    ]
+      .filter(Boolean)
+      .join(" "),
+    statements: asked.holds.statements,
     confirmLabel: "Apply changes",
   });
   const now = ws().tabs[tab.id];
@@ -493,7 +536,11 @@ async function applyEdits(tab: TableTab, edits: TableEdits): Promise<void> {
   if (!(await ensureConsole(tab))) return;
   const count = pendingCount(edits);
   const { changes, rowOf } = toChanges(edits, tab.table.schema, tab.table.table);
-  const res = await commands.tableApply(tabId, changes);
+  let res = await commands.tableApply(tabId, changes, null);
+  while (res.status === "error" && res.error.kind === "ConfirmWrites") {
+    if (!(await editsConfirmed(tab, edits, res.error.confirmation))) return;
+    res = await commands.tableApply(tabId, changes, res.error.confirmation.digest);
+  }
   if (res.status === "error") {
     const failedAt = "change" in res.error ? rowOf(res.error.change) : null;
     useTableEdits.setState((s) => ({ byTab: { ...s.byTab, [tabId]: { ...edits, failedAt } } }));

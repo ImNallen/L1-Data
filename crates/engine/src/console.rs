@@ -13,6 +13,7 @@ use crate::sql::{Invalidates, StmtKind, StmtSpan};
 use crate::store::HistoryInsert;
 use crate::text::{OffsetMap, synthesize_tag};
 use crate::txn::{StmtOutcome, TransactionPlan, txn_after};
+use crate::writes::WritesChecked;
 
 pub(crate) const STREAM_EMIT_INTERVAL: Duration = Duration::from_millis(100);
 const OUTPUT_COALESCE: Duration = Duration::from_millis(5);
@@ -65,6 +66,7 @@ pub struct ConsoleInner {
     pub session: SessionSlot,
     pub txn: TxnState,
     pub txn_depth: Option<u32>,
+    pub unasked: WriteList,
     pub run: RunState,
     pub rev: u64,
     refreshes: Option<PendingRefreshes>,
@@ -126,8 +128,21 @@ impl ConsoleInner {
         }
     }
 
+    /// Every way a session leaves the tab goes through here, so its transaction state and held writes leave with it.
+    pub fn end_session(&mut self, next: SessionSlot) -> SessionSlot {
+        self.txn = TxnState::Idle;
+        self.txn_depth = None;
+        self.unasked = WriteList::default();
+        std::mem::replace(&mut self.session, next)
+    }
+
     pub fn finish_refreshes(&mut self, committed: bool) -> Option<(DatabaseRef, Owed)> {
         if self.txn != TxnState::Idle { return None; }
+        self.end_refreshes(committed)
+    }
+
+    /// A chained `COMMIT` or `ROLLBACK` ends the transaction that owes the refreshes while the next one opens.
+    fn end_refreshes(&mut self, committed: bool) -> Option<(DatabaseRef, Owed)> {
         let pending = self.refreshes.take()?;
         // Native batches may have committed DDL before opening the transaction that ended.
         (committed || pending.policy == RefreshPolicy::NativeEnd).then_some((pending.db, pending.owed))
@@ -138,10 +153,11 @@ impl ConsoleInner {
 /// `ConsoleState.export` both derive from this one value, so an export's progress leaves the
 /// snapshot on every path out of `Busy`: return, close, and disconnect.
 pub enum Work {
-    Run,
+    Run(WritesChecked),
     Count,
-    Transaction,
-    Edit,
+    Commit(WritesChecked),
+    Rollback,
+    Edit(WritesChecked),
     Probe,
     Export(ExportProgress),
 }
@@ -149,20 +165,40 @@ pub enum Work {
 impl Work {
     pub fn kind(&self) -> ConsoleWork {
         match self {
-            Work::Run => ConsoleWork::Run,
+            Work::Run(_) => ConsoleWork::Run,
             Work::Count => ConsoleWork::Count,
-            Work::Transaction => ConsoleWork::Transaction,
-            Work::Edit => ConsoleWork::Edit,
+            Work::Commit(_) | Work::Rollback => ConsoleWork::Transaction,
+            Work::Edit(_) => ConsoleWork::Edit,
             Work::Probe => ConsoleWork::Probe,
             Work::Export(_) => ConsoleWork::Export,
         }
     }
 }
 
+pub struct IdleSession {
+    session: Session,
+    opened: ConnectionConfig,
+}
+
+impl IdleSession {
+    pub fn new(session: Session, opened: ConnectionConfig) -> Self {
+        Self { session, opened }
+    }
+
+    pub fn opened(&self) -> &ConnectionConfig {
+        &self.opened
+    }
+
+    pub fn database_kind(&self) -> DatabaseKind {
+        self.session.database_kind()
+    }
+}
+
 pub enum SessionSlot {
     Empty,
-    Idle(Session),
+    Idle(IdleSession),
     Busy {
+        opened: ConnectionConfig,
         run_id: RunId,
         work: Work,
         backend_pid: i32,
@@ -187,6 +223,7 @@ impl Console {
             session: SessionSlot::Empty,
             txn: TxnState::Idle,
             txn_depth: None,
+            unasked: WriteList::default(),
             run: RunState::Idle,
             rev: 0,
             refreshes: None,
@@ -222,7 +259,7 @@ impl Console {
             config: inner.config.clone(),
             session: match &inner.session {
                 SessionSlot::Empty => SessionState::None,
-                SessionSlot::Idle(s) => SessionState::Open { backend_pid: s.backend_pid },
+                SessionSlot::Idle(idle) => SessionState::Open { backend_pid: idle.session.backend_pid },
                 SessionSlot::Busy { backend_pid, .. } => SessionState::Open { backend_pid: *backend_pid },
                 SessionSlot::Lost { reason, transaction } => SessionState::Lost { reason: reason.clone(), transaction: *transaction },
             },
@@ -267,9 +304,13 @@ impl Console {
 
     pub fn take_session(&self, inner: &mut ConsoleInner, run_id: RunId, work: Work) -> Option<(Session, Arc<AtomicBool>)> {
         let SessionSlot::Idle(_) = inner.session else { return None };
-        let SessionSlot::Idle(session) = std::mem::replace(&mut inner.session, SessionSlot::Empty) else { unreachable!() };
+        let SessionSlot::Idle(IdleSession { session, opened }) = std::mem::replace(&mut inner.session, SessionSlot::Empty) else { unreachable!() };
+        if let Work::Run(checked) | Work::Commit(checked) | Work::Edit(checked) = &work {
+            checked.mark_held_writes_asked(&mut inner.unasked);
+        }
         let stop = Arc::new(AtomicBool::new(false));
         inner.session = SessionSlot::Busy {
+            opened,
             run_id,
             work,
             backend_pid: session.backend_pid,
@@ -294,18 +335,17 @@ impl Console {
 
     /// Puts the session back after a run or a transaction command and applies its final `txn`.
     pub fn return_session(inner: &mut ConsoleInner, session: Session, txn: TxnState, lost: Option<String>) -> Option<(DatabaseRef, Owed)> {
+        let SessionSlot::Busy { opened, .. } = std::mem::replace(&mut inner.session, SessionSlot::Empty) else { unreachable!("Console::edit holds the slot") };
         inner.txn = txn;
         inner.txn_depth = session.txn_depth();
         match lost {
             Some(reason) => {
                 let transaction = session.transaction_loss(txn);
-                inner.txn = TxnState::Idle;
-                inner.txn_depth = None;
-                inner.session = SessionSlot::Lost { reason, transaction };
+                inner.end_session(SessionSlot::Lost { reason, transaction });
                 inner.finish_refreshes(false)
             }
             None => {
-                inner.session = SessionSlot::Idle(session);
+                inner.session = SessionSlot::Idle(IdleSession { session, opened });
                 None
             }
         }
@@ -316,12 +356,10 @@ impl Console {
     /// statement in flight is Cancelled and the rest Skipped.
     pub async fn drop_session(&self, shared: &Arc<Shared>) {
         let mut inner = self.inner.lock().await;
-        let session = std::mem::replace(&mut inner.session, SessionSlot::Empty);
+        let session = inner.end_session(SessionSlot::Empty);
         if let SessionSlot::Busy { stop, .. } = &session {
             stop.store(true, Ordering::Relaxed);
         }
-        inner.txn = TxnState::Idle;
-        inner.txn_depth = None;
         let due = inner.finish_refreshes(false);
         if let RunState::Running { run_id, started_at_ms, statements } = &mut inner.run {
             let mut in_flight = true;
@@ -381,6 +419,7 @@ pub struct RunPlan {
     pub database: String,
     pub connection: ConnectionConfig,
     pub page: Option<TablePage>,
+    pub writes_stay_unasked: bool,
 }
 
 pub struct TablePage {
@@ -462,21 +501,31 @@ pub async fn run_task(console: Arc<Console>, shared: Arc<Shared>, mut session: S
             e
         });
         if let Err(e) = &result { if e.severity == "FATAL" { fatal = Some(e.message.clone()); } }
-        txn = session.observed_txn().unwrap_or_else(|| txn_after(txn, &stmt.kind, if result.is_ok() { StmtOutcome::Ok } else { StmtOutcome::Err }));
+        let finished = if result.is_ok() { StmtOutcome::Ok } else { StmtOutcome::Err };
+        txn = session.observed_txn().unwrap_or_else(|| txn_after(txn, &stmt.kind, finished));
         let (status, history) = match &result {
             Ok((rows, tags)) => (StmtStatus::Finished, if let Some(rows) = rows { HistoryOutcome::Rows { rows: *rows } } else { HistoryOutcome::Command { tag: tags.join("; ") } }),
             Err(_) if cancelled => (StmtStatus::Cancelled, HistoryOutcome::Cancelled),
             Err(error) => (StmtStatus::Failed { error: error.clone() }, HistoryOutcome::Error { message: error.message.clone() }),
         };
+        let unasked_write = plan.writes_stay_unasked && crate::text::is_write(sql, plan.connection.database_kind);
+        let chained = result.is_ok() && matches!(stmt.kind, StmtKind::CommitAndChain | StmtKind::RollbackAndChain);
+        let ended = crate::txn::ended(&stmt.kind, finished, session.observed_txn());
         let due = console.edit(&shared, run_id, |inner| {
-            let committed = result.is_ok() && inner.txn != TxnState::Aborted && stmt.kind != crate::sql::StmtKind::Rollback;
+            let committed = result.is_ok() && inner.txn != TxnState::Aborted && !matches!(stmt.kind, StmtKind::Rollback | StmtKind::RollbackAndChain);
             inner.txn = txn;
             inner.txn_depth = session.txn_depth();
+            if unasked_write {
+                inner.unasked.add(sql);
+            }
+            if ended {
+                inner.unasked = WriteList::default();
+            }
             Console::statements_mut(inner)[index].status = status;
             if plan.connection.database_kind == DatabaseKind::Postgres && result.is_ok() {
                 inner.invalidate(DatabaseKind::Postgres, stmt.kind.invalidates());
             }
-            inner.finish_refreshes(committed)
+            if chained { inner.end_refreshes(committed) } else { inner.finish_refreshes(committed) }
         }).await?;
         if let Some((db, owed)) = due { shared.schedule_refreshes(db, owed); }
         let mut lines = notice_lines(&mut session);

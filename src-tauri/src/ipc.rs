@@ -108,20 +108,14 @@ pub fn script_outline(engine: State<'_, Arc<Engine>>, text: String, cursor: DocO
 
 #[tauri::command]
 #[specta::specta]
-pub fn script_writes(engine: State<'_, Arc<Engine>>, text: String, target: RunTarget, database_kind: DatabaseKind) -> Vec<DocRange> {
-    engine.script_writes(&text, target, database_kind)
-}
-
-#[tauri::command]
-#[specta::specta]
 pub fn editor_format(engine: State<'_, Arc<Engine>>, text: String, target: RunTarget, database_kind: DatabaseKind) -> Result<FormatEdit, FormatError> {
     engine.editor_format(&text, target, database_kind)
 }
 
 #[tauri::command]
 #[specta::specta]
-pub async fn console_run(engine: State<'_, Arc<Engine>>, tab_id: TabId, request: RunRequest) -> Result<RunAccepted, RunError> {
-    engine.console_run(tab_id, request).await
+pub async fn console_run(engine: State<'_, Arc<Engine>>, tab_id: TabId, request: RunRequest, confirmed: Option<WriteDigest>) -> Result<RunAccepted, RunError> {
+    engine.console_run(tab_id, request, confirmed).await
 }
 
 // Async commands that borrow `State` must return `Result`; the owned `AppHandle` lifts that.
@@ -133,8 +127,8 @@ pub async fn console_cancel(app: AppHandle, tab_id: TabId) {
 
 #[tauri::command]
 #[specta::specta]
-pub async fn console_commit(engine: State<'_, Arc<Engine>>, tab_id: TabId) -> Result<(), TxnError> {
-    engine.console_commit(tab_id).await
+pub async fn console_commit(engine: State<'_, Arc<Engine>>, tab_id: TabId, confirmed: Option<WriteDigest>) -> Result<(), TxnError> {
+    engine.console_commit(tab_id, confirmed).await
 }
 
 #[tauri::command]
@@ -145,8 +139,8 @@ pub async fn console_rollback(engine: State<'_, Arc<Engine>>, tab_id: TabId) -> 
 
 #[tauri::command]
 #[specta::specta]
-pub async fn table_apply(engine: State<'_, Arc<Engine>>, tab_id: TabId, changes: TableChanges) -> Result<ApplySummary, ApplyError> {
-    engine.table_apply(tab_id, changes).await
+pub async fn table_apply(engine: State<'_, Arc<Engine>>, tab_id: TabId, changes: TableChanges, confirmed: Option<WriteDigest>) -> Result<ApplySummary, ApplyError> {
+    engine.table_apply(tab_id, changes, confirmed).await
 }
 
 #[tauri::command]

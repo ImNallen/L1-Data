@@ -40,9 +40,10 @@ pub fn txn_after(state: TxnState, kind: &StmtKind, outcome: StmtOutcome) -> TxnS
         (Open, _, _) => Open,
         (Idle, Begin, Ok) => Active,
         (Idle, _, _) => Idle,
+        (_, CommitAndChain, Ok) | (_, RollbackAndChain, Ok) => Active,
         (_, Commit, Ok) | (_, Rollback, Ok) => Idle,
         // A failed COMMIT (deferred constraint, serialization) rolls back and ends the block.
-        (_, Commit, Err) => Idle,
+        (_, Commit, Err) | (_, CommitAndChain, Err) => Idle,
         (_, RollbackTo, Ok) => Active,
         (Active, _, Ok) => Active,
         (Active, _, Err) => Aborted,
@@ -50,11 +51,19 @@ pub fn txn_after(state: TxnState, kind: &StmtKind, outcome: StmtOutcome) -> TxnS
     }
 }
 
+pub fn ended(kind: &StmtKind, outcome: StmtOutcome, observed: Option<TxnState>) -> bool {
+    use StmtKind::*;
+    match observed {
+        Some(state) => state == TxnState::Idle,
+        None => outcome == StmtOutcome::Ok && matches!(kind, Commit | Rollback | CommitAndChain | RollbackAndChain),
+    }
+}
+
 pub fn needs_implicit_begin(mode: TxnMode, state: TxnState, kind: &StmtKind) -> bool {
     use StmtKind::*;
     mode == TxnMode::Manual
         && state == TxnState::Idle
-        && !matches!(kind, Begin | Commit | Rollback | Savepoint | RollbackTo | Release | CopyStdio | NoTxnBlock(_))
+        && !matches!(kind, Begin | Commit | Rollback | CommitAndChain | RollbackAndChain | Savepoint | RollbackTo | Release | CopyStdio | NoTxnBlock(_))
 }
 
 #[cfg(test)]
@@ -69,6 +78,8 @@ mod tests {
             Begin,
             Commit,
             Rollback,
+            CommitAndChain,
+            RollbackAndChain,
             Savepoint,
             RollbackTo,
             Release,
@@ -96,6 +107,12 @@ mod tests {
             (Active, Commit, Ok, Idle),
             (Active, Commit, Err, Idle),
             (Active, Rollback, Ok, Idle),
+            (Idle, CommitAndChain, Err, Idle),
+            (Active, CommitAndChain, Ok, Active),
+            (Active, CommitAndChain, Err, Idle),
+            (Active, RollbackAndChain, Ok, Active),
+            (Aborted, CommitAndChain, Ok, Active),
+            (Aborted, RollbackAndChain, Ok, Active),
             (Active, Savepoint, Ok, Active),
             (Active, Savepoint, Err, Aborted),
             (Active, RollbackTo, Ok, Active),
@@ -119,6 +136,20 @@ mod tests {
     }
 
     #[test]
+    fn only_a_reported_or_successful_end_ends_a_transaction() {
+        for kind in all_kinds() {
+            let ends = matches!(kind, Commit | Rollback | CommitAndChain | RollbackAndChain);
+            assert_eq!(ended(&kind, Ok, None), ends, "{kind:?}");
+            assert!(!ended(&kind, Err, None), "{kind:?}: a failed statement shows no end");
+            assert!(ended(&kind, Err, Some(Idle)), "{kind:?}: the server reports no transaction");
+            assert!(!ended(&kind, Ok, Some(Active)), "{kind:?}: the server reports one open");
+        }
+        let missed_begin = Other("HEADER".into());
+        assert_eq!(txn_after(Idle, &missed_begin, Ok), Idle);
+        assert!(!ended(&missed_begin, Ok, None), "an Idle the engine infers is not an end it saw");
+    }
+
+    #[test]
     fn the_machine_is_total() {
         for state in [Idle, Active, Aborted, Open] {
             for kind in all_kinds() {
@@ -132,7 +163,7 @@ mod tests {
     #[test]
     fn implicit_begin_only_in_manual_idle_for_blockable_statements() {
         for kind in all_kinds() {
-            let expected = !matches!(kind, Begin | Commit | Rollback | Savepoint | RollbackTo | Release | CopyStdio | NoTxnBlock(_));
+            let expected = !matches!(kind, Begin | Commit | Rollback | CommitAndChain | RollbackAndChain | Savepoint | RollbackTo | Release | CopyStdio | NoTxnBlock(_));
             assert_eq!(needs_implicit_begin(TxnMode::Manual, Idle, &kind), expected, "{kind:?}");
             assert!(!needs_implicit_begin(TxnMode::Manual, Active, &kind));
             assert!(!needs_implicit_begin(TxnMode::Manual, Aborted, &kind));

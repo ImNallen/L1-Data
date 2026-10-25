@@ -219,7 +219,7 @@ impl Harness {
 
     async fn start_run(&mut self, tab: TabId, sql: &str) -> RunAccepted {
         self.engine
-            .console_run(tab, RunRequest::Script { text: sql.into(), target: RunTarget::All })
+            .console_run(tab, RunRequest::Script { text: sql.into(), target: RunTarget::All }, None)
             .await
             .unwrap()
     }
@@ -556,7 +556,7 @@ async fn error_position_maps_to_utf16_past_an_emoji() {
     let cursor = text.encode_utf16().count() as u32 - 3;
     let accepted = h
         .engine
-        .console_run(tab, RunRequest::Script { text: text.into(), target: RunTarget::Cursor { offset: DocOffset(cursor) } })
+        .console_run(tab, RunRequest::Script { text: text.into(), target: RunTarget::Cursor { offset: DocOffset(cursor) } }, None)
         .await
         .unwrap();
     assert_eq!(accepted.statements.len(), 1, "cursor picks only the second statement");
@@ -576,8 +576,8 @@ async fn cancel_finishes_cancelled_quickly() {
     let tab = h.sql_tab(TxnMode::AutoCommit).await;
     let accepted = h.start_run(tab, "select slow_echo(30); select 2").await;
     tokio::time::sleep(Duration::from_millis(300)).await;
-    assert!(matches!(h.engine.console_run(tab, RunRequest::Script { text: "select 1".into(), target: RunTarget::All }).await, Err(RunError::Busy)));
-    assert!(matches!(h.engine.console_commit(tab).await, Err(TxnError::Busy)));
+    assert!(matches!(h.engine.console_run(tab, RunRequest::Script { text: "select 1".into(), target: RunTarget::All }, None).await, Err(RunError::Busy)));
+    assert!(matches!(h.engine.console_commit(tab, None).await, Err(TxnError::Busy)));
     let started = Instant::now();
     h.engine.console_cancel(tab).await;
     let state = h.wait_finished(tab, accepted.run_id).await;
@@ -606,10 +606,10 @@ async fn manual_tab_isolated_until_commit_and_abort_rolls_back() {
     let reconfigure = |database: &str, mode| ConsoleConfig { connection_id: h.conn, database: database.into(), schema: None, mode };
     assert!(matches!(h.engine.console_configure(a, reconfigure("shop", TxnMode::AutoCommit)).await, Err(ConfigureError::TransactionOpen)));
     assert!(matches!(h.engine.console_configure(a, reconfigure("reporting", TxnMode::Manual)).await, Err(ConfigureError::TransactionOpen)));
-    h.engine.console_commit(a).await.unwrap();
+    h.engine.console_commit(a, None).await.unwrap();
     assert_eq!(h.console(a).txn, TxnState::Idle);
     assert_eq!(h.scalar(b, &format!("select count(*) from {table}")).await, "1");
-    assert!(matches!(h.engine.console_commit(a).await, Err(TxnError::NoTransaction)));
+    assert!(matches!(h.engine.console_commit(a, None).await, Err(TxnError::NoTransaction)));
 
     let state = h.run(a, "select 1/0").await;
     assert!(matches!(state.run, RunState::Finished { outcome: RunOutcome::Failed, .. }));
@@ -617,7 +617,7 @@ async fn manual_tab_isolated_until_commit_and_abort_rolls_back() {
     let state = h.run(a, "select 1").await;
     assert_eq!(state.txn, TxnState::Aborted, "an aborted block rejects everything but ROLLBACK");
     assert!(matches!(statuses(&state)[0], StmtStatus::Failed { error } if error.sqlstate.as_deref() == Some("25P02")));
-    assert!(matches!(h.engine.console_commit(a).await, Err(TxnError::RolledBack)));
+    assert!(matches!(h.engine.console_commit(a, None).await, Err(TxnError::RolledBack)));
     assert_eq!(h.console(a).txn, TxnState::Idle);
 
     h.run_ok(a, &format!("insert into {table} values (2)")).await;
@@ -645,7 +645,7 @@ async fn a_notice_raised_at_commit_carries_the_commit_run_id() {
     assert!(!h.log(tab).contains(&"NOTICE: deferred".to_owned()), "the trigger is deferred to COMMIT: {:?}", h.log(tab));
 
     let before = h.entries(tab).len();
-    h.engine.console_commit(tab).await.unwrap();
+    h.engine.console_commit(tab, None).await.unwrap();
     h.drain();
     let commit = &h.entries(tab)[before..];
     assert_eq!(commit.iter().map(|e| log_line(&e.body)).collect::<Vec<_>>(), ["0> COMMIT", "NOTICE: deferred", "0 COMMIT"]);
@@ -797,7 +797,7 @@ async fn ddl_refreshes_the_catalog() {
     h.wait_published("shop", version).await;
     assert_eq!(h.catalog_status("shop"), CatalogStatus::Ready { version });
 
-    let page = h.engine.console_run(tab, RunRequest::TablePage { schema: "public".into(), table: "orders".into(), page: 2, query: TableQuery::default() }).await.unwrap();
+    let page = h.engine.console_run(tab, RunRequest::TablePage { schema: "public".into(), table: "orders".into(), page: 2, query: TableQuery::default() }, None).await.unwrap();
     let state = h.wait_finished(tab, page.run_id).await;
     let meta = Harness::result(&state, 0);
     assert_eq!(meta.row_count, 500);
@@ -931,7 +931,7 @@ async fn esc_during_all_rows_leaves_the_target_untouched_and_the_session_alive()
     };
     let during = h.wait_console(tab, |s| s.export.as_ref().is_some_and(|p| p.rows > 0)).await;
     assert_eq!((during.work, during.export.as_ref().map(|p| (p.result, p.format))), (Some(ConsoleWork::Export), Some((meta.r#ref, ExportFormat::Csv))));
-    assert!(matches!(h.engine.console_run(tab, RunRequest::Script { text: "select 1".into(), target: RunTarget::All }).await, Err(RunError::Busy)), "the export holds the session");
+    assert!(matches!(h.engine.console_run(tab, RunRequest::Script { text: "select 1".into(), target: RunTarget::All }, None).await, Err(RunError::Busy)), "the export holds the session");
     h.engine.console_cancel(tab).await;
 
     assert!(matches!(export.await.unwrap(), Err(ExportError::Cancelled)));
@@ -977,7 +977,7 @@ async fn a_table_tabs_all_rows_is_the_whole_filtered_table_in_page_order() {
     h.engine.set_settings(Settings { table_page_size: 10, ..h.engine.settings() });
     let tab = h.sql_tab(TxnMode::AutoCommit).await;
     let query = TableQuery { r#where: "status <> 'cancelled'".into(), order_by: "total DESC".into(), ..Default::default() };
-    let accepted = h.engine.console_run(tab, RunRequest::TablePage { schema: "public".into(), table: "orders".into(), page: 1, query }).await.unwrap();
+    let accepted = h.engine.console_run(tab, RunRequest::TablePage { schema: "public".into(), table: "orders".into(), page: 1, query }, None).await.unwrap();
     let state = h.wait_finished(tab, accepted.run_id).await;
     let meta = Harness::result(&state, 0);
     assert_eq!((meta.row_count, meta.truncated, &meta.all_rows), (10, None, &AllRows::Table));
@@ -1084,11 +1084,11 @@ async fn schema_and_search_path_follow_the_console_config() {
     assert_eq!(h.scalar(tab, "show search_path").await, "public");
     assert_eq!(h.scalar(tab, "show application_name").await, "L1 Data");
     for copy in ["copy customers from stdin", "copy public.customers (id) to stdout", "copy pg_temp.nope from stdin with (format csv)"] {
-        let err = h.engine.console_run(tab, RunRequest::Script { text: copy.into(), target: RunTarget::All }).await.err();
+        let err = h.engine.console_run(tab, RunRequest::Script { text: copy.into(), target: RunTarget::All }, None).await.err();
         assert!(matches!(err, Some(RunError::Unsupported { .. })), "{copy}: {err:?}");
     }
     assert_eq!(h.scalar(tab, "select 5").await, "5", "the session survived the rejected COPYs");
-    assert!(matches!(h.engine.console_run(tab, RunRequest::Script { text: " -- nothing\n".into(), target: RunTarget::All }).await, Err(RunError::NoStatement)));
+    assert!(matches!(h.engine.console_run(tab, RunRequest::Script { text: " -- nothing\n".into(), target: RunTarget::All }, None).await, Err(RunError::NoStatement)));
     h.engine.console_close(tab, false).await.unwrap();
     assert!(h.engine.boot().consoles.is_empty());
     h.engine.disconnect(h.conn, false).await.unwrap();
@@ -1138,7 +1138,7 @@ async fn table_apply_commits_every_change_or_none() {
     ok.updates.push(RowUpdate { key: vec![cell("id", Some("2"))], set: vec![cell("name", Some("b'2")), cell("note", Some("x"))] });
     ok.inserts.push(vec![cell("name", Some("d"))]);
     let before = h.log(tab).len();
-    let summary = h.engine.table_apply(tab, ok).await.unwrap();
+    let summary = h.engine.table_apply(tab, ok, None).await.unwrap();
     assert!(summary.committed);
     h.drain();
     assert_eq!(
@@ -1158,7 +1158,7 @@ async fn table_apply_commits_every_change_or_none() {
     let mut missing = changes(&table);
     missing.inserts.push(vec![cell("name", Some("e"))]);
     missing.updates.push(RowUpdate { key: vec![cell("id", Some("999"))], set: vec![cell("name", Some("ghost"))] });
-    let err = h.engine.table_apply(tab, missing).await.unwrap_err();
+    let err = h.engine.table_apply(tab, missing, None).await.unwrap_err();
     assert!(matches!(err, ApplyError::RowMismatch { change: ChangeRef { kind: ChangeKind::Update, index: 0 }, rows: 0 }), "{err:?}");
 
     let mut violating = changes(&table);
@@ -1166,7 +1166,7 @@ async fn table_apply_commits_every_change_or_none() {
     violating.inserts.push(vec![cell("note", Some("no name"))]);
     h.drain();
     let before = h.log(tab).len();
-    let err = h.engine.table_apply(tab, violating).await.unwrap_err();
+    let err = h.engine.table_apply(tab, violating, None).await.unwrap_err();
     assert!(matches!(&err, ApplyError::Failed { change: ChangeRef { kind: ChangeKind::Insert, index: 0 }, error } if error.sqlstate.as_deref() == Some("23502")), "{err:?}");
     h.drain();
     let failed = &h.log(tab)[before..];
@@ -1179,7 +1179,7 @@ async fn table_apply_commits_every_change_or_none() {
 
     let mut keyless = changes(&table);
     keyless.deletes.push(vec![cell("name", Some("c"))]);
-    assert!(matches!(h.engine.table_apply(tab, keyless).await, Err(ApplyError::NoPrimaryKey)));
+    assert!(matches!(h.engine.table_apply(tab, keyless, None).await, Err(ApplyError::NoPrimaryKey)));
     h.run_ok(tab, &format!("drop table public.{table}")).await;
 }
 
@@ -1193,18 +1193,18 @@ async fn table_apply_in_manual_mode_waits_for_commit_and_a_failure_keeps_the_ope
 
     let mut insert = changes(&table);
     insert.inserts.push(vec![cell("name", Some("d"))]);
-    let summary = h.engine.table_apply(manual, insert).await.unwrap();
+    let summary = h.engine.table_apply(manual, insert, None).await.unwrap();
     assert!(!summary.committed);
     assert_eq!(h.console(manual).txn, TxnState::Active);
     assert_eq!(rows_of(&mut h, auto, &table).await, "1:a:NULL 2:b:NULL 3:c:NULL", "other sessions don't see it before Commit");
 
     let mut failing = changes(&table);
     failing.updates.push(RowUpdate { key: vec![cell("id", Some("1"))], set: vec![cell("name", None)] });
-    assert!(matches!(h.engine.table_apply(manual, failing).await, Err(ApplyError::Failed { .. })));
+    assert!(matches!(h.engine.table_apply(manual, failing, None).await, Err(ApplyError::Failed { .. })));
     assert_eq!(h.console(manual).txn, TxnState::Active, "the savepoint kept the transaction usable");
     assert_eq!(rows_of(&mut h, manual, &table).await, "1:a:NULL 2:b:NULL 3:c:NULL 4:d:NULL", "earlier work in the transaction survives");
 
-    h.engine.console_commit(manual).await.unwrap();
+    h.engine.console_commit(manual, None).await.unwrap();
     assert_eq!(rows_of(&mut h, auto, &table).await, "1:a:NULL 2:b:NULL 3:c:NULL 4:d:NULL");
     h.run_ok(auto, &format!("drop table public.{table}")).await;
 }
@@ -1221,7 +1221,7 @@ async fn table_pages_sort_and_filter_in_the_engine() {
     };
     let page = h
         .engine
-        .console_run(tab, RunRequest::TablePage { schema: "public".into(), table: "customers".into(), page: 0, query: query.clone() })
+        .console_run(tab, RunRequest::TablePage { schema: "public".into(), table: "customers".into(), page: 0, query: query.clone() }, None)
         .await
         .unwrap();
     let state = h.wait_finished(tab, page.run_id).await;
@@ -1242,7 +1242,7 @@ async fn table_pages_sort_and_filter_in_the_engine() {
         TableQuery { r#where: "true; drop table customers".into(), ..Default::default() },
         TableQuery { order_by: "id; drop table customers".into(), ..Default::default() },
     ] {
-        let refused = h.engine.console_run(tab, RunRequest::TablePage { schema: "public".into(), table: "customers".into(), page: 0, query: smuggled }).await;
+        let refused = h.engine.console_run(tab, RunRequest::TablePage { schema: "public".into(), table: "customers".into(), page: 0, query: smuggled }, None).await;
         assert!(matches!(refused, Err(RunError::BadFilter)), "{refused:?}");
     }
 }
@@ -1255,7 +1255,7 @@ async fn sql_comments_in_where_and_order_by_keep_the_page_limit() {
     let query = TableQuery { order_by: "id DESC -- newest first".into(), filters: vec![], r#where: "region = 'APAC' -- only asia".into() };
     let page = h
         .engine
-        .console_run(tab, RunRequest::TablePage { schema: "public".into(), table: "customers".into(), page: 0, query: query.clone() })
+        .console_run(tab, RunRequest::TablePage { schema: "public".into(), table: "customers".into(), page: 0, query: query.clone() }, None)
         .await
         .unwrap();
     let state = h.wait_finished(tab, page.run_id).await;
@@ -1295,7 +1295,7 @@ async fn table_page_preserves_nested_domain_native_metadata_and_primary_key() {
 
         let accepted = h.engine.console_run(tab, RunRequest::TablePage {
             schema: schema.clone(), table: "items".into(), page: 0, query: TableQuery::default(),
-        }).await.unwrap();
+        }, None).await.unwrap();
         let state = h.wait_finished(tab, accepted.run_id).await;
         assert!(matches!(state.run, RunState::Finished { outcome: RunOutcome::Ok, .. }), "{:?}", state.run);
         let meta = Harness::result(&state, 0);
@@ -1313,7 +1313,7 @@ async fn table_page_preserves_nested_domain_native_metadata_and_primary_key() {
             schema: schema.clone(), table: "items".into(), inserts: vec![], deletes: vec![],
             updates: vec![RowUpdate { key, set: vec![cell("value", Some("43"))] }],
         };
-        assert!(h.engine.table_apply(tab, changes).await.unwrap().committed);
+        assert!(h.engine.table_apply(tab, changes, None).await.unwrap().committed);
         assert_eq!(h.scalar(tab, &format!("SELECT value FROM {schema}.items WHERE id = 1")).await, "43");
     }).await;
     oracle.batch_execute(&format!("DROP SCHEMA {schema} CASCADE")).await.unwrap();
@@ -1329,7 +1329,7 @@ async fn table_page_on_second_database_uses_its_pk() {
     let tab = h.sql_tab_on(TxnMode::AutoCommit, "reporting").await;
     let page = h
         .engine
-        .console_run(tab, RunRequest::TablePage { schema: "public".into(), table: "daily".into(), page: 0, query: TableQuery::default() })
+        .console_run(tab, RunRequest::TablePage { schema: "public".into(), table: "daily".into(), page: 0, query: TableQuery::default() }, None)
         .await
         .unwrap();
     let state = h.wait_finished(tab, page.run_id).await;
@@ -1346,7 +1346,7 @@ async fn table_page_on_second_database_uses_its_pk() {
 
     let mut changes = TableChanges { schema: "public".into(), table: "daily".into(), inserts: vec![], updates: vec![], deletes: vec![] };
     changes.updates.push(RowUpdate { key: vec![cell("day", Some("2026-01-02"))], set: vec![cell("orders", Some("101"))] });
-    assert!(h.engine.table_apply(tab, changes).await.unwrap().committed, "the full key of daily is its own primary key");
+    assert!(h.engine.table_apply(tab, changes, None).await.unwrap().committed, "the full key of daily is its own primary key");
     h.run_ok(tab, "update daily set orders = 101 where day = '2026-01-02'").await;
 }
 
@@ -1502,7 +1502,7 @@ async fn alter_database_in_a_manual_transaction_refreshes_the_list_on_commit() {
     let names = h.database_names();
     assert!(names.contains(&old) && !names.contains(&new), "an uncommitted rename changes nothing: {names:?}");
 
-    h.engine.console_commit(manual).await.unwrap();
+    h.engine.console_commit(manual, None).await.unwrap();
     let names = h.wait_database_names(|names| names.contains(&new)).await;
     assert!(!names.contains(&old), "the committed rename replaced the old name: {names:?}");
     h.run_ok(auto, &format!("drop database {new}")).await;
@@ -2108,4 +2108,505 @@ async fn a_stalled_session_does_not_hang_the_restart_or_disconnect_check() {
     let DisconnectError::OpenTransactions { mut tabs } = err else { panic!("{err:?}") };
     tabs.sort_by_key(|t| t.tab_id.0);
     assert_eq!(tabs, both);
+}
+
+async fn set_environment(h: &Harness, environment: Option<Environment>) {
+    let draft = ConnectionDraft { id: Some(h.conn), password: PasswordInput::Keep, environment, ..draft_from_url(&url(), "dev").unwrap() };
+    h.engine.save_connection(draft).await.unwrap();
+}
+
+fn script(text: &str) -> RunRequest {
+    RunRequest::Script { text: text.into(), target: RunTarget::All }
+}
+
+async fn asked_to_run(h: &Harness, tab: TabId, request: RunRequest, confirmed: Option<&WriteDigest>) -> WriteConfirmation {
+    match h.engine.console_run(tab, request, confirmed.cloned()).await {
+        Err(RunError::ConfirmWrites { confirmation }) => confirmation,
+        other => panic!("expected ConfirmWrites, got {other:?}"),
+    }
+}
+
+async fn count(oracle: &tokio_postgres::Client, table: &str) -> i64 {
+    oracle.query_one(&format!("select count(*) from public.{table}"), &[]).await.unwrap().get(0)
+}
+
+#[tokio::test]
+async fn a_write_on_production_runs_only_with_the_digest_of_the_same_work_and_target() {
+    let mut h = Harness::start().await;
+    let oracle = h.oracle().await;
+    let table = unique("t_guard");
+    oracle.batch_execute(&format!("create table public.{table} (n int)")).await.unwrap();
+    set_environment(&h, Some(Environment::Production)).await;
+    let tab = h.sql_tab(TxnMode::AutoCommit).await;
+    let history = h.history_len();
+
+    let one = format!("insert into public.{table} values (1)");
+    let asked = asked_to_run(&h, tab, script(&format!("select 1;\n{one};")), None).await;
+    assert_eq!((asked.connection.as_str(), asked.database.as_str(), asked.sends.count), ("dev", "shop", 1));
+    assert_eq!(asked.sends.statements, [one.as_str()]);
+    assert_eq!(count(&oracle, &table).await, 0, "a refused run sends nothing");
+    assert!(matches!(h.console(tab).run, RunState::Idle), "{:?}", h.console(tab).run);
+
+    let stale = asked_to_run(&h, tab, script(&format!("select 1;\ninsert into public.{table} values (2);")), Some(&asked.digest)).await;
+    assert_ne!(stale.digest, asked.digest);
+    assert_eq!(count(&oracle, &table).await, 0, "a digest for other text sends nothing");
+
+    let manual = h.sql_tab(TxnMode::Manual).await;
+    asked_to_run(&h, manual, script(&format!("select 1;\n{one};")), Some(&asked.digest)).await;
+
+    let accepted = h.engine.console_run(tab, script(&format!("select 1;\n{one};")), Some(asked.digest.clone())).await.unwrap();
+    let state = h.wait_finished(tab, accepted.run_id).await;
+    assert!(matches!(state.run, RunState::Finished { outcome: RunOutcome::Ok, .. }), "{:?}", state.run);
+    assert_eq!(count(&oracle, &table).await, 1);
+    assert_eq!(h.history_len(), history + 2, "only the run that ran is in history");
+
+    h.run_ok(tab, &format!("select count(*) from public.{table}")).await;
+
+    let selected = format!("select 1;\n{one};\ninsert into public.{table} values (3);");
+    let from = selected.find("insert").unwrap() as u32;
+    let to = from + one.len() as u32 + 1;
+    let selection = RunRequest::Script { text: selected.clone(), target: RunTarget::Selection { from: DocOffset(from), to: DocOffset(to) } };
+    let asked = asked_to_run(&h, tab, selection, None).await;
+    assert_eq!((asked.sends.count, asked.sends.statements.as_slice()), (1, [one.clone()].as_slice()));
+
+    asked_to_run(&h, tab, script(&one), None).await;
+    set_environment(&h, Some(Environment::Staging)).await;
+    asked_to_run(&h, tab, script(&one), None).await;
+    let staging = h.sql_tab(TxnMode::AutoCommit).await;
+    h.run_ok(staging, &one).await;
+    set_environment(&h, None).await;
+    let unset = h.sql_tab(TxnMode::AutoCommit).await;
+    h.run_ok(unset, &one).await;
+    assert_eq!(count(&oracle, &table).await, 3, "a session opened on Staging or unset writes without a digest");
+
+    oracle.batch_execute(&format!("drop table public.{table}")).await.unwrap();
+}
+
+#[tokio::test]
+async fn a_digest_holds_only_while_the_connection_stays_as_asked() {
+    let h = Harness::start().await;
+    let oracle = h.oracle().await;
+    let table = unique("t_guard");
+    oracle.batch_execute(&format!("create table public.{table} (n int)")).await.unwrap();
+    set_environment(&h, Some(Environment::Production)).await;
+    let tab = h.sql_tab(TxnMode::AutoCommit).await;
+    let one = format!("insert into public.{table} values (1)");
+    let asked = asked_to_run(&h, tab, script(&one), None).await;
+
+    let renamed = ConnectionDraft {
+        id: Some(h.conn),
+        name: "dev renamed".into(),
+        password: PasswordInput::Keep,
+        environment: Some(Environment::Production),
+        ..draft_from_url(&url(), "dev").unwrap()
+    };
+    h.engine.save_connection(renamed).await.unwrap();
+    let again = asked_to_run(&h, tab, script(&one), Some(&asked.digest)).await;
+    assert_eq!(again.connection, "dev renamed");
+    assert_eq!(count(&oracle, &table).await, 0);
+    oracle.batch_execute(&format!("drop table public.{table}")).await.unwrap();
+}
+
+#[tokio::test]
+async fn staged_edits_on_production_apply_only_with_the_digest_of_the_same_edits() {
+    let mut h = Harness::start().await;
+    h.engine.connect(h.conn).await.unwrap();
+    let tab = h.sql_tab(TxnMode::AutoCommit).await;
+    let table = edit_table(&mut h, tab).await;
+    set_environment(&h, Some(Environment::Production)).await;
+    let reader = h.sql_tab(TxnMode::AutoCommit).await;
+
+    let mut edits = changes(&table);
+    edits.updates.push(RowUpdate { key: vec![cell("id", Some("1"))], set: vec![cell("note", Some("x"))] });
+    edits.inserts.push(vec![cell("name", Some("d"))]);
+    let asked = match h.engine.table_apply(tab, edits.clone(), None).await {
+        Err(ApplyError::ConfirmWrites { confirmation }) => confirmation,
+        other => panic!("expected ConfirmWrites, got {other:?}"),
+    };
+    assert_eq!((asked.sends.count, asked.holds.count), (2, 2), "the setup's auto-commit writes stay held, because no COMMIT ended them");
+    assert_eq!(
+        asked.sends.statements,
+        [format!("UPDATE \"public\".\"{table}\" SET \"note\" = 'x' WHERE \"id\" = '1'"), format!("INSERT INTO \"public\".\"{table}\" (\"name\") VALUES ('d')")]
+    );
+    assert_eq!(rows_of(&mut h, reader, &table).await, "1:a:NULL 2:b:NULL 3:c:NULL");
+
+    let mut other = edits.clone();
+    other.inserts[0] = vec![cell("name", Some("e"))];
+    assert!(matches!(h.engine.table_apply(tab, other, Some(asked.digest.clone())).await, Err(ApplyError::ConfirmWrites { .. })));
+    assert_eq!(rows_of(&mut h, reader, &table).await, "1:a:NULL 2:b:NULL 3:c:NULL", "a digest for other edits applies nothing");
+
+    assert!(h.engine.table_apply(tab, edits, Some(asked.digest)).await.unwrap().committed);
+    assert_eq!(rows_of(&mut h, tab, &table).await, "1:a:x 2:b:NULL 3:c:NULL 4:d:NULL");
+    set_environment(&h, None).await;
+    h.run_ok(tab, &format!("drop table public.{table}")).await;
+}
+
+#[tokio::test]
+async fn a_session_opened_on_production_still_asks_after_the_connection_moves_elsewhere() {
+    let mut h = Harness::start().await;
+    let oracle = h.oracle().await;
+    let table = unique("t_guard");
+    oracle.batch_execute(&format!("create table public.{table} (n int primary key)")).await.unwrap();
+    set_environment(&h, Some(Environment::Production)).await;
+    let tab = h.sql_tab(TxnMode::AutoCommit).await;
+    h.run_ok(tab, "select 1").await;
+    h.engine.refresh_catalog(h.db()).await.unwrap();
+
+    let page = RunRequest::TablePage { schema: "public".into(), table: table.clone(), page: 0, query: TableQuery::default() };
+    let accepted = h.engine.console_run(tab, page, None).await.expect("a table page reads, so it never asks");
+    h.wait_finished(tab, accepted.run_id).await;
+
+    let moved = ConnectionDraft {
+        id: Some(h.conn),
+        host: "moved.invalid".into(),
+        password: PasswordInput::Keep,
+        environment: Some(Environment::Local),
+        ..draft_from_url(&url(), "dev").unwrap()
+    };
+    h.engine.save_connection(moved).await.unwrap();
+    let asked = asked_to_run(&h, tab, script(&format!("insert into public.{table} values (1)")), None).await;
+    assert_eq!(asked.sends.count, 1);
+    assert_eq!(count(&oracle, &table).await, 0, "the live session still points where it was opened as Production");
+    oracle.batch_execute(&format!("drop table public.{table}")).await.unwrap();
+}
+
+async fn resave(h: &Harness, host: &str, environment: Option<Environment>) {
+    let saved = h.engine.boot().connections.into_iter().find(|c| c.id == h.conn).unwrap();
+    let draft = ConnectionDraft {
+        database_kind: saved.database_kind,
+        id: Some(saved.id),
+        name: saved.name,
+        host: host.into(),
+        port: saved.port,
+        database: saved.database,
+        user: saved.user,
+        ssl_mode: saved.ssl_mode,
+        ca_cert_path: saved.ca_cert_path,
+        password: PasswordInput::Keep,
+        color: saved.color,
+        ssh: None,
+        environment,
+        sql_server_auth: saved.sql_server_auth,
+    };
+    h.engine.save_connection(draft).await.unwrap();
+}
+
+fn saved_host(h: &Harness) -> String {
+    h.engine.boot().connections.into_iter().find(|c| c.id == h.conn).unwrap().host
+}
+
+#[tokio::test]
+async fn a_session_opened_on_production_asks_after_the_connection_moves_away_and_back_as_local() {
+    let mut h = Harness::start().await;
+    let oracle = h.oracle().await;
+    let table = unique("t_guard");
+    oracle.batch_execute(&format!("create table public.{table} (n int)")).await.unwrap();
+    let home = saved_host(&h);
+    resave(&h, &home, Some(Environment::Production)).await;
+    let tab = h.sql_tab(TxnMode::AutoCommit).await;
+    h.run_ok(tab, "select 1").await;
+
+    resave(&h, "moved.invalid", Some(Environment::Local)).await;
+    h.run_ok(tab, "select 1").await;
+    resave(&h, &home, Some(Environment::Local)).await;
+
+    let asked = asked_to_run(&h, tab, script(&format!("insert into public.{table} values (1)")), None).await;
+    assert_eq!(asked.sends.count, 1);
+    assert_eq!(count(&oracle, &table).await, 0, "the tab's session was opened as Production");
+    oracle.batch_execute(&format!("drop table public.{table}")).await.unwrap();
+}
+
+#[tokio::test]
+async fn a_session_opened_on_production_asks_after_the_instance_reconnects_as_local() {
+    let role = Role::create().await;
+    let mut h = Harness::start_as(&role).await;
+    let table = unique("t_guard");
+    role.oracle.batch_execute(&format!("create table public.{table} (n int); grant select, insert on public.{table} to {}", role.name)).await.unwrap();
+    let home = saved_host(&h);
+    resave(&h, &home, Some(Environment::Production)).await;
+    let tab = h.sql_tab(TxnMode::AutoCommit).await;
+    let state = h.run_ok(tab, "select 1").await;
+    let SessionState::Open { backend_pid: console_pid } = state.session else { panic!("{:?}", state.session) };
+
+    resave(&h, &home, Some(Environment::Local)).await;
+    let metadata: Vec<i32> = role.backends().await.into_iter().filter(|(_, pid)| *pid != console_pid).map(|(_, pid)| pid).collect();
+    let [home_pid] = metadata[..] else { panic!("one home metadata session, found {metadata:?}") };
+    role.oracle.simple_query(&format!("select pg_terminate_backend({home_pid})")).await.unwrap();
+    h.wait_status(|s| !matches!(s, ConnStatus::Connected { .. })).await;
+
+    let asked = asked_to_run(&h, tab, script(&format!("insert into public.{table} values (1)")), None).await;
+    assert_eq!(asked.sends.count, 1);
+    assert!(matches!(h.status(), ConnStatus::Connected { .. }), "the run reconnected the instance from the Local config");
+    assert!(matches!(h.console(tab).session, SessionState::Open { backend_pid } if backend_pid == console_pid), "the tab kept the session it opened as Production");
+    assert_eq!(count(&role.oracle, &table).await, 0);
+    role.oracle.batch_execute(&format!("drop table public.{table}")).await.unwrap();
+    role.drop().await;
+}
+
+#[tokio::test]
+async fn commit_on_production_asks_for_writes_that_ran_before_the_connection_was_production() {
+    let mut h = Harness::start().await;
+    let oracle = h.oracle().await;
+    let table = unique("t_guard");
+    oracle.batch_execute(&format!("create table public.{table} (n int)")).await.unwrap();
+    set_environment(&h, Some(Environment::Staging)).await;
+    let tab = h.sql_tab(TxnMode::Manual).await;
+    let one = format!("insert into public.{table} values (1)");
+    assert_eq!(h.run_ok(tab, &one).await.txn, TxnState::Active);
+    set_environment(&h, Some(Environment::Production)).await;
+
+    let asked = match h.engine.console_commit(tab, None).await {
+        Err(TxnError::ConfirmWrites { confirmation }) => confirmation,
+        other => panic!("expected ConfirmWrites, got {other:?}"),
+    };
+    assert_eq!((asked.sends.count, asked.holds.count, asked.holds.statements.as_slice()), (0, 1, [one.clone()].as_slice()));
+    let typed = asked_to_run(&h, tab, script("commit"), None).await;
+    assert_eq!((typed.sends.count, typed.holds.statements.as_slice()), (0, [one.clone()].as_slice()), "a typed COMMIT names the writes it keeps");
+    assert_eq!(h.console(tab).txn, TxnState::Active, "a refused commit sends nothing");
+    assert_eq!(count(&oracle, &table).await, 0);
+
+    h.engine.console_commit(tab, Some(asked.digest)).await.unwrap();
+    assert_eq!(count(&oracle, &table).await, 1);
+
+    let confirmed = asked_to_run(&h, tab, script(&one), None).await;
+    let accepted = h.engine.console_run(tab, script(&one), Some(confirmed.digest)).await.unwrap();
+    h.wait_finished(tab, accepted.run_id).await;
+    h.engine.console_commit(tab, None).await.expect("a write asked as Production commits without a second question");
+    assert_eq!(count(&oracle, &table).await, 2);
+    oracle.batch_execute(&format!("drop table public.{table}")).await.unwrap();
+}
+
+async fn staging_writes_held_then_production(h: &mut Harness, table: &str) -> TabId {
+    set_environment(h, Some(Environment::Staging)).await;
+    let tab = h.sql_tab(TxnMode::Manual).await;
+    assert_eq!(h.run_ok(tab, &format!("insert into public.{table} values (1)")).await.txn, TxnState::Active);
+    set_environment(h, Some(Environment::Production)).await;
+    tab
+}
+
+#[tokio::test]
+async fn every_run_on_production_asks_while_the_transaction_holds_writes_that_ran_before() {
+    let mut h = Harness::start().await;
+    let oracle = h.oracle().await;
+    let table = unique("t_guard");
+    oracle.batch_execute(&format!("create table public.{table} (n int)")).await.unwrap();
+    let tab = staging_writes_held_then_production(&mut h, &table).await;
+
+    let held = format!("insert into public.{table} values (1)");
+    for (text, sends) in [("select 1", 0), ("select 1;\ncommit", 0), ("end", 0), ("prepare transaction 'l1_held'", 1)] {
+        let asked = asked_to_run(&h, tab, script(text), None).await;
+        assert_eq!((asked.sends.count, asked.holds.count, asked.holds.statements.as_slice()), (sends, 1, [held.clone()].as_slice()), "{text}");
+        assert_eq!(h.console(tab).txn, TxnState::Active, "{text}: a refused run sends nothing");
+    }
+    assert_eq!(count(&oracle, &table).await, 0);
+
+    let asked = asked_to_run(&h, tab, script("select 1"), None).await;
+    let accepted = h.engine.console_run(tab, script("select 1"), Some(asked.digest)).await.unwrap();
+    h.wait_finished(tab, accepted.run_id).await;
+    h.run_ok(tab, "commit").await;
+    assert_eq!(count(&oracle, &table).await, 1, "the confirmed run marked the held write asked");
+    oracle.batch_execute(&format!("drop table public.{table}")).await.unwrap();
+}
+
+#[tokio::test]
+async fn a_begin_behind_any_comment_holds_its_writes_until_production_asks() {
+    let mut h = Harness::start().await;
+    let oracle = h.oracle().await;
+    let table = unique("t_guard");
+    oracle.batch_execute(&format!("create table public.{table} (n int)")).await.unwrap();
+    for header in ["/*/ header */", "/* a /* b */ c */", "-- c\r"] {
+        set_environment(&h, Some(Environment::Staging)).await;
+        let tab = h.sql_tab(TxnMode::AutoCommit).await;
+        let held = format!("insert into public.{table} values (1)");
+        assert_eq!(h.run_ok(tab, &format!("{header} begin;\n{held};")).await.txn, TxnState::Active, "{header:?}");
+        set_environment(&h, Some(Environment::Production)).await;
+        for text in ["select now()", "commit"] {
+            let asked = asked_to_run(&h, tab, script(text), None).await;
+            assert_eq!(asked.holds.statements, [held.clone()], "{header:?} then {text}");
+        }
+        assert!(matches!(h.engine.console_commit(tab, None).await, Err(TxnError::ConfirmWrites { .. })), "{header:?}");
+        assert_eq!(count(&oracle, &table).await, 0, "{header:?}: nothing committed unasked");
+        h.engine.console_rollback(tab).await.unwrap();
+    }
+    oracle.batch_execute(&format!("drop table public.{table}")).await.unwrap();
+}
+
+#[tokio::test]
+async fn a_rollback_to_a_savepoint_keeps_the_writes_before_it_held() {
+    let mut h = Harness::start().await;
+    let oracle = h.oracle().await;
+    let table = unique("t_guard");
+    oracle.batch_execute(&format!("create table public.{table} (n int)")).await.unwrap();
+    let held = format!("insert into public.{table} values (1)");
+    for rollback_to in ["rollback to s", "rollback work to savepoint s", "ROLLBACK TRANSACTION TO s"] {
+        set_environment(&h, Some(Environment::Staging)).await;
+        let tab = h.sql_tab(TxnMode::AutoCommit).await;
+        let state = h.run_ok(tab, &format!("begin;\n{held};\nsavepoint s;\n{rollback_to}")).await;
+        assert_eq!(state.txn, TxnState::Active, "{rollback_to}");
+        set_environment(&h, Some(Environment::Production)).await;
+        let asked = asked_to_run(&h, tab, script("commit"), None).await;
+        assert_eq!(asked.holds.statements, [held.clone()], "{rollback_to}");
+        assert_eq!(count(&oracle, &table).await, 0, "{rollback_to}: nothing committed unasked");
+        h.engine.console_rollback(tab).await.unwrap();
+    }
+    oracle.batch_execute(&format!("drop table public.{table}")).await.unwrap();
+}
+
+#[tokio::test]
+async fn pointing_a_tab_at_another_connection_drops_the_writes_its_session_held() {
+    let mut h = Harness::start().await;
+    let oracle = h.oracle().await;
+    let table = unique("t_guard");
+    oracle.batch_execute(&format!("create table public.{table} (n int)")).await.unwrap();
+    set_environment(&h, Some(Environment::Staging)).await;
+    let tab = h.sql_tab(TxnMode::AutoCommit).await;
+    h.run_ok(tab, &format!("insert into public.{table} values (1)")).await;
+    let production = ConnectionDraft { environment: Some(Environment::Production), ..draft_from_url(&url(), "prod").unwrap() };
+    let production = h.engine.save_connection(production).await.unwrap().id;
+    let config = ConsoleConfig { connection_id: production, database: h.database.clone(), schema: None, mode: TxnMode::AutoCommit };
+    h.engine.console_configure(tab, config).await.unwrap();
+    h.run_ok(tab, "select 1").await;
+    asked_to_run(&h, tab, script(&format!("insert into public.{table} values (2)")), None).await;
+    oracle.batch_execute(&format!("drop table public.{table}")).await.unwrap();
+}
+
+#[tokio::test]
+async fn a_staged_apply_off_production_stays_held_until_commit_asks() {
+    let mut h = Harness::start().await;
+    h.engine.connect(h.conn).await.unwrap();
+    set_environment(&h, Some(Environment::Staging)).await;
+    let setup = h.sql_tab(TxnMode::AutoCommit).await;
+    let table = edit_table(&mut h, setup).await;
+    let tab = h.sql_tab(TxnMode::Manual).await;
+    let mut edits = changes(&table);
+    edits.inserts.push(vec![cell("name", Some("d"))]);
+    assert!(!h.engine.table_apply(tab, edits, None).await.unwrap().committed);
+    set_environment(&h, Some(Environment::Production)).await;
+
+    let asked = match h.engine.console_commit(tab, None).await {
+        Err(TxnError::ConfirmWrites { confirmation }) => confirmation,
+        other => panic!("expected ConfirmWrites, got {other:?}"),
+    };
+    assert_eq!(asked.holds.statements, [format!("INSERT INTO \"public\".\"{table}\" (\"name\") VALUES ('d')")]);
+    h.engine.console_rollback(tab).await.unwrap();
+    set_environment(&h, None).await;
+    h.run_ok(setup, &format!("drop table public.{table}")).await;
+}
+
+#[tokio::test]
+async fn writes_stay_held_until_the_engine_sees_their_transaction_end() {
+    let mut h = Harness::start().await;
+    let oracle = h.oracle().await;
+    let table = unique("t_guard");
+    oracle.batch_execute(&format!("create table public.{table} (n int)")).await.unwrap();
+    set_environment(&h, Some(Environment::Staging)).await;
+    let tab = h.sql_tab(TxnMode::AutoCommit).await;
+    let write = format!("insert into public.{table} values (1)");
+    for end in ["commit", "rollback", "end", "abort"] {
+        set_environment(&h, Some(Environment::Staging)).await;
+        assert_eq!(h.run_ok(tab, &write).await.txn, TxnState::Idle);
+        set_environment(&h, Some(Environment::Production)).await;
+        let asked = asked_to_run(&h, tab, script("select 1"), None).await;
+        assert_eq!(asked.holds.statements, [write.clone()], "an Idle the engine infers does not end the write's transaction");
+        set_environment(&h, Some(Environment::Staging)).await;
+        h.run_ok(tab, end).await;
+        set_environment(&h, Some(Environment::Production)).await;
+        h.run_ok(tab, "select 1").await;
+    }
+    assert_eq!(count(&oracle, &table).await, 4);
+    oracle.batch_execute(&format!("drop table public.{table}")).await.unwrap();
+}
+
+#[tokio::test]
+async fn commit_and_chain_keeps_a_transaction_open_and_ends_the_writes_it_held() {
+    let mut h = Harness::start().await;
+    let oracle = h.oracle().await;
+    let table = unique("t_guard");
+    oracle.batch_execute(&format!("create table public.{table} (n int)")).await.unwrap();
+    set_environment(&h, Some(Environment::Staging)).await;
+    let tab = h.sql_tab(TxnMode::AutoCommit).await;
+    h.run_ok(tab, "begin").await;
+    assert_eq!(h.run_ok(tab, "commit and chain").await.txn, TxnState::Active);
+    assert_eq!(h.run_ok(tab, &format!("insert into public.{table} values (1)")).await.txn, TxnState::Active);
+    set_environment(&h, Some(Environment::Production)).await;
+    assert!(matches!(h.engine.console_commit(tab, None).await, Err(TxnError::ConfirmWrites { .. })));
+    asked_to_run(&h, tab, script("commit"), None).await;
+    assert_eq!(count(&oracle, &table).await, 0);
+
+    set_environment(&h, Some(Environment::Staging)).await;
+    assert_eq!(h.run_ok(tab, "commit work and chain").await.txn, TxnState::Active);
+    assert_eq!(count(&oracle, &table).await, 1);
+    assert_eq!(h.run_ok(tab, &format!("insert into public.{table} values (2)")).await.txn, TxnState::Active);
+    assert_eq!(h.run_ok(tab, "rollback and chain").await.txn, TxnState::Active);
+    set_environment(&h, Some(Environment::Production)).await;
+    h.run_ok(tab, "select 1").await;
+    h.engine.console_commit(tab, None).await.expect("a chained end left no held writes");
+    assert_eq!(count(&oracle, &table).await, 1);
+    oracle.batch_execute(&format!("drop table public.{table}")).await.unwrap();
+}
+
+#[tokio::test]
+async fn prepared_transaction_statements_on_production_wait_for_the_digest() {
+    let mut h = Harness::start().await;
+    let oracle = h.oracle().await;
+    let table = unique("t_guard");
+    let gid = unique("l1_gid");
+    oracle.batch_execute(&format!("create table public.{table} (n int)")).await.unwrap();
+    let held = staging_writes_held_then_production(&mut h, &table).await;
+    let other = h.sql_tab(TxnMode::AutoCommit).await;
+    for (tab, text) in [(held, format!("prepare transaction '{gid}'")), (other, format!("commit prepared '{gid}'")), (other, format!("rollback prepared '{gid}'"))] {
+        let asked = asked_to_run(&h, tab, script(&text), None).await;
+        assert_eq!(asked.sends.statements, [text.clone()]);
+    }
+    let prepared: i64 = oracle.query_one(&format!("select count(*) from pg_prepared_xacts where gid = '{gid}'"), &[]).await.unwrap().get(0);
+    assert_eq!((prepared, count(&oracle, &table).await), (0, 0), "a refused statement prepares and commits nothing");
+    h.engine.console_rollback(held).await.unwrap();
+    oracle.batch_execute(&format!("drop table public.{table}")).await.unwrap();
+}
+
+#[tokio::test]
+async fn a_transaction_prepared_off_production_commits_on_production_only_with_the_digest() {
+    let mut h = Harness::start().await;
+    let oracle = h.oracle().await;
+    let slots: String = oracle.query_one("show max_prepared_transactions", &[]).await.unwrap().get(0);
+    if slots == "0" {
+        assert!(
+            std::env::var_os("L1_DATA_TEST_PG_NO_PREPARED").is_some(),
+            "the server has max_prepared_transactions = 0. Run `pnpm db:up` to recreate it with slots, or set L1_DATA_TEST_PG_NO_PREPARED=1 to skip this test"
+        );
+        return;
+    }
+    let table = unique("t_guard");
+    let gid = unique("l1_gid");
+    oracle.batch_execute(&format!("create table public.{table} (n int)")).await.unwrap();
+    let held = staging_writes_held_then_production(&mut h, &table).await;
+    let prepared = format!("select count(*) from pg_prepared_xacts where gid = '{gid}'");
+    let prepared = async || oracle.query_one(&prepared, &[]).await.unwrap().get::<_, i64>(0);
+
+    set_environment(&h, Some(Environment::Staging)).await;
+    h.run_ok(held, &format!("prepare transaction '{gid}'")).await;
+    assert_eq!(prepared().await, 1);
+    set_environment(&h, Some(Environment::Production)).await;
+    let other = h.sql_tab(TxnMode::AutoCommit).await;
+    let commit = format!("commit prepared '{gid}'");
+    let asked = asked_to_run(&h, other, script(&commit), None).await;
+    asked_to_run(&h, other, script(&format!("rollback prepared '{gid}'")), None).await;
+    assert_eq!((prepared().await, count(&oracle, &table).await), (1, 0));
+    let accepted = h.engine.console_run(other, script(&commit), Some(asked.digest)).await.unwrap();
+    h.wait_finished(other, accepted.run_id).await;
+    assert_eq!((prepared().await, count(&oracle, &table).await), (0, 1));
+    oracle.batch_execute(&format!("drop table public.{table}")).await.unwrap();
+}
+
+#[tokio::test]
+async fn ddl_committed_by_commit_and_chain_refreshes_the_catalog() {
+    let mut h = Harness::start().await;
+    let tab = h.sql_tab(TxnMode::AutoCommit).await;
+    h.engine.connect(h.conn).await.unwrap();
+    let table = unique("t_chain");
+    let initial = h.engine.catalog(h.db()).await.unwrap().version;
+    h.run_ok(tab, &format!("begin;\ncreate table public.{table} (id int);\ncommit and chain;\nrollback")).await;
+    let catalog = h.catalog_when(&h.db(), |c| c.version > initial).await;
+    assert!(catalog.relation("public", &table).is_some(), "the chained commit kept the table");
+    h.run_ok(tab, &format!("drop table public.{table}")).await;
 }

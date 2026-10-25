@@ -46,7 +46,7 @@ fn saved(connection_id: ConnectionId, database: &str, table: bool) -> TabSnapsho
 
 async fn run(engine: &Engine, tab: TabId, request: RunRequest) -> ConsoleState {
     let mut events = engine.subscribe();
-    let accepted = engine.console_run(tab, request).await.unwrap();
+    let accepted = engine.console_run(tab, request, None).await.unwrap();
     tokio::time::timeout(Duration::from_secs(10), async {
         loop {
             match events.recv().await {
@@ -173,7 +173,7 @@ async fn saved_config_edits_and_other_case_variants_do_not_retarget_the_connecte
         assert!(matches!(engine.catalog(DatabaseRef { connection_id: config.id, database: database.into() }).await, Err(CatalogError::UnknownDatabase { .. })));
         let state = engine.console_configure(tab, console(config.id, database)).await.unwrap();
         assert_eq!(state.config.database, database);
-        assert!(matches!(engine.console_run(tab, query()).await, Err(RunError::NotConfigured)));
+        assert!(matches!(engine.console_run(tab, query(), None).await, Err(RunError::NotConfigured)));
     }
     engine.console_configure(tab, console(config.id, "reporting")).await.unwrap();
     engine.disconnect(config.id, true).await.unwrap();

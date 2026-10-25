@@ -1,0 +1,236 @@
+use serde::Serialize;
+use sha2::{Digest, Sha256};
+
+use crate::model::{ConnectionConfig, ConsoleConfigView, DatabaseKind, Environment, ExecutionUnitKind, TxnState, WriteConfirmation, WriteDigest, WriteList};
+use crate::text;
+
+const SHOWN: usize = 3;
+const SHOWN_CHARS: usize = 2000;
+
+#[derive(Serialize)]
+pub struct Target<'a> {
+    pub saved: &'a ConnectionConfig,
+    pub opened: &'a ConnectionConfig,
+    pub console: &'a ConsoleConfigView,
+    pub txn: TxnState,
+    pub unasked: &'a WriteList,
+}
+
+#[derive(Debug)]
+pub struct WritesChecked {
+    on_production: bool,
+}
+
+impl WritesChecked {
+    pub fn writes_stay_unasked(&self) -> bool {
+        !self.on_production
+    }
+
+    pub fn mark_held_writes_asked(&self, unasked: &mut WriteList) {
+        if self.on_production {
+            *unasked = WriteList::default();
+        }
+    }
+}
+
+impl WriteList {
+    pub fn add(&mut self, sql: &str) {
+        if self.statements.len() < SHOWN {
+            self.statements.push(shown(sql));
+        }
+        self.count = self.count.saturating_add(1);
+    }
+}
+
+impl Target<'_> {
+    fn on_production(&self) -> bool {
+        [self.saved, self.opened].iter().any(|c| c.environment == Some(Environment::Production))
+    }
+
+    fn digest(&self, work: &[&str]) -> WriteDigest {
+        let mut hasher = Sha256::new();
+        serde_json::to_writer(&mut hasher, &(self, work)).expect("model types serialize to JSON");
+        WriteDigest::new(format!("{:x}", hasher.finalize()))
+    }
+}
+
+/// Held writes make any work ask, because a batch can commit them in forms the classifier cannot see, such as
+/// `IF @@TRANCOUNT > 0 COMMIT` or `PREPARE TRANSACTION` followed by `COMMIT PREPARED` from another session.
+pub fn check(target: &Target, statements: &[&str], confirmed: Option<&WriteDigest>) -> Result<WritesChecked, WriteConfirmation> {
+    if !target.on_production() {
+        return Ok(WritesChecked { on_production: false });
+    }
+    let kind = target.saved.database_kind;
+    let mut sends = WriteList::default();
+    statements.iter().filter(|sql| text::is_write(sql, kind)).for_each(|sql| sends.add(sql));
+    if sends.count == 0 && target.unasked.count == 0 {
+        return Ok(WritesChecked { on_production: true });
+    }
+    let digest = target.digest(statements);
+    if confirmed == Some(&digest) {
+        return Ok(WritesChecked { on_production: true });
+    }
+    Err(WriteConfirmation {
+        connection: target.saved.name.clone(),
+        database: target.console.database.clone(),
+        unit: match kind {
+            DatabaseKind::Postgres => ExecutionUnitKind::Statement,
+            DatabaseKind::SqlServer => ExecutionUnitKind::Batch,
+        },
+        sends,
+        holds: target.unasked.clone(),
+        digest,
+    })
+}
+
+fn shown(sql: &str) -> String {
+    let sql = sql.trim();
+    match sql.char_indices().nth(SHOWN_CHARS) {
+        Some((end, _)) => format!("{}…", &sql[..end]),
+        None => sql.to_owned(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::model::{ConnectionId, SslMode, TxnMode};
+    use uuid::Uuid;
+
+    static NONE: WriteList = WriteList { count: 0, statements: Vec::new() };
+
+    fn connection(environment: Option<Environment>) -> ConnectionConfig {
+        ConnectionConfig {
+            database_kind: DatabaseKind::Postgres,
+            id: ConnectionId(Uuid::from_u128(1)),
+            name: "prod".into(),
+            host: "db".into(),
+            port: 5432,
+            database: "shop".into(),
+            user: "app".into(),
+            ssl_mode: SslMode::Prefer,
+            ca_cert_path: None,
+            has_password: false,
+            color: None,
+            ssh: None,
+            environment,
+            sql_server_auth: None,
+        }
+    }
+
+    fn console(mode: TxnMode) -> ConsoleConfigView {
+        ConsoleConfigView { connection_id: ConnectionId(Uuid::from_u128(1)), database: "shop".into(), schema: None, mode }
+    }
+
+    fn on<'a>(connection: &'a ConnectionConfig, console: &'a ConsoleConfigView) -> Target<'a> {
+        Target { saved: connection, opened: connection, console, txn: TxnState::Idle, unasked: &NONE }
+    }
+
+    fn list(statements: &[&str]) -> WriteList {
+        let mut list = WriteList::default();
+        statements.iter().for_each(|sql| list.add(sql));
+        list
+    }
+
+    fn shape(list: &WriteList) -> (u32, Vec<&str>) {
+        (list.count, list.statements.iter().map(String::as_str).collect())
+    }
+
+    const WORK: &[&str] = &["select 1", " insert into t values (1) ", "delete from t"];
+
+    #[test]
+    fn only_a_write_on_production_asks() {
+        let production = connection(Some(Environment::Production));
+        let auto = console(TxnMode::AutoCommit);
+        assert!(check(&on(&production, &auto), &["select 1", "begin", "commit"], None).is_ok());
+        for environment in [None, Some(Environment::Local), Some(Environment::Staging)] {
+            assert!(check(&on(&connection(environment), &auto), WORK, None).unwrap().writes_stay_unasked(), "{environment:?}");
+        }
+        let asked = check(&on(&production, &auto), WORK, None).unwrap_err();
+        assert_eq!((asked.connection.as_str(), asked.database.as_str(), asked.unit), ("prod", "shop", ExecutionUnitKind::Statement));
+        assert_eq!((shape(&asked.sends), shape(&asked.holds)), ((2, vec!["insert into t values (1)", "delete from t"]), (0, vec![])));
+        assert!(!check(&on(&production, &auto), WORK, Some(&asked.digest)).unwrap().writes_stay_unasked(), "a confirmed write is not unasked");
+    }
+
+    #[test]
+    fn a_session_opened_on_production_asks_until_it_closes() {
+        let auto = console(TxnMode::AutoCommit);
+        let production = connection(Some(Environment::Production));
+        let local = connection(Some(Environment::Local));
+        let session = |saved, opened| Target { saved, opened, console: &auto, txn: TxnState::Idle, unasked: &NONE };
+        assert!(check(&session(&local, &production), WORK, None).is_err(), "relabelled on the same server");
+        let moved = ConnectionConfig { host: "elsewhere".into(), ..local.clone() };
+        assert!(check(&session(&moved, &production), WORK, None).is_err(), "relabelled and moved");
+        assert!(check(&session(&production, &local), WORK, None).is_err(), "marked Production after the session opened");
+        assert!(check(&session(&local, &moved), WORK, None).is_ok());
+    }
+
+    #[test]
+    fn the_digest_holds_only_for_the_same_work_and_target() {
+        let production = connection(Some(Environment::Production));
+        let auto = console(TxnMode::AutoCommit);
+        let digest = check(&on(&production, &auto), WORK, None).unwrap_err().digest;
+        assert!(check(&on(&production, &auto), WORK, Some(&digest)).is_ok());
+
+        let edited = ["select 1", " insert into t values (2) ", "delete from t"];
+        assert!(check(&on(&production, &auto), &edited, Some(&digest)).is_err(), "a statement that writes changed");
+        let read_changed = ["select 2", " insert into t values (1) ", "delete from t"];
+        assert!(check(&on(&production, &auto), &read_changed, Some(&digest)).is_err(), "a statement that reads changed");
+        let manual = console(TxnMode::Manual);
+        assert!(check(&on(&production, &manual), WORK, Some(&digest)).is_err(), "the mode changed");
+        let other_db = ConsoleConfigView { database: "reporting".into(), ..auto.clone() };
+        assert!(check(&on(&production, &other_db), WORK, Some(&digest)).is_err(), "the database changed");
+        let other_schema = ConsoleConfigView { schema: Some("audit".into()), ..auto.clone() };
+        assert!(check(&on(&production, &other_schema), WORK, Some(&digest)).is_err(), "the schema changed");
+        let other_host = ConnectionConfig { host: "db2".into(), ..production.clone() };
+        assert!(check(&on(&other_host, &auto), WORK, Some(&digest)).is_err(), "the connection changed");
+        let reopened = Target { opened: &other_host, ..on(&production, &auto) };
+        assert!(check(&reopened, WORK, Some(&digest)).is_err(), "the session reached another server");
+        let open = Target { txn: TxnState::Active, ..on(&production, &auto) };
+        assert!(check(&open, WORK, Some(&digest)).is_err(), "the transaction state changed");
+        let held = list(&["update t set n = 1"]);
+        assert!(check(&Target { unasked: &held, ..on(&production, &auto) }, WORK, Some(&digest)).is_err(), "the held writes changed");
+    }
+
+    #[test]
+    fn any_work_on_production_asks_while_the_transaction_holds_unasked_writes() {
+        let manual = console(TxnMode::Manual);
+        let production = connection(Some(Environment::Production));
+        let staging = connection(Some(Environment::Staging));
+        let held = list(&["insert into t values (1)", "delete from t"]);
+        let open = |saved, unasked| Target { saved, opened: &staging, console: &manual, txn: TxnState::Active, unasked };
+
+        assert!(check(&open(&staging, &held), &["commit"], None).is_ok(), "off Production nothing asks");
+        assert!(check(&open(&production, &NONE), &["select 1", "commit"], None).is_ok(), "nothing ran unasked");
+        for work in [&["COMMIT"][..], &["select 1"], &["IF @@TRANCOUNT > 0 COMMIT TRANSACTION"], &["prepare transaction 'p'"]] {
+            let asked = check(&open(&production, &held), work, None).unwrap_err();
+            assert_eq!(shape(&asked.holds), (2, vec!["insert into t values (1)", "delete from t"]), "{work:?}");
+        }
+        let asked = check(&open(&production, &held), WORK, None).unwrap_err();
+        assert_eq!((asked.sends.count, asked.holds.count), (2, 2));
+
+        let mut unasked = held.clone();
+        check(&open(&production, &held), WORK, Some(&asked.digest)).unwrap().mark_held_writes_asked(&mut unasked);
+        assert_eq!(unasked.count, 0, "the confirmed question listed them");
+        let mut unasked = held.clone();
+        check(&open(&staging, &held), WORK, None).unwrap().mark_held_writes_asked(&mut unasked);
+        assert_eq!(unasked.count, 2, "a check off Production keeps them");
+    }
+
+    #[test]
+    fn a_write_list_counts_every_write_and_keeps_the_first_three() {
+        let four = list(&["insert into t values (1)", "delete from t", "update t set n = 2", "truncate t"]);
+        assert_eq!(shape(&four), (4, vec!["insert into t values (1)", "delete from t", "update t set n = 2"]));
+        let long = format!("insert into t values ('{}')", "x".repeat(3 * SHOWN_CHARS));
+        let cut = &list(&[&long]).statements[0];
+        assert_eq!(cut.chars().count(), SHOWN_CHARS + 1);
+        assert!(cut.ends_with('…'));
+    }
+
+    #[test]
+    fn a_sql_server_write_is_a_batch() {
+        let production = ConnectionConfig { database_kind: DatabaseKind::SqlServer, ..connection(Some(Environment::Production)) };
+        let asked = check(&on(&production, &console(TxnMode::AutoCommit)), &["SELECT 1", "EXEC dbo.purge"], None).unwrap_err();
+        assert_eq!((asked.unit, shape(&asked.sends)), (ExecutionUnitKind::Batch, (1, vec!["EXEC dbo.purge"])));
+    }
+}
