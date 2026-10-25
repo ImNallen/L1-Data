@@ -35,11 +35,22 @@ fn first_property(text: &str) -> Option<usize> {
 fn split_jdbc_properties(input: &str) -> Result<(&str, Option<&str>), String> {
     let Some(authority_start) = input.find("://").map(|i| i + 3) else { return Ok((input, None)) };
     let authority_end = input[authority_start..].find(['/', '?', '#']).map_or(input.len(), |i| authority_start + i);
-    let Some(start) = first_property(&input[authority_start..authority_end]).map(|i| authority_start + i) else { return Ok((input, None)) };
+    let start = match first_property(&input[authority_start..authority_end]) {
+        Some(i) => {
+            let start = authority_start + i;
+            if input[start + 1..].split(';').any(|p| p.contains('@') && !p.split_once('=').is_some_and(|(key, _)| key.eq_ignore_ascii_case("user"))) {
+                return Err("This SQL Server URL is ambiguous. An @ after its first ;name=value property could also end the user name and password. Percent-encode a ; in a password as %3B, or an @ in a property value as %40. Only a user value can hold a plain @.".into());
+            }
+            start
+        }
+        None if input[authority_end..].starts_with('/') => {
+            let path_end = input[authority_end..].find(['?', '#']).map_or(input.len(), |i| authority_end + i);
+            let Some(i) = first_property(&input[authority_end..path_end]) else { return Ok((input, None)) };
+            authority_end + i
+        }
+        None => return Ok((input, None)),
+    };
     let properties = &input[start + 1..];
-    if properties.split(';').any(|p| p.contains('@') && !p.split_once('=').is_some_and(|(key, _)| key.eq_ignore_ascii_case("user"))) {
-        return Err("This SQL Server URL is ambiguous. An @ after its first ;name=value property could also end the user name and password. Percent-encode a ; in a password as %3B, or an @ in a property value as %40. Only a user value can hold a plain @.".into());
-    }
     if let Some((c, encoded)) = properties.chars().find_map(|c| match c {
         '/' => Some((c, "%2F")),
         '?' => Some((c, "%3F")),
@@ -196,8 +207,30 @@ mod tests {
         assert_eq!(password("sqlserver://sa:pa;ss@localhost:1434/shop"), "pa;ss");
         assert_eq!(password("sqlserver://sa:a%3Bb=c@localhost/shop"), "a;b=c");
         assert_eq!(draft_from_url("sqlserver://localhost/my;db", "").unwrap().database, "my;db");
-        assert_eq!(draft_from_url("mssql://localhost/shop;database=other", "").unwrap().database, "shop;database=other");
         assert_eq!(password("sqlserver://localhost;user=sa;password=a%2Fb%40c"), "a/b@c");
+    }
+
+    #[test]
+    fn properties_after_the_path_read_as_properties() {
+        let draft = draft_from_url("sqlserver://db.example.net/shop;authentication=ActiveDirectoryAzCli", "").unwrap();
+        assert_eq!((draft.host.as_str(), draft.database.as_str(), draft.sql_server_auth), ("db.example.net", "shop", Some(SqlServerAuth::EntraAzureCli)));
+        let draft = draft_from_url("sqlserver://sa:pa;ss@db.example.net:1433/shop;encrypt=true;trustServerCertificate=true", "").unwrap();
+        assert_eq!((draft.host.as_str(), draft.port, draft.database.as_str(), draft.user.as_str(), draft.ssl_mode), ("db.example.net", 1433, "shop", "sa", SslMode::Require));
+        assert!(matches!(draft.password, PasswordInput::Set(p) if p == "pa;ss"));
+        let draft = draft_from_url("sqlserver://db.example.net/shop;user=me@contoso.com;password=p@ss", "").unwrap();
+        assert_eq!((draft.host.as_str(), draft.user.as_str()), ("db.example.net", "me@contoso.com"));
+        assert!(matches!(draft.password, PasswordInput::Set(p) if p == "p@ss"), "after the path an @ cannot end the user info");
+        for (url, refused) in [
+            ("mssql://localhost/shop;database=other", "repeats database"),
+            ("sqlserver://host:1433/db;encrypt=false", "always encrypted"),
+            ("sqlserver://host/db;applicationName=x", "Unsupported SQL Server URL property"),
+            ("sqlserver://host/db;password=a/b", "a / inside a property value as %2F"),
+            ("sqlserver://host/db;encrypt=true?sslmode=require", "a ? inside a property value as %3F"),
+            ("sqlserver://host/a/b;encrypt=true", "single database name"),
+        ] {
+            let message = draft_from_url(url, "").unwrap_err();
+            assert!(message.contains(refused), "{url}: {message}");
+        }
     }
 
     #[test]
