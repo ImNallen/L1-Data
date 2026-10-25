@@ -238,6 +238,58 @@ async fn a_nowait_message_streams_while_the_batch_waits_and_survives_cancel() {
     assert!(matches!(state.run, RunState::Finished { outcome: RunOutcome::Cancelled, .. }), "{:?}", state.run);
 }
 
+async fn notices_read_slowly(events: &mut broadcast::Receiver<AppEvent>, until: impl Fn(&AppEvent) -> bool) -> (Vec<String>, u64) {
+    let (mut notices, mut lagged) = (Vec::new(), 0);
+    loop {
+        match events.recv().await {
+            Ok(event) if until(&event) => return (notices, lagged),
+            Ok(AppEvent::ConsoleOutput { entries, .. }) => {
+                notices.extend(entries.into_iter().filter_map(|e| match e.body {
+                    OutputBody::Notice { message, .. } => Some(message),
+                    _ => None,
+                }));
+                tokio::time::sleep(Duration::from_millis(1)).await;
+            }
+            Ok(_) => {}
+            Err(broadcast::error::RecvError::Lagged(n)) => lagged += n,
+            Err(e) => panic!("{e:?}"),
+        }
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_nowait_flood_reaches_a_slow_reader_whole() {
+    let mut h = Harness::open(TxnMode::AutoCommit).await;
+    let id = h.start("DECLARE @i int = 0; WHILE @i < 20000 BEGIN RAISERROR('%d', 0, 1, @i) WITH NOWAIT; SET @i += 1; END").await.run_id;
+    let tab = h.tab;
+    let (notices, lagged) = notices_read_slowly(&mut h.events, |event| matches!(event, AppEvent::ConsoleChanged(s) if s.tab_id == tab && matches!(s.run, RunState::Finished { run_id, .. } if run_id == id))).await;
+    assert_eq!(lagged, 0);
+    assert_eq!(notices.len(), 20_000);
+    assert!(notices.iter().enumerate().all(|(i, n)| *n == i.to_string()));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_export_sends_the_notices_of_its_rerun_in_batches() {
+    let mut h = Harness::open(TxnMode::AutoCommit).await;
+    let state = h.ok("DECLARE @i int = 0; WHILE @i < 5000 BEGIN PRINT @i; SET @i += 1; END; SELECT 1 AS a").await;
+    let meta = Harness::rowsets(&state)[0].clone();
+    let mut events = h.engine.subscribe();
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("out.csv");
+    h.engine.result_export(meta.r#ref, ExportFormat::Csv, ExportScope::All, path.display().to_string()).await.unwrap();
+    let (mut notices, mut lagged) = (0, 0);
+    loop {
+        match events.try_recv() {
+            Ok(AppEvent::ConsoleOutput { entries, .. }) => notices += entries.iter().filter(|e| matches!(e.body, OutputBody::Notice { .. })).count(),
+            Ok(_) => {}
+            Err(broadcast::error::TryRecvError::Lagged(n)) => lagged += n,
+            Err(broadcast::error::TryRecvError::Empty) => break,
+            Err(e) => panic!("{e:?}"),
+        }
+    }
+    assert_eq!((notices, lagged), (5_000, 0));
+}
+
 #[tokio::test]
 async fn sql_server_reports_each_statement_count_like_ssms() {
     let mut h = Harness::open(TxnMode::AutoCommit).await;

@@ -2,7 +2,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
-use futures_util::{FutureExt, StreamExt};
+use futures_util::{Stream, StreamExt};
 use tokio::sync::{Mutex, watch};
 
 use crate::Shared;
@@ -15,6 +15,42 @@ use crate::text::{OffsetMap, synthesize_tag};
 use crate::txn::{StmtOutcome, TransactionPlan, txn_after};
 
 pub(crate) const STREAM_EMIT_INTERVAL: Duration = Duration::from_millis(100);
+const OUTPUT_COALESCE: Duration = Duration::from_millis(5);
+
+pub(crate) struct OutputBatch<'a> {
+    console: &'a Console,
+    shared: &'a Shared,
+    run_id: RunId,
+    lines: Vec<OutputBody>,
+}
+
+impl<'a> OutputBatch<'a> {
+    pub fn new(console: &'a Console, shared: &'a Shared, run_id: RunId) -> Self {
+        Self { console, shared, run_id, lines: Vec::new() }
+    }
+
+    pub fn push(&mut self, body: OutputBody) {
+        self.lines.push(body);
+    }
+
+    pub fn send(&mut self) {
+        self.console.output_all(self.shared, self.run_id, std::mem::take(&mut self.lines));
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.lines.is_empty()
+    }
+
+    pub async fn wait<S: Stream + Unpin>(&mut self, stream: &mut S) -> Option<S::Item> {
+        match tokio::time::timeout(OUTPUT_COALESCE, stream.next()).await {
+            Ok(next) => next,
+            Err(_) => {
+                self.send();
+                stream.next().await
+            }
+        }
+    }
+}
 
 pub struct Console {
     pub tab: TabId,
@@ -536,16 +572,10 @@ async fn run_outputs(console: &Console, shared: &Shared, session: &mut Session, 
     let mut reported = None;
     let mut nth: u16 = 0;
     let mut rerun: Option<Rerun> = None;
-    let mut log = Vec::new();
+    let mut log = OutputBatch::new(console, shared, run_id);
     let mut stream = session.query(sql);
     loop {
-        let next = match stream.next().now_or_never() {
-            Some(next) => next,
-            None => {
-                console.output_all(shared, run_id, std::mem::take(&mut log));
-                stream.next().await
-            }
-        };
+        let next = if log.is_empty() { stream.next().await } else { log.wait(&mut stream).await };
         let Some(event) = next else { break };
         match event {
             Err(error) => { failure = Some(error); break; }
@@ -611,7 +641,7 @@ async fn run_outputs(console: &Console, shared: &Shared, session: &mut Session, 
         }
         if last_emit.elapsed() >= STREAM_EMIT_INTERVAL {
             last_emit = Instant::now();
-            console.output_all(shared, run_id, std::mem::take(&mut log));
+            log.send();
             if let Some((set, out)) = &active { set.set_elapsed(elapsed_ms(started)); outputs[*out] = RunOutput::Rows { result: set.meta(), state: RowsState::Streaming }; }
             console.edit(shared, run_id, |inner| Console::statements_mut(inner)[index].outputs = outputs.clone()).await?;
         }
@@ -621,7 +651,7 @@ async fn run_outputs(console: &Console, shared: &Shared, session: &mut Session, 
         if failure.is_none() { finish_rows(&mut log, index, &set, &mut outputs[out], started, &mut rows); }
         else { end_rows(&set, &mut outputs[out], started, if stop.load(Ordering::Relaxed) { RowsState::Cancelled } else { RowsState::Failed }); }
     }
-    console.output_all(shared, run_id, log);
+    log.send();
     console.edit(shared, run_id, |inner| Console::statements_mut(inner)[index].outputs = outputs).await?;
     Ok(match (failure, reported) {
         (Some(error), _) => Err(Failed { error, logged: false }),
@@ -640,7 +670,7 @@ fn end_rows(set: &ResultSet, output: &mut RunOutput, started: Instant, state: Ro
     *output = RunOutput::Rows { result: set.meta(), state };
 }
 
-fn finish_rows(log: &mut Vec<OutputBody>, index: usize, set: &ResultSet, output: &mut RunOutput, started: Instant, rows: &mut Option<u64>) {
+fn finish_rows(log: &mut OutputBatch, index: usize, set: &ResultSet, output: &mut RunOutput, started: Instant, rows: &mut Option<u64>) {
     set.set_elapsed(elapsed_ms(started));
     let meta = set.meta();
     *rows = Some(rows.unwrap_or(0) + meta.rows_seen);

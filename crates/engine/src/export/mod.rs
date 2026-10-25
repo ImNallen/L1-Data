@@ -7,7 +7,7 @@ use futures_util::StreamExt;
 use tokio::sync::{mpsc, oneshot};
 
 use crate::Shared;
-use crate::console::{Console, ConsoleInner, STREAM_EMIT_INTERVAL, SessionSlot, Work};
+use crate::console::{Console, ConsoleInner, OutputBatch, STREAM_EMIT_INTERVAL, SessionSlot, Work};
 use crate::files::Replacement;
 use crate::model::*;
 use crate::results::{ResultSet, Rerun};
@@ -385,10 +385,11 @@ async fn pump(job: &Job, session: &mut Session, encoder: &mut Encoder, writer: &
     let mut tick = tokio::time::interval_at(tokio::time::Instant::now() + STREAM_EMIT_INTERVAL, STREAM_EMIT_INTERVAL);
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     let mut published = ExportProgress { result: job.set.r#ref, format: job.format, rows: 0, bytes: 0, write_error: None };
+    let mut log = OutputBatch::new(&job.console, &job.shared, job.run_id);
     let mut stream = session.query(&job.sql);
     loop {
         let event = tokio::select! {
-            event = stream.next() => match event {
+            event = async { if log.is_empty() { stream.next().await } else { log.wait(&mut stream).await } } => match event {
                 Some(event) => Some(event),
                 None => break,
             },
@@ -396,7 +397,7 @@ async fn pump(job: &Job, session: &mut Session, encoder: &mut Encoder, writer: &
         };
         let mut emit = event.is_none();
         match event {
-            None => {}
+            None => log.send(),
             // After a halt, the first cause wins over the error the server sends for it.
             Some(Err(_)) if halt.is_some() => break,
             Some(Err(_)) if stop.load(Ordering::Relaxed) => {
@@ -412,7 +413,7 @@ async fn pump(job: &Job, session: &mut Session, encoder: &mut Encoder, writer: &
                 break;
             }
             Some(Ok(QueryEvent::Prepared | QueryEvent::Complete { .. })) => {}
-            Some(Ok(QueryEvent::Notice(body))) => job.console.output(&job.shared, job.run_id, body),
+            Some(Ok(QueryEvent::Notice(body))) => log.push(body),
             Some(Ok(QueryEvent::ServerError(e))) => {
                 halt.get_or_insert(Halt::Query(e));
             }
@@ -461,6 +462,7 @@ async fn pump(job: &Job, session: &mut Session, encoder: &mut Encoder, writer: &
         }
     }
     drop(stream);
+    log.send();
     match halt {
         Some(halt) => Err(halt),
         None if set.is_none_or(|i| i < nth) => Err(Halt::ShapeChanged),
