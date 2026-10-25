@@ -81,19 +81,19 @@ pub(super) fn query_error(e: tiberius::error::Error) -> QueryError {
     }
 }
 
-fn config(p: &ConnectParams, token: Option<&str>) -> Result<Config, ConnectError> {
+fn config(p: &ConnectParams) -> Result<Config, ConnectError> {
     let mut config = Config::new();
     config.host(&p.host);
     config.port(p.port);
     config.database(&p.database);
     config.application_name("L1 Data");
     config.command_timeout(None);
-    config.authentication(match token {
-        Some(token) => AuthMethod::aad_token(token),
-        None => AuthMethod::sql_server(&p.user, p.password.as_deref().unwrap_or("")),
-    });
+    config.authentication(AuthMethod::sql_server(&p.user, p.password.as_deref().unwrap_or("")));
     config.encryption(EncryptionLevel::Required);
     match (p.ssl_mode, &p.ca_cert_path) {
+        (SslMode::Require, None) if p.entra.is_some() => {
+            return Err(ConnectError::Tls { message: "Choose Verify full for Microsoft Entra ID. Its token works on every Azure SQL database you can reach, so it goes only to a verified server.".into() });
+        }
         (SslMode::Require, None) => config.trust_cert(),
         (SslMode::VerifyFull, None) => {}
         (SslMode::VerifyFull, Some(_)) => {
@@ -112,11 +112,14 @@ fn config(p: &ConnectParams, token: Option<&str>) -> Result<Config, ConnectError
 
 impl MsSession {
     pub(super) async fn open(p: &ConnectParams) -> Result<Self, ConnectError> {
+        let mut cfg = config(p)?;
         let token = match &p.entra {
             Some(az) => Some(az.token().await?),
             None => None,
         };
-        let cfg = config(p, token.as_deref())?;
+        if let Some(token) = &token {
+            cfg.authentication(AuthMethod::aad_token(token));
+        }
         let stream = p.dial().await?;
         let connection = Client::connect(cfg, stream.compat_write());
         let connected = tokio::time::timeout(CONNECT_TIMEOUT, connection).await.map_err(|_| ConnectError::Network { message: "SQL Server connection timed out".into() })?;

@@ -78,6 +78,10 @@ export function signsInWithEntra(fields: Fields): boolean {
   return toSqlServerAuth(fields) === "EntraAzureCli";
 }
 
+export function entraNeedsVerifiedTls(fields: Fields): boolean {
+  return signsInWithEntra(fields) && fields.sslMode === "Require";
+}
+
 export function parsePort(text: string): number | null {
   const port = Number(text);
   return Number.isInteger(port) && port > 0 && port < 65_536 ? port : null;

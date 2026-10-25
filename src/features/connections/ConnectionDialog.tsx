@@ -19,6 +19,7 @@ import { Button, cx, DatabaseBadge, DialogBackdrop, IconButton, inputClass, Moda
 import { connect, unknownHostKey, type UnknownHostKey } from "./connectionActions";
 import { CONNECTION_COLORS, ConnectionColorDot, connectionColorId, type ConnectionColorId } from "./connectionColors";
 import {
+  entraNeedsVerifiedTls,
   initialFields,
   initialPassword,
   initialSshSecret,
@@ -361,7 +362,7 @@ function ConnectionForm({
   const shownUrlError = urlError !== null && (urlBlurred || url.includes("://") || url.includes("=")) ? urlError : null;
 
   const port = parsePort(fields.port);
-  const valid = fields.host.trim() !== "" && port !== null && sshValid(fields) && toSqlServerAuth(fields) !== "Unknown";
+  const valid = fields.host.trim() !== "" && port !== null && sshValid(fields) && toSqlServerAuth(fields) !== "Unknown" && !entraNeedsVerifiedTls(fields);
   const fallbackName = `${fields.host.trim()} / ${fields.database.trim()}`;
 
   const draft = (): ConnectionDraft => ({
@@ -438,7 +439,14 @@ function ConnectionForm({
   );
   const entra = signsInWithEntra(fields);
   const sslModes = fields.databaseKind === "SqlServer" ? SSL_MODES.filter((m) => m.value === "VerifyFull" || m.value === "Require") : SSL_MODES;
-  const sslHint = sslModes.find((m) => m.value === fields.sslMode)?.hint;
+  const sslHint = entraNeedsVerifiedTls(fields) ? (
+    <span data-testid="conn-ssl-entra" className="text-danger">
+      Choose Verify full for Microsoft Entra ID. Its token works on every Azure SQL database you can reach, so it goes only to a verified server. Azure SQL
+      certificates verify.
+    </span>
+  ) : (
+    sslModes.find((m) => m.value === fields.sslMode)?.hint
+  );
 
   return (
     <form

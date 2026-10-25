@@ -1,6 +1,7 @@
 import { expect, it } from "vitest";
 import type { ConnectionConfig } from "../../ipc/bindings";
 import {
+  entraNeedsVerifiedTls,
   initialFields,
   initialSshSecret,
   isDirty,
@@ -135,6 +136,13 @@ it("sends a sign-in choice only for SQL Server", () => {
   expect(toSqlServerAuth(initialFields(undefined, "SqlServer"))).toBe("SqlLogin");
   expect(toSqlServerAuth({ ...entra, databaseKind: "Postgres" })).toBeNull();
   expect(signsInWithEntra({ ...entra, databaseKind: "Postgres" })).toBe(false);
+});
+
+it("refuses Entra over TLS that skips the certificate check", () => {
+  const entra = { ...initialFields(undefined, "SqlServer"), sqlServerAuth: "EntraAzureCli" } as const;
+  expect(entraNeedsVerifiedTls(entra)).toBe(false);
+  expect(entraNeedsVerifiedTls({ ...entra, sslMode: "Require" })).toBe(true);
+  expect(entraNeedsVerifiedTls({ ...entra, sslMode: "Require", sqlServerAuth: "SqlLogin" })).toBe(false);
 });
 
 const tunneled: ConnectionConfig = {

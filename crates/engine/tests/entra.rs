@@ -57,7 +57,7 @@ fn entra(host: &str, port: u16) -> ConnectionDraft {
         database: "shop".into(),
         user: "".into(),
         password: PasswordInput::Set("never saved".into()),
-        ssl_mode: SslMode::Require,
+        ssl_mode: SslMode::VerifyFull,
         ca_cert_path: None,
         color: None,
         ssh: None,
@@ -114,6 +114,14 @@ async fn a_missing_cli_fails_as_auth_naming_the_install_and_az_login() {
 }
 
 #[tokio::test]
+async fn an_entra_token_is_never_sent_over_tls_that_skips_verification() {
+    let h = Harness::with_az("ok").await;
+    let Err(ConnectError::Tls { message }) = h.engine.test_connection(ConnectionDraft { ssl_mode: SslMode::Require, ..entra("127.0.0.1", refused_port()) }).await else { panic!("expected Tls") };
+    assert!(message.starts_with("Choose Verify full"), "{message}");
+    assert_eq!(h.calls(), 0, "the token is not even fetched");
+}
+
+#[tokio::test]
 async fn a_sql_login_never_runs_az() {
     let h = Harness::with_az("ok").await;
     let draft = ConnectionDraft { user: "sa".into(), sql_server_auth: None, ..entra("127.0.0.1", refused_port()) };
@@ -123,14 +131,10 @@ async fn a_sql_login_never_runs_az() {
 
 #[cfg(feature = "mssql-tests")]
 #[tokio::test]
-async fn a_token_the_server_refuses_fails_as_auth_and_is_not_reused() {
+async fn the_dev_servers_self_signed_certificate_stops_an_entra_sign_in_before_the_token_is_sent() {
     let h = Harness::with_az("ok").await;
     let host = std::env::var("L1_DATA_TEST_MSSQL_HOST").unwrap_or_else(|_| "localhost".into());
     let port = std::env::var("L1_DATA_TEST_MSSQL_PORT").ok().and_then(|p| p.parse().ok()).unwrap_or(1434);
     let id = h.engine.save_connection(entra(&host, port)).await.unwrap().id;
-    for _ in 0..2 {
-        let Err(ConnectError::Auth { message }) = h.engine.connect(id).await else { panic!("expected Auth") };
-        assert!(message.contains("Login failed"), "{message}");
-    }
-    assert_eq!(h.calls(), 2);
+    assert!(matches!(h.engine.connect(id).await, Err(ConnectError::Tls { .. })));
 }
