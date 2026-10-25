@@ -129,10 +129,12 @@ export class RowCache {
   }
 
   private evict(keep: Set<number>) {
+    const before = this.pages.size;
     for (const page of this.pages.keys()) {
-      if (this.pages.size <= MAX_PAGES) return;
+      if (this.pages.size <= MAX_PAGES) break;
       if (!keep.has(page)) this.pages.delete(page);
     }
+    if (this.pages.size < before) this.notify();
   }
 
   private markGone() {

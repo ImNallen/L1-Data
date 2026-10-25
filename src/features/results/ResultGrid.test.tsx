@@ -8,7 +8,7 @@ import type { ColumnMeta, DatabaseKind, RelationDetail, ResultMeta, RowPage, Tab
 import { buildCatalogView, useCatalog } from "../../state/catalog";
 import { dbKey } from "../../state/dbKey";
 import { useRelationDetail } from "../../state/relationDetail";
-import { dropRowCaches } from "../../state/rowCache";
+import { dropRowCaches, PAGE_SIZE, rowCacheFor } from "../../state/rowCache";
 import { markDeleted, NO_EDITS, setCell, useTableEdits } from "../../state/tableEdits";
 import { EMPTY_QUERY, useWorkspace } from "../../state/workspace";
 import { Overlays } from "../../shell/Overlays";
@@ -434,4 +434,18 @@ it("returns focus to the grid when a record view opened from the menu closes", a
   await screen.findByTestId("record-dialog");
   await user.keyboard("{Escape}");
   await vi.waitFor(() => expect(document.activeElement).toBe(screen.getByTestId("result-grid")));
+});
+
+it("loads its visible rows again after the record view pages them out of the shared cache", async () => {
+  const meta = { ...queryResult([]), rowCount: 20_000, rowsSeen: 20_000 };
+  mockIPC((cmd, args) => {
+    if (cmd !== "result_page") return null;
+    const { start, len } = args as { start: number; len: number };
+    return { start, rows: Array.from({ length: len }, (_, i) => [String(start + i + 1), "c"]), cut: [] };
+  });
+  render(<ResultGrid meta={meta} done query={null} editing={null} />);
+  await vi.waitFor(() => expect(screen.getByTestId("grid-cell-0-0").textContent).toBe("1"));
+  const cache = rowCacheFor(meta.ref);
+  for (let page = 10; page < 80; page++) await cache.ensure({ start: page * PAGE_SIZE, end: page * PAGE_SIZE + 1 }, meta.rowCount);
+  await vi.waitFor(() => expect(screen.getByTestId("grid-cell-0-0").textContent).toBe("1"));
 });

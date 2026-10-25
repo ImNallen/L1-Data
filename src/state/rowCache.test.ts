@@ -116,6 +116,16 @@ describe("RowCache", () => {
     expect(cache.getVersion()).toBeGreaterThan(before);
   });
 
+  it("notifies subscribers when it evicts a page they were reading", async () => {
+    const { src } = source(() => 100_000);
+    const cache = new RowCache(REF, src);
+    for (let p = 0; p < 64; p++) await cache.ensure({ start: p * PAGE_SIZE, end: p * PAGE_SIZE + 1 }, 100_000);
+    let seen: string | null | undefined = "unread";
+    cache.subscribe(() => (seen = cache.get(0)?.[0]));
+    await cache.ensure({ start: 64 * PAGE_SIZE, end: 64 * PAGE_SIZE + 1 }, 100_000);
+    expect(seen).toBeUndefined();
+  });
+
   it("stops fetching once the result is gone", async () => {
     let calls = 0;
     const cache = new RowCache(REF, {

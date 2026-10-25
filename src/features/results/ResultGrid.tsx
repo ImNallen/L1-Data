@@ -299,7 +299,7 @@ export function ResultGrid({
   actionsRef?: Ref<GridActions | null>;
 }) {
   const cache = rowCacheFor(meta.ref);
-  useSyncExternalStore(cache.subscribe, cache.getVersion);
+  const cacheVersion = useSyncExternalStore(cache.subscribe, cache.getVersion);
   const scroller = useRef<HTMLDivElement>(null);
   const viewport = useElementWidth(scroller);
   const [selection, setSelection] = useState<Selection>(null);
@@ -398,7 +398,7 @@ export function ResultGrid({
   const lastRow = virtualRows.at(-1)?.index ?? 0;
   useEffect(() => {
     void cache.ensure({ start: Math.max(0, firstRow - PREFETCH), end: lastRow + 1 + PREFETCH }, rowCount);
-  }, [cache, firstRow, lastRow, rowCount]);
+  }, [cache, cacheVersion, firstRow, lastRow, rowCount]);
 
   useEffect(() => {
     const up = () => (dragging.current = null);
