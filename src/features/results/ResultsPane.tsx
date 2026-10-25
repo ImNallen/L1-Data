@@ -394,11 +394,6 @@ export function ResultsPane({ tabId }: { tabId: TabId | null }) {
         </div>
       </div>
 
-      {(databaseKind === "SqlServer" || shown?.meta.databaseKind === "SqlServer") && (
-        <p data-testid="sqlserver-output-limit" className="border-b border-grid px-3 py-1 text-ui-11.5 text-dim">
-          SQL Server PRINT and informational messages are unavailable. Affected row counts may be unknown.
-        </p>
-      )}
       {browsingTable && databaseKind === "SqlServer" && (
         <p data-testid="sqlserver-edit-limit" className="border-b border-grid px-3 py-1 text-ui-11.5 text-dim">
           SQL Server table results are read-only. Use SQL scripts to insert, update or delete rows.
