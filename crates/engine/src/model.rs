@@ -860,6 +860,8 @@ pub struct ScopeRelation {
     /// How the statement refers to it, as written: its alias, else its name. `None` for a subquery without an alias.
     pub reference: Option<String>,
     pub source: RelationSource,
+    /// The names a column alias list gives the first columns, as in `orders o(a, b)`, folded as the server folds them.
+    pub column_aliases: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Type)]

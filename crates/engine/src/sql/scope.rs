@@ -222,6 +222,8 @@ enum Origin {
     CteColumns,
     /// A parenthesized join, whose relations join the enclosing query's when it closes.
     JoinGroup,
+    /// The column alias list after a relation's alias.
+    ColumnAliases,
     Other,
 }
 
@@ -232,6 +234,7 @@ struct Rel {
     folded: Option<String>,
     source: RelationSource,
     role: Role,
+    column_aliases: Vec<String>,
 }
 
 type Output = (Vec<String>, Vec<TableName>);
@@ -463,7 +466,7 @@ impl<'a> Walk<'a> {
             (Clause::Relation { role, slot: Slot::Expect }, Class::Param) => {
                 let written = self.text[self.sig[i].span.clone()].to_owned();
                 let source = RelationSource::Derived { columns: Vec::new(), star: Vec::new() };
-                self.push_rel(Rel { folded: Some(written.clone()), written: Some(written), source, role });
+                self.push_rel(Rel { folded: Some(written.clone()), written: Some(written), source, role, column_aliases: Vec::new() });
                 self.top().clause = Clause::Relation { role, slot: Slot::Named };
             }
             (Clause::Relation { role, slot: Slot::Named | Slot::As }, Class::Word | Class::Name) => {
@@ -632,7 +635,7 @@ impl<'a> Walk<'a> {
         } else {
             RelationSource::Table { schema, name: name.clone() }
         };
-        self.push_rel(Rel { written: Some(written), folded: Some(name), source, role });
+        self.push_rel(Rel { written: Some(written), folded: Some(name), source, role, column_aliases: Vec::new() });
         self.top().clause = Clause::Relation { role, slot: Slot::Named };
         j
     }
@@ -677,7 +680,9 @@ impl<'a> Walk<'a> {
         let query = matches!(first.as_deref(), Some("SELECT" | "WITH" | "VALUES"))
             || cte_body && matches!(first.as_deref(), Some("INSERT" | "UPDATE" | "DELETE" | "MERGE"));
         let names_a_relation = next.is_some_and(|j| matches!(self.sig[j].class, Class::Word | Class::Name | Class::Open));
+        let renames = self.frames[parent].rels.last().is_some_and(|r| self.kind == DatabaseKind::Postgres || matches!(r.source, RelationSource::Derived { .. }));
         let origin = match clause {
+            Clause::Relation { slot: Slot::Aliased, .. } if !query && renames => Origin::ColumnAliases,
             Clause::Relation { slot: Slot::Expect, .. } if query => Origin::Derived,
             Clause::Relation { role: role @ (Role::From | Role::Join | Role::Using), slot: Slot::Expect } if names_a_relation => {
                 self.frames[parent].clause = Clause::Relation { role, slot: Slot::Aliased };
@@ -723,7 +728,7 @@ impl<'a> Walk<'a> {
         match self.frames[id].origin {
             Origin::Derived => {
                 let (columns, star) = self.output(id);
-                self.push_rel(Rel { written: None, folded: None, source: RelationSource::Derived { columns, star }, role: Role::From });
+                self.push_rel(Rel { written: None, folded: None, source: RelationSource::Derived { columns, star }, role: Role::From, column_aliases: Vec::new() });
             }
             Origin::CteColumns => {
                 let names = std::mem::take(&mut self.frames[id].group_names);
@@ -738,6 +743,13 @@ impl<'a> Walk<'a> {
                         (columns, star) = (explicit, Vec::new());
                     }
                     self.frames[parent].ctes.push(Cte { key, written, columns, star });
+                }
+            }
+            Origin::ColumnAliases => {
+                let names = std::mem::take(&mut self.frames[id].group_names);
+                let p = &mut self.frames[parent];
+                if let Some(rel) = p.rels.last_mut().filter(|_| !p.sealed) {
+                    rel.column_aliases = names;
                 }
             }
             Origin::JoinGroup => {
@@ -804,7 +816,8 @@ impl<'a> Walk<'a> {
         let expand = |rel: &Rel, columns: &mut Vec<String>, star: &mut Vec<TableName>| match &rel.source {
             RelationSource::Table { schema, name } => star.push(TableName { schema: schema.clone(), name: name.clone() }),
             RelationSource::Derived { columns: c, star: s } => {
-                columns.extend(c.iter().cloned());
+                let renamed = if s.is_empty() { &rel.column_aliases[..] } else { &[] };
+                columns.extend(renamed.iter().chain(c.iter().skip(renamed.len())).cloned());
                 star.extend(s.iter().cloned());
             }
         };
@@ -844,7 +857,8 @@ impl<'a> Walk<'a> {
             rels.extend(visible.iter().filter(|r| !self.aliased_elsewhere(r, frame_rels)));
             child = Some(&self.frames[f]);
         }
-        let relations = rels.iter().map(|r| ScopeRelation { reference: r.written.clone(), source: r.source.clone() }).collect();
+        let relations =
+            rels.iter().map(|r| ScopeRelation { reference: r.written.clone(), source: r.source.clone(), column_aliases: r.column_aliases.clone() }).collect();
         let mut ctes: Vec<String> = Vec::new();
         let recursing = chain.windows(2).filter_map(|w| self.recursing(w[1], w[0]));
         let defined = chain.iter().enumerate().flat_map(|(k, &f)| {
@@ -1407,6 +1421,20 @@ mod tests {
             assert_eq!((refs(&s), s.expect), (vec![(Some("o"), &o), (Some("c"), &c), (Some("a"), &a)], Expect::JoinCondition { target: 2 }));
         }
         assert_eq!(pg("select * from (orders o join |").expect, Expect::Relation);
+    }
+
+    #[test]
+    fn a_column_alias_list_renames_the_first_columns() {
+        let aliases = |s: &Scope| s.relations.iter().map(|r| r.column_aliases.clone()).collect::<Vec<_>>();
+        let s = pg("select * from orders o(a, \"B\") where o.|");
+        assert_eq!((refs(&s), aliases(&s)), (vec![(Some("o"), &table(None, "orders"))], vec![vec!["a".to_owned(), "B".to_owned()]]));
+        let s = pg("select * from unnest(array[1]) as u(x) where u.|");
+        assert_eq!(aliases(&s), [["x"]]);
+        let s = ms("SELECT * FROM (VALUES (1, 2)) AS v(a, b) WHERE v.|");
+        assert_eq!(aliases(&s), [["a", "b"]]);
+        assert_eq!(aliases(&ms("SELECT * FROM orders o (NOLOCK) WHERE o.|")), [Vec::<String>::new()]);
+        let s = pg("with x as (select * from generate_series(1, 3) g(n)) select * from x where |");
+        assert_eq!(refs(&s), [(Some("x"), &RelationSource::Derived { columns: vec!["n".into()], star: vec![] })]);
     }
 
     #[test]

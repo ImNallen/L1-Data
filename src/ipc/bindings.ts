@@ -1215,6 +1215,8 @@ export type ScopeRelation = {
 	/**  How the statement refers to it, as written: its alias, else its name. `None` for a subquery without an alias. */
 	reference: string | null,
 	source: RelationSource,
+	/**  The names a column alias list gives the first columns, as in `orders o(a, b)`, folded as the server folds them. */
+	columnAliases: string[],
 };
 
 /**  The statements of a script and the one a run at the cursor would pick. */

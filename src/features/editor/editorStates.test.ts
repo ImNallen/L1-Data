@@ -30,7 +30,11 @@ afterEach(() => {
 });
 
 type Reply = Extract<EngineContext, { kind: "Complete" }>;
-const table = (reference: string, name: string, schema: string | null = null): ScopeRelation => ({ reference, source: { kind: "Table", schema, name } });
+const table = (reference: string, name: string, schema: string | null = null, columnAliases: string[] = []): ScopeRelation => ({
+  reference,
+  source: { kind: "Table", schema, name },
+  columnAliases,
+});
 const reply = (expect: Expect, relations: ScopeRelation[] = [], more: Partial<Reply> = {}): Reply => ({
   kind: "Complete",
   from: 0,
@@ -172,7 +176,7 @@ it("stays closed after a space unless the engine says a join condition starts th
 });
 
 it("sends the SQL Server kind and offers the expansion of a derived relation", async () => {
-  const derived: ScopeRelation = { reference: "r", source: { kind: "Derived", columns: ["n"], star: [{ schema: null, name: "coupons" }] } };
+  const derived: ScopeRelation = { reference: "r", source: { kind: "Derived", columns: ["n"], star: [{ schema: null, name: "coupons" }] }, columnAliases: [] };
   seedEditor("t1", "");
   const sent: unknown[] = [];
   mockIPC((_cmd, args) => {
@@ -186,6 +190,18 @@ it("sends the SQL Server kind and offers the expansion of a derived relation", a
   const result = await source!(new CompletionContext(state, 2, false));
   expect(result?.options.map((o) => o.label)).toEqual(["n", "code", "percent_off", "expires_at"]);
   expect(sent).toEqual([{ text: "r.", cursor: 2, databaseKind: "SqlServer" }]);
+});
+
+it("names the first columns as a column alias list renames them, also in a join condition", async () => {
+  const renamed = table("o", "orders", null, ["oid", "cid"]);
+  const qualified = reply({ kind: "Expression" }, [renamed], { qualifier: { kind: "Relation", index: 0 } });
+  expect((await completeAtEnd("select * from orders o(oid, cid) where o.", qualified)).labels).toEqual(["oid", "cid", "status", "total", "created_at"]);
+  const unnest: ScopeRelation = { reference: "u", source: { kind: "Derived", columns: [], star: [] }, columnAliases: ["x"] };
+  const fromUnnest = reply({ kind: "Expression" }, [unnest], { qualifier: { kind: "Relation", index: 0 } });
+  expect((await completeAtEnd("select * from unnest(array[1]) u(x) where u.", fromUnnest)).labels).toEqual(["x"]);
+  const join = reply({ kind: "JoinCondition", target: 1 }, [renamed, table("c", "customers")]);
+  const { labels } = await completeAtEnd("select * from orders o(oid, cid) join customers c on ", join, { keys: { [oidOf("orders")]: ORDER_KEYS } });
+  expect(labels[0]).toBe("c.id = o.cid");
 });
 
 it("matches a name in another case only where the server would", async () => {

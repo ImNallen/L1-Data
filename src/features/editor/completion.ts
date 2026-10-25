@@ -40,17 +40,21 @@ function resolveTable(view: CatalogView | undefined, schema: string | null, name
   return s && rel ? { schema: s.name, rel } : undefined;
 }
 
+function renamed(columns: Column[], aliases: string[], detail: string): Column[] {
+  return [...aliases.map((name, i) => ({ name, detail: columns[i]?.detail ?? detail })), ...columns.slice(aliases.length)];
+}
+
 function columnsOf(view: CatalogView | undefined, rel: ScopeRelation): Column[] {
   const from = rel.reference ?? "";
   if (rel.source.kind === "Table") {
     const found = resolveTable(view, rel.source.schema, rel.source.name);
-    return found?.rel.columns.map((c) => ({ name: c.name, detail: `${shortType(c.typeDisplay)} · ${from}` })) ?? [];
+    return renamed(found?.rel.columns.map((c) => ({ name: c.name, detail: `${shortType(c.typeDisplay)} · ${from}` })) ?? [], rel.columnAliases, from);
   }
   const named = rel.source.columns.map((name) => ({ name, detail: from }));
   const starred = rel.source.star.flatMap(
     (t) => resolveTable(view, t.schema, t.name)?.rel.columns.map((c) => ({ name: c.name, detail: `${shortType(c.typeDisplay)} · ${from}` })) ?? [],
   );
-  return [...named, ...starred];
+  return renamed([...named, ...starred], rel.columnAliases, from);
 }
 
 function columnOptions(view: CatalogView | undefined, rel: ScopeRelation, kind: DatabaseKind): Completion[] {
@@ -68,35 +72,35 @@ function keywordOptions(reply: Complete): Completion[] {
 
 /** Keys load per relation in scope, so a catalog refresh never reads every key in the database. */
 async function joinConditions(view: CatalogView, reply: Complete, target: number, kind: DatabaseKind): Promise<Completion[]> {
-  const resolve = (r: ScopeRelation | undefined) =>
-    r?.source.kind === "Table" && r.reference ? resolveTable(view, r.source.schema, r.source.name) : undefined;
-  const joined = reply.relations[target];
-  const t = resolve(joined);
-  const ref = joined?.reference;
-  if (!t || !ref) return [];
-  const others = reply.relations.flatMap((r, i) => {
-    const found = i === target ? undefined : resolve(r);
-    return found && r.reference ? [{ ref: r.reference, ...found }] : [];
-  });
+  const resolve = (r: ScopeRelation | undefined) => {
+    const found = r?.source.kind === "Table" && r.reference ? resolveTable(view, r.source.schema, r.source.name) : undefined;
+    return found && r?.reference ? [{ ...found, ref: r.reference, aliases: r.columnAliases }] : [];
+  };
+  const [t] = resolve(reply.relations[target]);
+  if (!t) return [];
+  const others = reply.relations.flatMap((r, i) => (i === target ? [] : resolve(r)));
   if (!others.length) return [];
   const { db, version } = view.catalog;
   const details = useRelationDetail.getState();
   const loaded = Promise.all([t, ...others].map((r) => details.ensure(db, version, r.rel.oid)));
   await Promise.race([loaded, new Promise((resolve) => setTimeout(resolve, JOIN_DETAIL_WAIT_MS))]);
   const keysOf = (oid: number) => useRelationDetail.getState().entries[detailKey(db, oid)]?.detail?.keys ?? [];
-  const col = (ref: string, name: string) => `${ref}.${quoteName(kind, name)}`;
+  const col = (r: (typeof others)[number], name: string) => {
+    const alias = r.aliases[r.rel.columns.findIndex((c) => c.name === name)];
+    return `${r.ref}.${alias ?? quoteName(kind, name)}`;
+  };
   const conditions: string[] = [];
   for (const o of others) {
     for (const key of keysOf(t.rel.oid)) {
       if (key.kind.kind === "Foreign" && key.kind.refSchema === o.schema && key.kind.refTable === o.rel.name) {
         const refs = key.kind.refColumns;
-        conditions.push(key.columns.map((c, i) => `${col(ref, c)} = ${col(o.ref, refs[i]!)}`).join(" AND "));
+        conditions.push(key.columns.map((c, i) => `${col(t, c)} = ${col(o, refs[i]!)}`).join(" AND "));
       }
     }
     for (const key of keysOf(o.rel.oid)) {
       if (key.kind.kind === "Foreign" && key.kind.refSchema === t.schema && key.kind.refTable === t.rel.name) {
         const refs = key.kind.refColumns;
-        conditions.push(key.columns.map((c, i) => `${col(ref, refs[i]!)} = ${col(o.ref, c)}`).join(" AND "));
+        conditions.push(key.columns.map((c, i) => `${col(t, refs[i]!)} = ${col(o, c)}`).join(" AND "));
       }
     }
   }
