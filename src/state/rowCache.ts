@@ -2,6 +2,7 @@ import { commands, type ResultRef, type RowPage } from "../ipc/bindings";
 
 export const PAGE_SIZE = 256;
 const MAX_PAGES = 64;
+const FULL_CHARS = 4 * 1024 * 1024;
 
 export type Row = (string | null)[];
 export type RowRange = { start: number; end: number };
@@ -44,6 +45,7 @@ export class RowCache {
   private readonly pages = new Map<number, Page>();
   private readonly inflight = new Map<number, Promise<void>>();
   private readonly full = new Map<string, string | null>();
+  private fullChars = 0;
   private readonly listeners = new Set<() => void>();
   private version = 0;
   gone = false;
@@ -61,10 +63,6 @@ export class RowCache {
     return this.pages.get(Math.floor(row / PAGE_SIZE))?.cut.has(cellKey(row, col)) ?? false;
   }
 
-  fullValue(row: number, col: number): string | null | undefined {
-    return this.full.get(cellKey(row, col));
-  }
-
   async ensure(range: RowRange, rowCount: number): Promise<void> {
     if (this.gone) return;
     const wanted = pagesFor(range, rowCount);
@@ -76,15 +74,13 @@ export class RowCache {
 
   async loadFull(row: number, col: number): Promise<string | null | undefined> {
     const key = cellKey(row, col);
-    if (this.full.has(key)) return this.full.get(key);
+    if (this.full.has(key)) return this.keepFull(key, this.full.get(key)!);
     const value = await this.source.cell(this.ref, row, col);
     if (value === "gone") {
       this.markGone();
       return undefined;
     }
-    this.full.set(key, value);
-    this.notify();
-    return value;
+    return this.keepFull(key, value);
   }
 
   subscribe = (listener: () => void): (() => void) => {
@@ -110,6 +106,19 @@ export class RowCache {
       .finally(() => this.inflight.delete(page));
     this.inflight.set(page, promise);
     return promise;
+  }
+
+  private keepFull(key: string, value: string | null): string | null {
+    if (this.full.has(key)) this.fullChars -= this.full.get(key)?.length ?? 0;
+    this.full.delete(key);
+    this.full.set(key, value);
+    this.fullChars += value?.length ?? 0;
+    for (const [k, v] of this.full) {
+      if (this.fullChars <= FULL_CHARS || k === key) break;
+      this.full.delete(k);
+      this.fullChars -= v?.length ?? 0;
+    }
+    return value;
   }
 
   private touch(page: number) {

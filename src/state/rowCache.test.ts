@@ -85,7 +85,24 @@ describe("RowCache", () => {
     expect(cache.isCut(300, 0)).toBe(true);
     expect(cache.isCut(301, 0)).toBe(false);
     expect(await cache.loadFull(300, 0)).toBe("full 300");
-    expect(cache.fullValue(300, 0)).toBe("full 300");
+  });
+
+  it("holds full values up to a character budget, dropping the least recently read first", async () => {
+    const reads: number[] = [];
+    const sizes = [1_500_000, 1_500_000, 1_500_000, 5_000_000];
+    const cache = new RowCache(REF, {
+      async page(_ref, start) {
+        return { start, rows: [], cut: [] };
+      },
+      async cell(_ref, row) {
+        reads.push(row);
+        return "x".repeat(sizes[row]!);
+      },
+    });
+    for (const row of [0, 1, 0, 2, 0, 1]) await cache.loadFull(row, 0);
+    expect(reads).toEqual([0, 1, 2, 1]);
+    for (const row of [3, 3, 0]) await cache.loadFull(row, 0);
+    expect(reads).toEqual([0, 1, 2, 1, 3, 0]);
   });
 
   it("notifies subscribers when a page lands", async () => {
