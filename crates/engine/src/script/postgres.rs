@@ -235,7 +235,8 @@ fn table_statements(t: &Table, out: &mut Vec<String>, warnings: &mut Vec<String>
     match (&t.parent, &t.of_type) {
         (Parent::Partition { schema, name: parent, bound }, _) => {
             head.push_str(&format!(" PARTITION OF {}", qualified(schema, parent)));
-            let body: Vec<_> = constraints.collect();
+            let overrides = t.columns.iter().filter_map(|c| generation_override(c).map(|g| format!("{} WITH OPTIONS{g}", ident(&c.name))));
+            let body: Vec<_> = overrides.chain(constraints).collect();
             if !body.is_empty() {
                 head.push_str(&format!(" (\n    {}\n)", body.join(",\n    ")));
             }
@@ -250,7 +251,10 @@ fn table_statements(t: &Table, out: &mut Vec<String>, warnings: &mut Vec<String>
             }
         }
         (parent, _) => {
-            let columns = t.columns.iter().filter(|c| c.declared).map(|c| if c.inherited.is_some() { column_head(c) } else { format!("{}{}", column_head(c), column_options(c, &t.schema, &t.name)) });
+            let columns = t.columns.iter().filter(|c| c.declared).map(|c| {
+                let options = if c.inherited.is_some() { generation_override(c).unwrap_or_default() } else { column_options(c, &t.schema, &t.name) };
+                format!("{}{options}", column_head(c))
+            });
             let body: Vec<_> = columns.chain(constraints).collect();
             head.push_str(&format!(" (\n    {}\n)", body.join(",\n    ")));
             if let Parent::Inherits(parents) = parent {
@@ -322,6 +326,10 @@ fn table_statements(t: &Table, out: &mut Vec<String>, warnings: &mut Vec<String>
         out.extend(comment(&format!("COLUMN {name}.{}", ident(&c.name)), &c.comment));
     }
     warnings.extend(unscripted(&t.unscripted, &name));
+    let inherits = !matches!(t.parent, Parent::Partition { .. });
+    for c in t.columns.iter().filter(|c| inherits && !c.declared && generation_override(c).is_some()) {
+        warnings.push(format!("the generation expression of {name}.{}, which a replay takes from its parent", ident(&c.name)));
+    }
     if !in_replay_order(&t.columns) {
         warnings.push(format!("the column order of {name}, because a replay puts inherited columns first"));
     }
@@ -354,7 +362,7 @@ fn column_options(c: &Column, schema: &str, table: &str) -> String {
         out.push_str(&format!(" {}", identity_clause(identity, schema, table)));
     }
     match (c.generated, &c.default) {
-        (Some(kind), Some(expr)) => out.push_str(&format!(" GENERATED ALWAYS AS ({expr}) {}", if kind == Generated::Stored { "STORED" } else { "VIRTUAL" })),
+        (Some(kind), Some(expr)) => out.push_str(&generation(kind, expr)),
         (None, Some(expr)) => out.push_str(&format!(" DEFAULT {expr}")),
         _ => {}
     }
@@ -362,6 +370,16 @@ fn column_options(c: &Column, schema: &str, table: &str) -> String {
         out.push_str(" NOT NULL");
     }
     out
+}
+
+fn generation(kind: Generated, expr: &str) -> String {
+    format!(" GENERATED ALWAYS AS ({expr}) {}", if kind == Generated::Stored { "STORED" } else { "VIRTUAL" })
+}
+
+/// `PARTITION OF` and `INHERITS` copy the parent's generation expression, which a child may override.
+fn generation_override(c: &Column) -> Option<String> {
+    let (kind, expr, parent) = (c.generated?, c.default.as_ref()?, c.inherited.as_ref()?);
+    (parent.default.as_ref() != Some(expr)).then(|| generation(kind, expr))
 }
 
 fn column_head(c: &Column) -> String {
@@ -810,6 +828,29 @@ COMMENT ON COLUMN public.t.status IS 'lifecycle';
             table(&t).text,
             "CREATE TABLE app.tree (\n    id integer NOT NULL,\n    parent integer\n);\n\nCREATE UNIQUE INDEX tree_id ON app.tree USING btree (id);\n\nALTER TABLE app.tree ADD CONSTRAINT tree_parent FOREIGN KEY (parent) REFERENCES app.tree(id);\n"
         );
+    }
+
+    #[test]
+    fn a_partition_or_child_keeps_a_generation_expression_that_differs_from_its_parents() {
+        let generated = |expr: &str, parent: &str, declared: bool| Column {
+            generated: Some(Generated::Stored),
+            default: Some(expr.into()),
+            declared,
+            inherited: Some(Inherited { default: Some(parent.into()), storage: "x".into(), ..Inherited::default() }),
+            ..col("b", "integer")
+        };
+        let partition = |columns: Vec<Column>| Table {
+            schema: "app".into(),
+            name: "g_1".into(),
+            parent: Parent::Partition { schema: "app".into(), name: "g".into(), bound: "FOR VALUES IN (1)".into() },
+            columns,
+            ..Default::default()
+        };
+        assert_eq!(table(&partition(vec![generated("(a * 3)", "(a * 2)", false)])).text, "CREATE TABLE app.g_1 PARTITION OF app.g (\n    b WITH OPTIONS GENERATED ALWAYS AS ((a * 3)) STORED\n)\n    FOR VALUES IN (1);\n");
+        assert_eq!(table(&partition(vec![generated("(a * 2)", "(a * 2)", false)])).text, "CREATE TABLE app.g_1 PARTITION OF app.g\n    FOR VALUES IN (1);\n");
+        let child = |declared: bool| Table { schema: "app".into(), name: "c".into(), parent: Parent::Inherits(vec![("app".into(), "p".into())]), columns: vec![generated("(a * 3)", "(a * 2)", declared)], ..Default::default() };
+        assert_eq!(table(&child(true)).text, "CREATE TABLE app.c (\n    b integer GENERATED ALWAYS AS ((a * 3)) STORED\n) INHERITS (app.p);\n");
+        assert_eq!(table(&child(false)).warnings, ["the generation expression of app.c.b, which a replay takes from its parent"]);
     }
 
     #[test]
