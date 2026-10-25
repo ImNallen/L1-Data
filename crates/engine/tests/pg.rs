@@ -2109,3 +2109,130 @@ async fn a_stalled_session_does_not_hang_the_restart_or_disconnect_check() {
     tabs.sort_by_key(|t| t.tab_id.0);
     assert_eq!(tabs, both);
 }
+
+async fn set_environment(h: &Harness, environment: Option<Environment>) {
+    let draft = ConnectionDraft { id: Some(h.conn), password: PasswordInput::Keep, environment, ..draft_from_url(&url(), "dev").unwrap() };
+    h.engine.save_connection(draft).await.unwrap();
+}
+
+fn script(text: &str) -> RunRequest {
+    RunRequest::Script { text: text.into(), target: RunTarget::All }
+}
+
+async fn asked_to_run(h: &Harness, tab: TabId, request: RunRequest, confirmed: Option<&WriteDigest>) -> WriteConfirmation {
+    match h.engine.console_run(tab, request, confirmed.cloned()).await {
+        Err(RunError::ConfirmWrites { confirmation }) => confirmation,
+        other => panic!("expected ConfirmWrites, got {other:?}"),
+    }
+}
+
+async fn count(oracle: &tokio_postgres::Client, table: &str) -> i64 {
+    oracle.query_one(&format!("select count(*) from public.{table}"), &[]).await.unwrap().get(0)
+}
+
+#[tokio::test]
+async fn a_write_on_production_runs_only_with_the_digest_of_the_same_work_and_target() {
+    let mut h = Harness::start().await;
+    let oracle = h.oracle().await;
+    let table = unique("t_guard");
+    oracle.batch_execute(&format!("create table public.{table} (n int)")).await.unwrap();
+    set_environment(&h, Some(Environment::Production)).await;
+    let tab = h.sql_tab(TxnMode::AutoCommit).await;
+    let history = h.history_len();
+
+    let one = format!("insert into public.{table} values (1)");
+    let asked = asked_to_run(&h, tab, script(&format!("select 1;\n{one};")), None).await;
+    assert_eq!((asked.connection.as_str(), asked.database.as_str(), asked.writes), ("dev", "shop", 1));
+    assert_eq!(asked.statements, [one.as_str()]);
+    assert_eq!(count(&oracle, &table).await, 0, "a refused run sends nothing");
+    assert!(matches!(h.console(tab).run, RunState::Idle), "{:?}", h.console(tab).run);
+
+    let stale = asked_to_run(&h, tab, script(&format!("select 1;\ninsert into public.{table} values (2);")), Some(&asked.digest)).await;
+    assert_ne!(stale.digest, asked.digest);
+    assert_eq!(count(&oracle, &table).await, 0, "a digest for other text sends nothing");
+
+    let manual = h.sql_tab(TxnMode::Manual).await;
+    asked_to_run(&h, manual, script(&format!("select 1;\n{one};")), Some(&asked.digest)).await;
+
+    let accepted = h.engine.console_run(tab, script(&format!("select 1;\n{one};")), Some(asked.digest.clone())).await.unwrap();
+    let state = h.wait_finished(tab, accepted.run_id).await;
+    assert!(matches!(state.run, RunState::Finished { outcome: RunOutcome::Ok, .. }), "{:?}", state.run);
+    assert_eq!(count(&oracle, &table).await, 1);
+    assert_eq!(h.history_len(), history + 2, "only the run that ran is in history");
+
+    h.run_ok(tab, &format!("select count(*) from public.{table}")).await;
+
+    let selected = format!("select 1;\n{one};\ninsert into public.{table} values (3);");
+    let from = selected.find("insert").unwrap() as u32;
+    let to = from + one.len() as u32 + 1;
+    let selection = RunRequest::Script { text: selected.clone(), target: RunTarget::Selection { from: DocOffset(from), to: DocOffset(to) } };
+    let asked = asked_to_run(&h, tab, selection, None).await;
+    assert_eq!((asked.writes, asked.statements.as_slice()), (1, [one.clone()].as_slice()));
+
+    asked_to_run(&h, tab, script(&one), None).await;
+    set_environment(&h, Some(Environment::Staging)).await;
+    h.run_ok(tab, &one).await;
+    set_environment(&h, None).await;
+    h.run_ok(tab, &one).await;
+    assert_eq!(count(&oracle, &table).await, 3, "Staging and unset write without a digest");
+
+    oracle.batch_execute(&format!("drop table public.{table}")).await.unwrap();
+}
+
+#[tokio::test]
+async fn a_digest_holds_only_while_the_connection_stays_as_asked() {
+    let h = Harness::start().await;
+    let oracle = h.oracle().await;
+    let table = unique("t_guard");
+    oracle.batch_execute(&format!("create table public.{table} (n int)")).await.unwrap();
+    set_environment(&h, Some(Environment::Production)).await;
+    let tab = h.sql_tab(TxnMode::AutoCommit).await;
+    let one = format!("insert into public.{table} values (1)");
+    let asked = asked_to_run(&h, tab, script(&one), None).await;
+
+    let renamed = ConnectionDraft {
+        id: Some(h.conn),
+        name: "dev renamed".into(),
+        password: PasswordInput::Keep,
+        environment: Some(Environment::Production),
+        ..draft_from_url(&url(), "dev").unwrap()
+    };
+    h.engine.save_connection(renamed).await.unwrap();
+    let again = asked_to_run(&h, tab, script(&one), Some(&asked.digest)).await;
+    assert_eq!(again.connection, "dev renamed");
+    assert_eq!(count(&oracle, &table).await, 0);
+    oracle.batch_execute(&format!("drop table public.{table}")).await.unwrap();
+}
+
+#[tokio::test]
+async fn staged_edits_on_production_apply_only_with_the_digest_of_the_same_edits() {
+    let mut h = Harness::start().await;
+    h.engine.connect(h.conn).await.unwrap();
+    let tab = h.sql_tab(TxnMode::AutoCommit).await;
+    let table = edit_table(&mut h, tab).await;
+    set_environment(&h, Some(Environment::Production)).await;
+
+    let mut edits = changes(&table);
+    edits.updates.push(RowUpdate { key: vec![cell("id", Some("1"))], set: vec![cell("note", Some("x"))] });
+    edits.inserts.push(vec![cell("name", Some("d"))]);
+    let asked = match h.engine.table_apply(tab, edits.clone(), None).await {
+        Err(ApplyError::ConfirmWrites { confirmation }) => confirmation,
+        other => panic!("expected ConfirmWrites, got {other:?}"),
+    };
+    assert_eq!(asked.writes, 2);
+    assert_eq!(
+        asked.statements,
+        [format!("UPDATE \"public\".\"{table}\" SET \"note\" = 'x' WHERE \"id\" = '1'"), format!("INSERT INTO \"public\".\"{table}\" (\"name\") VALUES ('d')")]
+    );
+    assert_eq!(rows_of(&mut h, tab, &table).await, "1:a:NULL 2:b:NULL 3:c:NULL");
+
+    let mut other = edits.clone();
+    other.inserts[0] = vec![cell("name", Some("e"))];
+    assert!(matches!(h.engine.table_apply(tab, other, Some(asked.digest.clone())).await, Err(ApplyError::ConfirmWrites { .. })));
+    assert_eq!(rows_of(&mut h, tab, &table).await, "1:a:NULL 2:b:NULL 3:c:NULL", "a digest for other edits applies nothing");
+
+    assert!(h.engine.table_apply(tab, edits, Some(asked.digest)).await.unwrap().committed);
+    assert_eq!(rows_of(&mut h, tab, &table).await, "1:a:x 2:b:NULL 3:c:NULL 4:d:NULL");
+    set_environment(&h, None).await;
+    h.run_ok(tab, &format!("drop table public.{table}")).await;
+}

@@ -780,3 +780,41 @@ async fn insert_exports_replay_identity_and_leave_out_computed_and_rowversion_co
         std::panic::resume_unwind(panic);
     }
 }
+
+#[tokio::test]
+async fn a_batch_that_runs_exec_on_production_waits_for_the_digest() {
+    let mut h = Harness::open(TxnMode::AutoCommit).await;
+    let old = h.engine.boot().connections.into_iter().find(|c| c.id == h.connection).unwrap();
+    let production = ConnectionDraft {
+        database_kind: DatabaseKind::SqlServer,
+        id: Some(h.connection),
+        name: old.name,
+        host: old.host,
+        port: old.port,
+        database: old.database,
+        user: old.user,
+        ssl_mode: old.ssl_mode,
+        ca_cert_path: None,
+        password: PasswordInput::Keep,
+        color: None,
+        ssh: None,
+        environment: Some(Environment::Production),
+    };
+    h.engine.save_connection(production).await.unwrap();
+    let text = "CREATE TABLE #p1_guard(id int)\nGO\nSELECT 1\nGO\nEXEC sp_who";
+    let request = || RunRequest::Script { text: text.into(), target: RunTarget::All };
+    let asked = match h.engine.console_run(h.tab, request(), None).await {
+        Err(RunError::ConfirmWrites { confirmation }) => confirmation,
+        other => panic!("expected ConfirmWrites, got {other:?}"),
+    };
+    assert_eq!((asked.connection.as_str(), asked.database.as_str(), asked.writes), ("SQL Server test", "shop", 2));
+    assert_eq!(asked.statements, ["CREATE TABLE #p1_guard(id int)", "EXEC sp_who"]);
+    let state = h.ok("SELECT OBJECT_ID('tempdb..#p1_guard')").await;
+    assert_eq!(h.rows(Harness::rowsets(&state)[0])[0][0], None, "a refused batch runs nothing");
+
+    let id = h.engine.console_run(h.tab, request(), Some(asked.digest)).await.unwrap().run_id;
+    let state = h.finish(id).await;
+    assert!(matches!(state.run, RunState::Finished { outcome: RunOutcome::Ok, .. }), "{:?}", state.run);
+    let state = h.ok("SELECT OBJECT_ID('tempdb..#p1_guard')").await;
+    assert!(h.rows(Harness::rowsets(&state)[0])[0][0].is_some());
+}
