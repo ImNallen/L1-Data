@@ -114,6 +114,7 @@ mod tests {
             color: None,
             ssh: None,
             environment,
+            sql_server_auth: None,
         }
     }
 

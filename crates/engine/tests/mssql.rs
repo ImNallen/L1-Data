@@ -797,6 +797,7 @@ async fn set_environment(h: &Harness, environment: Option<Environment>) {
         color: None,
         ssh: None,
         environment,
+        sql_server_auth: old.sql_server_auth,
     };
     h.engine.save_connection(draft).await.unwrap();
 }

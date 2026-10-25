@@ -2286,6 +2286,7 @@ async fn resave(h: &Harness, host: &str, environment: Option<Environment>) {
         color: saved.color,
         ssh: None,
         environment,
+        sql_server_auth: saved.sql_server_auth,
     };
     h.engine.save_connection(draft).await.unwrap();
 }
