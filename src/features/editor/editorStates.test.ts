@@ -3,7 +3,7 @@ import { syntaxTree } from "@codemirror/language";
 import { CompletionContext, type CompletionResult } from "@codemirror/autocomplete";
 import { clearMocks, mockIPC } from "@tauri-apps/api/mocks";
 import { afterEach, expect, it } from "vitest";
-import type { CompletionContext as EngineContext, Expect, KeyInfo, ScopeRelation } from "../../ipc/bindings";
+import type { Catalog, CompletionContext as EngineContext, DatabaseKind, Expect, KeyInfo, ScopeRelation } from "../../ipc/bindings";
 import { buildCatalogView } from "../../state/catalog";
 import { useRelationDetail } from "../../state/relationDetail";
 import { shopCatalog } from "../../testing/shopCatalog";
@@ -49,11 +49,12 @@ function foreignKey(columns: string[], refTable: string, refColumns: string[]): 
 
 const ORDER_KEYS = [foreignKey(["customer_id"], "customers", ["id"]), foreignKey(["customer_id", "ship_address_id"], "addresses", ["customer_id", "id"])];
 
+type Setup = { keys?: Record<number, KeyInfo[]>; explicit?: boolean; catalog?: Catalog; kind?: DatabaseKind };
+
 async function completeAtEnd(
   text: string,
   engine: Reply | { kind: "None" },
-  keys: Record<number, KeyInfo[]> = {},
-  explicit = true,
+  { keys = {}, explicit = true, catalog = shopCatalog("c1", 1), kind = catalog.databaseKind }: Setup = {},
 ): Promise<{ labels: string[]; sent: unknown[] }> {
   const sent: unknown[] = [];
   mockIPC((cmd, args) => {
@@ -68,7 +69,7 @@ async function completeAtEnd(
     return null;
   });
   seedEditor("t1", text);
-  configureSql("t1", buildCatalogView(shopCatalog("c1", 1)));
+  configureSql("t1", buildCatalogView(catalog), kind);
   const state = editorStateOf("t1");
   const pos = state.doc.length;
   const context = new CompletionContext(state, pos, explicit);
@@ -135,8 +136,7 @@ it("offers the foreign key join condition first, with the joined relation's colu
   const { labels } = await completeAtEnd(
     text,
     reply({ kind: "JoinCondition", target: 1 }, [table("o", "orders"), table("c", "customers")]),
-    { [oidOf("orders")]: ORDER_KEYS },
-    false,
+    { keys: { [oidOf("orders")]: ORDER_KEYS }, explicit: false },
   );
   expect(labels[0]).toBe("c.id = o.customer_id");
   expect(labels).toContain("email");
@@ -146,7 +146,7 @@ it("joins every column of a composite foreign key with AND", async () => {
   const { labels } = await completeAtEnd(
     "select * from orders o join addresses a on ",
     reply({ kind: "JoinCondition", target: 1 }, [table("o", "orders"), table("a", "addresses")]),
-    { [oidOf("orders")]: ORDER_KEYS },
+    { keys: { [oidOf("orders")]: ORDER_KEYS } },
   );
   expect(labels[0]).toBe("a.customer_id = o.customer_id AND a.id = o.ship_address_id");
 });
@@ -155,19 +155,19 @@ it("reads a foreign key from the joined relation to one already in scope", async
   const { labels } = await completeAtEnd(
     "select * from customers c join orders o on ",
     reply({ kind: "JoinCondition", target: 1 }, [table("c", "customers"), table("o", "orders")]),
-    { [oidOf("orders")]: ORDER_KEYS },
+    { keys: { [oidOf("orders")]: ORDER_KEYS } },
   );
   expect(labels[0]).toBe("o.customer_id = c.id");
 });
 
 it("leaves an alias being typed alone, and lists the keywords only on request", async () => {
   const alias = reply({ kind: "Alias" }, [table("orders", "orders")], { keywords: ["ORDER BY", "WHERE"] });
-  expect((await completeAtEnd("select * from orders o", alias, {}, false)).labels).toEqual([]);
+  expect((await completeAtEnd("select * from orders o", alias, { explicit: false })).labels).toEqual([]);
   expect((await completeAtEnd("select * from orders o", alias)).labels).toEqual(["ORDER BY", "WHERE"]);
 });
 
 it("stays closed after a space unless the engine says a join condition starts there", async () => {
-  expect((await completeAtEnd("select * from orders o ", reply({ kind: "Keyword" }, [], { keywords: ["WHERE"] }), {}, false)).labels).toEqual([]);
+  expect((await completeAtEnd("select * from orders o ", reply({ kind: "Keyword" }, [], { keywords: ["WHERE"] }), { explicit: false })).labels).toEqual([]);
   expect((await completeAtEnd("select 'abc", { kind: "None" })).labels).toEqual([]);
 });
 
@@ -186,6 +186,15 @@ it("sends the SQL Server kind and offers the expansion of a derived relation", a
   const result = await source!(new CompletionContext(state, 2, false));
   expect(result?.options.map((o) => o.label)).toEqual(["n", "code", "percent_off", "expires_at"]);
   expect(sent).toEqual([{ text: "r.", cursor: 2, databaseKind: "SqlServer" }]);
+});
+
+it("matches a name in another case only where the server would", async () => {
+  const catalog = shopCatalog("c1", 1);
+  catalog.schemas[1]!.relations.find((r) => r.name === "orders")!.name = "Orders";
+  const qualified = reply({ kind: "Expression" }, [table("o", "orders")], { qualifier: { kind: "Relation", index: 0 } });
+  expect((await completeAtEnd("select * from orders o where o.", qualified, { catalog })).labels).toEqual([]);
+  const msCatalog = { ...catalog, databaseKind: "SqlServer" as const };
+  expect((await completeAtEnd("SELECT * FROM orders o WHERE o.", qualified, { catalog: msCatalog })).labels).toContain("customer_id");
 });
 
 it("changes to SQL Server syntax before a catalog arrives while retaining the document", () => {

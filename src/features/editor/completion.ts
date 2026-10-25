@@ -21,16 +21,22 @@ function insertCallWithCursorInside(text: string) {
   };
 }
 
+/** The engine folds a PostgreSQL name as the server does, so only SQL Server's default collations match in any case. */
+function named<T extends { name: string }>(view: CatalogView, items: T[], name: string): T | undefined {
+  const exact = items.find((i) => i.name === name);
+  if (exact || view.catalog.databaseKind !== "SqlServer") return exact;
+  return items.find((i) => i.name.toLowerCase() === name.toLowerCase());
+}
+
 function schemaNamed(view: CatalogView, name: string) {
-  const schemas = view.catalog.schemas;
-  return schemas.find((s) => s.name === name) ?? schemas.find((s) => s.name.toLowerCase() === name.toLowerCase());
+  return named(view, view.catalog.schemas, name);
 }
 
 function resolveTable(view: CatalogView | undefined, schema: string | null, name: string): Resolved | undefined {
   if (!view) return undefined;
   const target = schema ?? view.catalog.defaultSchema;
   const s = target === null ? undefined : schemaNamed(view, target);
-  const rel = s && (s.relations.find((r) => r.name === name) ?? s.relations.find((r) => r.name.toLowerCase() === name.toLowerCase()));
+  const rel = s && named(view, s.relations, name);
   return s && rel ? { schema: s.name, rel } : undefined;
 }
 

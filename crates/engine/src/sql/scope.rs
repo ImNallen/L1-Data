@@ -950,12 +950,12 @@ fn closed(kind: DatabaseKind, lexeme: &str) -> bool {
     }
 }
 
-/// A name as the server resolves it: PostgreSQL folds an unquoted name to lower case, and a quoted
-/// name keeps its case with its doubled quotes undone.
+/// A name as the server resolves it: PostgreSQL folds the ASCII letters of an unquoted name to lower
+/// case, and a quoted name keeps its case with its doubled quotes undone.
 fn fold(kind: DatabaseKind, text: &str, l: &Lexeme) -> String {
     let raw = &text[l.span.clone()];
     if l.class != Class::Name {
-        return if kind == DatabaseKind::Postgres { raw.to_lowercase() } else { raw.to_owned() };
+        return if kind == DatabaseKind::Postgres { raw.to_ascii_lowercase() } else { raw.to_owned() };
     }
     let raw = raw.strip_prefix("U&").or_else(|| raw.strip_prefix("u&")).unwrap_or(raw);
     let (close, doubled) = if raw.starts_with('[') { (']', "]]") } else { ('"', "\"\"") };
@@ -1301,6 +1301,13 @@ mod tests {
     #[test]
     fn within_group_keeps_the_select_list() {
         assert_eq!(pg("select percentile_cont(0.5) within group (order by total), | from orders o").expect, Expect::Expression);
+    }
+
+    #[test]
+    fn postgres_folds_only_ascii_letters_of_an_unquoted_name() {
+        assert_eq!(refs(&pg("select * from CAFÉ c where c.|")), [(Some("c"), &table(None, "cafÉ"))]);
+        assert_eq!(pg("select * from ÄBC where äbc.|").qualifier, Some(Qualifier::Name { parts: vec!["äbc".into()] }));
+        assert_eq!(refs(&ms("SELECT * FROM CAFÉ c WHERE c.|")), [(Some("c"), &table(None, "CAFÉ"))]);
     }
 
     #[test]
