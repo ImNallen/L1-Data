@@ -108,6 +108,7 @@ fn tsql_statement_starts(text: &str, batch: &[Lexeme]) -> Vec<usize> {
     let mut main_verb = false;
     let mut source_begun = false;
     let mut update = false;
+    let mut update_set = false;
     let mut prev: Option<&Lexeme> = None;
     for l in batch.iter().filter(|l| !matches!(l.class, Class::LineComment | Class::BlockComment)) {
         match l.class {
@@ -115,16 +116,18 @@ fn tsql_statement_starts(text: &str, batch: &[Lexeme]) -> Vec<usize> {
             Class::Close => depth = depth.saturating_sub(1),
             Class::Semi if depth == 0 => {
                 starts.push(l.span.end);
-                (first, main_verb, source_begun, update, prev) = (None, false, false, false, None);
+                (first, main_verb, source_begun, update, update_set, prev) = (None, false, false, false, false, None);
                 continue;
             }
             Class::Word if depth == 0 => {
                 let w = word(l).unwrap_or_default();
                 let prev_word = prev.and_then(word);
                 let after_comma = prev.is_some_and(|p| p.class == Class::Comma);
+                let set_option = first.as_deref() == Some("SET");
                 let continues = after_comma
                     || prev_word.as_deref().is_some_and(|p| {
-                        ["UNION", "ALL", "EXCEPT", "INTERSECT", "ON", "FOR", "AFTER", "OF", "THEN", "INSTEAD", "OR", "NOT", "GRANT", "DENY", "REVOKE"].contains(&p)
+                        ["UNION", "ALL", "EXCEPT", "INTERSECT", "FOR", "AFTER", "OF", "THEN", "INSTEAD", "OR", "NOT", "GRANT", "DENY", "REVOKE"].contains(&p)
+                            || p == "ON" && !set_option
                     });
                 let cte_body = first.as_deref() == Some("WITH") && !main_verb;
                 let insert_source = first.as_deref() == Some("INSERT") && !source_begun;
@@ -133,7 +136,7 @@ fn tsql_statement_starts(text: &str, batch: &[Lexeme]) -> Vec<usize> {
                     && match w.as_str() {
                         "SELECT" => !cte_body && !insert_source,
                         "INSERT" | "UPDATE" | "DELETE" | "MERGE" => !cte_body,
-                        "SET" => !update,
+                        "SET" => !update || update_set,
                         "EXEC" | "EXECUTE" => !insert_source,
                         "IF" => !matches!(first.as_deref(), Some("DROP" | "ALTER" | "CREATE")),
                         "DECLARE" | "PRINT" | "WHILE" | "RETURN" | "BEGIN" | "CREATE" | "ALTER" | "DROP" | "TRUNCATE" | "THROW" | "RAISERROR" | "USE" | "GRANT" | "DENY" | "REVOKE" => true,
@@ -141,7 +144,7 @@ fn tsql_statement_starts(text: &str, batch: &[Lexeme]) -> Vec<usize> {
                     };
                 if starts_new {
                     starts.push(l.span.start);
-                    (first, main_verb, source_begun, update) = (None, false, false, false);
+                    (first, main_verb, source_begun, update, update_set) = (None, false, false, false, false);
                 }
                 if first.is_none() {
                     first = Some(w.clone());
@@ -149,6 +152,7 @@ fn tsql_statement_starts(text: &str, batch: &[Lexeme]) -> Vec<usize> {
                     main_verb = true;
                 }
                 source_begun |= matches!(w.as_str(), "VALUES" | "SELECT" | "EXEC" | "EXECUTE");
+                update_set = update && (update_set || w == "SET") && w != "UPDATE";
                 update |= w == "UPDATE";
             }
             _ => {}
@@ -1297,6 +1301,18 @@ mod tests {
     #[test]
     fn within_group_keeps_the_select_list() {
         assert_eq!(pg("select percentile_cont(0.5) within group (order by total), | from orders o").expect, Expect::Expression);
+    }
+
+    #[test]
+    fn a_tsql_set_option_ends_its_statement() {
+        let s = ms("UPDATE customers SET name = 'x'\nSET XACT_ABORT ON\nSELECT * FROM orders o WHERE o.|");
+        assert_eq!((refs(&s), s.qualifier.clone()), (vec![(Some("o"), &table(None, "orders"))], Some(Qualifier::Relation { index: 0 })));
+        let s = ms("SELECT * FROM customers c\nUPDATE orders SET status = 1\nSET NOCOUNT ON\nSELECT * FROM orders o JOIN products p ON |");
+        assert_eq!((refs(&s), s.expect), (vec![(Some("o"), &table(None, "orders")), (Some("p"), &table(None, "products"))], Expect::JoinCondition { target: 1 }));
+        let s = ms("SET NOCOUNT ON\nSELECT * FROM orders o WHERE o.|");
+        assert_eq!(refs(&s), [(Some("o"), &table(None, "orders"))]);
+        let s = ms("UPDATE o SET status = 1, total = o.| FROM orders o");
+        assert_eq!((refs(&s).len(), s.expect), (1, Expect::Expression));
     }
 
     #[test]
