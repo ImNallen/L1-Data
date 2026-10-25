@@ -28,7 +28,7 @@ Verified constraints the design honors:
 pnpm install
 pnpm db:up              # docker compose -f dev/docker-compose.yml: postgres:16 on :5433, seeded `shop` db + lab.type_zoo
 pnpm tauri dev          # app; bindings regenerate on every debug build
-pnpm bridge             # dev-bridge on :7077 + vite on :5173: the real Engine driven from a plain browser
+pnpm bridge             # dev-bridge on :7077 + vite on :5173 (L1_DATA_BRIDGE_PORT, L1_DATA_VITE_PORT): the real Engine from a plain browser
 cargo test -p engine                       # pure unit tests, no DB
 cargo test -p engine --features pg-tests   # engine against the Docker DB
 pnpm test                                  # vitest: reducers, formatting
@@ -1088,7 +1088,7 @@ src/                          # frontend
   features/saved/{SavedPalette.tsx,savedActions.ts,savedList.ts,savedPane.ts}   # the Saved queries palette, its pure ranking and keys, and its preview reducer
   testing/shopCatalog.ts      # catalog fixture for vitest
   **/*.test.ts(x)             # vitest, next to the code under test
-crates/dev-bridge/             # bin (not shipped): axum on 127.0.0.1:7077, POST /invoke/:cmd + GET /events (SSE)
+crates/dev-bridge/             # bin (not shipped): axum on 127.0.0.1:$L1_DATA_BRIDGE_PORT (default 7077), POST /invoke/:cmd + GET /events (SSE)
 src/dev/bridgeShim.ts         # loaded only in vite dev outside Tauri: mockIPC -> fetch, SSE -> emit("app-event")
 dev/{docker-compose.yml,seed.sql}   # shop + lab.type_zoo
 dev/sshd/                     # the ssh-tests bastion: Dockerfile, sshd_config, and test-only keys
@@ -1161,7 +1161,7 @@ Tracing a run from the button to the grid takes four files: `runActions.ts` → 
    - grid header icons and key navigation, history list paging, settings screen, window chrome, theme, global shortcuts, the bridge shim
    - the assistant: `live.apply` for providers, chats, entries, and tombstones, turn grouping, tool lines, provider status text, ignored launch arguments, send requests with UTF-16 offsets and an attached result, Replace tab as one undo, the resync check, SQL cards, and the panel's pickers, approval card, and failure states
 4. **Contract drift**: a `src-tauri` test (`export_bindings_up_to_date`) renders bindings to a string and asserts equality with `src/ipc/bindings.ts`. A second test asserts the dev-bridge dispatch table covers exactly the registered command names. The dev-bridge also tests that `app_boot` replies with the snapshot and that bad requests are bridge errors, not command errors.
-5. **UI against the real engine** (`pnpm bridge`). `crates/dev-bridge` hosts the same `Engine` (MemoryKeyStore, temp `L1_DATA_DATA_DIR`) behind `POST /invoke/:cmd` and an SSE stream of `AppEvent`. In vite dev outside Tauri, `src/dev/bridgeShim.ts` installs `mockIPC` from `@tauri-apps/api/mocks` (with `shouldMockEvents`) that forwards every command to the bridge and re-emits SSE frames as `app-event`. The generated bindings run unchanged. An agent drives it with agent-browser or Playwright, selecting by `data-testid`:
+5. **UI against the real engine** (`pnpm bridge`). `crates/dev-bridge` hosts the same `Engine` (MemoryKeyStore, temp `L1_DATA_DATA_DIR`) behind `POST /invoke/:cmd` and an SSE stream of `AppEvent`. It listens on 127.0.0.1 at `L1_DATA_BRIDGE_PORT` (default 7077) and accepts requests only from the vite origin at `L1_DATA_VITE_PORT` (default 5173). Each variable takes only ASCII digits for a port from 1 to 65535. Vite checks both only when it serves, and passes the bridge port to the page, so separate port pairs run separate bridges side by side. In vite dev outside Tauri, `src/dev/bridgeShim.ts` installs `mockIPC` from `@tauri-apps/api/mocks` (with `shouldMockEvents`) that forwards every command to the bridge and re-emits SSE frames as `app-event`. The generated bindings run unchanged. An agent drives it with agent-browser or Playwright, selecting by `data-testid`:
    - create connection via the dialog, test it, save it, and see "Live" plus `customers 18.4k`-style estimates in the tree
    - ⌘P, type "ord it", and Enter opens `order_items`; the table tab shows 500 rows
    - new tab: type the mockup query, ⌘↵, see status "6 rows ·", the `orders` header tooltip `orders bigint`, right-aligned numbers

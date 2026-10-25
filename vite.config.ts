@@ -12,11 +12,15 @@ function port(name: string, fallback: number): number {
   return parsed;
 }
 
-export default defineConfig({
-  plugins: [react(), tailwindcss()],
-  define: { __L1_DATA_BRIDGE_URL__: JSON.stringify(`http://127.0.0.1:${port("L1_DATA_BRIDGE_PORT", 7077)}`) },
-  server: { port: port("L1_DATA_VITE_PORT", 5173), strictPort: true, watch: { ignored: ["**/src-tauri/**", "**/crates/**", "**/target/**"] } },
-  clearScreen: false,
-  envPrefix: ["VITE_", "TAURI_ENV_"],
-  test: { include: ["src/**/*.test.ts", "src/**/*.test.tsx"] },
+export default defineConfig(({ command, mode }) => {
+  const serving = command === "serve" && mode !== "test";
+  const read = (name: string, fallback: number) => (serving ? port(name, fallback) : fallback);
+  return {
+    plugins: [react(), tailwindcss()],
+    define: { __L1_DATA_BRIDGE_URL__: JSON.stringify(`http://127.0.0.1:${read("L1_DATA_BRIDGE_PORT", 7077)}`) },
+    server: { port: read("L1_DATA_VITE_PORT", 5173), strictPort: true, watch: { ignored: ["**/src-tauri/**", "**/crates/**", "**/target/**"] } },
+    clearScreen: false,
+    envPrefix: ["VITE_", "TAURI_ENV_"],
+    test: { include: ["src/**/*.test.ts", "src/**/*.test.tsx"] },
+  };
 });

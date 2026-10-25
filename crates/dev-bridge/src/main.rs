@@ -33,8 +33,10 @@ const VITE_PORT: PortVar = PortVar { name: "L1_DATA_VITE_PORT", default: 5173 };
 impl PortVar {
     fn parse(&self, value: Option<&str>) -> u16 {
         let Some(value) = value else { return self.default };
-        let port = value.parse::<NonZeroU16>().unwrap_or_else(|_| panic!("{} must be a port from 1 to 65535, got {value:?}", self.name));
-        port.get()
+        match value.parse::<NonZeroU16>() {
+            Ok(port) if value.bytes().all(|b| b.is_ascii_digit()) => port.get(),
+            _ => panic!("{} must be a port from 1 to 65535, got {value:?}", self.name),
+        }
     }
 
     fn read(&self) -> u16 {
@@ -157,11 +159,12 @@ mod tests {
     fn a_set_port_replaces_the_default() {
         assert_eq!(BRIDGE_PORT.parse(Some("7177")), 7177);
         assert_eq!(VITE_PORT.parse(Some("65535")), 65535);
+        assert_eq!(BRIDGE_PORT.parse(Some("07177")), 7177);
     }
 
     #[test]
     fn a_value_that_is_not_a_port_panics_naming_its_variable() {
-        for bad in ["abc", "", "0", "65536", "-1", " 7077"] {
+        for bad in ["abc", "", "0", "65536", "-1", " 7077", "+7077", "7077 ", "７０７７"] {
             let payload = std::panic::catch_unwind(|| BRIDGE_PORT.parse(Some(bad))).expect_err(bad);
             let message = payload.downcast_ref::<String>().expect("formatted panic message");
             assert!(message.starts_with("L1_DATA_BRIDGE_PORT must be a port"), "{bad:?}: {message}");

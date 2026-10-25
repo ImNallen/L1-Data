@@ -1,7 +1,16 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-BRIDGE="http://127.0.0.1:${L1_DATA_BRIDGE_PORT:-7077}"
+PORT=${L1_DATA_BRIDGE_PORT-7077}
+if ! python3 -c 'import sys; v = sys.argv[1]; sys.exit(not (v.isascii() and v.isdigit() and 1 <= int(v) <= 65535))' "$PORT"; then
+  echo "L1_DATA_BRIDGE_PORT must be a port from 1 to 65535, got \"$PORT\"" >&2
+  exit 1
+fi
+if (exec 3<>"/dev/tcp/127.0.0.1/$PORT") 2>/dev/null; then
+  echo "port $PORT is in use; stop that bridge or set L1_DATA_BRIDGE_PORT to a free port" >&2
+  exit 1
+fi
+BRIDGE="http://127.0.0.1:$PORT"
 DATA_DIR=$(mktemp -d)
 SSE_LOG=$(mktemp)
 SSE_PID=

@@ -294,10 +294,16 @@ def check(bridge, work, assistant=True):
     print("PASS historical database kind after connection deletion")
 
 
+def bridge_port():
+    value = os.environ.get("L1_DATA_BRIDGE_PORT", "7077")
+    if not (value.isascii() and value.isdigit() and 1 <= int(value) <= 65535):
+        raise SystemExit(f"L1_DATA_BRIDGE_PORT must be a port from 1 to 65535, got {value!r}")
+    return int(value)
+
+
 def main():
-    port = int(os.environ.get("L1_DATA_BRIDGE_PORT", "7077"))
     parser = argparse.ArgumentParser(description="Exercise PostgreSQL and SQL Server through the real dev bridge.")
-    parser.add_argument("--bridge", help=f"Use an existing bridge instead of starting a temporary engine on :{port}.")
+    parser.add_argument("--bridge", help="Use an existing bridge instead of starting a temporary engine on :$L1_DATA_BRIDGE_PORT (default 7077).")
     parser.add_argument("--skip-assistant", action="store_true", help="Skip fake-provider configuration and assistant turns.")
     args = parser.parse_args()
     with tempfile.TemporaryDirectory(prefix="l1data-mssql-smoke-") as directory:
@@ -305,7 +311,10 @@ def main():
         process = None
         log = None
         try:
-            if not args.bridge:
+            url = args.bridge
+            if not url:
+                port = bridge_port()
+                url = f"http://127.0.0.1:{port}"
                 try:
                     occupied = socket.create_connection(("127.0.0.1", port), timeout=1)
                 except ConnectionRefusedError:
@@ -316,7 +325,7 @@ def main():
                 log = (work / "bridge.log").open("w")
                 process = subprocess.Popen(["./target/debug/dev-bridge"],
                     env={**os.environ, "L1_DATA_DATA_DIR": directory}, stdout=log, stderr=log)
-            bridge = Bridge(args.bridge or f"http://127.0.0.1:{port}")
+            bridge = Bridge(url)
             deadline = time.monotonic() + 15
             while True:
                 if process is not None and process.poll() is not None:
