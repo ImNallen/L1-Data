@@ -2629,7 +2629,7 @@ async fn catalog_facts(client: &tokio_postgres::Client, relations: &str) -> Vec<
             UNION ALL
             SELECT concat_ws(' ', 'column', a.attnum, a.attname, format_type(a.atttypid, a.atttypmod), a.attnotnull, a.attidentity, a.attgenerated,
                              pg_get_expr(d.adbin, d.adrelid), a.attcollation::regcollation, col_description(c.oid, a.attnum), a.attislocal, a.attinhcount,
-                             a.attstattarget, a.attstorage, a.attcompression, a.attoptions, a.attfdwoptions)
+                             a.attstattarget, a.attstorage, to_jsonb(a) ->> 'attcompression', a.attoptions, a.attfdwoptions)
             FROM pg_attribute a LEFT JOIN pg_attrdef d ON d.adrelid = a.attrelid AND d.adnum = a.attnum
             WHERE a.attrelid = c.oid AND a.attnum > 0 AND NOT a.attisdropped
             UNION ALL
@@ -2652,7 +2652,7 @@ async fn catalog_facts(client: &tokio_postgres::Client, relations: &str) -> Vec<
                              obj_description(p.oid, 'pg_policy'))
             FROM pg_policy p WHERE p.polrelid = c.oid
             UNION ALL
-            SELECT concat_ws(' ', 'statistics', pg_get_statisticsobjdef(x.oid), x.stxstattarget, obj_description(x.oid, 'pg_statistic_ext')) FROM pg_statistic_ext x WHERE x.stxrelid = c.oid
+            SELECT concat_ws(' ', 'statistics', pg_get_statisticsobjdef(x.oid), to_jsonb(x) ->> 'stxstattarget', obj_description(x.oid, 'pg_statistic_ext')) FROM pg_statistic_ext x WHERE x.stxrelid = c.oid
             UNION ALL
             SELECT concat_ws(' ', 'query', pg_get_viewdef(c.oid)) WHERE c.relkind IN ('v', 'm')
          ) f(fact)

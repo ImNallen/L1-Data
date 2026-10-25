@@ -24,13 +24,25 @@ const RELATION: &str = "SELECT c.relkind::text, n.nspname, c.relname, c.relpersi
      LEFT JOIN pg_foreign_table ft ON ft.ftrelid = c.oid LEFT JOIN pg_foreign_server fs ON fs.oid = ft.ftserver
      WHERE c.oid = $1";
 
-const COLUMNS: &str = "SELECT a.attname, coalesce(serial.name, format_type(a.atttypid, a.atttypmod)), a.attnotnull, a.attidentity::text, a.attgenerated::text,
+/// The catalog columns a server reads differ by version, and the app supports PostgreSQL 12 and later.
+struct Queries {
+    columns: String,
+    statistics: String,
+}
+
+impl Queries {
+    fn for_version(version: i32) -> Queries {
+        let compression = |alias: &str| if version >= 140000 { format!("{alias}.attcompression::text") } else { "''".into() };
+        let target = if version >= 130000 { "NULLIF(s.stxstattarget, -1)::int4" } else { "NULL::int4" };
+        Queries {
+            columns: format!(
+                "SELECT a.attname, coalesce(serial.name, format_type(a.atttypid, a.atttypmod)), a.attnotnull, a.attidentity::text, a.attgenerated::text,
         CASE WHEN serial.name IS NULL THEN pg_get_expr(d.adbin, d.adrelid) END,
         CASE WHEN a.attcollation <> t.typcollation THEN cn.nspname END, CASE WHEN a.attcollation <> t.typcollation THEN co.collname END,
         col_description(a.attrelid, a.attnum),
         ident.nspname, ident.relname, format_type(ident.seqtypid, NULL), ident.seqstart, ident.seqincrement, ident.seqmin, ident.seqmax, ident.seqcache, ident.seqcycle,
-        a.attislocal, NULLIF(a.attstattarget, -1)::int4, a.attstorage::text, t.typstorage::text, a.attcompression::text, coalesce(a.attoptions, '{}'), coalesce(a.attfdwoptions, '{}'),
-        pa.position, pa.def, pa.attnotnull, pa.attstorage::text, pa.attcompression::text, serial.seq
+        a.attislocal, NULLIF(a.attstattarget, -1)::int4, a.attstorage::text, t.typstorage::text, {compression}, coalesce(a.attoptions, '{{}}'), coalesce(a.attfdwoptions, '{{}}'),
+        pa.position, pa.def, pa.attnotnull, pa.attstorage::text, pa.attcompression, serial.seq
      FROM pg_attribute a
      JOIN pg_class c ON c.oid = a.attrelid
      JOIN pg_type t ON t.oid = a.atttypid
@@ -55,13 +67,23 @@ const COLUMNS: &str = "SELECT a.attname, coalesce(serial.name, format_type(a.att
           AND s.seqmax = CASE a.atttypid WHEN 'int2'::regtype THEN 32767 WHEN 'int4'::regtype THEN 2147483647 ELSE 9223372036854775807 END
      ) serial ON true
      LEFT JOIN LATERAL (
-        SELECT (h.inhseqno::int8 << 16) + pa.attnum AS position, pg_get_expr(pd.adbin, pd.adrelid) AS def, pa.attnotnull, pa.attstorage, pa.attcompression
+        SELECT (h.inhseqno::int8 << 16) + pa.attnum AS position, pg_get_expr(pd.adbin, pd.adrelid) AS def, pa.attnotnull, pa.attstorage, {parent_compression} AS attcompression
         FROM pg_inherits h JOIN pg_attribute pa ON pa.attrelid = h.inhparent AND pa.attname = a.attname AND NOT pa.attisdropped
         LEFT JOIN pg_attrdef pd ON pd.adrelid = pa.attrelid AND pd.adnum = pa.attnum
         WHERE h.inhrelid = a.attrelid AND a.attinhcount > 0 ORDER BY h.inhseqno LIMIT 1
      ) pa ON true
      WHERE a.attrelid = $1 AND a.attnum > 0 AND NOT a.attisdropped
-     ORDER BY a.attnum";
+     ORDER BY a.attnum",
+                compression = compression("a"),
+                parent_compression = compression("pa"),
+            ),
+            statistics: format!(
+                "SELECT n.nspname, s.stxname, pg_get_statisticsobjdef(s.oid), {target}, obj_description(s.oid, 'pg_statistic_ext')
+                 FROM pg_statistic_ext s JOIN pg_namespace n ON n.oid = s.stxnamespace WHERE s.stxrelid = $1 ORDER BY s.stxname"
+            ),
+        }
+    }
+}
 
 const OWNED_SEQUENCES: &str = "SELECT sn.nspname, sc.relname, a.attname, format_type(s.seqtypid, NULL), s.seqstart, s.seqincrement, s.seqmin, s.seqmax, s.seqcache, s.seqcycle
      FROM pg_depend dep JOIN pg_class sc ON sc.oid = dep.objid AND sc.relkind = 'S'
@@ -98,9 +120,6 @@ const POLICIES: &str = "SELECT p.polname, p.polpermissive, p.polcmd::text,
         ARRAY(SELECT r.rolname::text FROM pg_roles r WHERE r.oid = ANY (p.polroles) ORDER BY r.rolname),
         pg_get_expr(p.polqual, p.polrelid), pg_get_expr(p.polwithcheck, p.polrelid), obj_description(p.oid, 'pg_policy')
      FROM pg_policy p WHERE p.polrelid = $1 ORDER BY p.polname";
-
-const STATISTICS: &str = "SELECT n.nspname, s.stxname, pg_get_statisticsobjdef(s.oid), NULLIF(s.stxstattarget, -1)::int4, obj_description(s.oid, 'pg_statistic_ext')
-     FROM pg_statistic_ext s JOIN pg_namespace n ON n.oid = s.stxnamespace WHERE s.stxrelid = $1 ORDER BY s.stxname";
 
 const PARTITIONS: &str = "SELECT c.oid FROM pg_inherits i JOIN pg_class c ON c.oid = i.inhrelid
      WHERE i.inhparent = $1 AND c.relispartition
@@ -178,9 +197,10 @@ fn unscripted(r: &Row, grants: &[Row]) -> ddl::Unscripted {
 /// expression or a view, index, constraint, or trigger definition. Routine bodies stay as written.
 pub async fn load(client: &mut Client, target: &ScriptTarget) -> Result<ObjectScript, DetailError> {
     let tx = client.build_transaction().read_only(true).start().await.map_err(failed)?;
-    tx.batch_execute("SET LOCAL search_path = pg_catalog").await.map_err(failed)?;
+    let version: i32 = tx.query_one("SELECT current_setting('server_version_num')::int4, set_config('search_path', 'pg_catalog', true)", &[]).await.map_err(failed)?.get(0);
+    let queries = Queries::for_version(version);
     let script = match target {
-        ScriptTarget::Relation { oid } => relation(&tx, *oid).await,
+        ScriptTarget::Relation { oid } => relation(&tx, &queries, *oid).await,
         ScriptTarget::Routine { oid } => routine(&tx, *oid).await,
         ScriptTarget::Index { relation_oid, name } => index(&tx, *relation_oid, name).await,
         ScriptTarget::Trigger { relation_oid, name } => trigger(&tx, *relation_oid, name).await,
@@ -197,17 +217,17 @@ fn refused(message: &str) -> DetailError {
     DetailError::Failed { message: message.into() }
 }
 
-async fn relation(tx: &Transaction<'_>, oid: u32) -> Result<ObjectScript, DetailError> {
+async fn relation(tx: &Transaction<'_>, queries: &Queries, oid: u32) -> Result<ObjectScript, DetailError> {
     let r = tx.query_opt(RELATION, &[&oid]).await.map_err(failed)?.ok_or(DetailError::Gone)?;
     let name: String = r.get(2);
     let ddl = match r.get::<_, &str>(0) {
-        "r" | "p" | "f" => ddl::table(&table(tx, oid, &r).await?),
+        "r" | "p" | "f" => ddl::table(&table(tx, queries, oid, &r).await?),
         kind @ ("v" | "m") => {
             let params: &[&(dyn ToSql + Sync)] = &[&oid];
             let grants = relation_grants_query();
             let (query, columns, indexes, triggers, rules, grants) = tokio::try_join!(
                 tx.query_one("SELECT pg_get_viewdef($1::oid, true)", params),
-                tx.query(COLUMNS, params),
+                tx.query(&queries.columns, params),
                 tx.query(INDEXES, params),
                 tx.query(TRIGGERS, params),
                 tx.query(RULES, params),
@@ -236,18 +256,18 @@ async fn relation(tx: &Transaction<'_>, oid: u32) -> Result<ObjectScript, Detail
     Ok(script::object_script(&name, ddl))
 }
 
-async fn table(tx: &Transaction<'_>, oid: u32, r: &Row) -> Result<ddl::Table, DetailError> {
+async fn table(tx: &Transaction<'_>, queries: &Queries, oid: u32, r: &Row) -> Result<ddl::Table, DetailError> {
     let params: &[&(dyn ToSql + Sync)] = &[&oid];
     let grants = relation_grants_query();
     let (columns, sequences, constraints, indexes, triggers, rules, policies, statistics, partitions, grants) = tokio::try_join!(
-        tx.query(COLUMNS, params),
+        tx.query(&queries.columns, params),
         tx.query(OWNED_SEQUENCES, params),
         tx.query(CONSTRAINTS, params),
         tx.query(INDEXES, params),
         tx.query(TRIGGERS, params),
         tx.query(RULES, params),
         tx.query(POLICIES, params),
-        tx.query(STATISTICS, params),
+        tx.query(&queries.statistics, params),
         tx.query(PARTITIONS, params),
         tx.query(&grants, params),
     )
@@ -265,7 +285,7 @@ async fn table(tx: &Transaction<'_>, oid: u32, r: &Row) -> Result<ddl::Table, De
     for p in &partitions {
         let child: u32 = p.get(0);
         let row = tx.query_opt(RELATION, &[&child]).await.map_err(failed)?.ok_or(DetailError::Gone)?;
-        children.push(Box::pin(table(tx, child, &row)).await?);
+        children.push(Box::pin(table(tx, queries, child, &row)).await?);
     }
     Ok(ddl::Table {
         name: r.get(2),
@@ -432,4 +452,20 @@ async fn trigger(tx: &Transaction<'_>, relation: u32, name: &str) -> Result<Obje
     let r = tx.query_opt(sql, &[&relation, &name]).await.map_err(failed)?.ok_or(DetailError::Gone)?;
     let table = ddl::qualified(r.get(4), r.get(5));
     Ok(script::object_script(name, script::Ddl::complete(ddl::script(ddl::trigger(&trigger_row(&r), keyword(r.get(6)), &table)))))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn queries_read_only_the_columns_the_server_has() {
+        let v12 = Queries::for_version(120000);
+        assert!(!v12.columns.contains("attcompression::text") && !v12.statistics.contains("stxstattarget"), "{}\n{}", v12.columns, v12.statistics);
+        let v13 = Queries::for_version(130000);
+        assert!(!v13.columns.contains("attcompression::text") && v13.statistics.contains("stxstattarget"));
+        let v14 = Queries::for_version(140000);
+        assert!(v14.columns.contains("a.attcompression::text") && v14.columns.contains("pa.attcompression::text"));
+        assert!(v14.columns.contains("coalesce(a.attoptions, '{}')"), "{}", v14.columns);
+    }
 }
