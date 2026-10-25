@@ -203,8 +203,7 @@ async fn run_again(shared: &Arc<Shared>, set: Arc<ResultSet>, format: ExportForm
     let target = path.clone();
     let file = blocking(shared, move || Replacement::begin(&target).map_err(io)).await?;
     let fresh = if needs_session {
-        let params = shared.session_params(config.connection_id, &config.database).map_err(|error| ExportError::Connect { error })?;
-        Some(Session::open(&params, config.schema.as_deref(), &shared.timezone).await.map_err(|error| ExportError::Connect { error })?)
+        Some(shared.open_tab_session(&config).await.map_err(|error| ExportError::Connect { error })?)
     } else {
         None
     };
@@ -212,10 +211,10 @@ async fn run_again(shared: &Arc<Shared>, set: Arc<ResultSet>, format: ExportForm
     let (session, stop, txn, fence) = {
         let mut inner = console.inner.lock().await;
         let fence = check(&inner)?;
-        if let Some(session) = fresh
+        if let Some((session, opened)) = fresh
             && matches!(inner.session, SessionSlot::Empty | SessionSlot::Lost { .. })
         {
-            inner.session = SessionSlot::Idle(session);
+            inner.session = SessionSlot::Idle { session, opened };
         }
         let progress = ExportProgress { result: set.r#ref, format, rows: 0, bytes: 0, write_error: None };
         let (session, stop) = console.take_session(&mut inner, run_id, Work::Export(progress)).ok_or(ExportError::Busy)?;

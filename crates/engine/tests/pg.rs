@@ -577,7 +577,7 @@ async fn cancel_finishes_cancelled_quickly() {
     let accepted = h.start_run(tab, "select slow_echo(30); select 2").await;
     tokio::time::sleep(Duration::from_millis(300)).await;
     assert!(matches!(h.engine.console_run(tab, RunRequest::Script { text: "select 1".into(), target: RunTarget::All }, None).await, Err(RunError::Busy)));
-    assert!(matches!(h.engine.console_commit(tab).await, Err(TxnError::Busy)));
+    assert!(matches!(h.engine.console_commit(tab, None).await, Err(TxnError::Busy)));
     let started = Instant::now();
     h.engine.console_cancel(tab).await;
     let state = h.wait_finished(tab, accepted.run_id).await;
@@ -606,10 +606,10 @@ async fn manual_tab_isolated_until_commit_and_abort_rolls_back() {
     let reconfigure = |database: &str, mode| ConsoleConfig { connection_id: h.conn, database: database.into(), schema: None, mode };
     assert!(matches!(h.engine.console_configure(a, reconfigure("shop", TxnMode::AutoCommit)).await, Err(ConfigureError::TransactionOpen)));
     assert!(matches!(h.engine.console_configure(a, reconfigure("reporting", TxnMode::Manual)).await, Err(ConfigureError::TransactionOpen)));
-    h.engine.console_commit(a).await.unwrap();
+    h.engine.console_commit(a, None).await.unwrap();
     assert_eq!(h.console(a).txn, TxnState::Idle);
     assert_eq!(h.scalar(b, &format!("select count(*) from {table}")).await, "1");
-    assert!(matches!(h.engine.console_commit(a).await, Err(TxnError::NoTransaction)));
+    assert!(matches!(h.engine.console_commit(a, None).await, Err(TxnError::NoTransaction)));
 
     let state = h.run(a, "select 1/0").await;
     assert!(matches!(state.run, RunState::Finished { outcome: RunOutcome::Failed, .. }));
@@ -617,7 +617,7 @@ async fn manual_tab_isolated_until_commit_and_abort_rolls_back() {
     let state = h.run(a, "select 1").await;
     assert_eq!(state.txn, TxnState::Aborted, "an aborted block rejects everything but ROLLBACK");
     assert!(matches!(statuses(&state)[0], StmtStatus::Failed { error } if error.sqlstate.as_deref() == Some("25P02")));
-    assert!(matches!(h.engine.console_commit(a).await, Err(TxnError::RolledBack)));
+    assert!(matches!(h.engine.console_commit(a, None).await, Err(TxnError::RolledBack)));
     assert_eq!(h.console(a).txn, TxnState::Idle);
 
     h.run_ok(a, &format!("insert into {table} values (2)")).await;
@@ -645,7 +645,7 @@ async fn a_notice_raised_at_commit_carries_the_commit_run_id() {
     assert!(!h.log(tab).contains(&"NOTICE: deferred".to_owned()), "the trigger is deferred to COMMIT: {:?}", h.log(tab));
 
     let before = h.entries(tab).len();
-    h.engine.console_commit(tab).await.unwrap();
+    h.engine.console_commit(tab, None).await.unwrap();
     h.drain();
     let commit = &h.entries(tab)[before..];
     assert_eq!(commit.iter().map(|e| log_line(&e.body)).collect::<Vec<_>>(), ["0> COMMIT", "NOTICE: deferred", "0 COMMIT"]);
@@ -1204,7 +1204,7 @@ async fn table_apply_in_manual_mode_waits_for_commit_and_a_failure_keeps_the_ope
     assert_eq!(h.console(manual).txn, TxnState::Active, "the savepoint kept the transaction usable");
     assert_eq!(rows_of(&mut h, manual, &table).await, "1:a:NULL 2:b:NULL 3:c:NULL 4:d:NULL", "earlier work in the transaction survives");
 
-    h.engine.console_commit(manual).await.unwrap();
+    h.engine.console_commit(manual, None).await.unwrap();
     assert_eq!(rows_of(&mut h, auto, &table).await, "1:a:NULL 2:b:NULL 3:c:NULL 4:d:NULL");
     h.run_ok(auto, &format!("drop table public.{table}")).await;
 }
@@ -1502,7 +1502,7 @@ async fn alter_database_in_a_manual_transaction_refreshes_the_list_on_commit() {
     let names = h.database_names();
     assert!(names.contains(&old) && !names.contains(&new), "an uncommitted rename changes nothing: {names:?}");
 
-    h.engine.console_commit(manual).await.unwrap();
+    h.engine.console_commit(manual, None).await.unwrap();
     let names = h.wait_database_names(|names| names.contains(&new)).await;
     assert!(!names.contains(&old), "the committed rename replaced the old name: {names:?}");
     h.run_ok(auto, &format!("drop database {new}")).await;
@@ -2171,10 +2171,13 @@ async fn a_write_on_production_runs_only_with_the_digest_of_the_same_work_and_ta
 
     asked_to_run(&h, tab, script(&one), None).await;
     set_environment(&h, Some(Environment::Staging)).await;
-    h.run_ok(tab, &one).await;
+    asked_to_run(&h, tab, script(&one), None).await;
+    let staging = h.sql_tab(TxnMode::AutoCommit).await;
+    h.run_ok(staging, &one).await;
     set_environment(&h, None).await;
-    h.run_ok(tab, &one).await;
-    assert_eq!(count(&oracle, &table).await, 3, "Staging and unset write without a digest");
+    let unset = h.sql_tab(TxnMode::AutoCommit).await;
+    h.run_ok(unset, &one).await;
+    assert_eq!(count(&oracle, &table).await, 3, "a session opened on Staging or unset writes without a digest");
 
     oracle.batch_execute(&format!("drop table public.{table}")).await.unwrap();
 }
@@ -2336,4 +2339,37 @@ async fn a_session_opened_on_production_asks_after_the_instance_reconnects_as_lo
     assert_eq!(count(&role.oracle, &table).await, 0);
     role.oracle.batch_execute(&format!("drop table public.{table}")).await.unwrap();
     role.drop().await;
+}
+
+#[tokio::test]
+async fn commit_on_production_asks_for_writes_that_ran_before_the_connection_was_production() {
+    let mut h = Harness::start().await;
+    let oracle = h.oracle().await;
+    let table = unique("t_guard");
+    oracle.batch_execute(&format!("create table public.{table} (n int)")).await.unwrap();
+    set_environment(&h, Some(Environment::Staging)).await;
+    let tab = h.sql_tab(TxnMode::Manual).await;
+    let one = format!("insert into public.{table} values (1)");
+    assert_eq!(h.run_ok(tab, &one).await.txn, TxnState::Active);
+    set_environment(&h, Some(Environment::Production)).await;
+
+    let asked = match h.engine.console_commit(tab, None).await {
+        Err(TxnError::ConfirmWrites { confirmation }) => confirmation,
+        other => panic!("expected ConfirmWrites, got {other:?}"),
+    };
+    assert_eq!((asked.writes, asked.statements.as_slice()), (1, [one.clone()].as_slice()));
+    let typed = asked_to_run(&h, tab, script("commit"), None).await;
+    assert_eq!(typed.statements, ["commit"]);
+    assert_eq!(h.console(tab).txn, TxnState::Active, "a refused commit sends nothing");
+    assert_eq!(count(&oracle, &table).await, 0);
+
+    h.engine.console_commit(tab, Some(asked.digest)).await.unwrap();
+    assert_eq!(count(&oracle, &table).await, 1);
+
+    let confirmed = asked_to_run(&h, tab, script(&one), None).await;
+    let accepted = h.engine.console_run(tab, script(&one), Some(confirmed.digest)).await.unwrap();
+    h.wait_finished(tab, accepted.run_id).await;
+    h.engine.console_commit(tab, None).await.expect("a write asked as Production commits without a second question");
+    assert_eq!(count(&oracle, &table).await, 2);
+    oracle.batch_execute(&format!("drop table public.{table}")).await.unwrap();
 }

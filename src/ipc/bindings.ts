@@ -26,7 +26,7 @@ export const commands = {
 	tableOrder: (db: DatabaseRef, schema: string, table: string, orderBy: string, edit: TableOrderEdit) => typedError<TableOrderView, string>(__TAURI_INVOKE("table_order", { db, schema, table, orderBy, edit })),
 	consoleRun: (tabId: TabId, request: RunRequest, confirmed: string | null) => typedError<RunAccepted, RunError>(__TAURI_INVOKE("console_run", { tabId, request, confirmed })),
 	consoleCancel: (tabId: TabId) => __TAURI_INVOKE<void>("console_cancel", { tabId }),
-	consoleCommit: (tabId: TabId) => typedError<null, TxnError>(__TAURI_INVOKE("console_commit", { tabId })),
+	consoleCommit: (tabId: TabId, confirmed: string | null) => typedError<null, TxnError>(__TAURI_INVOKE("console_commit", { tabId, confirmed })),
 	consoleRollback: (tabId: TabId) => typedError<null, TxnError>(__TAURI_INVOKE("console_rollback", { tabId })),
 	tableApply: (tabId: TabId, changes: TableChanges, confirmed: string | null) => typedError<ApplySummary, ApplyError>(__TAURI_INVOKE("table_apply", { tabId, changes, confirmed })),
 	consoleClose: (tabId: TabId, force: boolean) => typedError<null, DisconnectError>(__TAURI_INVOKE("console_close", { tabId, force })),
@@ -1416,9 +1416,11 @@ export type TurnOutcome = { kind: "Completed" } | { kind: "Stopped" } |
 
 export type TurnPhase = "Starting" | "Working" | "AwaitingApproval";
 
-export type TxnError = { kind: "Busy" } | { kind: "NoTransaction" } | { kind: "RolledBack" } | {
+export type TxnError = ({ kind: "Busy" }) & { confirmation?: never } | ({ kind: "NoTransaction" }) & { confirmation?: never } | ({ kind: "RolledBack" }) & { confirmation?: never } | {
 	kind: "Query",
-} & QueryError;
+} & QueryError | 
+/**  Commit would keep writes that ran before the connection counted as Production. Nothing was sent. */
+{ kind: "ConfirmWrites"; confirmation: WriteConfirmation };
 
 export type TxnMode = "AutoCommit" | "Manual";
 
@@ -1502,15 +1504,18 @@ export type WriteConfirmation = {
 	database: string,
 	unit: ExecutionUnitKind,
 	writes: number,
-	/**  The first three statements, or SQL Server batches, that write, trimmed and cut at 2,000 characters. */
+	/**
+	 *  The first three statements, or SQL Server batches, that write, trimmed and cut at 2,000 characters. For a
+	 *  commit, the first three of the writes it would keep.
+	 */
 	statements: string[],
 	digest: WriteDigest,
 };
 
 /**
- *  Opaque. It names the exact statements a guarded action sends and the connection, database,
- *  schema, and mode they run on. The engine makes one when it refuses a write on Production and accepts it back
- *  only while all of that is unchanged.
+ *  Opaque. It names the exact statements a guarded action sends, the connection both as saved and as the tab's
+ *  session opened it, and the tab's database, schema, mode, and transaction state. The engine makes one when it
+ *  refuses a write on Production and accepts it back only while all of that is unchanged.
  */
 export type WriteDigest = string;
 

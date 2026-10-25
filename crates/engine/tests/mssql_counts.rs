@@ -238,7 +238,7 @@ async fn busy_count_refuses_competitors_and_cancel_preserves_original_results() 
         assert_eq!(before.txn, TxnState::Open);
         assert!(matches!(h.count(TableQuery::default()).await, Err(CountError::Failed { message }) if message.contains("busy")));
         assert!(matches!(h.engine.console_run(h.tab, RunRequest::Script { text: "SELECT 99".into(), target: RunTarget::All }, None).await, Err(RunError::Busy)));
-        assert!(matches!(h.engine.console_commit(h.tab).await, Err(TxnError::Busy)));
+        assert!(matches!(h.engine.console_commit(h.tab, None).await, Err(TxnError::Busy)));
         assert!(matches!(h.engine.console_rollback(h.tab).await, Err(TxnError::Busy)));
         assert!(matches!(h.engine.console_configure(h.tab, h.config("reporting")).await, Err(ConfigureError::Busy)));
         h.engine.console_cancel(h.tab).await;

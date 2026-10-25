@@ -127,8 +127,8 @@ pub async fn console_cancel(app: AppHandle, tab_id: TabId) {
 
 #[tauri::command]
 #[specta::specta]
-pub async fn console_commit(engine: State<'_, Arc<Engine>>, tab_id: TabId) -> Result<(), TxnError> {
-    engine.console_commit(tab_id).await
+pub async fn console_commit(engine: State<'_, Arc<Engine>>, tab_id: TabId, confirmed: Option<WriteDigest>) -> Result<(), TxnError> {
+    engine.console_commit(tab_id, confirmed).await
 }
 
 #[tauri::command]

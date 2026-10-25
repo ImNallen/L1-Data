@@ -199,7 +199,7 @@ async fn select_into_refreshes_after_native_commit_and_rollback() {
             let before = h.engine.catalog(h.db()).await.unwrap().version;
             let state = h.ok(h.tab, &format!("BEGIN TRANSACTION; IF 1=1 SELECT 42 AS id INTO dbo.[{}]", h.table)).await;
             assert_eq!(state.txn, TxnState::Open);
-            if commit { h.engine.console_commit(h.tab).await.unwrap(); }
+            if commit { h.engine.console_commit(h.tab, None).await.unwrap(); }
             else { h.engine.console_rollback(h.tab).await.unwrap(); }
             let catalog = h.table_after(before, commit).await;
             if commit {
@@ -276,7 +276,7 @@ async fn procedure_refreshes_settle_on_commit_and_typed_rollback() {
             let state = h.ok(h.tab, &format!("BEGIN TRANSACTION; EXEC dbo.[{}] @create=1", h.procedure)).await;
             assert_ne!(state.txn, TxnState::Idle);
             assert_eq!(h.engine.catalog(h.db()).await.unwrap().version, before);
-            if commit { h.engine.console_commit(h.tab).await.unwrap(); }
+            if commit { h.engine.console_commit(h.tab, None).await.unwrap(); }
             else { h.ok(h.tab, "ROLLBACK TRANSACTION").await; }
             let settled = h.table_after(before, commit).await;
             before = if commit {

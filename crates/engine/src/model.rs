@@ -1785,9 +1785,9 @@ pub enum RunError {
     ConfirmWrites { confirmation: WriteConfirmation },
 }
 
-/// Opaque. It names the exact statements a guarded action sends and the connection, database,
-/// schema, and mode they run on. The engine makes one when it refuses a write on Production and accepts it back
-/// only while all of that is unchanged.
+/// Opaque. It names the exact statements a guarded action sends, the connection both as saved and as the tab's
+/// session opened it, and the tab's database, schema, mode, and transaction state. The engine makes one when it
+/// refuses a write on Production and accepts it back only while all of that is unchanged.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Type)]
 pub struct WriteDigest(String);
 
@@ -1806,7 +1806,8 @@ pub struct WriteConfirmation {
     pub database: String,
     pub unit: ExecutionUnitKind,
     pub writes: u32,
-    /// The first three statements, or SQL Server batches, that write, trimmed and cut at 2,000 characters.
+    /// The first three statements, or SQL Server batches, that write, trimmed and cut at 2,000 characters. For a
+    /// commit, the first three of the writes it would keep.
     pub statements: Vec<String>,
     pub digest: WriteDigest,
 }
@@ -1818,6 +1819,8 @@ pub enum TxnError {
     NoTransaction,
     RolledBack,
     Query(QueryError),
+    /// Commit would keep writes that ran before the connection counted as Production. Nothing was sent.
+    ConfirmWrites { confirmation: WriteConfirmation },
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Type)]

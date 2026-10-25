@@ -393,7 +393,7 @@ async fn transactions_are_observed_and_commit_button_finishes_all_nesting() {
     let state = h.ok("SELECT COUNT_BIG(*) FROM #tx").await;
     assert_eq!(h.rows(Harness::rowsets(&state)[0])[0][0].as_deref(), Some("0"));
     h.ok("BEGIN TRANSACTION; BEGIN TRANSACTION; INSERT INTO #tx VALUES (2)").await;
-    h.engine.console_commit(h.tab).await.unwrap();
+    h.engine.console_commit(h.tab, None).await.unwrap();
     let state = h.ok("SELECT @@TRANCOUNT, COUNT_BIG(*) FROM #tx").await;
     assert_eq!(h.rows(Harness::rowsets(&state)[0])[0], vec![Some("0".into()), Some("1".into())]);
     h.ok("SET XACT_ABORT ON; BEGIN TRANSACTION").await;

@@ -119,7 +119,7 @@ routes! { e;
     table_order(db: DatabaseRef, schema: String, table: String, order_by: String, edit: TableOrderEdit) => e.table_order(db, &schema, &table, &order_by, edit);
     console_run(tab_id: TabId, request: RunRequest, confirmed: Option<WriteDigest>) => e.console_run(tab_id, request, confirmed).await;
     console_cancel(tab_id: TabId) => { e.console_cancel(tab_id).await; ok(()) };
-    console_commit(tab_id: TabId) => e.console_commit(tab_id).await;
+    console_commit(tab_id: TabId, confirmed: Option<WriteDigest>) => e.console_commit(tab_id, confirmed).await;
     console_rollback(tab_id: TabId) => e.console_rollback(tab_id).await;
     table_apply(tab_id: TabId, changes: TableChanges, confirmed: Option<WriteDigest>) => e.table_apply(tab_id, changes, confirmed).await;
     console_close(tab_id: TabId, force: bool) => e.console_close(tab_id, force).await;

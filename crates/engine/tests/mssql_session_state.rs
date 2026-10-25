@@ -221,7 +221,7 @@ async fn native_buttons_keep_nesting_semantics_and_do_not_run_a_followup_probe()
         transaction(&h.same("BEGIN TRANSACTION; BEGIN TRANSACTION; UPDATE #l1_native_state SET n=99").await, true);
         transaction(&h.same("COMMIT TRANSACTION").await, true);
         raw_rows(&mut h.control, "WHILE @@TRANCOUNT > 0 COMMIT TRANSACTION").await.unwrap();
-        h.engine.console_commit(h.tab).await.unwrap();
+        h.engine.console_commit(h.tab, None).await.unwrap();
         transaction(&h.state(), false);
         h.same(EFFECTS).await;
         h.same("SELECT CONVERT(nvarchar(20),SUM(n)) FROM #l1_native_state").await;
@@ -311,7 +311,7 @@ async fn cancel_retires_the_moved_session_and_transaction_buttons_remain_busy() 
                 tokio::time::sleep(Duration::from_millis(10)).await;
             }
         }).await.expect("First result did not stream before WAITFOR");
-        assert!(matches!(h.engine.console_commit(h.tab).await, Err(TxnError::Busy)));
+        assert!(matches!(h.engine.console_commit(h.tab, None).await, Err(TxnError::Busy)));
         assert!(matches!(h.engine.console_rollback(h.tab).await, Err(TxnError::Busy)));
         assert!(matches!(h.engine.console_run(h.tab, RunRequest::Script { text: "SELECT 1".into(), target: RunTarget::All }, None).await, Err(RunError::Busy)));
         h.engine.console_cancel(h.tab).await;

@@ -207,7 +207,7 @@ async fn staged_refusal_preserves_xact_abort_and_prior_native_transaction_work()
         assert_eq!(h.scalar(h.tab, "SELECT XACT_STATE()").await, "1");
         assert_eq!(h.scalar(h.tab, "SELECT CASE WHEN (@@OPTIONS & 16384)=16384 THEN 1 ELSE 0 END").await, "1");
         assert_eq!(h.scalar(h.observer, &format!("SELECT n FROM dbo.[{}] WITH (READUNCOMMITTED) WHERE id=1", h.table)).await, "3");
-        h.engine.console_commit(h.tab).await.unwrap();
+        h.engine.console_commit(h.tab, None).await.unwrap();
         transaction(&h.state(h.tab), 0);
         assert_eq!(h.scalar(h.observer, &format!("SELECT n FROM dbo.[{}] WHERE id=1", h.table)).await, "3");
         h.ok(h.tab, &format!("BEGIN TRANSACTION; UPDATE dbo.[{}] SET n=4 WHERE id=1", h.table)).await;
@@ -225,7 +225,7 @@ async fn native_explicit_transactions_keep_module_definitions_rollbackable() {
             transaction(&h.ok(h.tab, "BEGIN TRANSACTION").await, 1);
             transaction(&h.ok(h.tab, &format!("CREATE PROCEDURE dbo.[{name}] AS BEGIN SELECT 1 AS n END")).await, 1);
             if finish {
-                h.engine.console_commit(h.tab).await.unwrap();
+                h.engine.console_commit(h.tab, None).await.unwrap();
             } else {
                 h.engine.console_rollback(h.tab).await.unwrap();
             }

@@ -13,6 +13,7 @@ use crate::sql::{Invalidates, StmtKind, StmtSpan};
 use crate::store::HistoryInsert;
 use crate::text::{OffsetMap, synthesize_tag};
 use crate::txn::{StmtOutcome, TransactionPlan, txn_after};
+use crate::writes::Unconfirmed;
 
 pub(crate) const STREAM_EMIT_INTERVAL: Duration = Duration::from_millis(100);
 const OUTPUT_COALESCE: Duration = Duration::from_millis(5);
@@ -65,6 +66,7 @@ pub struct ConsoleInner {
     pub session: SessionSlot,
     pub txn: TxnState,
     pub txn_depth: Option<u32>,
+    pub unconfirmed: Unconfirmed,
     pub run: RunState,
     pub rev: u64,
     refreshes: Option<PendingRefreshes>,
@@ -159,10 +161,12 @@ impl Work {
     }
 }
 
+/// `opened` is the connection as saved when the session opened, which a later save does not change.
 pub enum SessionSlot {
     Empty,
-    Idle(Session),
+    Idle { session: Session, opened: ConnectionConfig },
     Busy {
+        opened: ConnectionConfig,
         run_id: RunId,
         work: Work,
         backend_pid: i32,
@@ -187,6 +191,7 @@ impl Console {
             session: SessionSlot::Empty,
             txn: TxnState::Idle,
             txn_depth: None,
+            unconfirmed: Unconfirmed::default(),
             run: RunState::Idle,
             rev: 0,
             refreshes: None,
@@ -222,7 +227,7 @@ impl Console {
             config: inner.config.clone(),
             session: match &inner.session {
                 SessionSlot::Empty => SessionState::None,
-                SessionSlot::Idle(s) => SessionState::Open { backend_pid: s.backend_pid },
+                SessionSlot::Idle { session, .. } => SessionState::Open { backend_pid: session.backend_pid },
                 SessionSlot::Busy { backend_pid, .. } => SessionState::Open { backend_pid: *backend_pid },
                 SessionSlot::Lost { reason, transaction } => SessionState::Lost { reason: reason.clone(), transaction: *transaction },
             },
@@ -266,10 +271,11 @@ impl Console {
     }
 
     pub fn take_session(&self, inner: &mut ConsoleInner, run_id: RunId, work: Work) -> Option<(Session, Arc<AtomicBool>)> {
-        let SessionSlot::Idle(_) = inner.session else { return None };
-        let SessionSlot::Idle(session) = std::mem::replace(&mut inner.session, SessionSlot::Empty) else { unreachable!() };
+        let SessionSlot::Idle { .. } = inner.session else { return None };
+        let SessionSlot::Idle { session, opened } = std::mem::replace(&mut inner.session, SessionSlot::Empty) else { unreachable!() };
         let stop = Arc::new(AtomicBool::new(false));
         inner.session = SessionSlot::Busy {
+            opened,
             run_id,
             work,
             backend_pid: session.backend_pid,
@@ -294,9 +300,10 @@ impl Console {
 
     /// Puts the session back after a run or a transaction command and applies its final `txn`.
     pub fn return_session(inner: &mut ConsoleInner, session: Session, txn: TxnState, lost: Option<String>) -> Option<(DatabaseRef, Owed)> {
+        let SessionSlot::Busy { opened, .. } = std::mem::replace(&mut inner.session, SessionSlot::Empty) else { unreachable!("Console::edit holds the slot") };
         inner.txn = txn;
         inner.txn_depth = session.txn_depth();
-        match lost {
+        let due = match lost {
             Some(reason) => {
                 let transaction = session.transaction_loss(txn);
                 inner.txn = TxnState::Idle;
@@ -305,10 +312,14 @@ impl Console {
                 inner.finish_refreshes(false)
             }
             None => {
-                inner.session = SessionSlot::Idle(session);
+                inner.session = SessionSlot::Idle { session, opened };
                 None
             }
+        };
+        if inner.txn == TxnState::Idle {
+            inner.unconfirmed = Unconfirmed::default();
         }
+        due
     }
 
     /// Cancels any run and drops the session; the console itself stays. A task holding the
@@ -322,6 +333,7 @@ impl Console {
         }
         inner.txn = TxnState::Idle;
         inner.txn_depth = None;
+        inner.unconfirmed = Unconfirmed::default();
         let due = inner.finish_refreshes(false);
         if let RunState::Running { run_id, started_at_ms, statements } = &mut inner.run {
             let mut in_flight = true;

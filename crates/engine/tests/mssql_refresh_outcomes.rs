@@ -367,7 +367,7 @@ async fn commit_and_typed_rollback_refresh_tracked_catalogs() {
             let before = h.engine.catalog(h.db("shop")).await.unwrap().version;
             let other = h.engine.catalog(h.db("reporting")).await.unwrap().version;
             h.ok(h.tab, &format!("CREATE TABLE {} (id int); BEGIN TRANSACTION", h.qualified(&table))).await;
-            if commit { h.engine.console_commit(h.tab).await.unwrap(); }
+            if commit { h.engine.console_commit(h.tab, None).await.unwrap(); }
             else { h.ok(h.tab, "ROLLBACK TRANSACTION").await; }
             h.refreshed(before, &table).await;
             let other = h.catalog_after("reporting", other).await.version;
@@ -391,7 +391,7 @@ async fn postgres_commit_refreshes_only_its_database() {
         assert_eq!(state.txn, TxnState::Active);
         assert_eq!(h.engine.catalog(h.db("shop")).await.unwrap().version, before);
         assert!(!h.table_exists(&table).await);
-        h.engine.console_commit(h.tab).await.unwrap();
+        h.engine.console_commit(h.tab, None).await.unwrap();
         let catalog = h.catalog_after("shop", before).await;
         assert!(catalog.relation("public", &table).is_some());
         assert!(h.table_exists(&table).await);
