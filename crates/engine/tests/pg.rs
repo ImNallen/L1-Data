@@ -2839,6 +2839,8 @@ async fn hostile_object_scripts_replay_every_property_or_warn() {
         for part in ["ALTER TABLE \"Weird \"\"S\"\"\".parent ENABLE ROW LEVEL SECURITY;\n", "ALTER TABLE \"Weird \"\"S\"\"\".parent FORCE ROW LEVEL SECURITY;\n", "CREATE POLICY everyone ON"] {
             assert!(parent.contains(part), "{part} missing from {parent}");
         }
+        let tree = script(ScriptTarget::Relation { oid: oid("app.tree").await }).await.text;
+        assert!(tree.ends_with("CREATE UNIQUE INDEX tree_id ON app.tree USING btree (id);\n\nALTER TABLE app.tree ADD CONSTRAINT tree_parent FOREIGN KEY (parent) REFERENCES app.tree(id);\n"), "{tree}");
         let child = script(ScriptTarget::Relation { oid: oid("app.child").await }).await.text;
         assert!(child.contains(") INHERITS (app.base);\n"), "{child}");
         let pkey = script(ScriptTarget::Index { relation_oid: oid("\"Weird \"\"S\"\"\".parent").await, name: "parent_pkey".into() }).await.text;

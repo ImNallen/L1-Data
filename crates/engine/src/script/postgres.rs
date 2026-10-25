@@ -126,6 +126,9 @@ pub struct Constraint {
     pub name: String,
     pub definition: String,
     pub comment: Option<String>,
+    /// A foreign key that references its own table through a unique index no constraint owns,
+    /// which exists only once the script has created the table's indexes.
+    pub after_indexes: bool,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -211,7 +214,8 @@ pub fn table(t: &Table) -> Ddl {
 fn table_statements(t: &Table, out: &mut Vec<String>, warnings: &mut Vec<String>) {
     let name = qualified(&t.schema, &t.name);
     let keyword = if t.foreign.is_some() { "FOREIGN TABLE" } else { "TABLE" };
-    let (deferred, inline): (Vec<_>, Vec<_>) = t.constraints.iter().partition(|k| k.definition.ends_with(" NOT VALID"));
+    let (late, early): (Vec<_>, Vec<_>) = t.constraints.iter().partition(|k| k.after_indexes);
+    let (deferred, inline): (Vec<_>, Vec<_>) = early.into_iter().partition(|k| k.definition.ends_with(" NOT VALID"));
     let constraints = inline.iter().map(|k| format!("CONSTRAINT {} {}", ident(&k.name), k.definition));
     out.extend(t.owned_sequences.iter().map(create_sequence));
 
@@ -260,11 +264,13 @@ fn table_statements(t: &Table, out: &mut Vec<String>, warnings: &mut Vec<String>
     out.push(head);
 
     out.extend(t.owned_sequences.iter().map(|s| format!("ALTER SEQUENCE {} OWNED BY {name}.{}", qualified(&s.schema, &s.name), ident(&s.column))));
-    out.extend(deferred.iter().map(|k| format!("ALTER TABLE {name} ADD CONSTRAINT {} {}", ident(&k.name), k.definition)));
+    let add = |k: &&Constraint| format!("ALTER TABLE {name} ADD CONSTRAINT {} {}", ident(&k.name), k.definition);
+    out.extend(deferred.iter().map(add));
     for c in &t.columns {
         out.extend(column_changes(c, keyword, &name, !matches!(t.parent, Parent::Partition { .. }) && c.declared && c.inherited.is_none()));
     }
     indexes(&t.indexes, keyword, &t.schema, &name, out, warnings);
+    out.extend(late.iter().map(add));
     match t.replica_identity {
         _ if t.foreign.is_some() => {}
         ReplicaIdentity::Nothing => out.push(format!("ALTER TABLE {name} REPLICA IDENTITY NOTHING")),
@@ -685,8 +691,8 @@ mod tests {
             ],
             owned_sequences: vec![Sequence { name: "old_seq".into(), start: 777, ..sequence(1, 1, 1, i64::MAX) }],
             constraints: vec![
-                Constraint { name: "t_pkey".into(), definition: "PRIMARY KEY (id)".into(), comment: None },
-                Constraint { name: "positive".into(), definition: "CHECK ((id > 0)) NOT VALID".into(), comment: Some("checked later".into()) },
+                Constraint { name: "t_pkey".into(), definition: "PRIMARY KEY (id)".into(), comment: None, after_indexes: false },
+                Constraint { name: "positive".into(), definition: "CHECK ((id > 0)) NOT VALID".into(), comment: Some("checked later".into()), after_indexes: false },
             ],
             indexes: vec![
                 Index { name: "t_pkey".into(), comment: Some("pk".into()), replica_identity: true, ..Default::default() },
@@ -775,6 +781,22 @@ COMMENT ON COLUMN public.t.status IS 'lifecycle';
     }
 
     #[test]
+    fn a_foreign_key_to_its_own_tables_unique_index_follows_the_index() {
+        let t = Table {
+            schema: "app".into(),
+            name: "tree".into(),
+            columns: vec![Column { not_null: true, ..col("id", "integer") }, col("parent", "integer")],
+            constraints: vec![Constraint { name: "tree_parent".into(), definition: "FOREIGN KEY (parent) REFERENCES app.tree(id)".into(), comment: None, after_indexes: true }],
+            indexes: vec![Index { name: "tree_id".into(), definition: Some("CREATE UNIQUE INDEX tree_id ON app.tree USING btree (id)".into()), ..Default::default() }],
+            ..Default::default()
+        };
+        assert_eq!(
+            table(&t).text,
+            "CREATE TABLE app.tree (\n    id integer NOT NULL,\n    parent integer\n);\n\nCREATE UNIQUE INDEX tree_id ON app.tree USING btree (id);\n\nALTER TABLE app.tree ADD CONSTRAINT tree_parent FOREIGN KEY (parent) REFERENCES app.tree(id);\n"
+        );
+    }
+
+    #[test]
     fn a_partition_tree_scripts_each_partition_after_its_parent_with_what_differs_from_it() {
         let inherited = |default: Option<&str>| Some(Inherited { replay_order: 1, default: default.map(Into::into), not_null: false, storage: "p".into(), compression: String::new() });
         let partition = |name: &str, columns: Vec<Column>| Table {
@@ -798,7 +820,7 @@ COMMENT ON COLUMN public.t.status IS 'lifecycle';
                 Table {
                     unlogged: true,
                     options: vec!["fillfactor=70".into()],
-                    constraints: vec![Constraint { name: "e1_note".into(), definition: "CHECK ((v < 10))".into(), comment: None }],
+                    constraints: vec![Constraint { name: "e1_note".into(), definition: "CHECK ((v < 10))".into(), comment: None, after_indexes: false }],
                     partition_key: Some("RANGE (v)".into()),
                     partitions: vec![leaf],
                     ..partition("e1", vec![Column { default: Some("9".into()), not_null: true, inherited: inherited(Some("7")), ..v.clone() }])
@@ -878,7 +900,7 @@ ALTER FOREIGN TABLE public.e2 ALTER COLUMN v OPTIONS (ADD column_name 'vv');
         let typed = |columns: Vec<Column>, constraints: Vec<Constraint>| Table { schema: "app".into(), name: "pets".into(), of_type: Some("app.pet".into()), columns, constraints, ..Default::default() };
         let t = typed(
             vec![col("id", "integer"), Column { default: Some("'cat'::text".into()), not_null: true, ..col("kind", "text") }, Column { not_null: true, ..col("name", "text") }],
-            vec![Constraint { name: "pets_pkey".into(), definition: "PRIMARY KEY (id)".into(), comment: None }],
+            vec![Constraint { name: "pets_pkey".into(), definition: "PRIMARY KEY (id)".into(), comment: None, after_indexes: false }],
         );
         assert_eq!(
             table(&t).text,
@@ -949,7 +971,7 @@ ALTER FOREIGN TABLE public.e2 ALTER COLUMN v OPTIONS (ADD column_name 'vv');
     #[test]
     fn an_index_a_constraint_creates_scripts_as_the_constraint() {
         let pkey = Index { name: "orders_pkey".into(), comment: Some("pk".into()), ..Default::default() };
-        let constraint = Constraint { name: "orders_pkey".into(), definition: "PRIMARY KEY (id)".into(), comment: Some("the key".into()) };
+        let constraint = Constraint { name: "orders_pkey".into(), definition: "PRIMARY KEY (id)".into(), comment: Some("the key".into()), after_indexes: false };
         assert_eq!(
             index_script(&pkey, Some(&constraint), "TABLE", "public", "public.orders").text,
             "ALTER TABLE public.orders ADD CONSTRAINT orders_pkey PRIMARY KEY (id);\n\nCOMMENT ON INDEX public.orders_pkey IS 'pk';\n\nCOMMENT ON CONSTRAINT orders_pkey ON public.orders IS 'the key';\n"

@@ -95,7 +95,10 @@ const OWNED_SEQUENCES: &str = "SELECT sn.nspname, sc.relname, a.attname, format_
 
 /// A partition's copies of its parent's constraints, and a foreign key's clones for the
 /// partitions it references, come with the parent.
-const CONSTRAINTS: &str = "SELECT k.conname, pg_get_constraintdef(k.oid), obj_description(k.oid, 'pg_constraint') FROM pg_constraint k
+const CONSTRAINTS: &str = "SELECT k.conname, pg_get_constraintdef(k.oid), obj_description(k.oid, 'pg_constraint'),
+        k.contype = 'f' AND k.confrelid = k.conrelid
+          AND NOT EXISTS (SELECT 1 FROM pg_constraint u WHERE u.conindid = k.conindid AND u.conrelid = k.conrelid AND u.contype IN ('p', 'u'))
+     FROM pg_constraint k
      WHERE k.conrelid = $1 AND k.contype IN ('p', 'u', 'f', 'c', 'x') AND k.conislocal AND k.conparentid = 0
      ORDER BY position(k.contype IN 'pufcx'), k.conname";
 
@@ -396,7 +399,7 @@ fn column(r: &Row) -> ddl::Column {
 }
 
 fn constraint_row(r: &Row) -> ddl::Constraint {
-    ddl::Constraint { name: r.get(0), definition: r.get(1), comment: r.get(2) }
+    ddl::Constraint { name: r.get(0), definition: r.get(1), comment: r.get(2), after_indexes: r.get(3) }
 }
 
 fn index_row(r: &Row) -> ddl::Index {
@@ -457,7 +460,7 @@ async fn index(tx: &Transaction<'_>, relation: u32, name: &str) -> Result<Object
                LEFT JOIN pg_constraint k ON k.conindid = i.indexrelid AND k.conrelid = i.indrelid AND k.contype IN ('p', 'u', 'x')
                WHERE i.indrelid = $1 AND ic.relname = $2";
     let r = tx.query_opt(sql, &[&relation, &name]).await.map_err(failed)?.ok_or(DetailError::Gone)?;
-    let constraint = r.get::<_, Option<String>>(10).map(|name| ddl::Constraint { name, definition: r.get(11), comment: r.get(15) });
+    let constraint = r.get::<_, Option<String>>(10).map(|name| ddl::Constraint { name, definition: r.get(11), comment: r.get(15), after_indexes: false });
     let (schema, table): (&str, &str) = (r.get(12), r.get(13));
     let ddl = ddl::index_script(&index_row(&r), constraint.as_ref(), keyword(r.get(14)), schema, &ddl::qualified(schema, table));
     Ok(script::object_script(name, ddl))

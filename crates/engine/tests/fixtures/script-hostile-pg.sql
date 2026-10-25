@@ -142,3 +142,7 @@ CREATE INDEX pt_only ON ONLY app.pt (k);
 CREATE PUBLICATION hostile_pub FOR TABLE app.refd;
 CREATE TABLE app.dups (v int);
 INSERT INTO app.dups VALUES (1), (1);
+-- a foreign key to its own table through a unique index that no constraint owns
+CREATE TABLE app.tree (id int NOT NULL, parent int);
+CREATE UNIQUE INDEX tree_id ON app.tree (id);
+ALTER TABLE app.tree ADD CONSTRAINT tree_parent FOREIGN KEY (parent) REFERENCES app.tree (id);
