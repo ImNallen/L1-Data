@@ -107,8 +107,8 @@ pub fn format_edit(text: &str, target: RunTarget, database_kind: DatabaseKind) -
 pub fn synthesize_tag(kind: &StmtKind, rows: u64) -> String {
     match kind {
         StmtKind::Begin => "BEGIN".into(),
-        StmtKind::Commit => "COMMIT".into(),
-        StmtKind::Rollback | StmtKind::RollbackTo => "ROLLBACK".into(),
+        StmtKind::Commit | StmtKind::CommitAndChain => "COMMIT".into(),
+        StmtKind::Rollback | StmtKind::RollbackTo | StmtKind::RollbackAndChain => "ROLLBACK".into(),
         StmtKind::Savepoint => "SAVEPOINT".into(),
         StmtKind::Release => "RELEASE".into(),
         StmtKind::Ddl(tag) | StmtKind::NoTxnBlock(tag) | StmtKind::Other(tag) => tag.clone(),

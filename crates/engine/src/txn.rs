@@ -40,9 +40,10 @@ pub fn txn_after(state: TxnState, kind: &StmtKind, outcome: StmtOutcome) -> TxnS
         (Open, _, _) => Open,
         (Idle, Begin, Ok) => Active,
         (Idle, _, _) => Idle,
+        (_, CommitAndChain, Ok) | (_, RollbackAndChain, Ok) => Active,
         (_, Commit, Ok) | (_, Rollback, Ok) => Idle,
-        // A failed COMMIT (deferred constraint, serialization) rolls back and ends the block.
-        (_, Commit, Err) => Idle,
+        // A failed COMMIT (deferred constraint, serialization) rolls back and ends the block, and opens no chained one.
+        (_, Commit, Err) | (_, CommitAndChain, Err) => Idle,
         (_, RollbackTo, Ok) => Active,
         (Active, _, Ok) => Active,
         (Active, _, Err) => Aborted,
@@ -54,7 +55,7 @@ pub fn needs_implicit_begin(mode: TxnMode, state: TxnState, kind: &StmtKind) -> 
     use StmtKind::*;
     mode == TxnMode::Manual
         && state == TxnState::Idle
-        && !matches!(kind, Begin | Commit | Rollback | Savepoint | RollbackTo | Release | CopyStdio | NoTxnBlock(_))
+        && !matches!(kind, Begin | Commit | Rollback | CommitAndChain | RollbackAndChain | Savepoint | RollbackTo | Release | CopyStdio | NoTxnBlock(_))
 }
 
 #[cfg(test)]
@@ -69,6 +70,8 @@ mod tests {
             Begin,
             Commit,
             Rollback,
+            CommitAndChain,
+            RollbackAndChain,
             Savepoint,
             RollbackTo,
             Release,
@@ -96,6 +99,12 @@ mod tests {
             (Active, Commit, Ok, Idle),
             (Active, Commit, Err, Idle),
             (Active, Rollback, Ok, Idle),
+            (Idle, CommitAndChain, Err, Idle),
+            (Active, CommitAndChain, Ok, Active),
+            (Active, CommitAndChain, Err, Idle),
+            (Active, RollbackAndChain, Ok, Active),
+            (Aborted, CommitAndChain, Ok, Active),
+            (Aborted, RollbackAndChain, Ok, Active),
             (Active, Savepoint, Ok, Active),
             (Active, Savepoint, Err, Aborted),
             (Active, RollbackTo, Ok, Active),
@@ -132,7 +141,7 @@ mod tests {
     #[test]
     fn implicit_begin_only_in_manual_idle_for_blockable_statements() {
         for kind in all_kinds() {
-            let expected = !matches!(kind, Begin | Commit | Rollback | Savepoint | RollbackTo | Release | CopyStdio | NoTxnBlock(_));
+            let expected = !matches!(kind, Begin | Commit | Rollback | CommitAndChain | RollbackAndChain | Savepoint | RollbackTo | Release | CopyStdio | NoTxnBlock(_));
             assert_eq!(needs_implicit_begin(TxnMode::Manual, Idle, &kind), expected, "{kind:?}");
             assert!(!needs_implicit_begin(TxnMode::Manual, Active, &kind));
             assert!(!needs_implicit_begin(TxnMode::Manual, Aborted, &kind));

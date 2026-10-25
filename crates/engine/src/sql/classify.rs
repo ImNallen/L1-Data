@@ -11,6 +11,9 @@ pub enum StmtKind {
     Begin,
     Commit,
     Rollback,
+    /// `COMMIT AND CHAIN` or `ROLLBACK AND CHAIN`: it ends the transaction and opens the next one.
+    CommitAndChain,
+    RollbackAndChain,
     Savepoint,
     RollbackTo,
     Release,
@@ -51,8 +54,10 @@ pub fn classify(stmt: &str) -> StmtKind {
     let w = |i: usize| words.get(i).map(String::as_str).unwrap_or("");
     match w(0) {
         "BEGIN" | "START" => StmtKind::Begin,
+        "COMMIT" | "END" if chains(&words) => StmtKind::CommitAndChain,
         "COMMIT" | "END" => StmtKind::Commit,
         "ROLLBACK" | "ABORT" if w(1) == "TO" => StmtKind::RollbackTo,
+        "ROLLBACK" | "ABORT" if chains(&words) => StmtKind::RollbackAndChain,
         "ROLLBACK" | "ABORT" => StmtKind::Rollback,
         "SAVEPOINT" => StmtKind::Savepoint,
         "RELEASE" => StmtKind::Release,
@@ -79,6 +84,10 @@ pub fn classify(stmt: &str) -> StmtKind {
         "" if stmt.contains('(') => StmtKind::Query,
         other => StmtKind::Other(other.to_owned()),
     }
+}
+
+fn chains(words: &[String]) -> bool {
+    words.windows(2).any(|pair| pair[0] == "AND" && pair[1] == "CHAIN")
 }
 
 /// The source or target follows the first `FROM` or `TO`: the table name before it is any number
@@ -159,6 +168,12 @@ mod tests {
         assert_eq!(classify("ROLLBACK TO s1"), StmtKind::RollbackTo);
         assert_eq!(classify("savepoint s1"), StmtKind::Savepoint);
         assert_eq!(classify("release savepoint s1"), StmtKind::Release);
+        assert_eq!(classify("commit and chain"), StmtKind::CommitAndChain);
+        assert_eq!(classify("END TRANSACTION AND CHAIN"), StmtKind::CommitAndChain);
+        assert_eq!(classify("commit work and no chain"), StmtKind::Commit);
+        assert_eq!(classify("rollback and chain"), StmtKind::RollbackAndChain);
+        assert_eq!(classify("abort work and chain"), StmtKind::RollbackAndChain);
+        assert_eq!(classify("rollback and no chain"), StmtKind::Rollback);
     }
 
     #[test]
