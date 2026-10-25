@@ -1,5 +1,6 @@
 use std::ops::Range;
 
+use super::keywords::{RESERVED, TYPE_OR_FUNCTION_NAME};
 use super::lex::{LexKind, lex};
 use super::relations::{VETTED, VETTED_SIZES};
 use super::split::split_statements;
@@ -399,6 +400,7 @@ impl<'a> Walk<'a> {
                 self.push_rel(Rel { folded: Some(written.clone()), written: Some(written), source, role, column_aliases: Vec::new() });
                 self.top().clause = Clause::Relation { role, slot: Slot::Named };
             }
+            (Clause::Relation { slot: Slot::Named, .. }, Class::Word) if self.never_an_alias(i) => self.top().clause = Clause::Other,
             (Clause::Relation { role, slot: Slot::Named | Slot::As }, Class::Word | Class::Name) => {
                 let written = self.text[self.sig[i].span.clone()].to_owned();
                 let folded = fold(self.kind, self.text, self.sig[i]);
@@ -488,6 +490,7 @@ impl<'a> Walk<'a> {
             "INSERT" | "MERGE" => Clause::Next(&["INTO"]),
             "DELETE" => Clause::Next(&["FROM"]),
             "WITH" if clause == Clause::Start => Clause::Cte,
+            "WITH" if named && self.is_word(i + 1, "ORDINALITY") => return Some(i + 2),
             "WITH" if matches!(clause, Clause::Relation { role: Role::Into, .. }) && !next_opens => {
                 self.leave_part(|r| r.role == Role::Into);
                 Clause::Cte
@@ -556,21 +559,20 @@ impl<'a> Walk<'a> {
     }
 
     fn relation(&mut self, i: usize, role: Role) -> usize {
-        let mut parts = vec![i];
+        let mut parts = vec![Some(i)];
         let mut j = i + 1;
-        while j + 1 < self.sig.len()
-            && self.sig[j].class == Class::Dot
-            && matches!(self.sig[j + 1].class, Class::Word | Class::Name)
-            && !self.typed.contains(&j)
-            && !self.typed.contains(&(j + 1))
-        {
-            parts.push(j + 1);
-            j += 2;
+        while j + 1 < self.sig.len() && self.sig[j].class == Class::Dot && !self.typed.contains(&j) && !self.typed.contains(&(j + 1)) {
+            match self.sig[j + 1].class {
+                Class::Word | Class::Name => parts.push(Some(j + 1)),
+                Class::Dot if self.kind == DatabaseKind::SqlServer => parts.push(None),
+                _ => break,
+            }
+            j += if parts.last() == Some(&None) { 1 } else { 2 };
         }
-        let last = *parts.last().unwrap();
+        let last = parts.last().copied().flatten().unwrap_or(i);
         let written = self.text[self.sig[last].span.clone()].to_owned();
         let name = fold(self.kind, self.text, self.sig[last]);
-        let schema = (parts.len() >= 2).then(|| fold(self.kind, self.text, self.sig[parts[parts.len() - 2]]));
+        let schema = parts.len().checked_sub(2).and_then(|k| parts[k]).map(|k| fold(self.kind, self.text, self.sig[k]));
         let function = matches!(role, Role::From | Role::Join | Role::Using) && self.sig.get(j).is_some_and(|l| l.class == Class::Open) && !self.typed.contains(&j);
         let other_database = self.kind == DatabaseKind::SqlServer && parts.len() >= 3;
         let cte = if function || other_database || schema.is_some() { None } else { self.cte(&name) };
@@ -586,6 +588,18 @@ impl<'a> Walk<'a> {
         self.push_rel(Rel { written: Some(written), folded: Some(name), source, role, column_aliases });
         self.top().clause = Clause::Relation { role, slot: Slot::Named };
         j
+    }
+
+    /// A reserved word right after a relation, such as `FOR` or `OPTION`, that the server never reads as its alias.
+    fn never_an_alias(&self, i: usize) -> bool {
+        let word = &self.text[self.sig[i].span.clone()];
+        match self.kind {
+            DatabaseKind::Postgres => {
+                let word = word.to_ascii_lowercase();
+                RESERVED.contains(&word.as_str()) || TYPE_OR_FUNCTION_NAME.contains(&word.as_str())
+            }
+            DatabaseKind::SqlServer => tsql::RESERVED.iter().any(|r| r.eq_ignore_ascii_case(word)),
+        }
     }
 
     fn cte(&self, name: &str) -> Option<Cte> {
@@ -1606,6 +1620,25 @@ mod tests {
     fn a_tsql_name_in_another_database_offers_no_catalog_columns() {
         let s = ms("SELECT o.| FROM reporting.dbo.orders o");
         assert_eq!(refs(&s), [(Some("o"), &RelationSource::Derived { columns: vec![], star: vec![] })]);
+    }
+
+    #[test]
+    fn a_reserved_word_after_a_table_is_not_its_alias() {
+        let orders = table(None, "orders");
+        for s in [
+            pg("select orders.| from orders for update"),
+            pg("select orders.| from orders tablesample system (10)"),
+            ms("SELECT orders.| FROM orders FOR JSON AUTO"),
+            ms("SELECT orders.| FROM orders OPTION (RECOMPILE)"),
+        ] {
+            assert_eq!((refs(&s), s.qualifier.clone()), (vec![(Some("orders"), &orders)], Some(Qualifier::Relation { index: 0 })));
+        }
+        assert_eq!(refs(&pg("select f| from orders for update")), [(Some("orders"), &orders)]);
+        assert!(!refs(&ms("SELECT * FROM orders PIVOT (SUM(total) FOR status IN ([a])) p WHERE |")).iter().any(|r| r.0 == Some("PIVOT")));
+        let s = pg("select s.| from unnest(array[1]) with ordinality s(v, i)");
+        assert_eq!((s.qualifier.clone(), s.relations[0].column_aliases.clone()), (Some(Qualifier::Relation { index: 0 }), vec!["v".to_owned(), "i".to_owned()]));
+        assert_eq!(refs(&ms("SELECT t.| FROM shop..orders t"))[0].0, Some("t"));
+        assert_eq!(refs(&ms("SELECT orders.| FROM shop..orders"))[0].0, Some("orders"));
     }
 
     #[test]
