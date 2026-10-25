@@ -154,3 +154,6 @@ CREATE TABLE app.gen (a int, b int GENERATED ALWAYS AS (a * 2) STORED) PARTITION
 CREATE TABLE app.gen_1 (a int, b int GENERATED ALWAYS AS (a * 3) STORED);
 ALTER TABLE app.gen ATTACH PARTITION app.gen_1 FOR VALUES IN (1);
 CREATE TABLE app.gen_2 PARTITION OF app.gen FOR VALUES IN (2);
+CREATE TABLE app.pa (a int DEFAULT 1);
+CREATE TABLE app.pb (a int DEFAULT 2);
+CREATE TABLE app.pab (a int DEFAULT 3) INHERITS (app.pa, app.pb);

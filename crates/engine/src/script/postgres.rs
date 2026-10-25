@@ -252,7 +252,7 @@ fn table_statements(t: &Table, out: &mut Vec<String>, warnings: &mut Vec<String>
         }
         (parent, _) => {
             let columns = t.columns.iter().filter(|c| c.declared).map(|c| {
-                let options = if c.inherited.is_some() { generation_override(c).unwrap_or_default() } else { column_options(c, &t.schema, &t.name) };
+                let options = if c.inherited.is_some() { generation_override(c).or_else(|| merged_default(c)).unwrap_or_default() } else { column_options(c, &t.schema, &t.name) };
                 format!("{}{options}", column_head(c))
             });
             let body: Vec<_> = columns.chain(constraints).collect();
@@ -283,7 +283,8 @@ fn table_statements(t: &Table, out: &mut Vec<String>, warnings: &mut Vec<String>
     let add = |k: &&Constraint| format!("ALTER TABLE {name} ADD CONSTRAINT {} {}", ident(&k.name), k.definition);
     out.extend(deferred.iter().map(add));
     for c in &t.columns {
-        out.extend(column_changes(c, keyword, &name, !matches!(t.parent, Parent::Partition { .. }) && c.declared && c.inherited.is_none()));
+        let partition = matches!(t.parent, Parent::Partition { .. });
+        out.extend(column_changes(c, keyword, &name, !partition && c.declared && c.inherited.is_none(), !partition && merged_default(c).is_some()));
     }
     indexes(&t.indexes, keyword, &t.schema, &name, out, warnings);
     out.extend(late.iter().map(add));
@@ -382,6 +383,15 @@ fn generation_override(c: &Column) -> Option<String> {
     (parent.default.as_ref() != Some(expr)).then(|| generation(kind, expr))
 }
 
+/// A column the child declares and also inherits keeps its own default in `CREATE TABLE`,
+/// because parents whose defaults conflict make the child's declaration fail without it.
+fn merged_default(c: &Column) -> Option<String> {
+    if !c.declared || c.inherited.is_none() || c.generated.is_some() || c.identity.is_some() {
+        return None;
+    }
+    c.default.as_ref().map(|d| format!(" DEFAULT {d}"))
+}
+
 fn column_head(c: &Column) -> String {
     let mut out = format!("{} {}", ident(&c.name), c.type_name);
     if let Some((schema, name)) = &c.collation {
@@ -390,10 +400,10 @@ fn column_head(c: &Column) -> String {
     out
 }
 
-fn column_changes(c: &Column, keyword: &str, relation: &str, declared: bool) -> Vec<String> {
+fn column_changes(c: &Column, keyword: &str, relation: &str, declared: bool, declared_default: bool) -> Vec<String> {
     let (default, not_null, storage, compression) = match &c.inherited {
         _ if declared => (c.default.as_ref(), c.not_null, &c.type_storage, ""),
-        Some(p) => (p.default.as_ref(), p.not_null, &p.storage, p.compression.as_str()),
+        Some(p) => (if declared_default { c.default.as_ref() } else { p.default.as_ref() }, p.not_null, &p.storage, p.compression.as_str()),
         None => (None, false, &c.type_storage, ""),
     };
     let mut changes = vec![];
@@ -542,7 +552,7 @@ pub fn view(v: &View) -> Ddl {
     }
     let mut statements = vec![head];
     for c in &v.columns {
-        statements.extend(column_changes(c, keyword, &name, false));
+        statements.extend(column_changes(c, keyword, &name, false, false));
     }
     let mut warnings = unscripted(&v.unscripted, &name);
     indexes(&v.indexes, keyword, &v.schema, &name, &mut statements, &mut warnings);
@@ -828,6 +838,13 @@ COMMENT ON COLUMN public.t.status IS 'lifecycle';
             table(&t).text,
             "CREATE TABLE app.tree (\n    id integer NOT NULL,\n    parent integer\n);\n\nCREATE UNIQUE INDEX tree_id ON app.tree USING btree (id);\n\nALTER TABLE app.tree ADD CONSTRAINT tree_parent FOREIGN KEY (parent) REFERENCES app.tree(id);\n"
         );
+    }
+
+    #[test]
+    fn a_child_declares_the_default_of_a_column_it_merges_from_parents_whose_defaults_conflict() {
+        let merged = Column { default: Some("3".into()), inherited: Some(Inherited { default: Some("1".into()), storage: "x".into(), ..Inherited::default() }), ..col("a", "integer") };
+        let t = Table { schema: "app".into(), name: "pab".into(), parent: Parent::Inherits(vec![("app".into(), "pa".into()), ("app".into(), "pb".into())]), columns: vec![merged], ..Default::default() };
+        assert_eq!(table(&t).text, "CREATE TABLE app.pab (\n    a integer DEFAULT 3\n) INHERITS (app.pa, app.pb);\n");
     }
 
     #[test]
