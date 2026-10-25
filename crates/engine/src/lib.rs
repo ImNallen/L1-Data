@@ -418,7 +418,7 @@ impl Shared {
                 return Err(ConnectError::Network { message: "disconnected".into() });
             }
             let params = self.params(&instance.config, &slot.db.database)?;
-            let session = Session::open(&params, None, &self.timezone).await?;
+            let session = Session::open_metadata(&params, &self.timezone).await?;
             self.watch_slot_session(instance, &slot.db, session.backend_pid, session.closed_watch());
             *meta = Some(session);
         }
@@ -584,7 +584,7 @@ impl Shared {
     async fn open_instance(&self, id: ConnectionId) -> Result<(Arc<Instance>, i32, tokio::sync::watch::Receiver<Option<String>>), ConnectError> {
         let config = self.config(id).ok_or_else(|| ConnectError::Network { message: "unknown connection".into() })?;
         let params = self.params(&config, &config.database)?;
-        let mut session = Session::open(&params, None, &self.timezone).await?;
+        let mut session = Session::open_metadata(&params, &self.timezone).await?;
         let (databases, home) = session.list_databases().await.map_err(ConnectError::Server)?;
         let (server, pid, closed) = (session.server.clone(), session.backend_pid, session.closed_watch());
         let slot = DbSlot::new(DatabaseRef { connection_id: id, database: home.clone() });
@@ -1092,7 +1092,7 @@ impl Engine {
                 }
                 let probe = async {
                     let params = shared.params(&instance.config, &name).map_err(|e| connection::connect_error_text(&e))?;
-                    let mut session = Session::open(&params, None, &shared.timezone).await.map_err(|e| connection::connect_error_text(&e))?;
+                    let mut session = Session::open_metadata(&params, &shared.timezone).await.map_err(|e| connection::connect_error_text(&e))?;
                     session.count_schemas().await.map_err(|e| e.message)
                 };
                 let count = match tokio::time::timeout(PROBE_TIMEOUT, probe).await {

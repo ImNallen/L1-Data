@@ -77,6 +77,16 @@ impl Session {
         }
     }
 
+    pub async fn open_metadata(p: &ConnectParams, timezone: &str) -> Result<Self, ConnectError> {
+        match p.database_kind {
+            DatabaseKind::Postgres => Self::open(p, None, timezone).await,
+            DatabaseKind::SqlServer => {
+                let driver = mssql::MsSession::open_metadata(p).await?;
+                Ok(Self { backend_pid: driver.backend_pid, server: driver.server.clone(), search_path: None, driver: Driver::SqlServer(driver) })
+            }
+        }
+    }
+
     pub async fn open_assistant(p: &ConnectParams, timezone: &str) -> Result<Self, ConnectError> {
         if p.database_kind != DatabaseKind::Postgres {
             return Err(ConnectError::Server(error("SQL Server model queries are disabled because server-enforced read-only transactions are unavailable.")));

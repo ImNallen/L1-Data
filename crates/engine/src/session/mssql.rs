@@ -15,6 +15,17 @@ use tokio_util::compat::{Compat, TokioAsyncWriteCompatExt};
 
 type TdsClient = Client<Compat<DbStream>>;
 const ATTENTION_TIMEOUT: Duration = Duration::from_millis(300);
+const DEADLOCK_VICTIM: u32 = 1205;
+const DEADLOCK_ATTEMPTS: u32 = 5;
+const DEADLOCK_BACKOFF: Duration = Duration::from_millis(100);
+
+fn server_error_detail(code: u32) -> String {
+    format!("SQL Server error {code},")
+}
+
+fn deadlock_victim(e: &QueryError) -> bool {
+    e.detail.as_deref().is_some_and(|d| d.starts_with(&server_error_detail(DEADLOCK_VICTIM)))
+}
 
 pub(super) struct MsSession {
     client: Option<TdsClient>,
@@ -24,6 +35,7 @@ pub(super) struct MsSession {
     txn: TxnState,
     cancel: watch::Sender<u64>,
     closed: watch::Sender<Option<String>>,
+    metadata: bool,
 }
 
 #[derive(Clone)]
@@ -73,7 +85,7 @@ pub(super) fn query_error(e: tiberius::error::Error) -> QueryError {
             severity: if e.class() >= 20 { "FATAL" } else { "ERROR" }.into(),
             sqlstate: None,
             message: e.message().to_owned(),
-            detail: Some(format!("SQL Server error {}, state {}, line {}", e.code(), e.state(), e.line())),
+            detail: Some(format!("{} state {}, line {}", server_error_detail(e.code()), e.state(), e.line())),
             hint: None,
             context: (!e.procedure().is_empty()).then(|| e.procedure().to_owned()),
             position: None,
@@ -179,7 +191,14 @@ impl MsSession {
             txn,
             cancel,
             closed,
+            metadata: false,
         })
+    }
+    pub(super) async fn open_metadata(p: &ConnectParams) -> Result<Self, ConnectError> {
+        let mut session = Self::open(p).await?;
+        session.batch("SET DEADLOCK_PRIORITY LOW").await.map_err(ConnectError::Server)?;
+        session.metadata = true;
+        Ok(session)
     }
     pub(super) fn txn(&self) -> (TxnState, Option<u32>) {
         (self.txn, (self.txn == TxnState::Idle).then_some(0))
@@ -264,6 +283,18 @@ impl MsSession {
     }
 
     pub(super) async fn rows(&mut self, sql: &str) -> Result<Vec<Vec<Option<String>>>, QueryError> {
+        let mut attempt = 1;
+        loop {
+            match self.read_rows(sql).await {
+                Err(e) if self.metadata && deadlock_victim(&e) && attempt < DEADLOCK_ATTEMPTS => {
+                    tokio::time::sleep(DEADLOCK_BACKOFF * attempt).await;
+                    attempt += 1;
+                }
+                result => return result,
+            }
+        }
+    }
+    async fn read_rows(&mut self, sql: &str) -> Result<Vec<Vec<Option<String>>>, QueryError> {
         let mut stream = self.query(sql);
         let mut rows = Vec::new();
         let mut failed = None;
