@@ -2,7 +2,7 @@ use tokio_postgres::types::ToSql;
 use tokio_postgres::{Client, Row, Transaction};
 
 use crate::model::{DetailError, ObjectScript, ScriptTarget};
-use crate::script::{self, Change, Grant, postgres as ddl};
+use crate::script::{self, Change, Privilege, postgres as ddl};
 use crate::text::quote_ident_if_needed as ident;
 
 const RELATION: &str = "SELECT c.relkind::text, n.nspname, c.relname, c.relpersistence = 'u',
@@ -136,7 +136,9 @@ const ROUTINE: &str = "SELECT p.prokind::text, p.proname, CASE WHEN p.prokind <>
      FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace WHERE p.oid = $1";
 
 fn acl_changes(from: &str, acl: &str, default: &str, filter: &str, keys: &str) -> String {
-    let side = |acl: &str, granted: bool| format!("SELECT {keys}, a.grantee, a.privilege_type, a.is_grantable, {granted} FROM {from} CROSS JOIN LATERAL aclexplode({acl}) a WHERE {filter}");
+    let side = |exploded: &str, granted: bool| {
+        format!("SELECT {keys}, a.grantee, a.privilege_type, a.is_grantable, {granted} FROM {from} CROSS JOIN LATERAL aclexplode({exploded}) a WHERE {filter} AND {acl} IS NOT NULL")
+    };
     format!("({} EXCEPT {}) UNION ALL ({} EXCEPT {})", side(acl, true), side(default, true), side(default, false), side(acl, false))
 }
 
@@ -151,35 +153,35 @@ fn grants_query(changes: &[String]) -> String {
 
 fn relation_grants_query() -> String {
     grants_query(&[
-        acl_changes("pg_class c", "c.relacl", "acldefault('r', c.relowner)", "c.oid = $1 AND c.relacl IS NOT NULL", "NULL::text, NULL::text, NULL::text"),
+        acl_changes("pg_class c", "c.relacl", "acldefault('r', c.relowner)", "c.oid = $1", "NULL::text, NULL::text, NULL::text"),
         acl_changes(
             "pg_attribute at JOIN pg_class ac ON ac.oid = at.attrelid",
             "at.attacl",
             "acldefault('c', ac.relowner)",
-            "at.attrelid = $1 AND at.attnum > 0 AND NOT at.attisdropped AND at.attacl IS NOT NULL",
+            "at.attrelid = $1 AND at.attnum > 0 AND NOT at.attisdropped",
             "NULL::text, NULL::text, at.attname::text",
         ),
         acl_changes(
             "pg_depend dep JOIN pg_class sc ON sc.oid = dep.objid AND sc.relkind = 'S' JOIN pg_namespace sn ON sn.oid = sc.relnamespace",
             "sc.relacl",
             "acldefault('s', sc.relowner)",
-            "dep.classid = 'pg_class'::regclass AND dep.refclassid = 'pg_class'::regclass AND dep.refobjid = $1 AND dep.deptype IN ('a', 'i') AND sc.relacl IS NOT NULL",
+            "dep.classid = 'pg_class'::regclass AND dep.refclassid = 'pg_class'::regclass AND dep.refobjid = $1 AND dep.deptype IN ('a', 'i')",
             "sn.nspname::text, sc.relname::text, NULL::text",
         ),
     ])
 }
 
 fn routine_grants_query() -> String {
-    grants_query(&[acl_changes("pg_proc p", "p.proacl", "acldefault('f', p.proowner)", "p.oid = $1 AND p.proacl IS NOT NULL", "NULL::text, NULL::text, NULL::text")])
+    grants_query(&[acl_changes("pg_proc p", "p.proacl", "acldefault('f', p.proowner)", "p.oid = $1", "NULL::text, NULL::text, NULL::text")])
 }
 
-fn grant_row(r: &Row) -> Grant {
+fn grant_row(r: &Row) -> Privilege {
     let change = match (r.get::<_, bool>(6), r.get::<_, bool>(5)) {
         (false, _) => Change::Revoked,
         (true, true) => Change::GrantedWithGrantOption,
         (true, false) => Change::Granted,
     };
-    Grant { privilege: r.get(3), column: r.get::<_, Option<&str>>(2).map(ident), grantee: r.get::<_, Option<&str>>(4).map_or("PUBLIC".into(), ident), change }
+    Privilege { name: r.get(3), column: r.get::<_, Option<&str>>(2).map(ident), grantee: r.get::<_, Option<&str>>(4).map_or("PUBLIC".into(), ident), change }
 }
 
 fn unscripted(r: &Row, grants: &[Row]) -> ddl::Unscripted {
@@ -187,8 +189,8 @@ fn unscripted(r: &Row, grants: &[Row]) -> ddl::Unscripted {
     for g in grants {
         match (g.get::<_, Option<String>>(0), g.get::<_, Option<String>>(1)) {
             (Some(schema), Some(name)) => match u.sequence_privileges.last_mut() {
-                Some((key, list)) if key.0 == schema && key.1 == name => list.push(grant_row(g)),
-                _ => u.sequence_privileges.push(((schema, name), vec![grant_row(g)])),
+                Some(s) if s.schema == schema && s.name == name => s.privileges.push(grant_row(g)),
+                _ => u.sequence_privileges.push(ddl::SequencePrivileges { schema, name, privileges: vec![grant_row(g)] }),
             },
             _ => u.privileges.push(grant_row(g)),
         }
@@ -407,7 +409,7 @@ fn index_row(r: &Row) -> ddl::Index {
         clustered: r.get(3),
         replica_identity: r.get(4),
         tablespace: r.get(5),
-        statistics: columns.into_iter().zip(targets).collect(),
+        statistics: columns.into_iter().zip(targets).map(|(column, target)| ddl::ColumnStatistics { column, target }).collect(),
         invalid: r.get(8),
         partitioned: r.get(9),
     }

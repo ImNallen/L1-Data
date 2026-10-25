@@ -1,7 +1,7 @@
 use super::catalog::display;
 use super::{MsSession, native_object_id, number, required};
 use crate::model::*;
-use crate::script::{self, Change, Grant, tsql as ddl};
+use crate::script::{self, Change, Privilege, tsql as ddl};
 use crate::sql::tsql::{quote_ident, quote_literal};
 
 fn failed(e: QueryError) -> DetailError {
@@ -103,8 +103,7 @@ fn storage(r: &[Option<String>], at: usize) -> Result<ddl::Storage, DetailError>
         compression_delay: r[at + 9].as_deref().and_then(|d| d.parse().ok()),
         disabled: bit(r, at + 10)?,
         place: place(r, at + 11),
-        incremental: bit(r, at + 13)?,
-        suppress_dup_key_messages: bit(r, at + 14)?,
+        unscripted: ddl::Unscripted { incremental: bit(r, at + 13)?, suppress_dup_key_messages: bit(r, at + 14)? },
     })
 }
 
@@ -182,7 +181,7 @@ impl MsSession {
         let indexes = batch.add(indexes_sql(oid, "i.is_primary_key=0 AND i.is_unique_constraint=0", f));
         let triggers = batch.add(modules_sql(&format!("o.parent_object_id={oid} AND o.type IN ('TR','TA')")));
         let props = batch.add(properties_sql(&format!("o.object_id={oid}")));
-        let grants = batch.add(grants_sql(&oid.to_string()));
+        let privileges = batch.add(privileges_sql(&format!("o.object_id={oid}")));
         let classifications = f.classifications.map(|rank| batch.add(classifications_sql(oid, rank)));
         let sets = self.run_batch(batch).await?;
 
@@ -190,7 +189,7 @@ impl MsSession {
         match required(r, 2).map_err(failed)?.trim() {
             "V" => {
                 let (_, module) = modules(&sets[view])?.into_iter().next().ok_or(DetailError::Gone)?;
-                let view = ddl::View { indexes: indexes_from(&sets[indexes])?, triggers: triggers_from(&sets[triggers])?, properties: properties(&sets[props])?, grants: grants_from(&sets[grants])?, module: module.text()? };
+                let view = ddl::View { indexes: indexes_from(&sets[indexes])?, triggers: triggers_from(&sets[triggers])?, properties: properties(&sets[props])?, privileges: privileges_from(&sets[privileges])?, module: module.text()? };
                 Ok(script::object_script(&view.module.name, ddl::view(&view)))
             }
             "U" => {
@@ -227,7 +226,7 @@ impl MsSession {
                     history_of: r[9].clone().zip(r[10].clone()),
                     properties: properties(&sets[props])?,
                     classifications: classifications.map_or(Ok(vec![]), |at| classifications_from(&sets[at]))?,
-                    grants: grants_from(&sets[grants])?,
+                    privileges: privileges_from(&sets[privileges])?,
                 };
                 Ok(script::object_script(&name, ddl::table(&table)))
             }
@@ -236,16 +235,15 @@ impl MsSession {
     }
 
     async fn module_script(&mut self, filter: &str) -> Result<ObjectScript, DetailError> {
-        let ids = format!("SELECT o.object_id FROM sys.objects o WHERE {filter}");
         let mut batch = Batch::default();
         let found = batch.add(modules_sql(filter));
-        let props = batch.add(properties_sql(&format!("ep.class IN (1,2) AND ep.major_id IN ({ids})")));
-        let grants = batch.add(grants_sql(&ids));
+        let props = batch.add(properties_sql(&format!("ep.class IN (1,2) AND ep.major_id IN (SELECT o.object_id FROM sys.objects o WHERE {filter})")));
+        let privileges = batch.add(privileges_sql(filter));
         let sets = self.run_batch(batch).await?;
         let (_, module) = modules(&sets[found])?.into_iter().next().ok_or(DetailError::Gone)?;
         let mut module = module.text()?;
         module.properties = properties(&sets[props])?;
-        module.grants = grants_from(&sets[grants])?;
+        module.privileges = privileges_from(&sets[privileges])?;
         Ok(script::object_script(&module.name, ddl::module(&module)))
     }
 }
@@ -276,7 +274,7 @@ fn modules(rows: &[Row]) -> Result<Vec<(i32, Found)>, DetailError> {
                 Some("1") => Some(ddl::qualified(&text(r, 6)?, &text(r, 7)?)),
                 _ => None,
             };
-            let module = ddl::Module { schema, name, definition, ansi_nulls: bit(r, 3)?, quoted_identifier: bit(r, 4)?, disabled_on, properties: vec![], grants: vec![] };
+            let module = ddl::Module { schema, name, definition, ansi_nulls: bit(r, 3)?, quoted_identifier: bit(r, 4)?, disabled_on, properties: vec![], privileges: vec![] };
             Ok((oid, Found::Text(module)))
         })
         .collect()
@@ -323,15 +321,16 @@ fn properties(rows: &[Row]) -> Result<Vec<ddl::Property>, DetailError> {
         .collect()
 }
 
-fn grants_sql(ids: &str) -> String {
+/// `filter` picks the objects from `sys.objects o`, as `modules_sql` takes it.
+fn privileges_sql(filter: &str) -> String {
     format!(
         "SELECT p.permission_name,COL_NAME(p.major_id,p.minor_id),dp.name,p.state
          FROM sys.database_permissions p JOIN sys.database_principals dp ON dp.principal_id=p.grantee_principal_id
-         WHERE p.class=1 AND p.major_id IN ({ids}) ORDER BY dp.name,p.permission_name,p.minor_id"
+         WHERE p.class=1 AND p.major_id IN (SELECT o.object_id FROM sys.objects o WHERE {filter}) ORDER BY dp.name,p.permission_name,p.minor_id"
     )
 }
 
-fn grants_from(rows: &[Row]) -> Result<Vec<Grant>, DetailError> {
+fn privileges_from(rows: &[Row]) -> Result<Vec<Privilege>, DetailError> {
     rows.iter()
         .map(|r| {
             let change = match required(r, 3).map_err(failed)?.trim() {
@@ -340,7 +339,7 @@ fn grants_from(rows: &[Row]) -> Result<Vec<Grant>, DetailError> {
                 "R" => Change::Revoked,
                 _ => Change::Granted,
             };
-            Ok(Grant { privilege: text(r, 0)?, column: r[1].as_deref().map(quote_ident), grantee: quote_ident(&text(r, 2)?), change })
+            Ok(Privilege { name: text(r, 0)?, column: r[1].as_deref().map(quote_ident), grantee: quote_ident(&text(r, 2)?), change })
         })
         .collect()
 }

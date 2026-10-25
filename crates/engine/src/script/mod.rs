@@ -16,8 +16,8 @@ impl Ddl {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Grant {
-    pub privilege: String,
+pub struct Privilege {
+    pub name: String,
     pub column: Option<String>,
     pub grantee: String,
     pub change: Change,
@@ -31,8 +31,8 @@ pub enum Change {
     Denied,
 }
 
-pub fn privileges(object: &str, grants: &[Grant]) -> Option<String> {
-    let list: Vec<String> = grants
+pub fn privileges(object: &str, list: &[Privilege]) -> Option<String> {
+    let list: Vec<String> = list
         .iter()
         .map(|g| {
             let column = g.column.as_ref().map_or(String::new(), |c| format!(" ({c})"));
@@ -42,7 +42,7 @@ pub fn privileges(object: &str, grants: &[Grant]) -> Option<String> {
                 Change::Revoked => "revoked from",
                 Change::Denied => "denied to",
             };
-            format!("{}{column} {change} {}", g.privilege, g.grantee)
+            format!("{}{column} {change} {}", g.name, g.grantee)
         })
         .collect();
     (!list.is_empty()).then(|| format!("privileges on {object} ({})", list.join(", ")))
@@ -73,7 +73,7 @@ mod tests {
 
     #[test]
     fn privileges_list_each_change_with_its_column_and_grantee() {
-        let grant = |privilege: &str, column: Option<&str>, grantee: &str, change: Change| Grant { privilege: privilege.into(), column: column.map(Into::into), grantee: grantee.into(), change };
+        let grant = |privilege: &str, column: Option<&str>, grantee: &str, change: Change| Privilege { name: privilege.into(), column: column.map(Into::into), grantee: grantee.into(), change };
         assert_eq!(
             privileges(
                 "[dbo].[t]",

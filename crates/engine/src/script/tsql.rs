@@ -1,4 +1,4 @@
-use super::{Ddl, Grant, privileges};
+use super::{Ddl, Privilege, privileges};
 use crate::sql::tsql::{module_name, quote_ident as ident, quote_literal};
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -20,7 +20,7 @@ pub struct Table {
     pub history_of: Option<(String, String)>,
     pub properties: Vec<Property>,
     pub classifications: Vec<Classification>,
-    pub grants: Vec<Grant>,
+    pub privileges: Vec<Privilege>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -124,6 +124,12 @@ pub struct Storage {
     pub compression_delay: Option<i32>,
     pub disabled: bool,
     pub place: Option<Place>,
+    pub unscripted: Unscripted,
+}
+
+/// Index options the script warns about and never writes.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Unscripted {
     pub incremental: bool,
     pub suppress_dup_key_messages: bool,
 }
@@ -150,7 +156,7 @@ pub struct Module {
     pub quoted_identifier: bool,
     pub disabled_on: Option<String>,
     pub properties: Vec<Property>,
-    pub grants: Vec<Grant>,
+    pub privileges: Vec<Privilege>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -166,7 +172,7 @@ pub struct View {
     pub indexes: Vec<Index>,
     pub triggers: Vec<Trigger>,
     pub properties: Vec<Property>,
-    pub grants: Vec<Grant>,
+    pub privileges: Vec<Privilege>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -229,7 +235,7 @@ pub fn table(t: &Table) -> Ddl {
     }
     let disabled_keys = t.keys.iter().filter(|k| k.storage.disabled).map(|k| k.name.as_str());
     parts.extend(dependents(&name, disabled_keys, &t.indexes, &t.triggers, &t.properties, &mut warnings));
-    warnings.extend(privileges(&name, &t.grants));
+    warnings.extend(privileges(&name, &t.privileges));
     Ddl { text: parts.join("\n"), warnings }
 }
 
@@ -238,7 +244,7 @@ pub fn view(v: &View) -> Ddl {
     let name = qualified(&v.module.schema, &v.module.name);
     let mut parts = vec![module_text(&v.module, &mut warnings)];
     parts.extend(dependents(&name, std::iter::empty(), &v.indexes, &v.triggers, &v.properties, &mut warnings));
-    warnings.extend(privileges(&name, &v.grants));
+    warnings.extend(privileges(&name, &v.privileges));
     Ddl { text: parts.join("\n"), warnings }
 }
 
@@ -272,7 +278,7 @@ pub fn module(m: &Module) -> Ddl {
         text.push('\n');
         text.push_str(&properties);
     }
-    warnings.extend(privileges(&qualified(&m.schema, &m.name), &m.grants));
+    warnings.extend(privileges(&qualified(&m.schema, &m.name), &m.privileges));
     Ddl { text, warnings }
 }
 
@@ -300,7 +306,7 @@ fn dependents<'a>(name: &str, disabled_keys: impl Iterator<Item = &'a str>, inde
             }
         }
     }
-    let props: Vec<Property> = props.iter().filter(|p| !p.levels.get(2).is_some_and(|(kind, n)| left_out.contains(&(kind.as_str(), n.as_str())))).cloned().collect();
+    let props: Vec<Property> = props.iter().filter(|p| !p.part().is_some_and(|part| left_out.contains(&part))).cloned().collect();
     parts.extend(properties(&props, warnings));
     let disabled: Vec<&str> = disabled_keys.chain(indexes.iter().filter(|i| i.storage.disabled && matches!(i.kind, 1 | 2 | 5 | 6)).map(|i| i.name.as_str())).collect();
     if !disabled.is_empty() {
@@ -431,7 +437,7 @@ fn storage_warnings(s: &Storage, index: &str, table: &str, warnings: &mut Vec<St
     if let Some(place) = &s.place {
         warnings.push(format!("{}{of} on {table}", place.describe()));
     }
-    for (on, option) in [(s.incremental, "STATISTICS_INCREMENTAL"), (s.suppress_dup_key_messages, "SUPPRESS_DUP_KEY_MESSAGES")] {
+    for (on, option) in [(s.unscripted.incremental, "STATISTICS_INCREMENTAL"), (s.unscripted.suppress_dup_key_messages, "SUPPRESS_DUP_KEY_MESSAGES")] {
         if on {
             warnings.push(format!("{option}{of} on {table}"));
         }
@@ -544,6 +550,13 @@ fn module_text(m: &Module, warnings: &mut Vec<String>) -> String {
     out
 }
 
+impl Property {
+    /// The index, trigger, column, constraint, or parameter the property is on, if any.
+    fn part(&self) -> Option<(&str, &str)> {
+        self.levels.get(2).map(|(kind, name)| (kind.as_str(), name.as_str()))
+    }
+}
+
 fn properties(props: &[Property], warnings: &mut Vec<String>) -> Option<String> {
     let lines: Vec<String> = props
         .iter()
@@ -627,7 +640,7 @@ mod tests {
                 quoted_identifier: false,
                 disabled_on: Some("[dbo].[tickets]".into()),
                 properties: vec![],
-                grants: vec![],
+                privileges: vec![],
             })],
             ..table_named("tickets")
         };
@@ -832,8 +845,8 @@ GO
     #[test]
     fn incremental_statistics_and_suppressed_duplicate_key_messages_warn() {
         let t = Table {
-            keys: vec![Key { name: "PK_i".into(), primary: true, clustered: true, columns: vec![("id".into(), false)], storage: Storage { incremental: true, ..Storage::default() } }],
-            indexes: vec![Index { unique: true, storage: Storage { ignore_dup_key: true, suppress_dup_key_messages: true, ..Storage::default() }, ..index_on("UX_i", 2, &["id"]) }],
+            keys: vec![Key { name: "PK_i".into(), primary: true, clustered: true, columns: vec![("id".into(), false)], storage: Storage { unscripted: Unscripted { incremental: true, ..Unscripted::default() }, ..Storage::default() } }],
+            indexes: vec![Index { unique: true, storage: Storage { ignore_dup_key: true, unscripted: Unscripted { suppress_dup_key_messages: true, ..Unscripted::default() }, ..Storage::default() }, ..index_on("UX_i", 2, &["id"]) }],
             ..table_named("i")
         };
         let ddl = table(&t);
@@ -997,12 +1010,12 @@ GO
 
     #[test]
     fn privileges_warn_for_tables_views_and_modules() {
-        let grant = |privilege: &str, column: Option<&str>, change: Change| Grant { privilege: privilege.into(), column: column.map(Into::into), grantee: "[app]".into(), change };
-        let t = Table { grants: vec![grant("SELECT", None, Change::Granted), grant("UPDATE", Some("[qty]"), Change::Denied)], ..table_named("t") };
+        let grant = |privilege: &str, column: Option<&str>, change: Change| Privilege { name: privilege.into(), column: column.map(Into::into), grantee: "[app]".into(), change };
+        let t = Table { privileges: vec![grant("SELECT", None, Change::Granted), grant("UPDATE", Some("[qty]"), Change::Denied)], ..table_named("t") };
         assert_eq!(table(&t).warnings, ["privileges on [dbo].[t] (SELECT granted to [app], UPDATE ([qty]) denied to [app])"]);
-        let v = View { module: procedure("CREATE VIEW dbo.newname AS SELECT 1"), grants: vec![grant("SELECT", None, Change::Revoked)], ..View::default() };
+        let v = View { module: procedure("CREATE VIEW dbo.newname AS SELECT 1"), privileges: vec![grant("SELECT", None, Change::Revoked)], ..View::default() };
         assert_eq!(view(&v).warnings, ["privileges on [dbo].[newname] (SELECT revoked from [app])"]);
-        let m = Module { grants: vec![grant("EXECUTE", None, Change::GrantedWithGrantOption)], ..procedure("CREATE PROCEDURE dbo.newname AS SELECT 1") };
+        let m = Module { privileges: vec![grant("EXECUTE", None, Change::GrantedWithGrantOption)], ..procedure("CREATE PROCEDURE dbo.newname AS SELECT 1") };
         assert_eq!(module(&m).warnings, ["privileges on [dbo].[newname] (EXECUTE granted with grant option to [app])"]);
     }
 
@@ -1029,7 +1042,7 @@ GO
             indexes: vec![Index { unique: true, on_view: true, storage: Storage { fill_factor: 90, ..Storage::default() }, ..index_on("IX_v", 1, &["id"]) }],
             triggers: vec![Trigger::Text(module("v_ins", "CREATE TRIGGER dbo.v_ins ON dbo.v INSTEAD OF INSERT AS SELECT 1"))],
             properties: vec![property("MS_Description", "bound", &[("SCHEMA", "dbo"), ("VIEW", "v")])],
-            grants: vec![],
+            privileges: vec![],
         };
         assert_eq!(
             view(&v),

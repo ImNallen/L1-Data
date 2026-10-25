@@ -1,4 +1,4 @@
-use super::{Ddl, Grant, privileges};
+use super::{Ddl, Privilege, privileges};
 use crate::text::{quote_ident_if_needed as ident, quote_literal};
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -31,10 +31,24 @@ pub struct Table {
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Unscripted {
-    pub privileges: Vec<Grant>,
-    pub sequence_privileges: Vec<((String, String), Vec<Grant>)>,
+    pub privileges: Vec<Privilege>,
+    pub sequence_privileges: Vec<SequencePrivileges>,
     pub security_labels: bool,
     pub publications: Vec<String>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct SequencePrivileges {
+    pub schema: String,
+    pub name: String,
+    pub privileges: Vec<Privilege>,
+}
+
+/// An index column's statistics target, by the column's number in the index.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ColumnStatistics {
+    pub column: i32,
+    pub target: i32,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -135,7 +149,7 @@ pub struct Index {
     pub clustered: bool,
     pub replica_identity: bool,
     pub tablespace: Option<String>,
-    pub statistics: Vec<(i32, i32)>,
+    pub statistics: Vec<ColumnStatistics>,
     pub invalid: bool,
     pub partitioned: bool,
 }
@@ -319,7 +333,7 @@ fn in_replay_order(columns: &[Column]) -> bool {
 
 fn unscripted(u: &Unscripted, name: &str) -> Vec<String> {
     let mut out: Vec<String> = privileges(name, &u.privileges).into_iter().collect();
-    out.extend(u.sequence_privileges.iter().filter_map(|((schema, sequence), grants)| privileges(&qualified(schema, sequence), grants)));
+    out.extend(u.sequence_privileges.iter().filter_map(|s| privileges(&qualified(&s.schema, &s.name), &s.privileges)));
     if u.security_labels {
         out.push(format!("security labels on {name}"));
     }
@@ -463,7 +477,7 @@ fn indexes(list: &[Index], keyword: &str, schema: &str, relation: &str, out: &mu
         let name = ident(&i.name);
         let qualified_name = qualified(schema, &i.name);
         out.extend(i.definition.as_deref().map(index));
-        out.extend(i.statistics.iter().map(|(column, target)| format!("ALTER INDEX {qualified_name} ALTER COLUMN {column} SET STATISTICS {target}")));
+        out.extend(i.statistics.iter().map(|s| format!("ALTER INDEX {qualified_name} ALTER COLUMN {} SET STATISTICS {}", s.column, s.target)));
         match (i.invalid, i.partitioned) {
             (false, _) => {}
             (true, false) => warnings.push(format!("the invalid state of index {qualified_name}, which a replay builds valid")),
@@ -523,7 +537,7 @@ pub fn view(v: &View) -> Ddl {
     Ddl { text: script(statements), warnings }
 }
 
-pub fn routine(definition: &str, procedure: bool, signature: &str, description: &Option<String>, grants: &[Grant]) -> Ddl {
+pub fn routine(definition: &str, procedure: bool, signature: &str, description: &Option<String>, grants: &[Privilege]) -> Ddl {
     let mut statements = vec![definition.trim_end().to_owned()];
     statements.extend(comment(&format!("{} {signature}", if procedure { "PROCEDURE" } else { "FUNCTION" }), description));
     Ddl { text: script(statements), warnings: privileges(signature, grants).into_iter().collect() }
@@ -659,8 +673,8 @@ mod tests {
     use super::*;
     use crate::script::Change;
 
-    fn grant(privilege: &str, column: Option<&str>, grantee: &str, change: Change) -> Grant {
-        Grant { privilege: privilege.into(), column: column.map(Into::into), grantee: grantee.into(), change }
+    fn grant(privilege: &str, column: Option<&str>, grantee: &str, change: Change) -> Privilege {
+        Privilege { name: privilege.into(), column: column.map(Into::into), grantee: grantee.into(), change }
     }
 
     fn sequence(start: i64, increment: i64, min: i64, max: i64) -> Sequence {
@@ -871,7 +885,7 @@ ALTER FOREIGN TABLE public.e2 ALTER COLUMN v OPTIONS (ADD column_name 'vv');
             parent: Parent::Inherits(vec![("app".into(), "base".into()), ("app".into(), "Other".into())]),
             unscripted: Unscripted {
                 privileges: vec![grant("SELECT", None, "app", Change::Granted), grant("UPDATE", Some("\"Mixed\""), "PUBLIC", Change::GrantedWithGrantOption)],
-                sequence_privileges: vec![(("app".into(), "child_id_seq".into()), vec![grant("USAGE", None, "app", Change::Granted)])],
+                sequence_privileges: vec![SequencePrivileges { schema: "app".into(), name: "child_id_seq".into(), privileges: vec![grant("USAGE", None, "app", Change::Granted)] }],
                 security_labels: true,
                 publications: vec![],
             },
@@ -977,7 +991,7 @@ ALTER FOREIGN TABLE public.e2 ALTER COLUMN v OPTIONS (ADD column_name 'vv');
 
     #[test]
     fn an_index_keeps_its_column_statistics_and_warns_when_invalid_or_partly_attached() {
-        let expr = Index { name: "Lower".into(), definition: Some("CREATE INDEX \"Lower\" ON app.t USING btree (lower(a))".into()), statistics: vec![(1, 300)], ..Default::default() };
+        let expr = Index { name: "Lower".into(), definition: Some("CREATE INDEX \"Lower\" ON app.t USING btree (lower(a))".into()), statistics: vec![ColumnStatistics { column: 1, target: 300 }], ..Default::default() };
         assert_eq!(index_script(&expr, None, "TABLE", "app", "app.t"), Ddl::complete("CREATE INDEX \"Lower\" ON app.t USING btree (lower(a));\n\nALTER INDEX app.\"Lower\" ALTER COLUMN 1 SET STATISTICS 300;\n".into()));
         let broken = Index { name: "dup".into(), definition: Some("CREATE UNIQUE INDEX dup ON app.t USING btree (a)".into()), invalid: true, ..Default::default() };
         assert_eq!(index_script(&broken, None, "TABLE", "app", "app.t").warnings, ["the invalid state of index app.dup, which a replay builds valid"]);
