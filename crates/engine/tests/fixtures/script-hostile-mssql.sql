@@ -155,6 +155,14 @@ CREATE TABLE dbo.lob (id int PRIMARY KEY, tx ntext NULL);
 EXEC sp_tableoption N'dbo.lob', 'text in row', '500';
 EXEC sp_tableoption N'[we]]ird s].[Par ent]', 'large value types out of row', 1;
 GO
+CREATE DEFAULT dbo.d_zero AS 0;
+GO
+CREATE RULE dbo.r_pos AS @v > 0;
+GO
+CREATE TABLE [we]]ird s].[bound t] (id int NOT NULL, [q ü] int NULL, r int NULL);
+EXEC sp_bindefault N'dbo.d_zero', N'[we]]ird s].[bound t].[q ü]';
+EXEC sp_bindrule N'dbo.r_pos', N'[we]]ird s].[bound t].r';
+GO
 CREATE TABLE dbo.cci (id int NOT NULL, v int NULL);
 GO
 CREATE CLUSTERED COLUMNSTORE INDEX CCI ON dbo.cci ORDER (id) WITH (DATA_COMPRESSION = COLUMNSTORE_ARCHIVE, COMPRESSION_DELAY = 10);

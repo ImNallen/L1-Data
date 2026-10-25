@@ -995,7 +995,8 @@ impl Harness {
                 UNION ALL
                 SELECT CONCAT(N'column ',c.column_id,' ',c.name,' ',TYPE_NAME(c.user_type_id),' ',c.max_length,' ',c.precision,' ',c.scale,' ',c.is_nullable,' ',c.collation_name,' ',
                               CONVERT(nvarchar(40),ic.seed_value),' ',CONVERT(nvarchar(40),ic.increment_value),' ',ic.is_not_for_replication,' ',cc.definition,' ',cc.is_persisted,' ',dc.name,' ',dc.definition,' ',
-                              c.is_sparse,' ',c.is_column_set,' ',c.is_rowguidcol,' ',mc.masking_function,' ',c.generated_always_type,' ',c.is_hidden)
+                              c.is_sparse,' ',c.is_column_set,' ',c.is_rowguidcol,' ',mc.masking_function,' ',c.generated_always_type,' ',c.is_hidden,' ',
+                              OBJECT_NAME(c.default_object_id),' ',OBJECT_SCHEMA_NAME(c.rule_object_id),'.',OBJECT_NAME(c.rule_object_id))
                 FROM sys.columns c LEFT JOIN sys.identity_columns ic ON ic.object_id=c.object_id AND ic.column_id=c.column_id
                 LEFT JOIN sys.computed_columns cc ON cc.object_id=c.object_id AND cc.column_id=c.column_id
                 LEFT JOIN sys.default_constraints dc ON dc.object_id=c.default_object_id
@@ -1066,6 +1067,8 @@ async fn hostile_object_scripts_replay_every_property_or_warn() {
         dst.ok("CREATE SCHEMA [we]]ird s]").await;
         dst.ok("CREATE TYPE [we]]ird s].phone FROM nvarchar(20) NOT NULL").await;
         dst.ok("ALTER DATABASE CURRENT SET CHANGE_TRACKING = ON").await;
+        dst.ok("CREATE DEFAULT dbo.d_zero AS 0;").await;
+        dst.ok("CREATE RULE dbo.r_pos AS @v > 0").await;
         src.engine.refresh_catalog(db.clone()).await.unwrap();
         let catalog = src.engine.catalog(db.clone()).await.unwrap();
 
@@ -1125,7 +1128,7 @@ async fn hostile_object_scripts_replay_every_property_or_warn() {
         scripted.sort();
         assert_eq!(
             scripted,
-            ["Par ent", "bare_in", "bare_moved", "cci", "f_scalar", "go_in_comment", "heap_pk", "lob", "moved", "newname", "parted", "qi_off", "refd", "refr", "renamed_t", "sparse_set", "temporal", "temporal_history", "tree", "v_bound", "warned"]
+            ["Par ent", "bare_in", "bare_moved", "bound t", "cci", "f_scalar", "go_in_comment", "heap_pk", "lob", "moved", "newname", "parted", "qi_off", "refd", "refr", "renamed_t", "sparse_set", "temporal", "temporal_history", "tree", "v_bound", "warned"]
         );
 
         dst.replay_in_dependency_order(tables).await;
