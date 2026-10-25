@@ -267,7 +267,6 @@ export function cancelActive(): boolean {
   return true;
 }
 
-/** The answer holds only for the target it named, so a target changed meanwhile drops the commit. */
 async function commitConfirmed(tab: Tab, asked: WriteConfirmation): Promise<boolean> {
   const n = asked.writes;
   const rest = n > asked.statements.length ? ` The first ${asked.statements.length} are shown.` : "";

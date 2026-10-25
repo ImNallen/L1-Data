@@ -13,7 +13,7 @@ use crate::sql::{Invalidates, StmtKind, StmtSpan};
 use crate::store::HistoryInsert;
 use crate::text::{OffsetMap, synthesize_tag};
 use crate::txn::{StmtOutcome, TransactionPlan, txn_after};
-use crate::writes::Unconfirmed;
+use crate::writes::UnaskedWrites;
 
 pub(crate) const STREAM_EMIT_INTERVAL: Duration = Duration::from_millis(100);
 const OUTPUT_COALESCE: Duration = Duration::from_millis(5);
@@ -66,7 +66,7 @@ pub struct ConsoleInner {
     pub session: SessionSlot,
     pub txn: TxnState,
     pub txn_depth: Option<u32>,
-    pub unconfirmed: Unconfirmed,
+    pub unasked: UnaskedWrites,
     pub run: RunState,
     pub rev: u64,
     refreshes: Option<PendingRefreshes>,
@@ -161,7 +161,6 @@ impl Work {
     }
 }
 
-/// `opened` is the connection as saved when the session opened, which a later save does not change.
 pub enum SessionSlot {
     Empty,
     Idle { session: Session, opened: ConnectionConfig },
@@ -191,7 +190,7 @@ impl Console {
             session: SessionSlot::Empty,
             txn: TxnState::Idle,
             txn_depth: None,
-            unconfirmed: Unconfirmed::default(),
+            unasked: UnaskedWrites::default(),
             run: RunState::Idle,
             rev: 0,
             refreshes: None,
@@ -317,7 +316,7 @@ impl Console {
             }
         };
         if inner.txn == TxnState::Idle {
-            inner.unconfirmed = Unconfirmed::default();
+            inner.unasked = UnaskedWrites::default();
         }
         due
     }
@@ -333,7 +332,7 @@ impl Console {
         }
         inner.txn = TxnState::Idle;
         inner.txn_depth = None;
-        inner.unconfirmed = Unconfirmed::default();
+        inner.unasked = UnaskedWrites::default();
         let due = inner.finish_refreshes(false);
         if let RunState::Running { run_id, started_at_ms, statements } = &mut inner.run {
             let mut in_flight = true;

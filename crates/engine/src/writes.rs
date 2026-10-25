@@ -8,26 +8,22 @@ use crate::text;
 const SHOWN: usize = 3;
 const SHOWN_CHARS: usize = 2000;
 
-/// Where a guarded action runs. `opened` is the connection as saved when the tab's session opened, because a later
-/// save changes neither the server that session reached nor the environment it was opened in.
 #[derive(Serialize)]
 pub struct Target<'a> {
     pub saved: &'a ConnectionConfig,
     pub opened: &'a ConnectionConfig,
     pub console: &'a ConsoleConfigView,
     pub txn: TxnState,
-    pub unconfirmed: &'a Unconfirmed,
+    pub unasked: &'a UnaskedWrites,
 }
 
-/// The writes in a tab's open transaction that ran with no Production question. A commit keeps them, so on
-/// Production it asks for them.
 #[derive(Debug, Default, Serialize)]
-pub struct Unconfirmed {
+pub struct UnaskedWrites {
     writes: u32,
     shown: Vec<String>,
 }
 
-impl Unconfirmed {
+impl UnaskedWrites {
     pub fn add(&mut self, writes: &[&str]) {
         let room = SHOWN.saturating_sub(self.shown.len());
         self.shown.extend(writes.iter().take(room).map(|sql| shown(sql)));
@@ -61,15 +57,13 @@ impl Target<'_> {
     }
 }
 
-/// Refuses `statements` on Production unless `confirmed` is their digest. On success, returns the writes that run
-/// with no Production question, for the tab's `Unconfirmed`.
 pub fn check<'s>(target: &Target, statements: &[&'s str], confirmed: Option<&WriteDigest>) -> Result<Vec<&'s str>, WriteConfirmation> {
     let kind = target.saved.database_kind;
     if !target.on_production() {
         return Ok(statements.iter().copied().filter(|sql| text::is_write(sql, kind)).collect());
     }
-    let keeps_unconfirmed = |sql: &str| target.unconfirmed.writes > 0 && text::classify(sql, kind) == StmtKind::Commit;
-    let writes: Vec<&str> = statements.iter().copied().filter(|sql| text::is_write(sql, kind) || keeps_unconfirmed(sql)).collect();
+    let keeps_unasked = |sql: &str| target.unasked.writes > 0 && text::classify(sql, kind) == StmtKind::Commit;
+    let writes: Vec<&str> = statements.iter().copied().filter(|sql| text::is_write(sql, kind) || keeps_unasked(sql)).collect();
     if writes.is_empty() {
         return Ok(Vec::new());
     }
@@ -80,16 +74,15 @@ pub fn check<'s>(target: &Target, statements: &[&'s str], confirmed: Option<&Wri
     Err(target.ask(count(&writes), writes.iter().take(SHOWN).map(|sql| shown(sql)).collect(), digest))
 }
 
-/// Refuses a commit on Production that would keep writes the tab ran with no Production question.
 pub fn check_commit(target: &Target, confirmed: Option<&WriteDigest>) -> Result<(), WriteConfirmation> {
-    if !target.on_production() || target.unconfirmed.writes == 0 {
+    if !target.on_production() || target.unasked.writes == 0 {
         return Ok(());
     }
     let digest = target.digest(&["COMMIT"]);
     if confirmed == Some(&digest) {
         return Ok(());
     }
-    Err(target.ask(target.unconfirmed.writes, target.unconfirmed.shown.clone(), digest))
+    Err(target.ask(target.unasked.writes, target.unasked.shown.clone(), digest))
 }
 
 fn count(writes: &[&str]) -> u32 {
@@ -110,7 +103,7 @@ mod tests {
     use crate::model::{ConnectionId, SslMode, TxnMode};
     use uuid::Uuid;
 
-    static NONE: Unconfirmed = Unconfirmed { writes: 0, shown: Vec::new() };
+    static NONE: UnaskedWrites = UnaskedWrites { writes: 0, shown: Vec::new() };
 
     fn connection(environment: Option<Environment>) -> ConnectionConfig {
         ConnectionConfig {
@@ -135,7 +128,7 @@ mod tests {
     }
 
     fn on<'a>(connection: &'a ConnectionConfig, console: &'a ConsoleConfigView) -> Target<'a> {
-        Target { saved: connection, opened: connection, console, txn: TxnState::Idle, unconfirmed: &NONE }
+        Target { saved: connection, opened: connection, console, txn: TxnState::Idle, unasked: &NONE }
     }
 
     const WORK: &[&str] = &["select 1", " insert into t values (1) ", "delete from t"];
@@ -151,7 +144,7 @@ mod tests {
         let asked = check(&on(&production, &auto), WORK, None).unwrap_err();
         assert_eq!((asked.connection.as_str(), asked.database.as_str(), asked.unit, asked.writes), ("prod", "shop", ExecutionUnitKind::Statement, 2));
         assert_eq!(asked.statements, ["insert into t values (1)", "delete from t"]);
-        assert_eq!(check(&on(&production, &auto), WORK, Some(&asked.digest)).unwrap(), Vec::<&str>::new(), "a confirmed write is not unconfirmed");
+        assert_eq!(check(&on(&production, &auto), WORK, Some(&asked.digest)).unwrap(), Vec::<&str>::new(), "a confirmed write is not unasked");
     }
 
     #[test]
@@ -159,7 +152,7 @@ mod tests {
         let auto = console(TxnMode::AutoCommit);
         let production = connection(Some(Environment::Production));
         let local = connection(Some(Environment::Local));
-        let session = |saved, opened| Target { saved, opened, console: &auto, txn: TxnState::Idle, unconfirmed: &NONE };
+        let session = |saved, opened| Target { saved, opened, console: &auto, txn: TxnState::Idle, unasked: &NONE };
         assert!(check(&session(&local, &production), WORK, None).is_err(), "relabelled on the same server");
         let moved = ConnectionConfig { host: "elsewhere".into(), ..local.clone() };
         assert!(check(&session(&moved, &production), WORK, None).is_err(), "relabelled and moved");
@@ -197,27 +190,27 @@ mod tests {
         let auto = console(TxnMode::Manual);
         let production = connection(Some(Environment::Production));
         let staging = connection(Some(Environment::Staging));
-        let mut unconfirmed = Unconfirmed::default();
-        unconfirmed.add(&check(&on(&staging, &auto), WORK, None).unwrap());
-        let open = |saved, unconfirmed| Target { saved, opened: &staging, console: &auto, txn: TxnState::Active, unconfirmed };
+        let mut unasked = UnaskedWrites::default();
+        unasked.add(&check(&on(&staging, &auto), WORK, None).unwrap());
+        let open = |saved, unasked| Target { saved, opened: &staging, console: &auto, txn: TxnState::Active, unasked };
 
-        assert!(check_commit(&open(&staging, &unconfirmed), None).is_ok(), "off Production a commit never asks");
+        assert!(check_commit(&open(&staging, &unasked), None).is_ok(), "off Production a commit never asks");
         assert!(check_commit(&open(&production, &NONE), None).is_ok(), "nothing ran unasked");
-        let asked = check_commit(&open(&production, &unconfirmed), None).unwrap_err();
+        let asked = check_commit(&open(&production, &unasked), None).unwrap_err();
         assert_eq!((asked.writes, asked.statements.as_slice()), (2, ["insert into t values (1)".to_owned(), "delete from t".to_owned()].as_slice()));
-        assert!(check_commit(&open(&production, &unconfirmed), Some(&asked.digest)).is_ok());
+        assert!(check_commit(&open(&production, &unasked), Some(&asked.digest)).is_ok());
 
-        let typed = check(&open(&production, &unconfirmed), &["select 1", "commit"], None).unwrap_err();
+        let typed = check(&open(&production, &unasked), &["select 1", "commit"], None).unwrap_err();
         assert_eq!((typed.writes, typed.statements.as_slice()), (1, ["commit".to_owned()].as_slice()), "a typed COMMIT keeps them too");
         assert!(check(&open(&production, &NONE), &["select 1", "commit"], None).is_ok());
     }
 
     #[test]
-    fn unconfirmed_writes_count_every_write_and_keep_the_first_three() {
-        let mut unconfirmed = Unconfirmed::default();
-        unconfirmed.add(&["insert into t values (1)", "delete from t"]);
-        unconfirmed.add(&["update t set n = 2", "truncate t"]);
-        assert_eq!((unconfirmed.writes, unconfirmed.shown.as_slice()), (4, ["insert into t values (1)".to_owned(), "delete from t".to_owned(), "update t set n = 2".to_owned()].as_slice()));
+    fn unasked_writes_count_every_write_and_keep_the_first_three() {
+        let mut unasked = UnaskedWrites::default();
+        unasked.add(&["insert into t values (1)", "delete from t"]);
+        unasked.add(&["update t set n = 2", "truncate t"]);
+        assert_eq!((unasked.writes, unasked.shown.as_slice()), (4, ["insert into t values (1)".to_owned(), "delete from t".to_owned(), "update t set n = 2".to_owned()].as_slice()));
     }
 
     #[test]
@@ -239,8 +232,7 @@ mod tests {
 
     const CAN_WRITE: [&str; 3] = ["Work::Run", "Work::Edit", "Work::Transaction"];
 
-    /// `source` with comments removed and the insides of string and char literals blanked, so only code is left.
-    fn code_of(source: &str) -> String {
+    fn code_without_comments_or_literals(source: &str) -> String {
         let c: Vec<char> = source.chars().collect();
         let at = |i: usize, s: &str| s.chars().enumerate().all(|(k, ch)| c.get(i + k) == Some(&ch));
         let ident = |i: usize| i > 0 && (c[i - 1].is_alphanumeric() || c[i - 1] == '_');
@@ -302,7 +294,6 @@ mod tests {
         out
     }
 
-    /// The text of the call that starts at `call`, through its closing parenthesis.
     fn call_text(call: &str) -> &str {
         let mut depth = 0;
         for (i, ch) in call.char_indices() {
@@ -316,8 +307,7 @@ mod tests {
         panic!("unclosed call: {call}")
     }
 
-    /// Whether `function` matches on a `writes::check` result, so the answer can stop the handover.
-    fn checks(function: &str) -> bool {
+    fn uses_check_result(function: &str) -> bool {
         function.match_indices("writes::check").any(|(at, _)| {
             let before = function[..at].trim_end();
             before.ends_with("match") || before.strip_suffix('=').map(str::trim_end).is_some_and(|binding| {
@@ -343,10 +333,8 @@ mod tests {
         found
     }
 
-    /// Each handover of a tab's session for work that can write, named `file fn`, and whether a used check comes
-    /// before it in its function.
     fn handovers(file: &str, source: &str) -> Vec<(String, bool)> {
-        let code = code_of(source);
+        let code = code_without_comments_or_literals(source);
         let mut found = Vec::new();
         for (at, _) in code.match_indices("take_session(") {
             let args: String = call_text(&code[at..]).split_whitespace().collect();
@@ -357,7 +345,7 @@ mod tests {
             let start = code[..at].match_indices("fn ").filter(|(i, _)| *i == 0 || code[..*i].ends_with(char::is_whitespace)).last().expect("inside a function").0;
             let function = &code[start..at];
             let name: String = function["fn ".len()..].chars().take_while(|ch| ch.is_alphanumeric() || *ch == '_').collect();
-            found.push((format!("{file} {name}"), checks(function)));
+            found.push((format!("{file} {name}"), uses_check_result(function)));
         }
         found
     }

@@ -190,7 +190,6 @@ impl Shared {
         }
     }
 
-    /// A console session for `console`, opened from the connection as saved now, with that config.
     async fn open_tab_session(&self, console: &ConsoleConfigView) -> Result<(Session, ConnectionConfig), ConnectError> {
         let saved = self.config(console.connection_id).ok_or_else(|| ConnectError::Network { message: "unknown connection".into() })?;
         let instance = self.instance(saved.id);
@@ -660,7 +659,7 @@ impl Shared {
             if commit && !aborted {
                 let saved = self.config(inner.config.connection_id).ok_or(TxnError::NoTransaction)?;
                 let SessionSlot::Idle { opened, .. } = &inner.session else { unreachable!("matched above") };
-                let target = writes::Target { saved: &saved, opened, console: &inner.config, txn: inner.txn, unconfirmed: &inner.unconfirmed };
+                let target = writes::Target { saved: &saved, opened, console: &inner.config, txn: inner.txn, unasked: &inner.unasked };
                 if let Err(confirmation) = writes::check_commit(&target, confirmed.as_ref()) {
                     return Err(TxnError::ConfirmWrites { confirmation });
                 }
@@ -1326,9 +1325,9 @@ impl Engine {
             }
         }
         let SessionSlot::Idle { opened, .. } = &inner.session else { return Err(RunError::Busy) };
-        let target = writes::Target { saved: &current, opened, console: &config, txn: inner.txn, unconfirmed: &inner.unconfirmed };
+        let target = writes::Target { saved: &current, opened, console: &config, txn: inner.txn, unasked: &inner.unasked };
         match writes::check(&target, &sent, confirmed.as_ref()) {
-            Ok(unasked) => inner.unconfirmed.add(&unasked),
+            Ok(unasked) => inner.unasked.add(&unasked),
             Err(confirmation) => {
                 console.publish(&mut inner, s);
                 return Err(RunError::ConfirmWrites { confirmation });
@@ -1437,9 +1436,9 @@ impl Engine {
             };
             let sent: Vec<&str> = std::iter::once(wrap.0).chain(plan.iter().map(|edit| edit.sql.as_str())).chain(wrap.1).collect();
             let SessionSlot::Idle { opened, .. } = &inner.session else { return Err(ApplyError::Busy) };
-            let target = writes::Target { saved: &current, opened, console: &config, txn, unconfirmed: &inner.unconfirmed };
+            let target = writes::Target { saved: &current, opened, console: &config, txn, unasked: &inner.unasked };
             match writes::check(&target, &sent, confirmed.as_ref()) {
-                Ok(unasked) => inner.unconfirmed.add(&unasked),
+                Ok(unasked) => inner.unasked.add(&unasked),
                 Err(confirmation) => {
                     console.publish(&mut inner, s);
                     return Err(ApplyError::ConfirmWrites { confirmation });
