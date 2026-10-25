@@ -1065,7 +1065,7 @@ async fn hostile_object_scripts_replay_every_property_or_warn() {
                 "warned" => vec![
                     "ANSI_PADDING OFF on [dbo].[warned].[pad]",
                     "XML index [IX x] on [dbo].[warned]",
-                    "trigger [dbo].[enc_trg] on [dbo].[warned], whose text is encrypted",
+                    "trigger [dbo].[enc_trg] on [dbo].[warned], whose text is encrypted or hidden from this login",
                     "extended property [Version] of type int on [dbo].[warned]",
                 ],
                 "parted" => vec![

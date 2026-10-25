@@ -188,6 +188,17 @@ async fn select_only_login_keeps_relation_detail_and_actual_assistant_descriptio
         let browsed = h.request(reader_tab, RunRequest::TablePage { schema: "dbo".into(), table: table.clone(), page: 0, query: TableQuery::default() }).await;
         assert_eq!(h.rows(&browsed), selected);
 
+        let script = h.engine.object_script(db(reader), ScriptTarget::Relation { oid: relation.oid }).await.expect("SELECT-only Script as CREATE warns about what it cannot read");
+        let path = format!("[dbo].[{table}]");
+        for warning in [
+            format!("the default of {path}.[n], which this login cannot read"),
+            format!("the computed expression of {path}.[computed], which this login cannot read"),
+            format!("check constraint [{stem}_ck] on {path}, whose definition this login cannot read"),
+            format!("filtered index [{stem}_ix] on {path}, whose filter this login cannot read"),
+            format!("trigger [dbo].[{stem}_tr] on {path}, whose text is encrypted or hidden from this login"),
+        ] {
+            assert!(script.warnings.contains(&warning), "{warning} missing from {:?}", script.warnings);
+        }
         let detail = h.engine.relation_detail(db(reader), relation.oid).await;
         let described = tools::execute(&h.engine.shared, Some(&db(reader)), ParsedCall::DescribeTables { tables: vec![format!("dbo.{table}")] }).await;
         eprintln!("Public relation_detail {detail:?}\nActual describe_tables {:?}\n{}", described.status, described.for_model.text);

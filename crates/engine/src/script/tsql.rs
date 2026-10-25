@@ -52,6 +52,10 @@ pub struct Column {
     pub ansi_padding_off: bool,
     pub filestream: bool,
     pub encrypted: bool,
+    /// SQL Server hides a computed column's expression and a default's definition from a login
+    /// without VIEW DEFINITION, while it still shows the column.
+    pub unreadable_computed: bool,
+    pub unreadable_default: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -93,8 +97,9 @@ pub struct ForeignKey {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Check {
     pub name: String,
-    /// `sys.check_constraints.definition` carries its own parentheses.
-    pub definition: String,
+    /// `sys.check_constraints.definition` carries its own parentheses. SQL Server hides it from a
+    /// login without VIEW DEFINITION.
+    pub definition: Option<String>,
     pub state: State,
 }
 
@@ -111,6 +116,8 @@ pub struct Index {
     pub on_view: bool,
     pub storage: Storage,
     pub computed: bool,
+    /// The index has a filter whose text SQL Server hides from this login.
+    pub unreadable_filter: bool,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -208,7 +215,12 @@ pub fn table(t: &Table) -> Ddl {
     body.extend(t.keys.iter().map(|k| key(k, &name, &mut warnings)));
     let (late, early): (Vec<&ForeignKey>, Vec<&ForeignKey>) = t.foreign_keys.iter().partition(|f| f.after_indexes);
     body.extend(early.iter().map(|f| foreign_key(f)));
-    body.extend(t.checks.iter().map(|c| format!("CONSTRAINT {} CHECK {}{}", ident(&c.name), replication(&c.state), c.definition)));
+    for c in &t.checks {
+        match &c.definition {
+            Some(definition) => body.push(format!("CONSTRAINT {} CHECK {}{definition}", ident(&c.name), replication(&c.state))),
+            None => warnings.push(format!("check constraint {} on {name}, whose definition this login cannot read", ident(&c.name))),
+        }
+    }
     if let Some((start, end)) = &t.period {
         body.push(format!("PERIOD FOR SYSTEM_TIME ({}, {})", ident(start), ident(end)));
     }
@@ -227,7 +239,7 @@ pub fn table(t: &Table) -> Ddl {
     let states: Vec<String> = early
         .iter()
         .map(|f| (&f.name, &f.state))
-        .chain(t.checks.iter().map(|c| (&c.name, &c.state)))
+        .chain(t.checks.iter().filter(|c| c.definition.is_some()).map(|c| (&c.name, &c.state)))
         .filter_map(|(constraint, state)| constraint_state(&name, constraint, state))
         .collect();
     if !states.is_empty() {
@@ -316,7 +328,7 @@ fn dependents<'a>(name: &str, disabled_keys: impl Iterator<Item = &'a str>, inde
                 left_out.push(("TRIGGER", trigger));
             }
             Trigger::Encrypted { schema, name: trigger } => {
-                warnings.push(format!("trigger {} on {name}, whose text is encrypted", qualified(schema, trigger)));
+                warnings.push(format!("trigger {} on {name}, whose text is encrypted or hidden from this login", qualified(schema, trigger)));
                 left_out.push(("TRIGGER", trigger));
             }
         }
@@ -340,6 +352,11 @@ fn column(c: &Column, table: &str, warnings: &mut Vec<String>) -> String {
     for (on, property) in [(c.ansi_padding_off, "ANSI_PADDING OFF"), (c.filestream, "FILESTREAM"), (c.encrypted, "Always Encrypted")] {
         if on {
             warnings.push(format!("{property} on {path}"));
+        }
+    }
+    for (on, what) in [(c.unreadable_computed, "the computed expression"), (c.unreadable_default, "the default")] {
+        if on {
+            warnings.push(format!("{what} of {path}, which this login cannot read"));
         }
     }
     if let Some(computed) = &c.computed {
@@ -502,6 +519,10 @@ fn constraint_state(table: &str, constraint: &str, state: &State) -> Option<Stri
 
 fn index_text(i: &Index, table: &str, warnings: &mut Vec<String>) -> Option<String> {
     let name = ident(&i.name);
+    if i.unreadable_filter {
+        warnings.push(format!("filtered index {name} on {table}, whose filter this login cannot read"));
+        return None;
+    }
     let mut out = match i.kind {
         1 | 2 => format!("CREATE {}{} INDEX {name} ON {table} ({})", if i.unique { "UNIQUE " } else { "" }, clustering(i.kind == 1), sorted(&i.keys)),
         5 => format!("CREATE CLUSTERED COLUMNSTORE INDEX {name} ON {table}"),
@@ -616,7 +637,7 @@ mod tests {
     }
 
     fn index_on(name: &str, kind: u8, keys: &[&str]) -> Index {
-        Index { name: name.into(), kind, unique: false, keys: keys.iter().map(|k| (k.to_string(), false)).collect(), include: vec![], order: vec![], filter: None, on_view: false, storage: Storage::default(), computed: false }
+        Index { name: name.into(), kind, unique: false, keys: keys.iter().map(|k| (k.to_string(), false)).collect(), include: vec![], order: vec![], filter: None, on_view: false, storage: Storage::default(), computed: false, unreadable_filter: false }
     }
 
     fn property(name: &str, value: &str, path: &[(&str, &str)]) -> Property {
@@ -650,7 +671,7 @@ mod tests {
                 state: State::default(),
                 after_indexes: false,
             }],
-            checks: vec![Check { name: "CK_qty".into(), definition: "([qty]>(0))".into(), state: State::default() }],
+            checks: vec![Check { name: "CK_qty".into(), definition: Some("([qty]>(0))".into()), state: State::default() }],
             indexes: vec![Index { include: vec!["qty".into()], ..index_on("IX_code", 2, &["code"]) }],
             triggers: vec![Trigger::Text(Module {
                 schema: "dbo".into(),
@@ -741,8 +762,30 @@ GO
     }
 
     #[test]
+    fn a_computed_expression_or_default_this_login_cannot_read_warns() {
+        let mut warnings = vec![];
+        column(&Column { unreadable_computed: true, unreadable_default: true, ..col("b", "int") }, "[dbo].[t]", &mut warnings);
+        assert_eq!(warnings, ["the computed expression of [dbo].[t].[b], which this login cannot read", "the default of [dbo].[t].[b], which this login cannot read"]);
+    }
+
+    #[test]
+    fn a_check_or_index_filter_this_login_cannot_read_is_left_out_with_a_warning() {
+        let t = Table {
+            checks: vec![Check { name: "CK_hidden".into(), definition: None, state: State { disabled: true, ..State::default() } }],
+            indexes: vec![Index { unreadable_filter: true, ..index_on("IX_hidden", 2, &["id"]) }],
+            ..table_named("t")
+        };
+        let ddl = table(&t);
+        assert_eq!(
+            ddl.warnings,
+            ["check constraint [CK_hidden] on [dbo].[t], whose definition this login cannot read", "filtered index [IX_hidden] on [dbo].[t], whose filter this login cannot read"]
+        );
+        assert!(!ddl.text.contains("CK_hidden") && !ddl.text.contains("IX_hidden"), "{}", ddl.text);
+    }
+
+    #[test]
     fn constraints_replay_disabled_untrusted_and_not_for_replication() {
-        let check = |name: &str, state: State| Check { name: name.into(), definition: "([id]>(0))".into(), state };
+        let check = |name: &str, state: State| Check { name: name.into(), definition: Some("([id]>(0))".into()), state };
         let fk = |name: &str, state: State| ForeignKey {
             name: name.into(),
             columns: vec!["id".into()],
@@ -1027,7 +1070,7 @@ GO
             ..table_named("t")
         };
         let ddl = table(&t);
-        assert_eq!(ddl.warnings, ["XML index [IX x] on [dbo].[t]", "CLR trigger [dbo].[clr] on [dbo].[t]", "trigger [dbo].[enc]]x] on [dbo].[t], whose text is encrypted"]);
+        assert_eq!(ddl.warnings, ["XML index [IX x] on [dbo].[t]", "CLR trigger [dbo].[clr] on [dbo].[t]", "trigger [dbo].[enc]]x] on [dbo].[t], whose text is encrypted or hidden from this login"]);
         assert!(ddl.text.contains("@value = N'kept'") && ddl.text.contains("@value = N'column'"), "{}", ddl.text);
         for gone in ["@value = N'xml'", "@value = N'clr'", "@value = N'enc'"] {
             assert!(!ddl.text.contains(gone), "{gone} in {}", ddl.text);

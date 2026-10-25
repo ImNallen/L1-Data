@@ -145,6 +145,9 @@ impl MsSession {
                 }
                 let indexes = indexes_from(&sets[indexes])?;
                 let index = indexes.first().ok_or(DetailError::Gone)?;
+                if index.unreadable_filter {
+                    return Err(refused(format!("SQL Server hides the filter of {name} from this login, which lacks VIEW DEFINITION permission.")));
+                }
                 let ddl = ddl::index(index, &table, &props).ok_or_else(|| refused(format!("Only clustered, nonclustered, and columnstore indexes can be scripted, and {name} is none of these.")))?;
                 Ok(script::object_script(name, ddl))
             }
@@ -215,7 +218,7 @@ impl MsSession {
                     columns: columns_from(&sets[columns])?,
                     keys: keys_from(&sets[keys])?,
                     foreign_keys: foreign_keys_from(&sets[foreign_keys])?,
-                    checks: sets[checks].iter().map(|r| Ok(ddl::Check { name: text(r, 0)?, definition: text(r, 1)?, state: state(r, 2)? })).collect::<Result<_, DetailError>>()?,
+                    checks: sets[checks].iter().map(|r| Ok(ddl::Check { name: text(r, 0)?, definition: r[1].clone(), state: state(r, 2)? })).collect::<Result<_, DetailError>>()?,
                     indexes: indexes_from(&sets[indexes])?,
                     triggers: triggers_from(&sets[triggers])?,
                     heap: sets[heap].first().map(|r| storage(r, 0)).transpose()?,
@@ -368,7 +371,7 @@ fn columns_sql(oid: i32) -> String {
             CONVERT(nvarchar(40),ic.seed_value),CONVERT(nvarchar(40),ic.increment_value),cc.definition,cc.is_persisted,dc.name,dc.definition,
             COALESCE(ic.is_not_for_replication,0),c.is_sparse,c.is_column_set,c.is_rowguidcol,mc.masking_function,c.generated_always_type,c.is_hidden,
             CASE WHEN c.is_ansi_padded=0 AND t.name IN ('char','varchar','binary','varbinary') THEN 1 ELSE 0 END,c.is_filestream,
-            CASE WHEN c.encryption_type IS NULL THEN 0 ELSE 1 END,SCHEMA_NAME(xsc.schema_id),xsc.name,c.is_xml_document
+            CASE WHEN c.encryption_type IS NULL THEN 0 ELSE 1 END,SCHEMA_NAME(xsc.schema_id),xsc.name,c.is_xml_document,c.is_computed
          FROM sys.columns c
          JOIN sys.types ut ON ut.user_type_id=c.user_type_id
          LEFT JOIN sys.types t ON t.user_type_id=c.system_type_id AND t.system_type_id=t.user_type_id
@@ -411,6 +414,8 @@ fn columns_from(rows: &[Row]) -> Result<Vec<ddl::Column>, DetailError> {
                 ansi_padding_off: bit(r, 23)?,
                 filestream: bit(r, 24)?,
                 encrypted: bit(r, 25)?,
+                unreadable_computed: r[12].is_none() && bit(r, 29)?,
+                unreadable_default: r[14].is_some() && r[15].is_none(),
             })
         })
         .collect()
@@ -494,7 +499,7 @@ fn foreign_keys_from(rows: &[Row]) -> Result<Vec<ddl::ForeignKey>, DetailError> 
 /// Clustered indexes come first, because a view's other indexes need its clustered index.
 fn indexes_sql(oid: i32, filter: &str, f: &Features) -> String {
     format!(
-        "SELECT i.name,i.is_unique,i.type,i.filter_definition,c.name,ic.is_descending_key,ic.is_included_column,{},o.type,{},c.is_computed
+        "SELECT i.name,i.is_unique,i.type,i.filter_definition,c.name,ic.is_descending_key,ic.is_included_column,{},o.type,{},c.is_computed,i.has_filter
          FROM sys.indexes i JOIN sys.objects o ON o.object_id=i.object_id
          {STORAGE_JOINS}
          JOIN sys.index_columns ic ON ic.object_id=i.object_id AND ic.index_id=i.index_id
@@ -524,6 +529,7 @@ fn indexes_from(rows: &[Row]) -> Result<Vec<ddl::Index>, DetailError> {
                     on_view: required(r, 8).map_err(failed)?.trim() == "V",
                     storage: storage(r, 9)?,
                     computed: false,
+                    unreadable_filter: r[3].is_none() && bit(r, 25)?,
                 };
                 indexes.push((index, vec![]));
                 let (i, order) = indexes.last_mut().expect("pushed above");
