@@ -1,23 +1,28 @@
 import { describe, expect, it } from "vitest";
 import { shopCatalog } from "../testing/shopCatalog";
-import { buildCatalogView, isPrimaryKey, useCatalog } from "./catalog";
+import { buildCatalogView, isPrimaryKey, quoteName, useCatalog } from "./catalog";
 import { dbKey } from "./dbKey";
 
 const view = buildCatalogView(shopCatalog("conn", 7));
 
 describe("buildCatalogView", () => {
-  it("builds a lang-sql namespace keyed schema -> table -> columns with types", () => {
-    const publicNs = (view.completion as Record<string, Record<string, { self: { label: string }; children: { label: string; detail?: string }[] }>>).public!;
-    expect(Object.keys(publicNs)).toContain("orders");
-    expect(publicNs.orders!.self.label).toBe("orders");
-    expect(publicNs.orders!.children.map((c) => `${c.label}:${c.detail}`)).toEqual([
-      "id:bigint",
-      "customer_id:bigint",
-      "status:text",
-      "total:numeric(12,2)",
-      "created_at:timestamptz",
+  it("offers each catalog function with its arguments, bare in the default schema and qualified elsewhere", () => {
+    expect(view.functions.map((f) => `${f.label}${f.detail}=${String(f.apply)}`)).toContain("order_count(cust bigint)=order_count()");
+    const catalog = shopCatalog("conn", 7);
+    catalog.schemas[0]!.functions = [{ oid: 1, name: "mood_of", insertText: "mood_of()", args: "x int", returns: "lab.mood", kind: "Function" }];
+    catalog.schemas[1]!.functions.push({ oid: 2, name: "refresh_all", insertText: "CALL refresh_all()", args: "", returns: "", kind: "Procedure" });
+    const labels = buildCatalogView(catalog).functions.map((f) => [f.label, f.apply]);
+    expect(labels).toContainEqual(["lab.mood_of", "lab.mood_of()"]);
+    expect(labels.map(([label]) => label)).not.toContain("refresh_all");
+  });
+
+  it("quotes a name for insertion only when it is not a plain identifier", () => {
+    expect([quoteName("Postgres", "orders"), quoteName("Postgres", "Line Items"), quoteName("Postgres", 'a"b')]).toEqual(["orders", '"Line Items"', '"a""b"']);
+    expect([quoteName("SqlServer", "Orders"), quoteName("SqlServer", "line items"), quoteName("SqlServer", "a]b")]).toEqual([
+      "Orders",
+      "[line items]",
+      "[a]]b]",
     ]);
-    expect(Object.keys(view.completion)).toEqual(["lab", "public"]);
   });
 
   it("indexes relations by oid", () => {

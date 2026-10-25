@@ -1,14 +1,13 @@
 import type { Completion } from "@codemirror/autocomplete";
-import type { SQLNamespace } from "@codemirror/lang-sql";
 import { create } from "zustand";
-import { shortType } from "../features/results/format";
-import { commands, type Catalog, type ColumnInfo, type ColumnSource, type DatabaseRef, type RelKind, type Relation } from "../ipc/bindings";
+import { commands, type Catalog, type ColumnInfo, type ColumnSource, type DatabaseKind, type DatabaseRef, type RelKind, type Relation } from "../ipc/bindings";
 import { dbKey, type DbKey } from "./dbKey";
 
 export type CatalogView = {
   catalog: Catalog;
-  completion: SQLNamespace;
   qualifiedTables: Completion[];
+  /** Functions, aggregates, and window functions, named bare in the default schema and qualified elsewhere. */
+  functions: Completion[];
   relationsById: Map<number, { schema: string; rel: Relation }>;
 };
 
@@ -16,20 +15,21 @@ export function isViewKind(kind: RelKind): boolean {
   return kind === "View" || kind === "MaterializedView";
 }
 
+/** A catalog name as completion inserts it: bare when it is a plain identifier, else quoted. */
+export function quoteName(kind: DatabaseKind, name: string): string {
+  if (kind === "SqlServer") return /^[A-Za-z_][\w@$#]*$/.test(name) ? name : `[${name.replaceAll("]", "]]")}]`;
+  return /^[a-z_][a-z0-9_$]*$/.test(name) ? name : `"${name.replaceAll('"', '""')}"`;
+}
+
 export function buildCatalogView(catalog: Catalog): CatalogView {
-  const completion: Record<string, SQLNamespace> = {};
   const qualifiedTables: Completion[] = [];
+  const functions: Completion[] = [];
   const relationsById = new Map<number, { schema: string; rel: Relation }>();
 
   for (const schema of catalog.schemas) {
-    const tables: Record<string, SQLNamespace> = {};
     for (const rel of schema.relations) {
       relationsById.set(rel.oid, { schema: schema.name, rel });
       const view = isViewKind(rel.kind);
-      tables[rel.name] = {
-        self: { label: rel.name, type: view ? "type" : "class", detail: view ? "view" : "table" },
-        children: rel.columns.map((c): Completion => ({ label: c.name, type: "property", detail: shortType(c.typeDisplay) })),
-      };
       qualifiedTables.push({
         label: `${schema.name}.${rel.name}`,
         apply: rel.qualifiedName,
@@ -37,10 +37,15 @@ export function buildCatalogView(catalog: Catalog): CatalogView {
         detail: view ? "view" : "table",
       });
     }
-    completion[schema.name] = tables;
+    const bare = schema.name === catalog.defaultSchema;
+    for (const fn of schema.functions) {
+      if (fn.kind === "Procedure" || fn.returns === "trigger") continue;
+      const qualified = bare || catalog.databaseKind === "SqlServer" ? fn.insertText : `${quoteName(catalog.databaseKind, schema.name)}.${fn.insertText}`;
+      functions.push({ label: bare ? fn.name : `${schema.name}.${fn.name}`, detail: `(${fn.args})`, type: "function", apply: qualified });
+    }
   }
 
-  return { catalog, completion, qualifiedTables, relationsById };
+  return { catalog, qualifiedTables, functions, relationsById };
 }
 
 export function sourceColumn(view: CatalogView | undefined, source: ColumnSource | null): ColumnInfo | undefined {
