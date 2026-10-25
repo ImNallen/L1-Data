@@ -4,6 +4,7 @@ mod values;
 
 use super::{QueryEvent, QueryStream, error};
 use crate::connection::{CONNECT_TIMEOUT, ConnectParams};
+use crate::entra::AzCli;
 use crate::model::*;
 use futures_util::{StreamExt, TryStreamExt};
 use std::time::Duration;
@@ -113,8 +114,14 @@ fn config(p: &ConnectParams) -> Result<Config, ConnectError> {
 const LOGIN_FAILED: u32 = 18456;
 const UNTRUSTED_DOMAIN_LOGIN: u32 = 18452;
 
-fn refuses_login(code: u32, entra: bool) -> bool {
-    code == LOGIN_FAILED || (entra && code == UNTRUSTED_DOMAIN_LOGIN)
+async fn login_refused(code: u32, message: &str, entra: Option<(&AzCli, &str)>) -> Option<ConnectError> {
+    if code != LOGIN_FAILED && !(entra.is_some() && code == UNTRUSTED_DOMAIN_LOGIN) {
+        return None;
+    }
+    if let Some((az, token)) = entra {
+        az.forget(token).await;
+    }
+    Some(ConnectError::Auth { message: message.to_owned() })
 }
 
 impl MsSession {
@@ -133,11 +140,9 @@ impl MsSession {
         let client = match connected {
             Ok(client) => client,
             Err(tiberius::error::Error::Tls(message)) => return Err(ConnectError::Tls { message }),
-            Err(tiberius::error::Error::Server(e)) if refuses_login(e.code(), token.is_some()) => {
-                if let (Some(az), Some(token)) = (&p.entra, &token) {
-                    az.forget(token).await;
-                }
-                return Err(ConnectError::Auth { message: e.message().to_owned() });
+            Err(tiberius::error::Error::Server(e)) => {
+                let entra = p.entra.as_deref().zip(token.as_deref());
+                return Err(login_refused(e.code(), e.message(), entra).await.unwrap_or_else(|| ConnectError::Server(query_error(tiberius::error::Error::Server(e)))));
             }
             Err(e) => return Err(ConnectError::Server(query_error(e))),
         };
@@ -324,16 +329,52 @@ impl MsSession {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod login_tests {
-    use super::refuses_login;
+    use super::*;
+    use crate::shell_path::AgentPath;
+    use std::os::unix::fs::PermissionsExt;
 
-    #[test]
-    fn a_failed_login_refuses_and_an_untrusted_domain_refuses_only_entra() {
-        assert!(refuses_login(18456, false) && refuses_login(18456, true));
-        assert!(refuses_login(18452, true));
-        assert!(!refuses_login(18452, false), "a SQL login keeps trunk's mapping");
-        assert!(!refuses_login(4060, true), "a missing database is not a refused token");
+    struct FakeAz {
+        az: AzCli,
+        log: std::path::PathBuf,
+        _dir: tempfile::TempDir,
+    }
+
+    impl FakeAz {
+        fn new() -> Self {
+            let dir = tempfile::tempdir().unwrap();
+            let (program, log) = (dir.path().join("az"), dir.path().join("az.log"));
+            std::fs::write(&program, format!("#!/bin/sh\necho call >> '{}'\necho '{{\"accessToken\":\"token\",\"expires_on\":9999999999}}'\n", log.display())).unwrap();
+            std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o755)).unwrap();
+            Self { az: AzCli::new(AgentPath::Fixed("".into()), Some(program)), log, _dir: dir }
+        }
+
+        async fn calls_after_another_token(&self) -> usize {
+            assert_eq!(self.az.token().await.unwrap(), "token");
+            std::fs::read_to_string(&self.log).unwrap().lines().count()
+        }
+    }
+
+    #[tokio::test]
+    async fn a_refused_entra_login_fails_as_auth_and_drops_the_token() {
+        for code in [18456, 18452] {
+            let fake = FakeAz::new();
+            let token = fake.az.token().await.unwrap();
+            let refused = login_refused(code, "Login failed for user '<token-identified principal>'.", Some((&fake.az, &token))).await;
+            assert!(matches!(refused, Some(ConnectError::Auth { ref message }) if message.starts_with("Login failed")), "{code}: {refused:?}");
+            assert_eq!(fake.calls_after_another_token().await, 2, "{code} drops the token, so the next sign-in runs az");
+        }
+    }
+
+    #[tokio::test]
+    async fn other_login_errors_keep_the_token_and_a_sql_login_keeps_trunks_mapping() {
+        let fake = FakeAz::new();
+        let token = fake.az.token().await.unwrap();
+        assert!(login_refused(4060, "Cannot open database", Some((&fake.az, &token))).await.is_none(), "a missing database is not a refused token");
+        assert_eq!(fake.calls_after_another_token().await, 1);
+        assert!(matches!(login_refused(18456, "Login failed for user 'sa'.", None).await, Some(ConnectError::Auth { .. })));
+        assert!(login_refused(18452, "untrusted domain", None).await.is_none());
     }
 }
 

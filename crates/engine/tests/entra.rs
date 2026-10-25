@@ -187,10 +187,13 @@ async fn a_sql_login_never_runs_az() {
 
 #[cfg(feature = "mssql-tests")]
 #[tokio::test]
-async fn the_dev_servers_self_signed_certificate_stops_an_entra_sign_in_before_the_token_is_sent() {
+async fn the_dev_servers_self_signed_certificate_fails_an_entra_sign_in_before_login() {
     let h = Harness::with_az("ok").await;
     let host = std::env::var("L1_DATA_TEST_MSSQL_HOST").unwrap_or_else(|_| "localhost".into());
     let port = std::env::var("L1_DATA_TEST_MSSQL_PORT").ok().and_then(|p| p.parse().ok()).unwrap_or(1434);
     let id = h.engine.save_connection(entra(&host, port)).await.unwrap().id;
-    assert!(matches!(h.engine.connect(id).await, Err(ConnectError::Tls { .. })));
+    for _ in 0..2 {
+        assert!(matches!(h.engine.connect(id).await, Err(ConnectError::Tls { .. })));
+    }
+    assert_eq!(h.calls(), 1, "a login that refused the token would drop it, so the second sign-in would run az again");
 }
