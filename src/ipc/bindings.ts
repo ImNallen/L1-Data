@@ -211,6 +211,12 @@ export type CellWrite = {
 	value: string | null,
 };
 
+export type ChangeItem = {
+	title: string,
+	author: string | null,
+	pr: number | null,
+};
+
 export type ChangeKind = "Insert" | "Update" | "Delete";
 
 /**  Points at one entry of `TableChanges`, by its list and index there. */
@@ -977,6 +983,12 @@ export type RelationDetail = {
 	triggers: TriggerInfo[],
 };
 
+/**  What one release changed, as the feed lists it. Display only. */
+export type ReleaseChanges = {
+	version: string,
+	items: ChangeItem[],
+};
+
 export type ReplyBlock = { kind: "Markdown"; text: string } | 
 /**  A fenced SQL block. `relations` and `vetted` are filled when the fence closes. */
 { kind: "Sql"; sql: string; relations: string[]; vetted: boolean; complete: boolean };
@@ -1432,13 +1444,14 @@ export type UpdateStatus =
 { kind: "Disabled"; reason: UpdatesOff } | { kind: "Idle" } | { kind: "Checking" } | { kind: "UpToDate" } | 
 /**
  *  `downgrade` means the release is older than the running build, which happens only for a
- *  nightly build on the Stable track.
+ *  nightly build on the Stable track. `changes` lists each release after the running build up
+ *  to `version`, newest first.
  */
-{ kind: "Available"; version: string; downgrade: boolean } | 
+{ kind: "Available"; version: string; downgrade: boolean; changes: ReleaseChanges[] } | 
 /**  `percent` is `None` while the server sends no length. */
-{ kind: "Downloading"; version: string; downgrade: boolean; percent: number | null } | 
+{ kind: "Downloading"; version: string; downgrade: boolean; percent: number | null; changes: ReleaseChanges[] } | 
 /**  Verified against the built-in key. The engine holds the bytes. */
-{ kind: "Downloaded"; version: string; downgrade: boolean } | { kind: "Installing"; version: string } | { kind: "Failed"; failure: UpdateFailure };
+{ kind: "Downloaded"; version: string; downgrade: boolean; changes: ReleaseChanges[] } | { kind: "Installing"; version: string } | { kind: "Failed"; failure: UpdateFailure };
 
 /**
  *  The release line that update checks follow. `Settings` never holds it, because the webview

@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { RestartImpact, UpdateState, UpdateStatus } from "../../ipc/bindings";
-import { aboutStatusText, actionLabel, restartBody, restartTitle, updateAction, updateButtonView } from "./updateText";
+import { aboutStatusText, actionLabel, changeSections, restartBody, restartTitle, updateAction, updateButtonView } from "./updateText";
 
 const NOW = 10 * 60_000;
 const TAB_A = "a0000000-0000-4000-8000-00000000000a";
@@ -20,9 +20,9 @@ const EVERY: UpdateStatus[] = [
   { kind: "Idle" },
   { kind: "Checking" },
   { kind: "UpToDate" },
-  { kind: "Available", version: "0.2.0", downgrade: false },
-  { kind: "Downloading", version: "0.2.0", downgrade: false, percent: 42 },
-  { kind: "Downloaded", version: "0.2.0", downgrade: false },
+  { kind: "Available", version: "0.2.0", downgrade: false, changes: [] },
+  { kind: "Downloading", version: "0.2.0", downgrade: false, percent: 42, changes: [] },
+  { kind: "Downloaded", version: "0.2.0", downgrade: false, changes: [] },
   { kind: "Installing", version: "0.2.0" },
   { kind: "Failed", failure: { kind: "Offline" } },
 ];
@@ -59,10 +59,62 @@ describe("the update button", () => {
 
   it("names an older stable as one, and draws an indeterminate ring when the size is unknown", () => {
     const nightly = "0.1.1-nightly.20261023.5";
-    const older = updateButtonView(state({ kind: "Available", version: "0.1.0", downgrade: true }, nightly), NOW);
+    const older = updateButtonView(state({ kind: "Available", version: "0.1.0", downgrade: true, changes: [] }, nightly), NOW);
     expect(older?.tooltip).toBe("L1 Data 0.1.0 is available. It is the latest Stable build, older than this nightly. Click to download it.");
-    const unknown = updateButtonView(state({ kind: "Downloading", version: "0.2.0", downgrade: false, percent: null }), NOW);
+    const unknown = updateButtonView(state({ kind: "Downloading", version: "0.2.0", downgrade: false, percent: null, changes: [] }), NOW);
     expect([unknown?.percent, unknown?.tooltip]).toEqual([null, "Downloading L1 Data 0.2.0…"]);
+  });
+});
+
+describe("the update's change list", () => {
+  const changes = [
+    {
+      version: "0.2.0",
+      items: [
+        { title: "feat(app): name the run target", author: "ImNallen", pr: 50 },
+        { title: "fix(ui): cancel a cell edit on Escape", author: null, pr: 51 },
+      ],
+    },
+    { version: "0.1.2", items: [] },
+    {
+      version: "0.1.1",
+      items: [
+        { title: "chore(ui): tighten the footer", author: "ImNallen", pr: null },
+        { title: "docs(readme): list the shortcuts", author: null, pr: null },
+      ],
+    },
+  ];
+
+  it("heads the offered release as what changed and each skipped one by its version, and credits what the feed names", () => {
+    expect(changeSections({ kind: "Available", version: "0.2.0", downgrade: false, changes })).toEqual([
+      {
+        heading: "What's changed",
+        items: [
+          { title: "feat(app): name the run target", credit: "by @ImNallen in #50" },
+          { title: "fix(ui): cancel a cell edit on Escape", credit: "in #51" },
+        ],
+      },
+      {
+        heading: "Changes in 0.1.1",
+        items: [
+          { title: "chore(ui): tighten the footer", credit: "by @ImNallen" },
+          { title: "docs(readme): list the shortcuts", credit: null },
+        ],
+      },
+    ]);
+  });
+
+  it("stays through the download, and never says what changed about a release the feed did not list", () => {
+    const downloading = changeSections({ kind: "Downloading", version: "0.2.0", downgrade: false, percent: 10, changes });
+    const downloaded = changeSections({ kind: "Downloaded", version: "0.2.0", downgrade: false, changes });
+    expect([downloading.length, downloaded.length]).toEqual([2, 2]);
+    const skipped = changeSections({ kind: "Available", version: "0.2.1", downgrade: false, changes });
+    expect(skipped.map((s) => s.heading)).toEqual(["Changes in 0.2.0", "Changes in 0.1.1"]);
+  });
+
+  it("has nothing to show in any other status", () => {
+    const others = EVERY.filter((s) => !["Available", "Downloading", "Downloaded"].includes(s.kind));
+    expect(others.map(changeSections)).toEqual(others.map(() => []));
   });
 });
 
@@ -113,7 +165,9 @@ describe("the restart dialog", () => {
   });
 
   it("calls an older build one in the title", () => {
-    expect(restartTitle("0.2.0", state({ kind: "Downloaded", version: "0.2.0", downgrade: false }))).toBe("Restart to install L1 Data 0.2.0?");
-    expect(restartTitle("0.1.0", state({ kind: "Downloaded", version: "0.1.0", downgrade: true }))).toBe("Restart to install L1 Data 0.1.0, an older build?");
+    expect(restartTitle("0.2.0", state({ kind: "Downloaded", version: "0.2.0", downgrade: false, changes: [] }))).toBe("Restart to install L1 Data 0.2.0?");
+    expect(restartTitle("0.1.0", state({ kind: "Downloaded", version: "0.1.0", downgrade: true, changes: [] }))).toBe(
+      "Restart to install L1 Data 0.1.0, an older build?",
+    );
   });
 });

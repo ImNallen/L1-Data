@@ -26,7 +26,7 @@ export function parseReleases(raw) {
   return raw.flatMap((release) => {
     const version = release.tag_name.startsWith("v") ? parseVersion(release.tag_name.slice(1)) : null;
     if (!version || release.draft || !release.published_at) return [];
-    return [{ tag: release.tag_name, version, publishedAt: new Date(release.published_at) }];
+    return [{ tag: release.tag_name, version, publishedAt: new Date(release.published_at), body: release.body ?? "" }];
   });
 }
 

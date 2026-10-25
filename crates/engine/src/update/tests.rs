@@ -46,7 +46,24 @@ async fn until_relaunched(transport: &ScriptedTransport) {
 }
 
 fn available(version: &str, downgrade: bool) -> UpdateStatus {
-    UpdateStatus::Available { version: version.into(), downgrade }
+    UpdateStatus::Available { version: version.into(), downgrade, changes: vec![] }
+}
+
+/// The offer with its change list left out, for the tests about which release is offered.
+fn offer(status: UpdateStatus) -> UpdateStatus {
+    match status {
+        UpdateStatus::Available { version, downgrade, .. } => available(&version, downgrade),
+        other => other,
+    }
+}
+
+fn listed(status: &UpdateStatus) -> Vec<&str> {
+    match status {
+        UpdateStatus::Available { changes, .. } | UpdateStatus::Downloading { changes, .. } | UpdateStatus::Downloaded { changes, .. } => {
+            changes.iter().map(|c| c.version.as_str()).collect()
+        }
+        _ => vec![],
+    }
 }
 
 async fn downloaded(engine: &Engine, events: &mut broadcast::Receiver<AppEvent>, version: &str) -> UpdateState {
@@ -66,7 +83,7 @@ async fn the_first_check_runs_fifteen_seconds_after_open() {
     let waited = opened.elapsed();
     assert!((Duration::from_secs(15)..Duration::from_secs(16)).contains(&waited), "{waited:?}");
     let state = next_update(&mut events, |s| *s != UpdateStatus::Checking).await;
-    assert_eq!((state.status, state.track, state.current_version.as_str()), (available("0.2.0", false), UpdateTrack::Stable, "0.1.0"));
+    assert_eq!((offer(state.status), state.track, state.current_version.as_str()), (available("0.2.0", false), UpdateTrack::Stable, "0.1.0"));
     assert!(state.checked_at_ms.is_some());
 }
 
@@ -80,14 +97,15 @@ async fn a_nightly_build_switched_to_stable_is_offered_the_older_stable_and_rest
     assert_eq!((state.status, state.track), (available("0.1.0", true), UpdateTrack::Stable));
     engine.update_set_track(UpdateTrack::Nightly).unwrap();
     let state = next_update(&mut events, |s| *s != UpdateStatus::Checking).await;
-    assert_eq!(state.status, available("0.1.1-nightly.20261024.6", false), "switching back offers the newer nightly");
+    assert_eq!(listed(&state.status), ["0.1.1-nightly.20261024.6", "0.1.1-nightly.20261023.7"], "the running nightly is not listed");
+    assert_eq!(offer(state.status), available("0.1.1-nightly.20261024.6", false), "switching back offers the newer nightly");
     engine.update_set_track(UpdateTrack::Stable).unwrap();
     assert_eq!(next_update(&mut events, |s| *s != UpdateStatus::Checking).await.status, available("0.1.0", true));
     assert_eq!(saved_track(&engine), Some(json!({ "track": "Stable" })));
 
     engine.update_download("0.1.0".into()).unwrap();
     let state = next_update(&mut events, |s| matches!(s, UpdateStatus::Downloaded { .. })).await;
-    assert_eq!(state.status, UpdateStatus::Downloaded { version: "0.1.0".into(), downgrade: true });
+    assert_eq!(state.status, UpdateStatus::Downloaded { version: "0.1.0".into(), downgrade: true, changes: vec![] });
     let Ok(InstallReply::Confirm { impact }) = engine.update_install("0.1.0".into(), None).await else { panic!("a restart always asks first") };
     assert_eq!(impact, RestartImpact::default());
     assert!(matches!(engine.update_install("0.1.0".into(), Some(impact)).await, Ok(InstallReply::Restarting)));
@@ -151,7 +169,7 @@ async fn a_bad_signature_fails_the_download_and_the_next_step_is_a_check() {
     assert_eq!(state.status, UpdateStatus::Failed { failure: UpdateFailure::BadSignature });
     assert!(matches!(engine.update_install("0.2.0".into(), None).await, Err(UpdateError::Stale)));
     engine.update_check();
-    assert_eq!(next_update(&mut events, |s| *s != UpdateStatus::Checking).await.status, available("0.2.0", false));
+    assert_eq!(offer(next_update(&mut events, |s| *s != UpdateStatus::Checking).await.status), available("0.2.0", false));
 }
 
 #[tokio::test(start_paused = true)]
@@ -185,7 +203,7 @@ async fn update_check_runs_from_a_thread_with_no_runtime() {
     let mut events = engine.subscribe();
     let caller = engine.clone();
     std::thread::spawn(move || caller.update_check()).join().unwrap();
-    assert_eq!(next_update(&mut events, |s| *s != UpdateStatus::Checking).await.status, available("0.2.0", false));
+    assert_eq!(offer(next_update(&mut events, |s| *s != UpdateStatus::Checking).await.status), available("0.2.0", false));
 }
 
 #[tokio::test(start_paused = true)]
@@ -206,5 +224,19 @@ async fn update_set_track_runs_from_a_thread_with_no_runtime() {
     let caller = engine.clone();
     std::thread::spawn(move || caller.update_set_track(UpdateTrack::Nightly)).join().unwrap().unwrap();
     let state = next_update(&mut events, |s| *s != UpdateStatus::Checking).await;
-    assert_eq!((state.track, state.status), (UpdateTrack::Nightly, available("0.2.1-nightly.20261023.7", false)));
+    assert_eq!((state.track, offer(state.status)), (UpdateTrack::Nightly, available("0.2.1-nightly.20261023.7", false)));
+}
+
+#[tokio::test(start_paused = true)]
+async fn the_offer_lists_what_changed_since_the_running_build_through_the_download() {
+    let (engine, _transport, _dir) = engine_with("available").await;
+    let mut events = engine.subscribe();
+    engine.update_check();
+    let state = next_update(&mut events, |s| matches!(s, UpdateStatus::Available { .. })).await;
+    assert_eq!(listed(&state.status), ["0.2.0", "0.1.1"]);
+    engine.update_download("0.2.0".into()).unwrap();
+    let state = next_update(&mut events, |s| matches!(s, UpdateStatus::Downloading { .. })).await;
+    assert_eq!(listed(&state.status), ["0.2.0", "0.1.1"]);
+    let state = next_update(&mut events, |s| matches!(s, UpdateStatus::Downloaded { .. })).await;
+    assert_eq!(listed(&state.status), ["0.2.0", "0.1.1"]);
 }

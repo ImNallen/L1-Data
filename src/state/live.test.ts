@@ -244,7 +244,7 @@ describe("live.apply", () => {
   });
 
   it("keeps the update snapshot with the higher rev", () => {
-    const found = updateAt(3, { kind: "Available", version: "0.2.0", downgrade: false });
+    const found = updateAt(3, { kind: "Available", version: "0.2.0", downgrade: false, changes: [] });
     const s = applyAll(emptyLive, [
       { kind: "UpdateChanged", ...found },
       { kind: "UpdateChanged", ...updateAt(2, { kind: "Checking" }) },

@@ -1,4 +1,4 @@
-import type { ChatId, RestartImpact, TabId, UpdatesOff, UpdateState, UpdateStatus } from "../../ipc/bindings";
+import type { ChangeItem, ChatId, RestartImpact, TabId, UpdatesOff, UpdateState, UpdateStatus } from "../../ipc/bindings";
 import { updateFailureText } from "../../ipc/errors";
 import { timeAgo } from "../assistant/assistantText";
 
@@ -92,6 +92,24 @@ export function updateButtonView(u: UpdateState, nowMs: number): UpdateButtonVie
       return unreachable;
     }
   }
+}
+
+export type ChangeSection = { heading: string; items: { title: string; credit: string | null }[] };
+
+function credit({ author, pr }: ChangeItem): string | null {
+  const parts = [author !== null && `by @${author}`, pr !== null && `in #${pr}`].filter((part) => part !== false);
+  return parts.length === 0 ? null : parts.join(" ");
+}
+
+/** The update button's hover card: the offered release's changes, then each skipped release's. Empty hides the card. */
+export function changeSections(status: UpdateStatus): ChangeSection[] {
+  if (status.kind !== "Available" && status.kind !== "Downloading" && status.kind !== "Downloaded") return [];
+  return status.changes
+    .filter((release) => release.items.length > 0)
+    .map((release) => ({
+      heading: release.version === status.version ? "What's changed" : `Changes in ${release.version}`,
+      items: release.items.map((item) => ({ title: item.title, credit: credit(item) })),
+    }));
 }
 
 export function disabledText(reason: UpdatesOff): string {

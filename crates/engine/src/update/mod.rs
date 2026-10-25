@@ -39,6 +39,8 @@ pub struct Installed {
 
 pub trait Release: Send + 'static {
     fn version(&self) -> &str;
+    /// The feed's whole JSON, for the fields the plugin does not read.
+    fn feed(&self) -> &serde_json::Value;
     /// Downloads, then verifies the signature against the key built into the app.
     fn download(self: Box<Self>, progress: Progress) -> BoxFuture<'static, Result<Box<dyn Verified>, UpdateFailure>>;
 }
@@ -111,7 +113,7 @@ impl Shared {
         let shared = self.clone();
         self.spawn(async move {
             let fetched = tokio::time::timeout(CHECK_TIMEOUT, shared.updates.transport.fetch(check.feed)).await.unwrap_or(Err(UpdateFailure::Offline));
-            let fetched = fetched.map(|found| found.map(|release| (release.version().to_owned(), release)));
+            let fetched = fetched.map(|found| found.map(|release| machine::Found { version: release.version().to_owned(), changes: machine::feed_changes(release.feed()), release }));
             shared.edit_update(|m| m.finish_check(check.ticket, fetched, now_ms()));
         });
     }

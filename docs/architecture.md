@@ -148,6 +148,7 @@ async fn manual_tab_isolated_until_commit_and_abort_rolls_back() {
    - **The downgrade rule is derived on every check.** Only a nightly build on the Stable track takes an older version, so switching to Stable installs the latest stable. Every other pair of build and track takes only a strictly newer version by semver precedence, which orders `0.1.1-nightly.20261023.5` below `0.1.1-nightly.20261024.6` below `0.1.1`. Nothing is remembered, so a check that failed or was ignored after the switch, or a restart in between, cannot leave the user on the old track.
    - **Consent is checked again where the install runs.** `update_install(version, accepted)` first answers `Confirm` with a `RestartImpact`: the tabs with work in flight other than the engine's own `has_writes` probe, the open transactions probed as `disconnect` probes them, and the chats with a running turn. When the confirm comes back, the engine computes the impact again and installs only if the acceptance still covers it. Otherwise it answers `Confirm` with the longer list. This is the approval ledger's rule applied to a restart. Staged table edits live only in the webview, so `updateActions.ts` adds the tabs that hold them to the dialog. On confirm it reads them again, and if a tab gained edits it sends no acceptance, so the engine answers `Confirm` and the dialog reopens. After the install is accepted, the installer can wait on a macOS admin prompt. While the status is `Installing`, `InstallingOverlay` covers the window, holds focus, and swallows every keydown in a window capture listener, so no edit, query, or transaction starts that the relaunch would end unasked. The engine has already stopped the assistant's turns, and all other new work starts in the UI, so the engine has no gate of its own. The overlay leaves when the status does, so a `Failed` install hands the window back. The install stops the assistant's turns first, because Windows exits inside the plugin's `install` without running the shell's exit handler.
    - **Every step names the version the user saw.** `update_download` and `update_install` take the version. A repeat of a step already under way returns Ok and does nothing, and a step the update has moved past returns `Stale`, so a click that lands after a background change never acts on a state the user did not see. A check is bounded at 30 s and a download at 300 s. A track switch during a check is allowed, and the check's ticket drops its late result. Nothing downloads without a click, and a held release is never replaced by a background check.
+   - **The change list is display only.** The release pipeline adds `changes` to each `latest.json`, beside `version` and `notes`: this release and up to 29 earlier releases on its channel, newest first, each a `version` and the `items` parsed from that release's notes, each item a `title` with an `author` and a `pr` number that can be null. The plugin does not read the field, so `Release::feed` hands the engine the feed's whole JSON and `TauriRelease` returns the plugin's `raw_json`. `machine::feed_changes` reads it leniently: a missing or malformed field yields no changes, and an entry that fails to parse or has no semver version is dropped. It never fails a check or blocks an update. The machine keeps the releases with the running version < version <= the offered version, newest first, so a downgrade lists none, and the `Offer` carries them through `Available`, `Downloading`, and `Downloaded`. The update button's hover card shows them as plain text, with no links.
    - **Debug builds report `UpdatesOff::DevBuild` and never check.** The dev-bridge and the tests pass a `ScriptedTransport`, which serves scripted feeds, so they run the real machine and policy rather than canned states.
 
 ### Rust types (crates/engine/src/model.rs, the IPC contract)
@@ -535,12 +536,14 @@ pub struct UpdateState {                               // no `kind` field: AppEv
 #[serde(tag = "kind")]
 pub enum UpdateStatus {
     Disabled { reason: UpdatesOff }, Idle, Checking, UpToDate,
-    Available { version: String, downgrade: bool },
-    Downloading { version: String, downgrade: bool, percent: Option<u8> },
-    Downloaded { version: String, downgrade: bool },   // verified; the engine holds the bytes
+    Available { version: String, downgrade: bool, changes: Vec<ReleaseChanges> },   // changes: (running, version], newest first
+    Downloading { version: String, downgrade: bool, percent: Option<u8>, changes: Vec<ReleaseChanges> },
+    Downloaded { version: String, downgrade: bool, changes: Vec<ReleaseChanges> },   // verified; the engine holds the bytes
     Installing { version: String },
     Failed { failure: UpdateFailure },
 }
+pub struct ReleaseChanges { pub version: String, pub items: Vec<ChangeItem> }   // read from the feed's `changes`, display only
+pub struct ChangeItem { pub title: String, pub author: Option<String>, pub pr: Option<u32> }
 pub enum UpdatesOff { DevBuild, NotAppImage, UnsupportedTarget, UnknownVersion }
 #[serde(tag = "kind")]
 pub enum UpdateFailure { Offline, BadSignature, ReadOnlyLocation, PermissionDenied, Other { message: String } }   // worded in src/ipc/errors.ts
@@ -1079,7 +1082,7 @@ src/                          # frontend
   features/sidebar/{Sidebar,SidebarSearch,ConnectionTree}.tsx  features/sidebar/{treeFilter,detailText}.ts
   features/connections/{ConnectionDialog,connectionColors}.tsx  features/connections/connectionActions.ts
   features/editor/{SqlEditor.tsx,editorStates.ts,runActions.ts,persistence.ts,sqlIdent.ts,theme.ts}
-  features/updates/{UpdateButton.tsx,updateActions.ts,updateText.ts}   # the sidebar update button, the install confirm loop, every update string
+  features/updates/{UpdateButton.tsx,updateActions.ts,updateText.ts}   # the sidebar update button and its change list card, the install confirm loop, every update string
   features/results/{ResultsPane,ResultGrid,FilterBar}.tsx  features/results/{format,tableQuery}.ts
   features/history/{HistoryPalette.tsx,historyList.ts}
   features/saved/{SavedPalette.tsx,savedActions.ts,savedList.ts,savedPane.ts}   # the Saved queries palette, its pure ranking and keys, and its preview reducer
