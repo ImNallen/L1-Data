@@ -27,7 +27,8 @@ import {
   parsePort,
   signsInWithEntra,
   sshValid,
-  toPasswordInput,
+  takesPassword,
+  toPassword,
   toSqlServerAuth,
   toSshDraft,
   toUser,
@@ -381,7 +382,7 @@ function ConnectionForm({
     sqlServerAuth: toSqlServerAuth(fields),
     sslMode: fields.sslMode,
     caCertPath: fields.caCertPath.trim() || null,
-    password: toPasswordInput(password),
+    password: toPassword(fields, password),
     color: fields.color,
     ssh: toSshDraft(fields, sshSecret),
     environment: fields.environment,
@@ -591,7 +592,7 @@ function ConnectionForm({
             </div>
           </FormRow>
         )}
-        {!entra && (
+        {takesPassword(fields) && (
           <FormRow
             label={fields.databaseKind === "SqlServer" ? "SQL login" : "Sign in"}
             htmlFor={`${ids}-user`}

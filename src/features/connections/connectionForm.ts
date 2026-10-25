@@ -78,8 +78,16 @@ export function signsInWithEntra(fields: Fields): boolean {
   return toSqlServerAuth(fields) === "EntraAzureCli";
 }
 
+export function takesPassword(fields: Fields): boolean {
+  return fields.databaseKind === "Postgres" || fields.sqlServerAuth === "SqlLogin";
+}
+
 export function toUser(fields: Fields): string {
-  return signsInWithEntra(fields) ? "" : fields.user.trim();
+  return takesPassword(fields) ? fields.user.trim() : "";
+}
+
+export function toPassword(fields: Fields, edit: PasswordEdit): PasswordInput {
+  return takesPassword(fields) ? toPasswordInput(edit) : "Clear";
 }
 
 export function entraNeedsVerifiedTls(fields: Fields): boolean {

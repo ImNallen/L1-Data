@@ -7,6 +7,8 @@ import {
   isDirty,
   signsInWithEntra,
   sshValid,
+  takesPassword,
+  toPassword,
   toSqlServerAuth,
   toSshDraft,
   toUser,
@@ -144,6 +146,25 @@ it("sends no user name for Entra, whose user field is hidden", () => {
   const sqlServer = initialFields(undefined, "SqlServer");
   expect(toUser({ ...sqlServer, user: " sa " })).toBe("sa");
   expect(toUser({ ...sqlServer, sqlServerAuth: "EntraAzureCli" })).toBe("");
+});
+
+it("sends no password for Entra, even one typed under SQL login before the switch", () => {
+  const sqlServer = initialFields(undefined, "SqlServer");
+  const entra = { ...sqlServer, sqlServerAuth: "EntraAzureCli" } as const;
+  const typed: PasswordEdit = { kind: "set", value: "hunter2" };
+  expect(toPassword(sqlServer, typed)).toEqual({ Set: "hunter2" });
+  expect(toPassword(entra, typed)).toBe("Clear");
+  expect(toPassword(entra, { kind: "keep" })).toBe("Clear");
+  expect(toPassword({ ...entra, databaseKind: "Postgres" }, typed)).toEqual({ Set: "hunter2" });
+});
+
+it("asks for a user and password only for PostgreSQL and a SQL login", () => {
+  const sqlServer = initialFields(undefined, "SqlServer");
+  expect(takesPassword(initialFields(undefined))).toBe(true);
+  expect(takesPassword(sqlServer)).toBe(true);
+  expect(takesPassword({ ...sqlServer, sqlServerAuth: "EntraAzureCli" })).toBe(false);
+  expect(takesPassword({ ...sqlServer, sqlServerAuth: "Unknown" })).toBe(false);
+  expect(toUser({ ...sqlServer, sqlServerAuth: "Unknown" })).toBe("");
 });
 
 it("refuses Entra over TLS that skips the certificate check", () => {
