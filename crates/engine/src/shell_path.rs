@@ -25,7 +25,7 @@ pub(crate) async fn search_path(agent_path: &AgentPath, home: &Path) -> OsString
             let shell_path = login_shell_path().await.unwrap_or_default();
             let mut dirs: Vec<PathBuf> = dirs(&shell_path).into_iter().chain(dirs(&inherited)).collect();
             for extra in [home.join(".local/bin"), home.join(".claude/local"), PathBuf::from("/opt/homebrew/bin"), PathBuf::from("/usr/local/bin")] {
-                if !dirs.contains(&extra) {
+                if extra.is_absolute() && !dirs.contains(&extra) {
                     dirs.push(extra);
                 }
             }
@@ -73,5 +73,17 @@ mod tests {
         let child = search_path(&AgentPath::Fixed(path), Path::new("/home/a")).await;
         assert_eq!(child, std::env::join_paths(["/opt/bin", "/usr/bin"]).unwrap());
         assert_eq!(dirs(&child), [PathBuf::from("/opt/bin"), PathBuf::from("/usr/bin")]);
+    }
+
+    #[tokio::test]
+    async fn an_unset_or_relative_home_adds_no_relative_install_directory() {
+        for home in ["", "relative/home"] {
+            let path = search_path(&AgentPath::LoginShell, Path::new(home)).await;
+            let entries: Vec<PathBuf> = std::env::split_paths(&path).collect();
+            assert!(entries.iter().all(|p| p.is_absolute()), "HOME {home:?}: {entries:?}");
+            assert!(entries.contains(&PathBuf::from("/usr/local/bin")), "HOME {home:?}: {entries:?}");
+        }
+        let path = search_path(&AgentPath::LoginShell, Path::new("/home/a")).await;
+        assert!(std::env::split_paths(&path).any(|p| p == Path::new("/home/a/.local/bin")));
     }
 }
