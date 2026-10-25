@@ -20,12 +20,50 @@ fn text(row: &[Option<String>], i: usize) -> Result<String, DetailError> {
     Ok(required(row, i).map_err(failed)?.to_owned())
 }
 
+/// Each column a server version may lack, by the catalog column that marks it.
+const FEATURES: &str = "SELECT COL_LENGTH('sys.indexes','optimize_for_sequential_key'),COL_LENGTH('sys.index_columns','column_store_order_ordinal'),
+    COL_LENGTH('sys.partitions','xml_compression'),COL_LENGTH('sys.tables','ledger_type'),COL_LENGTH('sys.tables','is_node'),COL_LENGTH('sys.tables','history_retention_period')";
+
+#[derive(Debug, PartialEq, Eq)]
 struct Features {
     sequential_key: &'static str,
     columnstore_order: &'static str,
     xml_compression: &'static str,
     ledger: &'static str,
     graph: (&'static str, &'static str),
+    retention: &'static str,
+}
+
+impl Features {
+    fn from_lengths(row: &[Option<String>]) -> Features {
+        let has = |i: usize| row.get(i).is_some_and(Option::is_some);
+        let pick = |i: usize, column: &'static str, absent: &'static str| if has(i) { column } else { absent };
+        Features {
+            sequential_key: pick(0, "i.optimize_for_sequential_key", "0"),
+            columnstore_order: pick(1, "ic.column_store_order_ordinal", "0"),
+            xml_compression: pick(2, "COALESCE(p.xml_compression,0)", "0"),
+            ledger: pick(3, "t.ledger_type<>0", "1=0"),
+            graph: if has(4) { ("t.is_node=1", "t.is_edge=1") } else { ("1=0", "1=0") },
+            retention: pick(5, "t.history_retention_period,t.history_retention_period_unit_desc", "NULL,NULL"),
+        }
+    }
+}
+
+fn relation_query(oid: i32, f: &Features) -> String {
+    format!(
+        "SELECT s.name,o.name,o.type,t.uses_ansi_nulls,t.lock_escalation_desc,hs.name,h.name,{},
+            ts.name,tt.name,lds.type,lds.name,COL_NAME(pe.object_id,pe.start_column_id),COL_NAME(pe.object_id,pe.end_column_id),
+            CASE WHEN t.is_memory_optimized=1 THEN 'Memory-optimized tables' WHEN {} THEN 'Ledger tables' WHEN {} THEN 'Graph node tables'
+                 WHEN {} THEN 'Graph edge tables' WHEN t.is_filetable=1 THEN 'FileTables' WHEN t.is_external=1 THEN 'External tables' END
+         FROM sys.objects o JOIN sys.schemas s ON s.schema_id=o.schema_id
+         LEFT JOIN sys.tables t ON t.object_id=o.object_id
+         LEFT JOIN sys.objects h ON h.object_id=t.history_table_id LEFT JOIN sys.schemas hs ON hs.schema_id=h.schema_id
+         LEFT JOIN sys.tables tt ON tt.history_table_id=o.object_id LEFT JOIN sys.schemas ts ON ts.schema_id=tt.schema_id
+         LEFT JOIN sys.data_spaces lds ON lds.data_space_id=t.lob_data_space_id
+         LEFT JOIN sys.periods pe ON pe.object_id=o.object_id
+         WHERE o.object_id={oid}",
+        f.retention, f.ledger, f.graph.0, f.graph.1
+    )
 }
 
 fn storage_columns(f: &Features) -> String {
@@ -95,42 +133,12 @@ impl MsSession {
     }
 
     async fn features(&mut self) -> Result<Features, DetailError> {
-        let rows = self
-            .rows(
-                "SELECT COL_LENGTH('sys.indexes','optimize_for_sequential_key'),COL_LENGTH('sys.index_columns','column_store_order_ordinal'),
-                        COL_LENGTH('sys.partitions','xml_compression'),COL_LENGTH('sys.tables','ledger_type'),COL_LENGTH('sys.tables','is_node')",
-            )
-            .await
-            .map_err(failed)?;
-        let has = |i: usize| rows.first().is_some_and(|r| r[i].is_some());
-        let pick = |i: usize, column: &'static str, absent: &'static str| if has(i) { column } else { absent };
-        Ok(Features {
-            sequential_key: pick(0, "i.optimize_for_sequential_key", "0"),
-            columnstore_order: pick(1, "ic.column_store_order_ordinal", "0"),
-            xml_compression: pick(2, "COALESCE(p.xml_compression,0)", "0"),
-            ledger: pick(3, "t.ledger_type<>0", "1=0"),
-            graph: if has(4) { ("t.is_node=1", "t.is_edge=1") } else { ("1=0", "1=0") },
-        })
+        let rows = self.rows(FEATURES).await.map_err(failed)?;
+        Ok(Features::from_lengths(rows.first().map_or(&[][..], Vec::as_slice)))
     }
 
     async fn relation_script(&mut self, oid: i32, f: &Features) -> Result<ObjectScript, DetailError> {
-        let rows = self
-            .rows(&format!(
-                "SELECT s.name,o.name,o.type,t.uses_ansi_nulls,t.lock_escalation_desc,hs.name,h.name,t.history_retention_period,t.history_retention_period_unit_desc,
-                    ts.name,tt.name,lds.type,lds.name,COL_NAME(pe.object_id,pe.start_column_id),COL_NAME(pe.object_id,pe.end_column_id),
-                    CASE WHEN t.is_memory_optimized=1 THEN 'Memory-optimized tables' WHEN {} THEN 'Ledger tables' WHEN {} THEN 'Graph node tables'
-                         WHEN {} THEN 'Graph edge tables' WHEN t.is_filetable=1 THEN 'FileTables' WHEN t.is_external=1 THEN 'External tables' END
-                 FROM sys.objects o JOIN sys.schemas s ON s.schema_id=o.schema_id
-                 LEFT JOIN sys.tables t ON t.object_id=o.object_id
-                 LEFT JOIN sys.objects h ON h.object_id=t.history_table_id LEFT JOIN sys.schemas hs ON hs.schema_id=h.schema_id
-                 LEFT JOIN sys.tables tt ON tt.history_table_id=o.object_id LEFT JOIN sys.schemas ts ON ts.schema_id=tt.schema_id
-                 LEFT JOIN sys.data_spaces lds ON lds.data_space_id=t.lob_data_space_id
-                 LEFT JOIN sys.periods pe ON pe.object_id=o.object_id
-                 WHERE o.object_id={oid}",
-                f.ledger, f.graph.0, f.graph.1
-            ))
-            .await
-            .map_err(failed)?;
+        let rows = self.rows(&relation_query(oid, f)).await.map_err(failed)?;
         let r = rows.first().ok_or(DetailError::Gone)?;
         match required(r, 2).map_err(failed)?.trim() {
             "V" => {
@@ -443,4 +451,21 @@ impl MsSession {
 
 fn state(r: &[Option<String>], at: usize) -> Result<ddl::State, DetailError> {
     Ok(ddl::State { disabled: bit(r, at)?, untrusted: bit(r, at + 1)?, not_for_replication: bit(r, at + 2)? })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_server_without_a_feature_column_reads_a_constant_in_its_place() {
+        let sql2016 = Features::from_lengths(&[None, None, None, None, None, None]);
+        let query = relation_query(7, &sql2016);
+        assert!(!query.contains("history_retention_period"), "{query}");
+        assert!(query.contains("h.name,NULL,NULL,\n"), "{query}");
+        assert!(!query.contains("ledger_type") && !query.contains("is_node"), "{query}");
+        let sql2022 = Features::from_lengths(&[Some("1".into()), Some("4".into()), Some("1".into()), Some("1".into()), Some("1".into()), Some("4".into())]);
+        assert!(relation_query(7, &sql2022).contains("h.name,t.history_retention_period,t.history_retention_period_unit_desc,\n"));
+        assert_eq!(Features::from_lengths(&[]), sql2016);
+    }
 }
