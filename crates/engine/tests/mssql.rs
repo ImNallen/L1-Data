@@ -976,6 +976,12 @@ impl Harness {
         DatabaseRef { connection_id: self.connection, database: database.into() }
     }
 
+    /// Boxed, because a debug build keeps each inline call's whole future in the caller's stack
+    /// frame, and enough of them overflow the test thread's stack.
+    async fn script(&self, db: &DatabaseRef, target: ScriptTarget) -> Result<ObjectScript, DetailError> {
+        Box::pin(self.engine.object_script(db.clone(), target)).await
+    }
+
     async fn hostile_facts(&mut self) -> Vec<String> {
         self.all_rows(
             "SELECT s.name+'.'+o.name+' '+f.fact COLLATE DATABASE_DEFAULT
@@ -1089,7 +1095,7 @@ async fn hostile_object_scripts_replay_every_property_or_warn() {
         let mut scripted = vec![];
         for schema in &catalog.schemas {
             for rel in &schema.relations {
-                let result = src.engine.object_script(db.clone(), ScriptTarget::Relation { oid: rel.oid }).await;
+                let result = src.script(&db, ScriptTarget::Relation { oid: rel.oid }).await;
                 if rel.name == "node_t" {
                     assert_eq!(refusal(result), "Graph node tables cannot be scripted yet.");
                     continue;
@@ -1104,7 +1110,7 @@ async fn hostile_object_scripts_replay_every_property_or_warn() {
                 }
             }
             for f in &schema.functions {
-                let result = src.engine.object_script(db.clone(), ScriptTarget::Routine { oid: f.oid }).await;
+                let result = src.script(&db, ScriptTarget::Routine { oid: f.oid }).await;
                 if f.name == "enc" {
                     let message = "SQL Server has no readable definition for [dbo].[enc]. The module is encrypted, or this login lacks VIEW DEFINITION permission.";
                     assert_eq!(refusal(result), message);
@@ -1148,31 +1154,31 @@ async fn hostile_object_scripts_replay_every_property_or_warn() {
             ]]
         );
         let schema_oid = |name: &str| catalog.schemas.iter().flat_map(|s| &s.relations).find(|r| r.name == name).unwrap().oid;
-        let xml = src.engine.object_script(db.clone(), ScriptTarget::Index { relation_oid: schema_oid("warned"), name: "IX x".into() }).await;
+        let xml = src.script(&db, ScriptTarget::Index { relation_oid: schema_oid("warned"), name: "IX x".into() }).await;
         assert_eq!(refusal(xml), "Only clustered, nonclustered, and columnstore indexes can be scripted, and IX x is none of these.");
-        let ordered = src.engine.object_script(db.clone(), ScriptTarget::Trigger { relation_oid: schema_oid("refr"), name: "refr_a".into() }).await.unwrap();
+        let ordered = src.script(&db, ScriptTarget::Trigger { relation_oid: schema_oid("refr"), name: "refr_a".into() }).await.unwrap();
         assert!(
             ordered.text.ends_with("EXEC sys.sp_settriggerorder @triggername = N'[dbo].[refr_a]', @order = N'Last', @stmttype = N'INSERT';\nEXEC sys.sp_settriggerorder @triggername = N'[dbo].[refr_a]', @order = N'First', @stmttype = N'UPDATE';\nGO\n"),
             "{}",
             ordered.text
         );
-        let encrypted = src.engine.object_script(db.clone(), ScriptTarget::Trigger { relation_oid: schema_oid("warned"), name: "enc_trg".into() }).await;
+        let encrypted = src.script(&db, ScriptTarget::Trigger { relation_oid: schema_oid("warned"), name: "enc_trg".into() }).await;
         assert_eq!(refusal(encrypted), "SQL Server has no readable definition for [dbo].[enc_trg]. The module is encrypted, or this login lacks VIEW DEFINITION permission.");
-        let unique = src.engine.object_script(db.clone(), ScriptTarget::Index { relation_oid: schema_oid("refd"), name: "UQ_refd".into() }).await.unwrap();
+        let unique = src.script(&db, ScriptTarget::Index { relation_oid: schema_oid("refd"), name: "UQ_refd".into() }).await.unwrap();
         assert_eq!(
             unique.text,
             "ALTER TABLE [dbo].[refd] ADD CONSTRAINT [UQ_refd] UNIQUE NONCLUSTERED ([a] ASC, [b] ASC) WITH (IGNORE_DUP_KEY = ON, ALLOW_PAGE_LOCKS = OFF, DATA_COMPRESSION = PAGE);\nGO\n\nEXEC sys.sp_addextendedproperty @name = N'MS_Description', @value = N'the key', @level0type = N'SCHEMA', @level0name = N'dbo', @level1type = N'TABLE', @level1name = N'refd', @level2type = N'CONSTRAINT', @level2name = N'UQ_refd';\nGO\n"
         );
-        let parted = Box::pin(src.engine.object_script(db.clone(), ScriptTarget::Index { relation_oid: schema_oid("parted"), name: "IX_parted_kind".into() })).await.unwrap();
+        let parted = src.script(&db, ScriptTarget::Index { relation_oid: schema_oid("parted"), name: "IX_parted_kind".into() }).await.unwrap();
         assert_eq!(parted.text, "-- L1 Data could not script: partition scheme [ps_hostile] for index [IX_parted_kind] on [dbo].[parted]\n\nCREATE NONCLUSTERED INDEX [IX_parted_kind] ON [dbo].[parted] ([kind] ASC);\nGO\n");
-        let pk = src.engine.object_script(db.clone(), ScriptTarget::Index { relation_oid: schema_oid("Par ent"), name: "PK Par ent".into() }).await.unwrap();
+        let pk = src.script(&db, ScriptTarget::Index { relation_oid: schema_oid("Par ent"), name: "PK Par ent".into() }).await.unwrap();
         assert_eq!(pk.text, "ALTER TABLE [we]]ird s].[Par ent] ADD CONSTRAINT [PK Par ent] PRIMARY KEY NONCLUSTERED ([Id] DESC) WITH (FILLFACTOR = 80);\nGO\n");
-        let computed = src.engine.object_script(db.clone(), ScriptTarget::Index { relation_oid: schema_oid("Par ent"), name: "IX total".into() }).await.unwrap();
+        let computed = src.script(&db, ScriptTarget::Index { relation_oid: schema_oid("Par ent"), name: "IX total".into() }).await.unwrap();
         assert_eq!(
             computed.text,
             "SET ANSI_NULLS, ANSI_PADDING, ANSI_WARNINGS, ARITHABORT, CONCAT_NULL_YIELDS_NULL, QUOTED_IDENTIFIER ON;\nSET NUMERIC_ROUNDABORT OFF;\nGO\nCREATE NONCLUSTERED INDEX [IX total] ON [we]]ird s].[Par ent] ([total] ASC);\nGO\n"
         );
-        let filtered = src.engine.object_script(db.clone(), ScriptTarget::Index { relation_oid: schema_oid("Par ent"), name: "UX ü".into() }).await.unwrap();
+        let filtered = src.script(&db, ScriptTarget::Index { relation_oid: schema_oid("Par ent"), name: "UX ü".into() }).await.unwrap();
         assert_eq!(
             filtered.text,
             "SET ANSI_NULLS, ANSI_PADDING, ANSI_WARNINGS, ARITHABORT, CONCAT_NULL_YIELDS_NULL, QUOTED_IDENTIFIER ON;\nSET NUMERIC_ROUNDABORT OFF;\nGO\nCREATE UNIQUE NONCLUSTERED INDEX [UX ü] ON [we]]ird s].[Par ent] ([unicode ü] ASC) WHERE ([unicode ü] IS NOT NULL);\nGO\n\nEXEC sys.sp_addextendedproperty @name = N'MS_Description', @value = N'unique when set', @level0type = N'SCHEMA', @level0name = N'we]ird s', @level1type = N'TABLE', @level1name = N'Par ent', @level2type = N'INDEX', @level2name = N'UX ü';\nGO\n"
