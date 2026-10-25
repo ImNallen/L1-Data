@@ -855,25 +855,53 @@ impl<'a> Walk<'a> {
         let mut child: Option<&Frame> = None;
         for &f in &chain {
             let frame_rels = &self.frames[f].rels;
-            let visible = match (child.map(|c| (c.origin, c.lateral.clone())), snap.clause) {
+            let clause = child.map_or(snap.clause, |c| c.outer);
+            let visible = match (child.map(|c| (c.origin, c.lateral.clone())), clause) {
                 (Some((Origin::Derived, Some(left))), _) => frame_rels.get(left).unwrap_or_default(),
                 (Some((Origin::Derived | Origin::CteBody | Origin::ParenthesizedJoin, None)), _) => &[],
-                (None, Clause::On { tree_start, target, .. }) => &frame_rels[tree_start.min(target)..(target + 1).min(frame_rels.len())],
+                (_, Clause::On { tree_start, target, .. }) => &frame_rels[tree_start.min(target)..(target + 1).min(frame_rels.len())],
                 _ => &frame_rels[..],
             };
             rels.extend(visible.iter().filter(|r| !self.aliased_elsewhere(r, frame_rels)));
             child = Some(&self.frames[f]);
         }
+        let forward: Vec<&Cte> = chain.iter().filter(|&&f| self.frames[f].recursive).flat_map(|&f| self.frames[f].ctes.iter()).collect();
+        let defined_later = |t: &TableName| t.schema.is_none().then(|| forward.iter().find(|c| same(self.kind, &c.key, &t.name))).flatten();
         let quoted = |names: &[String]| names.iter().map(|n| quote_if_needed(self.kind, n)).collect::<Vec<_>>();
         let relations = rels
             .iter()
-            .map(|r| ScopeRelation {
-                reference: r.written.clone(),
-                source: match &r.source {
-                    RelationSource::Derived { columns, star } => RelationSource::Derived { columns: quoted(columns), star: star.clone() },
-                    table => table.clone(),
-                },
-                column_aliases: quoted(&r.column_aliases),
+            .map(|r| {
+                let mut rel = (*r).clone();
+                if let RelationSource::Table { schema, name } = &rel.source
+                    && let Some(cte) = defined_later(&TableName { schema: schema.clone(), name: name.clone() })
+                {
+                    rel.source = RelationSource::Derived { columns: cte.columns.clone(), star: cte.star.clone() };
+                    if rel.column_aliases.is_empty() {
+                        rel.column_aliases = cte.aliases.clone();
+                    }
+                }
+                if let RelationSource::Derived { columns, star } = &mut rel.source {
+                    let (mut more, mut tables) = (Vec::new(), Vec::new());
+                    for t in std::mem::take(star) {
+                        match defined_later(&t) {
+                            Some(cte) => {
+                                more.extend(cte.columns.iter().cloned());
+                                tables.extend(cte.star.iter().cloned());
+                            }
+                            None => tables.push(t),
+                        }
+                    }
+                    columns.extend(more);
+                    *star = tables;
+                }
+                ScopeRelation {
+                    reference: rel.written,
+                    source: match rel.source {
+                        RelationSource::Derived { columns, star } => RelationSource::Derived { columns: quoted(&columns), star },
+                        table => table,
+                    },
+                    column_aliases: quoted(&rel.column_aliases),
+                }
             })
             .collect();
         let mut ctes: Vec<String> = Vec::new();
@@ -1303,6 +1331,12 @@ mod tests {
         assert_eq!((s.expect, s.ctes), (Expect::Relation, vec!["tree".to_owned()]));
         assert_eq!(pg("with a as (select 1), b as (select * from |), c as (select 1) select 1").ctes, ["a"]);
         assert_eq!(pg("with recursive a as (select 1), b as (select * from |), c as (select 1) select 1").ctes, ["a", "b", "c"]);
+        let s = pg("with recursive a as (select * from b), b as (select id from orders) select a.| from a");
+        assert_eq!(refs(&s), [(Some("a"), &RelationSource::Derived { columns: vec!["id".into()], star: vec![] })]);
+        let s = pg("with recursive a as (select 1), b as (select id from orders) select x.| from b x");
+        assert_eq!(refs(&s), [(Some("x"), &RelationSource::Derived { columns: vec!["id".into()], star: vec![] })]);
+        let s = pg("with a as (select * from b), b as (select id from orders) select a.| from a");
+        assert_eq!(refs(&s), [(Some("a"), &RelationSource::Derived { columns: vec![], star: vec![TableName { schema: None, name: "b".into() }] })]);
         let s = pg("with t as (select 1 as n union all select n + 1 from t where t.|) select * from t");
         assert_eq!((refs(&s), s.ctes.is_empty()), (vec![(Some("t"), &table(None, "t"))], true));
     }
@@ -1443,6 +1477,10 @@ mod tests {
         assert_eq!((refs(&s), s.expect), (vec![(Some("p"), &table(None, "products")), (Some("r"), &table(None, "reviews"))], Expect::JoinCondition { target: 1 }));
         let s = pg("select * from orders o join customers c on true, products p where |");
         assert_eq!(refs(&s).len(), 3);
+        for s in [pg("select * from a, orders o join customers c on (|) join addresses d on true"), pg("select * from a, orders o join customers c on c.id in (select 1 where |) join addresses d on true")] {
+            let names: Vec<_> = refs(&s).iter().map(|r| r.0).collect();
+            assert!(names.ends_with(&[Some("o"), Some("c")]) && !names.contains(&Some("a")) && !names.contains(&Some("d")), "{names:?}");
+        }
         let s = ms("UPDATE o SET o.x = 1 FROM orders o JOIN customers c ON |");
         assert_eq!((refs(&s), s.expect), (vec![(Some("o"), &o), (Some("c"), &c)], Expect::JoinCondition { target: 1 }));
         for s in [pg("update orders t set status = 'x' from customers a join products p on |"), pg("delete from orders t using customers a join products p on |")] {
