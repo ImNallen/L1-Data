@@ -789,6 +789,8 @@ function ConnectionForm({
       </div>
 
       {probe.kind === "hostKey" && <HostKeyCard hostKey={probe.key} onTrust={() => void trustAndTest(probe.key)} />}
+      {probe.kind === "error" && <ErrorRow testId="conn-test-error" message={probe.message} />}
+      {saveError && <ErrorRow testId="conn-save-error" message={saveError} />}
       <div className="flex shrink-0 items-center gap-3 border-t border-border px-5 py-3">
         <Button data-testid="conn-test" disabled={!valid || probe.kind === "testing"} onClick={() => void test()}>
           Test
@@ -807,8 +809,6 @@ function ConnectionForm({
               </span>
             </span>
           )}
-          {probe.kind === "error" && <ErrorLine message={probe.message} />}
-          {saveError && <ErrorLine message={saveError} />}
         </div>
         <Button variant="ghost" onClick={onClose}>
           Close
@@ -839,12 +839,15 @@ function HostKeyCard({ hostKey, onTrust }: { hostKey: UnknownHostKey; onTrust: (
   );
 }
 
-function ErrorLine({ message }: { message: string }) {
+function ErrorRow({ testId, message }: { testId: string; message: string }) {
   return (
-    <span title={message} className="flex items-start gap-1.5 text-danger">
+    <div
+      data-testid={testId}
+      className="flex max-h-40 shrink-0 items-start gap-2 overflow-y-auto border-t border-border px-5 py-3 text-ui-12.5 leading-4 text-danger"
+    >
       <CircleAlertIcon size={14} className="shrink-0" />
-      <span className="line-clamp-2">{message}</span>
-    </span>
+      <span className="selectable min-w-0 break-words">{message}</span>
+    </div>
   );
 }
 
