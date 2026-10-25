@@ -19,6 +19,7 @@ pub struct Table {
     pub partition_key: Option<String>,
     pub partitions: Vec<Table>,
     pub indexes: Vec<Index>,
+    pub attached_indexes: Vec<AttachedIndex>,
     pub replica_identity: ReplicaIdentity,
     pub triggers: Vec<Trigger>,
     pub rules: Vec<Rule>,
@@ -76,9 +77,17 @@ pub enum ReplicaIdentity {
     Nothing,
     Full,
     Index,
-    /// A partition's copy of its parent's index, which the replay creates under a name PostgreSQL
-    /// chooses, so the script finds it by `parent`, the parent's index, and gives it back `name`.
-    AttachedIndex { name: String, parent: String },
+}
+
+/// A partition's copy of its parent's index, which the replay creates under a name PostgreSQL
+/// chooses, so the script finds it by `parent`, the parent's index, and gives it back `name`.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct AttachedIndex {
+    pub name: String,
+    pub parent: String,
+    pub clustered: bool,
+    pub replica_identity: bool,
+    pub comment: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -297,12 +306,12 @@ fn table_statements(t: &Table, out: &mut Vec<String>, warnings: &mut Vec<String>
         out.extend(column_changes(c, keyword, &name, !partition && c.declared && c.inherited.is_none(), !partition && merged_default(c).is_some()));
     }
     indexes(&t.indexes, keyword, &t.schema, &name, out, warnings);
+    attached_indexes(&t.attached_indexes, &t.schema, &name, out);
     out.extend(late.iter().map(add));
     match &t.replica_identity {
         _ if t.foreign.is_some() => {}
         ReplicaIdentity::Nothing => out.push(format!("ALTER TABLE {name} REPLICA IDENTITY NOTHING")),
         ReplicaIdentity::Full => out.push(format!("ALTER TABLE {name} REPLICA IDENTITY FULL")),
-        ReplicaIdentity::AttachedIndex { name: index, parent } => out.push(attached_replica_identity(&t.schema, &name, index, parent)),
         ReplicaIdentity::Default | ReplicaIdentity::Index => {}
     }
     for tr in &t.triggers {
@@ -383,7 +392,21 @@ fn column_options(c: &Column, schema: &str, table: &str) -> String {
     out
 }
 
-fn attached_replica_identity(schema: &str, table: &str, index: &str, parent: &str) -> String {
+fn attached_indexes(list: &[AttachedIndex], schema: &str, relation: &str, out: &mut Vec<String>) {
+    for a in list {
+        let name = ident(&a.name);
+        out.push(restore_attached_name(schema, relation, &a.name, &a.parent));
+        if a.clustered {
+            out.push(format!("ALTER TABLE {relation} CLUSTER ON {name}"));
+        }
+        if a.replica_identity {
+            out.push(format!("ALTER TABLE {relation} REPLICA IDENTITY USING INDEX {name}"));
+        }
+        out.extend(comment(&format!("INDEX {}", qualified(schema, &a.name)), &a.comment));
+    }
+}
+
+fn restore_attached_name(schema: &str, table: &str, index: &str, parent: &str) -> String {
     let (schema, table, index, parent) = (quote_literal(schema), quote_literal(table), quote_literal(index), quote_literal(parent));
     format!(
         "DO $l1$
@@ -394,7 +417,6 @@ BEGIN
     IF attached <> {index} THEN
         EXECUTE format('ALTER INDEX %I.%I RENAME TO %I', {schema}, attached, {index});
     END IF;
-    EXECUTE format('ALTER TABLE %s REPLICA IDENTITY USING INDEX %I', {table}, {index});
 END
 $l1$"
     )
@@ -912,13 +934,14 @@ COMMENT ON COLUMN public.t.status IS 'lifecycle';
             schema: "app".into(),
             name: "ri_1".into(),
             parent: Parent::Partition { schema: "app".into(), name: "ri".into(), bound: "FOR VALUES IN (1)".into() },
-            replica_identity: ReplicaIdentity::AttachedIndex { name: "ri_1_custom".into(), parent: "app.ri_id_k".into() },
+            replica_identity: ReplicaIdentity::Index,
+            attached_indexes: vec![AttachedIndex { name: "ri_1_custom".into(), parent: "app.ri_id_k".into(), clustered: true, replica_identity: true, comment: Some("leaf index".into()) }],
             triggers: vec![clone("off", 'D', None), clone("on", 'O', Some("leaf note"))],
             ..Default::default()
         };
         assert_eq!(
             table(&leaf).text,
-            "CREATE TABLE app.ri_1 PARTITION OF app.ri\n    FOR VALUES IN (1);\n\nDO $l1$\nDECLARE\n    attached name := (SELECT c.relname FROM pg_catalog.pg_inherits h JOIN pg_catalog.pg_index i ON i.indexrelid = h.inhrelid JOIN pg_catalog.pg_class c ON c.oid = h.inhrelid\n                      WHERE h.inhparent = 'app.ri_id_k'::regclass AND i.indrelid = 'app.ri_1'::regclass);\nBEGIN\n    IF attached <> 'ri_1_custom' THEN\n        EXECUTE format('ALTER INDEX %I.%I RENAME TO %I', 'app', attached, 'ri_1_custom');\n    END IF;\n    EXECUTE format('ALTER TABLE %s REPLICA IDENTITY USING INDEX %I', 'app.ri_1', 'ri_1_custom');\nEND\n$l1$;\n\nALTER TABLE app.ri_1 DISABLE TRIGGER off;\n\nALTER TABLE app.ri_1 ENABLE TRIGGER \"on\";\n\nCOMMENT ON TRIGGER \"on\" ON app.ri_1 IS 'leaf note';\n"
+            "CREATE TABLE app.ri_1 PARTITION OF app.ri\n    FOR VALUES IN (1);\n\nDO $l1$\nDECLARE\n    attached name := (SELECT c.relname FROM pg_catalog.pg_inherits h JOIN pg_catalog.pg_index i ON i.indexrelid = h.inhrelid JOIN pg_catalog.pg_class c ON c.oid = h.inhrelid\n                      WHERE h.inhparent = 'app.ri_id_k'::regclass AND i.indrelid = 'app.ri_1'::regclass);\nBEGIN\n    IF attached <> 'ri_1_custom' THEN\n        EXECUTE format('ALTER INDEX %I.%I RENAME TO %I', 'app', attached, 'ri_1_custom');\n    END IF;\nEND\n$l1$;\n\nALTER TABLE app.ri_1 CLUSTER ON ri_1_custom;\n\nALTER TABLE app.ri_1 REPLICA IDENTITY USING INDEX ri_1_custom;\n\nCOMMENT ON INDEX app.ri_1_custom IS 'leaf index';\n\nALTER TABLE app.ri_1 DISABLE TRIGGER off;\n\nALTER TABLE app.ri_1 ENABLE TRIGGER \"on\";\n\nCOMMENT ON TRIGGER \"on\" ON app.ri_1 IS 'leaf note';\n"
         );
     }
 

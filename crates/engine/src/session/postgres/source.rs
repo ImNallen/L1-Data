@@ -16,11 +16,7 @@ const RELATION: &str = "SELECT c.relkind::text, n.nspname, c.relname, c.relpersi
         ARRAY(SELECT hc.relname::text FROM pg_inherits h JOIN pg_class hc ON hc.oid = h.inhparent
               WHERE h.inhrelid = c.oid AND NOT c.relispartition ORDER BY h.inhseqno),
         CASE WHEN c.reloftype <> 0 THEN format_type(c.reloftype, NULL) END,
-        ARRAY(SELECT p.pubname::text FROM pg_publication_rel pr JOIN pg_publication p ON p.oid = pr.prpubid WHERE pr.prrelid = c.oid ORDER BY 1),
-        (SELECT ic.relname FROM pg_index ri JOIN pg_class ic ON ic.oid = ri.indexrelid JOIN pg_inherits h ON h.inhrelid = ri.indexrelid
-          WHERE ri.indrelid = c.oid AND ri.indisreplident),
-        (SELECT h.inhparent::regclass::text FROM pg_index ri JOIN pg_inherits h ON h.inhrelid = ri.indexrelid
-          WHERE ri.indrelid = c.oid AND ri.indisreplident)
+        ARRAY(SELECT p.pubname::text FROM pg_publication_rel pr JOIN pg_publication p ON p.oid = pr.prpubid WHERE pr.prrelid = c.oid ORDER BY 1)
      FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
      LEFT JOIN pg_inherits i ON i.inhrelid = c.oid AND c.relispartition
      LEFT JOIN pg_class p ON p.oid = i.inhparent LEFT JOIN pg_namespace pn ON pn.oid = p.relnamespace
@@ -127,6 +123,13 @@ const TRIGGERS: &str = "SELECT t.tgname, pg_get_triggerdef(t.oid), t.tgenabled::
        AND (p.oid IS NULL AND NOT t.tgisinternal
             OR p.oid IS NOT NULL AND (t.tgenabled <> 'O' OR t.tgenabled <> p.tgenabled OR obj_description(t.oid, 'pg_trigger') IS NOT NULL))
      ORDER BY t.tgname";
+
+/// A partition's copy of its parent's index comes with the parent under a name PostgreSQL
+/// chooses, so only a copy with its own clustering, replica identity, or comment is read.
+const ATTACHED_INDEXES: &str = "SELECT ic.relname, h.inhparent::regclass::text, i.indisclustered, i.indisreplident, obj_description(i.indexrelid, 'pg_class')
+     FROM pg_index i JOIN pg_class ic ON ic.oid = i.indexrelid JOIN pg_inherits h ON h.inhrelid = i.indexrelid
+     WHERE i.indrelid = $1 AND (i.indisclustered OR i.indisreplident OR obj_description(i.indexrelid, 'pg_class') IS NOT NULL)
+     ORDER BY ic.relname";
 
 const RULES: &str = "SELECT r.rulename, pg_get_ruledef(r.oid), r.ev_enabled::text, obj_description(r.oid, 'pg_rewrite') FROM pg_rewrite r
      WHERE r.ev_class = $1 AND r.rulename <> '_RETURN' ORDER BY r.rulename";
@@ -273,11 +276,12 @@ async fn relation(tx: &Transaction<'_>, queries: &Queries, oid: u32) -> Result<O
 async fn table(tx: &Transaction<'_>, queries: &Queries, oid: u32, r: &Row) -> Result<ddl::Table, DetailError> {
     let params: &[&(dyn ToSql + Sync)] = &[&oid];
     let grants = relation_grants_query();
-    let (columns, sequences, constraints, indexes, triggers, rules, policies, statistics, partitions, grants) = tokio::try_join!(
+    let (columns, sequences, constraints, indexes, attached, triggers, rules, policies, statistics, partitions, grants) = tokio::try_join!(
         tx.query(&queries.columns, params),
         tx.query(OWNED_SEQUENCES, params),
         tx.query(CONSTRAINTS, params),
         tx.query(INDEXES, params),
+        tx.query(ATTACHED_INDEXES, params),
         tx.query(TRIGGERS, params),
         tx.query(RULES, params),
         tx.query(POLICIES, params),
@@ -321,13 +325,14 @@ async fn table(tx: &Transaction<'_>, queries: &Queries, oid: u32, r: &Row) -> Re
         partition_key: r.get(6),
         partitions: children,
         indexes: indexes.iter().map(index_row).collect(),
+        attached_indexes: attached
+            .iter()
+            .map(|a| ddl::AttachedIndex { name: a.get(0), parent: a.get(1), clustered: a.get(2), replica_identity: a.get(3), comment: a.get(4) })
+            .collect(),
         replica_identity: match r.get::<_, &str>(13) {
             "n" => ddl::ReplicaIdentity::Nothing,
             "f" => ddl::ReplicaIdentity::Full,
-            "i" => match (r.get::<_, Option<String>>(23), r.get::<_, Option<String>>(24)) {
-                (Some(name), Some(parent)) => ddl::ReplicaIdentity::AttachedIndex { name, parent },
-                _ => ddl::ReplicaIdentity::Index,
-            },
+            "i" => ddl::ReplicaIdentity::Index,
             _ => ddl::ReplicaIdentity::Default,
         },
         triggers: triggers.iter().map(cloned_trigger_row).collect(),

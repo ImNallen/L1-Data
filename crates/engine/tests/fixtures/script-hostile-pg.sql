@@ -151,6 +151,8 @@ ALTER INDEX app.ri_1_id_k_idx RENAME TO "ri_1 custom";
 ALTER TABLE app.ri_1 REPLICA IDENTITY USING INDEX "ri_1 custom";
 ALTER TABLE app.ri_1 DISABLE TRIGGER ri_trg;
 COMMENT ON TRIGGER ri_trg ON app.ri_2 IS 'leaf clone note';
+ALTER TABLE app.ri_2 CLUSTER ON ri_2_id_k_idx;
+COMMENT ON INDEX app.ri_2_id_k_idx IS 'leaf index note';
 CREATE TABLE app.gen (a int, b int GENERATED ALWAYS AS (a * 2) STORED) PARTITION BY LIST (a);
 CREATE TABLE app.gen_1 (a int, b int GENERATED ALWAYS AS (a * 3) STORED);
 ALTER TABLE app.gen ATTACH PARTITION app.gen_1 FOR VALUES IN (1);
