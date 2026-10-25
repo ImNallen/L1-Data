@@ -80,18 +80,16 @@ fn lex(text: &str) -> Result<Vec<Token<'_>>, String> {
     lex_with(text, false)
 }
 
-/// An unclosed quote, bracket, or comment runs to the end of the text, so text the user is still
-/// typing lexes.
-fn lex_lenient(text: &str) -> Vec<Token<'_>> {
+fn lex_unclosed_to_end(text: &str) -> Vec<Token<'_>> {
     lex_with(text, true).unwrap_or_default()
 }
 
-fn lex_with(text: &str, lenient: bool) -> Result<Vec<Token<'_>>, String> {
+fn lex_with(text: &str, unclosed_to_end: bool) -> Result<Vec<Token<'_>>, String> {
     let quoted_end = |bytes: &[u8], start: usize, close: u8| match quoted_end(bytes, start, close) {
-        Err(_) if lenient => Ok(bytes.len()),
+        Err(_) if unclosed_to_end => Ok(bytes.len()),
         end => end,
     };
-    if text.contains('\0') && !lenient {
+    if text.contains('\0') && !unclosed_to_end {
         return Err("NUL is not supported in T-SQL".into());
     }
     let bytes = text.as_bytes();
@@ -126,12 +124,12 @@ fn lex_with(text: &str, lenient: bool) -> Result<Vec<Token<'_>>, String> {
                         i += 1;
                     }
                 }
-                if depth != 0 && !lenient {
+                if depth != 0 && !unclosed_to_end {
                     return Err(format!("Unclosed T-SQL block comment at byte {start}"));
                 }
                 Kind::BlockComment
             }
-            b'*' if bytes.get(i + 1) == Some(&b'/') && !lenient => {
+            b'*' if bytes.get(i + 1) == Some(&b'/') && !unclosed_to_end => {
                 return Err(format!("Unexpected comment terminator at byte {i}"));
             }
             b'\'' => {
@@ -172,7 +170,7 @@ fn lex_with(text: &str, lenient: bool) -> Result<Vec<Token<'_>>, String> {
                     while i < bytes.len() && bytes[i].is_ascii_digit() {
                         i += 1;
                     }
-                    if i == digits && !lenient {
+                    if i == digits && !unclosed_to_end {
                         return Err(format!("Incomplete T-SQL exponent at byte {start}"));
                     }
                 }
@@ -606,9 +604,9 @@ pub(crate) fn module_name(text: &str) -> Option<ModuleName> {
     (parts.len() <= 2).then(|| ModuleName { parts, span: tokens[at + 1].start..tokens[after - 1].end, on })
 }
 
-/// The lenient lexemes of `text` and its `GO` lines, for completion.
+/// The lexemes of `text`, an unclosed quote or comment running to the end, and its `GO` lines.
 pub(super) fn completion_lexemes(text: &str) -> (Vec<Lexeme>, Vec<StmtSpan>) {
-    let tokens = lex_lenient(text);
+    let tokens = lex_unclosed_to_end(text);
     let go = separators(text, &tokens).unwrap_or_default();
     let class = |t: &Token<'_>| match t.kind {
         Kind::Word => Class::Word,
@@ -631,9 +629,8 @@ pub(super) fn completion_lexemes(text: &str) -> (Vec<Lexeme>, Vec<StmtSpan>) {
     (tokens.iter().map(|t| Lexeme { class: class(t), span: t.start..t.end }).collect(), go)
 }
 
-/// Whether a quote, bracket, or block comment lexeme is closed: text after it stays outside it.
 pub(super) fn lexeme_closed(lexeme: &str) -> bool {
-    lex_lenient(&format!("{lexeme} x")).first().is_some_and(|t| t.end == lexeme.len())
+    lex_unclosed_to_end(&format!("{lexeme} x")).first().is_some_and(|t| t.end == lexeme.len())
 }
 
 pub(crate) fn quote_ident(name: &str) -> String {

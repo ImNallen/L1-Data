@@ -833,8 +833,10 @@ pub enum CompletionContext {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Type)]
 #[serde(tag = "kind", rename_all_fields = "camelCase")]
 pub enum Expect {
-    /// Only `keywords`, which may be empty, as after a relation or where an alias is typed.
+    /// Only `keywords`, which may be empty, as after a relation's alias.
     Keyword,
+    /// Right after a relation, where the word typed is most likely its alias, so `keywords` show only on request.
+    Alias,
     /// A table, view, or CTE: after `FROM`, `JOIN`, `INTO`, or `UPDATE`.
     Relation,
     /// Columns and functions: a select list, `WHERE`, `ON` once a condition has begun, `SET`.

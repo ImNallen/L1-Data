@@ -4,33 +4,50 @@ use crate::model::{
 };
 use crate::sql::{self, ByteTarget, DmlVerb, StmtKind, StmtSpan};
 
+/// Converts between byte offsets and UTF-16 code units. Callers convert a script's statements in order, so each
+/// conversion resumes from the last one, which keeps converting a whole script linear.
 pub struct OffsetMap<'a> {
     text: &'a str,
-    /// One code unit per byte, so a conversion of a script's every statement stays linear.
-    ascii: bool,
+    one_unit_per_byte: bool,
+    /// The byte offset and the UTF-16 offset of the last conversion, on a char boundary.
+    last: std::cell::Cell<(usize, u32)>,
 }
 
 impl<'a> OffsetMap<'a> {
     pub fn new(text: &'a str) -> Self {
-        Self { text, ascii: text.is_ascii() }
+        Self { text, one_unit_per_byte: text.is_ascii(), last: std::cell::Cell::new((0, 0)) }
     }
 
     pub fn to_utf16(&self, byte: usize) -> DocOffset {
         let byte = byte.min(self.text.len());
-        DocOffset(if self.ascii { byte } else { self.text[..byte].encode_utf16().count() } as u32)
+        if self.one_unit_per_byte {
+            return DocOffset(byte as u32);
+        }
+        let (from_byte, from_units) = match self.last.get() {
+            (b, u) if b <= byte => (b, u),
+            _ => (0, 0),
+        };
+        let units = from_units + self.text[from_byte..byte].encode_utf16().count() as u32;
+        self.last.set((byte, units));
+        DocOffset(units)
     }
 
     pub fn from_utf16(&self, off: DocOffset) -> usize {
-        if self.ascii {
+        if self.one_unit_per_byte {
             return (off.0 as usize).min(self.text.len());
         }
-        let mut units = 0u32;
-        for (byte, ch) in self.text.char_indices() {
+        let (start, mut units) = match self.last.get() {
+            (b, u) if u <= off.0 => (b, u),
+            _ => (0, 0),
+        };
+        for (i, ch) in self.text[start..].char_indices() {
             if units + ch.len_utf16() as u32 > off.0 {
-                return byte;
+                self.last.set((start + i, units));
+                return start + i;
             }
             units += ch.len_utf16() as u32;
         }
+        self.last.set((self.text.len(), units));
         self.text.len()
     }
 
@@ -83,7 +100,7 @@ pub fn completion_context(text: &str, cursor: DocOffset, database_kind: Database
         return CompletionContext::None;
     };
     CompletionContext::Complete {
-        from: map.to_utf16(scope.from),
+        from: map.to_utf16(scope.from_byte),
         expect: scope.expect,
         qualifier: scope.qualifier,
         relations: scope.relations,
@@ -316,6 +333,19 @@ mod tests {
     fn script_outline_ranges_and_cursor_are_utf16() {
         let text = "-- 😀é\nselect 1;\nselect 2;";
         assert_eq!(script_outline(text, DocOffset(18)), ScriptOutline { unit_kind: crate::model::ExecutionUnitKind::Statement, statements: vec![r(0, 15), r(17, 25)], at_cursor: Some(1) });
+    }
+
+    #[test]
+    fn offsets_convert_the_same_in_any_order() {
+        let text = "-- é\nselect '😀', 'ü';\nselect 2;";
+        let map = OffsetMap::new(text);
+        let bytes: Vec<usize> = text.char_indices().map(|(b, _)| b).chain([text.len()]).collect();
+        for &b in bytes.iter().rev().chain(bytes.iter()).chain(bytes.iter().step_by(3).rev()) {
+            let units = map.to_utf16(b);
+            assert_eq!(units, OffsetMap::new(text).to_utf16(b), "to_utf16({b})");
+            assert_eq!(map.from_utf16(units), b, "from_utf16({units:?})");
+        }
+        assert_eq!(map.from_utf16(DocOffset(8)), OffsetMap::new(text).from_utf16(DocOffset(8)));
     }
 
     #[test]

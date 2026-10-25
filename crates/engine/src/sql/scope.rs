@@ -1,6 +1,3 @@
-//! What completion may offer at a cursor: the clause the cursor sits in and the relations in
-//! scope, read from the statement under the cursor with the dialect's own lexer.
-
 use std::ops::Range;
 
 use super::lex::{LexKind, lex};
@@ -35,8 +32,7 @@ pub(super) struct Lexeme {
 
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) struct Scope {
-    /// A byte offset into the text.
-    pub from: usize,
+    pub from_byte: usize,
     pub expect: Expect,
     pub qualifier: Option<Qualifier>,
     pub relations: Vec<ScopeRelation>,
@@ -110,7 +106,7 @@ fn tsql_statement_starts(text: &str, batch: &[Lexeme]) -> Vec<usize> {
     let mut depth = 0usize;
     let mut first: Option<String> = None;
     let mut main_verb = false;
-    let mut values = false;
+    let mut source_begun = false;
     let mut update = false;
     let mut prev: Option<&Lexeme> = None;
     for l in batch.iter().filter(|l| !matches!(l.class, Class::LineComment | Class::BlockComment)) {
@@ -119,7 +115,7 @@ fn tsql_statement_starts(text: &str, batch: &[Lexeme]) -> Vec<usize> {
             Class::Close => depth = depth.saturating_sub(1),
             Class::Semi if depth == 0 => {
                 starts.push(l.span.end);
-                (first, main_verb, values, update, prev) = (None, false, false, false, None);
+                (first, main_verb, source_begun, update, prev) = (None, false, false, false, None);
                 continue;
             }
             Class::Word if depth == 0 => {
@@ -131,7 +127,7 @@ fn tsql_statement_starts(text: &str, batch: &[Lexeme]) -> Vec<usize> {
                         ["UNION", "ALL", "EXCEPT", "INTERSECT", "ON", "FOR", "AFTER", "OF", "THEN", "INSTEAD", "OR", "NOT", "GRANT", "DENY", "REVOKE"].contains(&p)
                     });
                 let cte_body = first.as_deref() == Some("WITH") && !main_verb;
-                let insert_source = first.as_deref() == Some("INSERT") && !values;
+                let insert_source = first.as_deref() == Some("INSERT") && !source_begun;
                 let starts_new = first.is_some()
                     && !continues
                     && match w.as_str() {
@@ -145,14 +141,14 @@ fn tsql_statement_starts(text: &str, batch: &[Lexeme]) -> Vec<usize> {
                     };
                 if starts_new {
                     starts.push(l.span.start);
-                    (first, main_verb, values, update) = (None, false, false, false);
+                    (first, main_verb, source_begun, update) = (None, false, false, false);
                 }
                 if first.is_none() {
                     first = Some(w.clone());
                 } else if first.as_deref() == Some("WITH") && ["SELECT", "INSERT", "UPDATE", "DELETE", "MERGE"].contains(&w.as_str()) {
                     main_verb = true;
                 }
-                values |= w == "VALUES";
+                source_begun |= matches!(w.as_str(), "VALUES" | "SELECT" | "EXEC" | "EXECUTE");
                 update |= w == "UPDATE";
             }
             _ => {}
@@ -178,7 +174,6 @@ enum Slot {
     Expect,
     /// Right after a relation, where an alias or the next clause may follow.
     Named,
-    /// After `AS`.
     As,
     Aliased,
     /// After `LEFT`, `CROSS`, and the like, before `JOIN`.
@@ -205,7 +200,6 @@ enum Clause {
     Other,
 }
 
-/// Where a clause sits in a query, for the clauses that can still follow it.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 enum Stage {
     From,
@@ -218,7 +212,6 @@ enum Stage {
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum Origin {
     Statement,
-    /// A subquery in a FROM list.
     Derived,
     CteBody,
     CteColumns,
@@ -226,19 +219,15 @@ enum Origin {
 }
 
 #[derive(Debug, Clone)]
-enum Source {
-    Table { schema: Option<String>, name: String },
-    Derived { columns: Vec<String>, star: Vec<TableName> },
+struct Rel {
+    written: Option<String>,
+    /// The alias or name that a qualifier matches.
+    folded: Option<String>,
+    source: RelationSource,
+    role: Role,
 }
 
-#[derive(Debug, Clone)]
-struct Rel {
-    /// The alias or name, as written.
-    written: Option<String>,
-    /// The alias or name, folded, that a qualifier matches.
-    key: Option<String>,
-    source: Source,
-}
+type Output = (Vec<String>, Vec<TableName>);
 
 #[derive(Debug, Clone)]
 struct Cte {
@@ -262,14 +251,16 @@ struct Frame {
     rels: Vec<Rel>,
     ctes: Vec<Cte>,
     items: Vec<Item>,
-    /// This frame's own lexemes in the select item being read, by index into `Walk::sig`.
-    item: Vec<usize>,
-    /// The Word and Name lexemes directly inside a group, for a CTE's column list.
-    names: Vec<String>,
+    /// By index into `Walk::sig`.
+    item_lexemes: Vec<usize>,
+    /// For a CTE's column list.
+    group_names: Vec<String>,
     pending_cte: Option<(String, String, Option<Vec<String>>)>,
-    /// A set operator after the cursor ends the part of the query the cursor is in.
+    /// A set operator or an `INSERT`'s query after the cursor ends the part of the statement the cursor is in.
     sealed: bool,
     seen: bool,
+    /// The first branch of a set operation names the output.
+    first_output: Option<Output>,
 }
 
 impl Frame {
@@ -282,11 +273,12 @@ impl Frame {
             rels: Vec::new(),
             ctes: Vec::new(),
             items: Vec::new(),
-            item: Vec::new(),
-            names: Vec::new(),
+            item_lexemes: Vec::new(),
+            group_names: Vec::new(),
             pending_cte: None,
             sealed: false,
             seen: false,
+            first_output: None,
         }
     }
 }
@@ -305,8 +297,10 @@ struct Walk<'a> {
     /// The first lexeme of the qualifier, or of the word being typed: where the cursor's context is read.
     context: usize,
     /// The qualifier and the word being typed, which the walk skips.
-    skip: Range<usize>,
+    typed: Range<usize>,
     parts: Vec<String>,
+    /// The cursor's word starts its line after a lexeme a statement can end on, so it may begin the next statement.
+    line_start: bool,
     frames: Vec<Frame>,
     stack: Vec<usize>,
     snapshot: Option<Snapshot>,
@@ -341,13 +335,31 @@ impl<'a> Walk<'a> {
             parts.insert(0, fold(kind, text, sig[context - 2]));
             context -= 2;
         }
-        let skip = context..word_at + usize::from(typed.is_some());
-        Some(Walk { text, kind, sig, from, context, skip, parts, frames: vec![Frame::new(None, true, Origin::Statement)], stack: vec![0], snapshot: None })
+        let line = &text[text[..from].rfind('\n').map_or(0, |n| n + 1)..from];
+        let ends_a_statement = context.checked_sub(1).is_some_and(|p| match sig[p].class {
+            Class::Word => !CONTINUED.contains(&text[sig[p].span.clone()].to_ascii_uppercase().as_str()),
+            class => matches!(class, Class::Name | Class::Close | Class::Number | Class::Str | Class::Star),
+        });
+        let line_start = parts.is_empty() && line.trim().is_empty() && ends_a_statement;
+        let typed_span = context..word_at + usize::from(typed.is_some());
+        Some(Walk {
+            text,
+            kind,
+            sig,
+            from,
+            context,
+            typed: typed_span,
+            parts,
+            line_start,
+            frames: vec![Frame::new(None, true, Origin::Statement)],
+            stack: vec![0],
+            snapshot: None,
+        })
     }
 
     fn word(&self, i: usize) -> Option<String> {
         let l = self.sig.get(i)?;
-        (l.class == Class::Word && !self.skip.contains(&i)).then(|| self.text[l.span.clone()].to_ascii_uppercase())
+        (l.class == Class::Word && !self.typed.contains(&i)).then(|| self.text[l.span.clone()].to_ascii_uppercase())
     }
 
     fn is_word(&self, i: usize, w: &str) -> bool {
@@ -365,7 +377,7 @@ impl<'a> Walk<'a> {
             if i == self.context {
                 self.take_snapshot();
             }
-            if self.skip.contains(&i) {
+            if self.typed.contains(&i) {
                 i += 1;
                 continue;
             }
@@ -403,7 +415,7 @@ impl<'a> Walk<'a> {
         if !self.frames[id].query {
             if matches!(class, Class::Word | Class::Name) {
                 let name = fold(self.kind, self.text, self.sig[i]);
-                self.frames[id].names.push(name);
+                self.frames[id].group_names.push(name);
             }
             return i + 1;
         }
@@ -411,25 +423,33 @@ impl<'a> Walk<'a> {
             self.frames[id].clause = Clause::On { target, fresh: false };
         }
         if let Some(w) = self.word(i) {
-            if let Some(next) = self.keyword(i, &w) {
+            if let Some(next) = self.enter_clause(i, &w) {
                 return next;
             }
         }
         let clause = self.frames[id].clause;
         match (clause, class) {
             (Clause::Select, Class::Comma) => self.end_item(),
-            (Clause::Select, _) => self.top().item.push(i),
+            (Clause::Select, _) => self.top().item_lexemes.push(i),
             (Clause::Relation { role, .. }, Class::Comma) if matches!(role, Role::From | Role::Join | Role::Using) => {
                 self.top().clause = Clause::Relation { role, slot: Slot::Expect };
             }
             (Clause::Relation { role, slot: Slot::Expect }, Class::Word | Class::Name) => return self.relation(i, role),
+            (Clause::Relation { role, slot: Slot::Expect }, Class::Param) => {
+                let written = self.text[self.sig[i].span.clone()].to_owned();
+                let source = RelationSource::Derived { columns: Vec::new(), star: Vec::new() };
+                self.push_rel(Rel { folded: Some(written.clone()), written: Some(written), source, role });
+                self.top().clause = Clause::Relation { role, slot: Slot::Named };
+            }
             (Clause::Relation { role, slot: Slot::Named | Slot::As }, Class::Word | Class::Name) => {
                 let written = self.text[self.sig[i].span.clone()].to_owned();
-                let key = fold(self.kind, self.text, self.sig[i]);
+                let folded = fold(self.kind, self.text, self.sig[i]);
                 let f = self.top();
-                if let Some(rel) = f.rels.last_mut() {
+                if !f.sealed
+                    && let Some(rel) = f.rels.last_mut()
+                {
                     rel.written = Some(written);
-                    rel.key = Some(key);
+                    rel.folded = Some(folded);
                 }
                 f.clause = Clause::Relation { role, slot: Slot::Aliased };
             }
@@ -443,21 +463,27 @@ impl<'a> Walk<'a> {
         i + 1
     }
 
-    /// Handles a keyword that moves the frame to another clause. `None` when `w` is not one here.
-    fn keyword(&mut self, i: usize, w: &str) -> Option<usize> {
+    fn enter_clause(&mut self, i: usize, w: &str) -> Option<usize> {
         let clause = self.top().clause;
         let prev = i.checked_sub(1).and_then(|p| self.word(p));
-        let next_opens = self.sig.get(i + 1).is_some_and(|l| l.class == Class::Open) && !self.skip.contains(&(i + 1));
+        let next_opens = self.sig.get(i + 1).is_some_and(|l| l.class == Class::Open) && !self.typed.contains(&(i + 1));
         let named = matches!(clause, Clause::Relation { slot: Slot::Named | Slot::Aliased, .. });
         let in_from = matches!(clause, Clause::Relation { role: Role::From | Role::Join | Role::Using, .. } | Clause::On { .. });
         let to = match w {
-            "SELECT" => Clause::Select,
+            "SELECT" => {
+                if self.top().rels.iter().any(|r| r.role == Role::Into) {
+                    self.leave_part(|r| r.role == Role::Into);
+                }
+                Clause::Select
+            }
             "FROM" if prev.as_deref() == Some("DISTINCT") => return Some(i + 1),
             "FROM" => Clause::Relation { role: Role::From, slot: Slot::Expect },
             "JOIN" | "APPLY" => Clause::Relation { role: Role::Join, slot: Slot::Expect },
             "LEFT" | "RIGHT" | "FULL" | "INNER" | "CROSS" | "NATURAL" | "OUTER" if in_from && !next_opens => {
                 Clause::Relation { role: Role::Join, slot: Slot::JoinWord }
             }
+            "ON" if clause == Clause::Select => return None,
+            "GROUP" if prev.as_deref() == Some("WITHIN") => return None,
             "ON" => match clause {
                 Clause::Relation { role: Role::From | Role::Join | Role::Using, slot: Slot::Named | Slot::Aliased } if !self.top().rels.is_empty() => {
                     Clause::On { target: self.top().rels.len() - 1, fresh: true }
@@ -474,13 +500,14 @@ impl<'a> Walk<'a> {
             "LIMIT" | "OFFSET" | "FETCH" => Clause::Limit,
             "WINDOW" => Clause::Other,
             "UNION" | "INTERSECT" | "EXCEPT" => {
-                let snapshot_taken = self.snapshot.is_some();
-                let f = self.top();
-                if snapshot_taken {
-                    f.sealed = true;
-                } else {
-                    f.rels.clear();
+                if clause == Clause::Select {
+                    self.end_item();
                 }
+                let id = *self.stack.last().unwrap();
+                if self.frames[id].first_output.is_none() {
+                    self.frames[id].first_output = Some(self.output(id));
+                }
+                self.leave_part(|_| true);
                 Clause::Start
             }
             "RETURNING" | "OUTPUT" => Clause::Returning,
@@ -514,6 +541,25 @@ impl<'a> Walk<'a> {
         Some(i + 1)
     }
 
+    /// Past a set operator, or past an `INSERT` target into its query, the relations `leaving` picks are out of the
+    /// cursor's sight. When the cursor came before, nothing after joins its part.
+    fn leave_part(&mut self, leaving: impl Fn(&Rel) -> bool) {
+        let cursor_passed = self.snapshot.is_some();
+        let f = self.top();
+        if cursor_passed {
+            f.sealed = true;
+        } else {
+            f.rels.retain(|r| !leaving(r));
+        }
+    }
+
+    fn push_rel(&mut self, rel: Rel) {
+        let f = self.top();
+        if !f.sealed {
+            f.rels.push(rel);
+        }
+    }
+
     fn matching_close(&self, open: usize) -> usize {
         let mut depth = 0usize;
         for (j, l) in self.sig.iter().enumerate().skip(open) {
@@ -531,15 +577,14 @@ impl<'a> Walk<'a> {
         self.sig.len()
     }
 
-    /// Reads `name`, `schema.name`, or `db.schema.name`, or a table function, at `i`.
     fn relation(&mut self, i: usize, role: Role) -> usize {
         let mut parts = vec![i];
         let mut j = i + 1;
         while j + 1 < self.sig.len()
             && self.sig[j].class == Class::Dot
             && matches!(self.sig[j + 1].class, Class::Word | Class::Name)
-            && !self.skip.contains(&j)
-            && !self.skip.contains(&(j + 1))
+            && !self.typed.contains(&j)
+            && !self.typed.contains(&(j + 1))
         {
             parts.push(j + 1);
             j += 2;
@@ -548,19 +593,16 @@ impl<'a> Walk<'a> {
         let written = self.text[self.sig[last].span.clone()].to_owned();
         let name = fold(self.kind, self.text, self.sig[last]);
         let schema = (parts.len() >= 2).then(|| fold(self.kind, self.text, self.sig[parts[parts.len() - 2]]));
-        let function = matches!(role, Role::From | Role::Join | Role::Using) && self.sig.get(j).is_some_and(|l| l.class == Class::Open) && !self.skip.contains(&j);
+        let function = matches!(role, Role::From | Role::Join | Role::Using) && self.sig.get(j).is_some_and(|l| l.class == Class::Open) && !self.typed.contains(&j);
         let source = if function {
-            Source::Derived { columns: Vec::new(), star: Vec::new() }
+            RelationSource::Derived { columns: Vec::new(), star: Vec::new() }
         } else if let (None, Some(cte)) = (&schema, self.cte(&name)) {
-            Source::Derived { columns: cte.columns, star: cte.star }
+            RelationSource::Derived { columns: cte.columns, star: cte.star }
         } else {
-            Source::Table { schema, name: name.clone() }
+            RelationSource::Table { schema, name: name.clone() }
         };
-        let f = self.top();
-        if !f.sealed {
-            f.rels.push(Rel { written: Some(written), key: Some(name), source });
-        }
-        f.clause = Clause::Relation { role, slot: Slot::Named };
+        self.push_rel(Rel { written: Some(written), folded: Some(name), source, role });
+        self.top().clause = Clause::Relation { role, slot: Slot::Named };
         j
     }
 
@@ -577,15 +619,17 @@ impl<'a> Walk<'a> {
 
     fn open(&mut self, i: usize) {
         let parent = *self.stack.last().unwrap();
-        let first = (i + 1..self.sig.len()).find(|j| !self.skip.contains(j));
-        let query = first.is_some_and(|j| matches!(self.word(j).as_deref(), Some("SELECT" | "WITH" | "VALUES")));
+        let first = (i + 1..self.sig.len()).find(|j| !self.typed.contains(j)).and_then(|j| self.word(j));
         let clause = self.frames[parent].clause;
+        let cte_body = clause == Clause::Cte
+            && self.frames[parent].pending_cte.is_some()
+            && i.checked_sub(1).is_some_and(|p| self.is_word(p, "AS") || self.is_word(p, "MATERIALIZED"));
+        let query = matches!(first.as_deref(), Some("SELECT" | "WITH" | "VALUES"))
+            || cte_body && matches!(first.as_deref(), Some("INSERT" | "UPDATE" | "DELETE" | "MERGE"));
         let origin = match clause {
             Clause::Relation { slot: Slot::Expect, .. } if query => Origin::Derived,
-            Clause::Cte if self.frames[parent].pending_cte.is_some() => {
-                let as_before = i.checked_sub(1).is_some_and(|p| self.is_word(p, "AS") || self.is_word(p, "MATERIALIZED"));
-                if as_before && query { Origin::CteBody } else { Origin::CteColumns }
-            }
+            Clause::Cte if cte_body => Origin::CteBody,
+            Clause::Cte if self.frames[parent].pending_cte.is_some() => Origin::CteColumns,
             _ => Origin::Other,
         };
         if let Clause::Relation { role, slot: Slot::Expect } = clause {
@@ -594,7 +638,7 @@ impl<'a> Walk<'a> {
             }
         }
         if self.frames[parent].clause == Clause::Select {
-            self.frames[parent].item.push(i);
+            self.frames[parent].item_lexemes.push(i);
         }
         self.frames.push(Frame::new(Some(parent), query, origin));
         self.stack.push(self.frames.len() - 1);
@@ -615,12 +659,10 @@ impl<'a> Walk<'a> {
         match self.frames[id].origin {
             Origin::Derived => {
                 let (columns, star) = self.output(id);
-                if !self.frames[parent].sealed {
-                    self.frames[parent].rels.push(Rel { written: None, key: None, source: Source::Derived { columns, star } });
-                }
+                self.push_rel(Rel { written: None, folded: None, source: RelationSource::Derived { columns, star }, role: Role::From });
             }
             Origin::CteColumns => {
-                let names = std::mem::take(&mut self.frames[id].names);
+                let names = std::mem::take(&mut self.frames[id].group_names);
                 if let Some(p) = self.frames[parent].pending_cte.as_mut() {
                     p.2 = Some(names);
                 }
@@ -637,38 +679,62 @@ impl<'a> Walk<'a> {
             Origin::Statement | Origin::Other => {}
         }
         if self.frames[parent].clause == Clause::Select {
-            self.frames[parent].item.push(i);
+            self.frames[parent].item_lexemes.push(i);
         }
     }
 
     fn end_item(&mut self) {
-        let f = self.top();
-        let item = std::mem::take(&mut f.item);
+        let lexemes = std::mem::take(&mut self.top().item_lexemes);
+        let mut lead = 0;
+        loop {
+            let opens = |k: usize| lexemes.get(k).is_some_and(|&i| self.sig[i].class == Class::Open);
+            lead += match lexemes.get(lead).and_then(|&i| self.word(i)).as_deref() {
+                Some("DISTINCT" | "ALL" | "PERCENT") => 1,
+                Some("ON") if opens(lead + 1) => 3,
+                Some("TOP") if opens(lead + 1) => 3,
+                Some("TOP") => 2,
+                Some("WITH") if lexemes.get(lead + 1).is_some_and(|&i| self.is_word(i, "TIES")) => 2,
+                _ => break,
+            };
+        }
+        if lead < lexemes.len() {
+            let item = self.item(&lexemes[lead..]);
+            self.top().items.push(item);
+        }
+    }
+
+    /// The output column a select item names, as the server names it.
+    fn item(&self, item: &[usize]) -> Item {
         let class = |k: usize| self.sig[item[k]].class;
-        let n = item.len();
+        let text = |k: usize| &self.text[self.sig[item[k]].span.clone()];
         let named = |k: usize| matches!(class(k), Class::Word | Class::Name);
-        let parsed = match n {
-            0 => return,
-            _ if class(n - 1) == Class::Star && n == 1 => Item::Star(None),
+        let name = |k: usize| Item::Named(fold(self.kind, self.text, self.sig[item[k]]));
+        let n = item.len();
+        let pg = self.kind == DatabaseKind::Postgres;
+        match n {
+            0 => Item::Unnamed,
+            _ if !pg && n >= 3 && named(0) && text(1) == "=" => name(0),
+            1 if class(0) == Class::Star => Item::Star(None),
             _ if class(n - 1) == Class::Star && n >= 3 && class(n - 2) == Class::Dot && named(n - 3) => Item::Star(Some(fold(self.kind, self.text, self.sig[item[n - 3]]))),
-            _ if named(n - 1) && !self.is_value_word(item[n - 1]) => Item::Named(fold(self.kind, self.text, self.sig[item[n - 1]])),
+            _ if named(n - 1) && self.word(item[n - 1]).is_some_and(|w| ["END", "NULL", "TRUE", "FALSE"].contains(&w.as_str())) => Item::Unnamed,
+            1 if named(0) => name(0),
+            _ if named(n - 1) && text(n - 2) == "::" => self.item(&item[..n - 2]),
+            _ if named(n - 1) && (self.is_word(item[n - 2], "AS") || matches!(class(n - 2), Class::Dot | Class::Word | Class::Name | Class::Close | Class::Str | Class::Number)) => name(n - 1),
+            3 if pg && named(0) && class(1) == Class::Open && class(2) == Class::Close => name(0),
             _ => Item::Unnamed,
-        };
-        self.top().items.push(parsed);
+        }
     }
 
-    fn is_value_word(&self, i: usize) -> bool {
-        self.word(i).is_some_and(|w| ["END", "NULL", "TRUE", "FALSE", "DISTINCT", "ALL"].contains(&w.as_str()))
-    }
-
-    /// The columns a query frame's select list names, and the tables a `*` stands for.
-    fn output(&self, id: usize) -> (Vec<String>, Vec<TableName>) {
+    fn output(&self, id: usize) -> Output {
         let f = &self.frames[id];
+        if let Some(first) = &f.first_output {
+            return first.clone();
+        }
         let mut columns = Vec::new();
         let mut star = Vec::new();
         let expand = |rel: &Rel, columns: &mut Vec<String>, star: &mut Vec<TableName>| match &rel.source {
-            Source::Table { schema, name } => star.push(TableName { schema: schema.clone(), name: name.clone() }),
-            Source::Derived { columns: c, star: s } => {
+            RelationSource::Table { schema, name } => star.push(TableName { schema: schema.clone(), name: name.clone() }),
+            RelationSource::Derived { columns: c, star: s } => {
                 columns.extend(c.iter().cloned());
                 star.extend(s.iter().cloned());
             }
@@ -678,7 +744,7 @@ impl<'a> Walk<'a> {
                 Item::Named(n) => columns.push(n.clone()),
                 Item::Star(None) => f.rels.iter().for_each(|r| expand(r, &mut columns, &mut star)),
                 Item::Star(Some(q)) => {
-                    if let Some(r) = f.rels.iter().find(|r| r.key.as_deref().is_some_and(|k| same(self.kind, k, q))) {
+                    if let Some(r) = f.rels.iter().find(|r| r.folded.as_deref().is_some_and(|k| same(self.kind, k, q))) {
                         expand(r, &mut columns, &mut star);
                     }
                 }
@@ -696,41 +762,59 @@ impl<'a> Walk<'a> {
             chain.push(f);
             id = self.frames[f].parent;
         }
-        let rels: Vec<&Rel> = chain.iter().flat_map(|&f| self.frames[f].rels.iter()).collect();
-        let relations = rels
-            .iter()
-            .map(|r| ScopeRelation {
-                reference: r.written.clone(),
-                source: match &r.source {
-                    Source::Table { schema, name } => RelationSource::Table { schema: schema.clone(), name: name.clone() },
-                    Source::Derived { columns, star } => RelationSource::Derived { columns: columns.clone(), star: star.clone() },
-                },
-            })
-            .collect();
-        let ctes = chain.iter().flat_map(|&f| self.frames[f].ctes.iter().map(|c| c.written.clone())).collect();
+        let seen_from = chain.iter().position(|&f| matches!(self.frames[f].origin, Origin::CteBody | Origin::Derived)).map_or(chain.len(), |p| p + 1);
+        let mut rels: Vec<&Rel> = Vec::new();
+        for &f in &chain[..seen_from] {
+            let frame_rels = &self.frames[f].rels;
+            let visible = match snap.clause {
+                Clause::On { target, .. } if f == snap.frame => &frame_rels[..(target + 1).min(frame_rels.len())],
+                _ => frame_rels,
+            };
+            rels.extend(visible.iter().filter(|r| !self.aliased_elsewhere(r, frame_rels)));
+        }
+        let relations = rels.iter().map(|r| ScopeRelation { reference: r.written.clone(), source: r.source.clone() }).collect();
+        let mut ctes: Vec<String> = Vec::new();
+        for c in chain.iter().flat_map(|&f| self.frames[f].ctes.iter()) {
+            if !ctes.contains(&c.written) {
+                ctes.push(c.written.clone());
+            }
+        }
         let qualifier = (!self.parts.is_empty()).then(|| self.qualifier(&rels));
         let frame = &self.frames[snap.frame];
-        let (expect, keywords) = if frame.query { self.expect(snap, frame) } else { self.expect_in_group(snap, frame) };
+        let (mut expect, mut keywords) = if frame.query { self.expect(snap, frame) } else { self.expect_in_group(snap, frame) };
+        if let Expect::JoinCondition { target } = &mut expect {
+            let dropped = frame.rels.iter().take(*target as usize).filter(|r| self.aliased_elsewhere(r, &frame.rels)).count();
+            *target -= dropped as u16;
+        }
+        if self.line_start && matches!(expect, Expect::Keyword | Expect::Alias | Expect::Expression) {
+            keywords.extend(if self.kind == DatabaseKind::Postgres { PG_STATEMENTS } else { TSQL_STATEMENTS });
+        }
         let functions = match expect {
             Expect::Expression | Expect::JoinCondition { .. } => match self.kind {
                 DatabaseKind::Postgres => VETTED.iter().chain(VETTED_SIZES).copied().collect(),
                 DatabaseKind::SqlServer => TSQL_FUNCTIONS.to_vec(),
             },
-            Expect::Keyword | Expect::Relation => Vec::new(),
+            Expect::Keyword | Expect::Alias | Expect::Relation => Vec::new(),
         };
-        let mut keywords = keywords;
         let mut seen = std::collections::HashSet::new();
         keywords.retain(|k| seen.insert(*k));
-        Scope { from: self.from, expect, qualifier, relations, ctes, keywords, functions }
+        Scope { from_byte: self.from, expect, qualifier, relations, ctes, keywords, functions }
+    }
+
+    /// T-SQL's `UPDATE o SET … FROM orders o` names its target by the alias a FROM item defines.
+    fn aliased_elsewhere(&self, rel: &Rel, frame_rels: &[Rel]) -> bool {
+        matches!(&rel.source, RelationSource::Table { schema: None, .. })
+            && rel.role == Role::Update
+            && frame_rels.iter().any(|o| o.role != Role::Update && o.folded.is_some() && rel.folded.as_deref().zip(o.folded.as_deref()).is_some_and(|(a, b)| same(self.kind, a, b)))
     }
 
     fn qualifier(&self, rels: &[&Rel]) -> Qualifier {
         let index = match self.parts.as_slice() {
-            [one] => rels.iter().position(|r| r.key.as_deref().is_some_and(|k| same(self.kind, k, one))),
+            [one] => rels.iter().position(|r| r.folded.as_deref().is_some_and(|k| same(self.kind, k, one))),
             [schema, name] => rels.iter().position(|r| {
                 r.written.is_some()
-                    && matches!(&r.source, Source::Table { schema: Some(s), name: n } if same(self.kind, s, schema) && same(self.kind, n, name))
-                    && r.key.as_deref().is_some_and(|k| same(self.kind, k, name))
+                    && matches!(&r.source, RelationSource::Table { schema: Some(s), name: n } if same(self.kind, s, schema) && same(self.kind, n, name))
+                    && r.folded.as_deref().is_some_and(|k| same(self.kind, k, name))
             }),
             _ => None,
         };
@@ -764,9 +848,10 @@ impl<'a> Walk<'a> {
                 expression(kw)
             }
             Clause::Relation { slot: Slot::Expect, .. } => (Expect::Relation, Vec::new()),
-            Clause::Relation { slot: Slot::As, .. } => (Expect::Keyword, Vec::new()),
+            Clause::Relation { slot: Slot::As, .. } => (Expect::Alias, Vec::new()),
             Clause::Relation { slot: Slot::JoinWord, .. } => (Expect::Keyword, vec!["JOIN", "OUTER JOIN"]),
-            Clause::Relation { role, slot: Slot::Named | Slot::Aliased } => {
+            Clause::Relation { role, slot: slot @ (Slot::Named | Slot::Aliased) } => {
+                let expect = if slot == Slot::Named { Expect::Alias } else { Expect::Keyword };
                 let kw = match role {
                     Role::Join => [if pg { &["ON", "USING"][..] } else { &["ON"][..] }, &self.after_from()].concat(),
                     Role::From | Role::Using => self.after_from(),
@@ -774,7 +859,7 @@ impl<'a> Walk<'a> {
                     Role::Update => vec!["SET"],
                     Role::Table => Vec::new(),
                 };
-                (Expect::Keyword, kw)
+                (expect, kw)
             }
             Clause::On { target, fresh } => {
                 let (_, kw) = expression([&["AND", "OR"][..], &self.after_from()].concat());
@@ -890,7 +975,13 @@ const TSQL_STATEMENTS: &[&str] = &[
     "TRUNCATE TABLE", "PRINT", "GRANT", "REVOKE",
 ];
 
-const MAIN_VERBS: &[&str] = &["SELECT", "INSERT INTO", "UPDATE", "DELETE FROM"];
+/// Words a statement cannot end on.
+const CONTINUED: &[&str] = &[
+    "ALL", "AND", "AS", "BETWEEN", "BY", "CASE", "DISTINCT", "ELSE", "FROM", "HAVING", "IN", "INTO", "IS", "JOIN", "LIKE", "NOT", "ON", "OR", "SELECT", "SET", "THEN", "TOP",
+    "UNION", "UPDATE", "USING", "VALUES", "WHEN", "WHERE", "WITH",
+];
+
+const MAIN_VERBS: &[&str] =&["SELECT", "INSERT INTO", "UPDATE", "DELETE FROM"];
 
 const EXPRESSION_WORDS: &[&str] = &["CASE", "WHEN", "THEN", "ELSE", "END", "AND", "OR", "NOT", "NULL", "IS", "IN", "LIKE", "BETWEEN", "EXISTS", "CAST", "COALESCE", "NULLIF", "DISTINCT", "AS"];
 
@@ -898,7 +989,6 @@ const PG_EXPRESSION_WORDS: &[&str] = &["TRUE", "FALSE", "ILIKE", "GREATEST", "LE
 
 const TSQL_EXPRESSION_WORDS: &[&str] = &["CURRENT_TIMESTAMP"];
 
-/// SQL Server's built-in scalar, aggregate, and window functions that a query commonly calls.
 const TSQL_FUNCTIONS: &[&str] = &[
     "ABS", "ACOS", "APPROX_COUNT_DISTINCT", "ASCII", "ASIN", "ATAN", "ATN2", "AVG", "CEILING", "CHAR", "CHARINDEX", "CHECKSUM", "CHOOSE", "CONCAT", "CONCAT_WS", "CONVERT", "COS",
     "COT", "COUNT", "COUNT_BIG", "CUME_DIST", "DATALENGTH", "DATEADD", "DATEDIFF", "DATEDIFF_BIG", "DATEFROMPARTS", "DATENAME", "DATEPART", "DATETIME2FROMPARTS", "DATETRUNC",
@@ -963,7 +1053,7 @@ mod tests {
             ("update |", Expect::Relation),
             ("update orders set |", Expect::Expression),
             ("delete from orders where |", Expect::Expression),
-            ("select * from orders as |", Expect::Keyword),
+            ("select * from orders as |", Expect::Alias),
         ];
         for (marked, expect) in cases {
             assert_eq!(pg(marked).expect, *expect, "{marked:?}");
@@ -1001,10 +1091,10 @@ mod tests {
 
     #[test]
     fn the_word_being_typed_starts_the_replaced_range() {
-        assert_eq!(pg("select * from ord|").from, 14);
-        assert_eq!(pg("select * from |").from, 14);
-        assert_eq!(pg("select o.cu| from orders o").from, 9);
-        assert_eq!(pg("select * from ord|ers").from, 14);
+        assert_eq!(pg("select * from ord|").from_byte, 14);
+        assert_eq!(pg("select * from |").from_byte, 14);
+        assert_eq!(pg("select o.cu| from orders o").from_byte, 9);
+        assert_eq!(pg("select * from ord|ers").from_byte, 14);
     }
 
     #[test]
@@ -1123,7 +1213,7 @@ mod tests {
         let s = ms("SELECT * FROM customers\nGO\nSELECT * FROM orders WHERE |");
         assert_eq!(refs(&s), [(Some("orders"), &table(None, "orders"))]);
         let s = ms("INSERT INTO archive SELECT * FROM orders o WHERE o.|");
-        assert_eq!(refs(&s).len(), 2);
+        assert_eq!(refs(&s), [(Some("o"), &table(None, "orders"))]);
         let s = ms("WITH r AS (SELECT * FROM orders) SELECT * FROM r WHERE r.|");
         assert_eq!(s.qualifier, Some(Qualifier::Relation { index: 0 }));
         let s = ms("SELECT * FROM orders o WITH (NOLOCK) JOIN customers c ON |");
@@ -1131,6 +1221,71 @@ mod tests {
         assert!(ms("SELECT * FROM orders o |").keywords.contains(&"CROSS APPLY"));
         assert!(!ms("SELECT * FROM orders o |").keywords.contains(&"LIMIT"));
         assert!(ms("SELECT |").keywords.contains(&"TOP"));
+    }
+
+    #[test]
+    fn an_alias_in_a_later_union_branch_leaves_the_cursors_branch_alone() {
+        let s = pg("select o.| from orders o union all select 1 from customers c");
+        assert_eq!((refs(&s), s.qualifier.clone()), (vec![(Some("o"), &table(None, "orders"))], Some(Qualifier::Relation { index: 0 })));
+        let s = ms("SELECT c.| FROM orders c UNION ALL SELECT o.id FROM customers o");
+        assert_eq!(refs(&s), [(Some("c"), &table(None, "orders"))]);
+    }
+
+    #[test]
+    fn only_the_relations_the_server_lets_the_cursor_see_are_in_scope() {
+        assert_eq!(refs(&pg("with x as (select | from orders) select * from customers c")), [(Some("orders"), &table(None, "orders"))]);
+        assert_eq!(refs(&pg("select * from orders o join (select * from customers c where c.|) x on true")), [(Some("c"), &table(None, "customers"))]);
+        let s = pg("select * from orders o join customers c on | join addresses a on a.customer_id = c.id");
+        assert_eq!(refs(&s), [(Some("o"), &table(None, "orders")), (Some("c"), &table(None, "customers"))]);
+        let s = pg("insert into archive select * from orders o join customers c on |");
+        assert_eq!((refs(&s).len(), s.expect), (2, Expect::JoinCondition { target: 1 }));
+        assert_eq!(refs(&pg("insert into orders (id, |) select 1 from customers")), [(Some("orders"), &table(None, "orders"))]);
+        let s = ms("INSERT INTO archive SELECT * FROM orders o\nSELECT * FROM customers c WHERE c.|");
+        assert_eq!(refs(&s), [(Some("c"), &table(None, "customers"))]);
+    }
+
+    #[test]
+    fn tsql_update_through_an_alias_resolves_to_its_from_item() {
+        let s = ms("UPDATE o SET o.| FROM orders o");
+        assert_eq!((refs(&s), s.qualifier.clone()), (vec![(Some("o"), &table(None, "orders"))], Some(Qualifier::Relation { index: 0 })));
+        let s = ms("DECLARE @t TABLE (id int)\nSELECT * FROM @t t WHERE t.|");
+        assert_eq!(refs(&s), [(Some("t"), &RelationSource::Derived { columns: vec![], star: vec![] })]);
+    }
+
+    #[test]
+    fn a_word_that_starts_a_line_may_start_the_next_statement() {
+        assert!(pg("select * from orders o\n\nsel|").keywords.contains(&"SELECT"));
+        assert!(ms("SELECT * FROM orders o WHERE o.id = 1\nUPD|").keywords.contains(&"UPDATE"));
+        assert!(!pg("select a,\n  b|").keywords.contains(&"SELECT"));
+        assert!(!pg("select a from orders where\n  |").keywords.contains(&"INSERT INTO"));
+    }
+
+    #[test]
+    fn an_alias_typed_right_after_a_relation_is_not_completed_unasked() {
+        assert_eq!(pg("select * from orders o|").expect, Expect::Alias);
+        assert_eq!(pg("select * from orders |").expect, Expect::Alias);
+        assert_eq!(pg("select * from orders as |").expect, Expect::Alias);
+        assert_eq!(pg("select * from orders o |").expect, Expect::Keyword);
+    }
+
+    #[test]
+    fn derived_columns_follow_the_names_the_server_gives() {
+        let derived = |marked: &str, kind| match at(kind, marked).map(|s| s.relations.into_iter().next().map(|r| r.source)) {
+            Some(Some(RelationSource::Derived { columns, star })) => (columns, star.into_iter().map(|t| t.name).collect::<Vec<_>>()),
+            other => panic!("{marked:?} gave {other:?}"),
+        };
+        assert_eq!(derived("with x as (select distinct * from orders) select * from x where |", Postgres), (vec![], vec!["orders".into()]));
+        assert_eq!(derived("with x as (select distinct on (id) * from orders) select * from x where |", Postgres), (vec![], vec!["orders".into()]));
+        assert_eq!(derived("with x as (select id::text, count(*), a + b, total n from orders) select * from x where |", Postgres).0, ["id", "count", "n"]);
+        assert_eq!(derived("WITH x AS (SELECT TOP 5 amount = o.total, o.id FROM orders o) SELECT * FROM x WHERE |", SqlServer).0, ["amount", "id"]);
+        assert_eq!(derived("with x as (select id, name from a union select id, title from b) select * from x where |", Postgres).0, ["id", "name"]);
+        assert_eq!(derived("with x as (update orders set total = 0 returning id) select * from x where |", Postgres), (vec![], vec![]));
+        assert_eq!(pg("with x as (update orders set total = 0 returning id) select * from x where |").ctes, ["x"]);
+    }
+
+    #[test]
+    fn within_group_keeps_the_select_list() {
+        assert_eq!(pg("select percentile_cont(0.5) within group (order by total), | from orders o").expect, Expect::Expression);
     }
 
     #[test]
