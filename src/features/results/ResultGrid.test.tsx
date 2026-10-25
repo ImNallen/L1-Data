@@ -9,8 +9,9 @@ import { buildCatalogView, useCatalog } from "../../state/catalog";
 import { dbKey } from "../../state/dbKey";
 import { useRelationDetail } from "../../state/relationDetail";
 import { dropRowCaches } from "../../state/rowCache";
-import { markDeleted, NO_EDITS, setCell } from "../../state/tableEdits";
-import { useWorkspace } from "../../state/workspace";
+import { markDeleted, NO_EDITS, setCell, useTableEdits } from "../../state/tableEdits";
+import { EMPTY_QUERY, useWorkspace } from "../../state/workspace";
+import { Overlays } from "../../shell/Overlays";
 import { shopCatalog } from "../../testing/shopCatalog";
 import { dropEditor } from "../editor/editorStates";
 import { gridEditing, gridKeyColumns, HeaderIcon, nextFocus, primaryKeyColumns, ResultGrid, selectRows } from "./ResultGrid";
@@ -177,24 +178,40 @@ it.each(["update", "delete"])("keeps original key columns for a pending %s when 
 });
 
 const shopDb = { connectionId: "c1", database: "shop" };
-const ordersDetail = (oid: number): RelationDetail => ({
+const foreignKey = (name: string, columns: string[], refTable: string, refColumns: string[]) => ({
+  name,
+  columns,
+  kind: { kind: "Foreign" as const, refSchema: "public", refTable, refColumns, onDelete: "NoAction" as const, onUpdate: "NoAction" as const },
+});
+const ordersDetail = (oid: number, extraKeys: RelationDetail["keys"]): RelationDetail => ({
   db: shopDb,
   oid,
   catalogVersion: 1,
   defaults: [],
   keys: [
     { name: "orders_pkey", columns: ["id"], kind: { kind: "Primary" } },
-    {
-      name: "orders_customer_id_fkey",
-      columns: ["customer_id"],
-      kind: { kind: "Foreign", refSchema: "public", refTable: "customers", refColumns: ["id"], onDelete: "NoAction", onUpdate: "NoAction" },
-    },
+    foreignKey("orders_customer_id_fkey", ["customer_id"], "customers", ["id"]),
+    ...extraKeys,
   ],
   indexes: [],
   triggers: [],
 });
 
-function queryResult(rows: (string | null)[][]): ResultMeta {
+type ResultSpec = {
+  columns?: { name: string; attnum: number | null }[];
+  databaseKind?: DatabaseKind;
+  allRows?: ResultMeta["allRows"];
+  cut?: [number, number][];
+  cell?: (row: number, col: number) => string;
+  keys?: RelationDetail["keys"];
+};
+
+const ORDER_COLUMNS = [
+  { name: "id", attnum: 1 },
+  { name: "customer_id", attnum: 2 },
+];
+
+function queryResult(rows: (string | null)[][], spec: ResultSpec = {}): ResultMeta {
   const catalog = shopCatalog("c1", 1);
   const orders = catalog.schemas[1]!.relations.find((r) => r.name === "orders")!;
   orders.columns[1]!.fk = true;
@@ -210,25 +227,30 @@ function queryResult(rows: (string | null)[][]): ResultMeta {
       disconnect() {}
     },
   );
-  mockIPC((cmd): RowPage | RelationDetail | TableScript | null => {
-    if (cmd === "result_page") return { start: 0, rows, cut: [] };
-    if (cmd === "relation_detail") return ordersDetail(orders.oid);
+  mockIPC((cmd, args): RowPage | RelationDetail | TableScript | string | null => {
+    if (cmd === "result_page") return { start: 0, rows, cut: spec.cut ?? [] };
+    if (cmd === "result_cell") {
+      const a = args as { row: number; col: number };
+      return spec.cell!(a.row, a.col);
+    }
+    if (cmd === "relation_detail") return ordersDetail(orders.oid, spec.keys ?? []);
     if (cmd === "table_script") return { text: "SELECT * FROM public.customers", acceptedTexts: ["SELECT * FROM public.customers"] };
     return null;
   });
   return {
-    databaseKind: "Postgres",
+    databaseKind: spec.databaseKind ?? "Postgres",
     ref: { tabId: "q1", runId: 1, index: 0 },
     db: shopDb,
-    columns: [
-      { name: "id", type: { display: "bigint", category: "Integer" }, source: { tableOid: orders.oid, attnum: 1 } },
-      { name: "customer_id", type: { display: "bigint", category: "Integer" }, source: { tableOid: orders.oid, attnum: 2 } },
-    ],
+    columns: (spec.columns ?? ORDER_COLUMNS).map(({ name, attnum }) => ({
+      name,
+      type: { display: name === "status" ? "text" : "bigint", category: name === "status" ? "Text" : "Integer" },
+      source: attnum === null ? null : { tableOid: orders.oid, attnum },
+    })),
     rowCount: rows.length,
     rowsSeen: rows.length,
     truncated: null,
     elapsedMs: 1,
-    allRows: { kind: "Statement" },
+    allRows: spec.allRows ?? { kind: "Statement" },
   };
 }
 
@@ -240,6 +262,7 @@ afterEach(() => {
   useWorkspace.setState(useWorkspace.getInitialState(), true);
   useCatalog.setState(useCatalog.getInitialState(), true);
   useRelationDetail.setState(useRelationDetail.getInitialState(), true);
+  useTableEdits.setState(useTableEdits.getInitialState(), true);
   vi.restoreAllMocks();
   vi.unstubAllGlobals();
 });
@@ -291,4 +314,124 @@ it("opens the focused row as a record with ⌘I or the menu", async () => {
   await user.pointer({ keys: "[MouseRight]", target: screen.getByText("42") });
   await user.click(await screen.findByTestId("grid-menu-record"));
   expect(useWorkspace.getState().overlay).toEqual({ kind: "record", meta, row: 0 });
+});
+
+const EDITING = { pkColumns: ["id"], writableColumns: new Set(["customer_id"]) };
+const lastOpened = (table: string) =>
+  Object.values(useWorkspace.getState().tabs)
+    .filter((t) => t.table?.table === table)
+    .at(-1)?.table?.query.filters;
+const byId = (value: string) => [{ column: "id", op: "Eq", value }];
+const settle = () => new Promise((resolve) => setTimeout(resolve, 50));
+
+async function followFrom(user: ReturnType<typeof userEvent.setup>, cell: HTMLElement, key = "orders_customer_id_fkey") {
+  await user.pointer({ keys: "[MouseRight]", target: cell });
+  await user.click(await screen.findByTestId(`grid-menu-follow-${key}`));
+}
+
+it.each([
+  { databaseKind: "SqlServer" as const, allRows: "Table" as const, offered: true },
+  { databaseKind: "SqlServer" as const, allRows: "Statement" as const, offered: false },
+  { databaseKind: "Postgres" as const, allRows: "Table" as const, offered: false },
+])("matches columns by name only on a SQL Server page of the tab's table: $databaseKind $allRows", async ({ databaseKind, allRows, offered }) => {
+  const user = userEvent.setup();
+  const meta = queryResult([["1", "42"]], { databaseKind, allRows: { kind: allRows }, columns: ORDER_COLUMNS.map((c) => ({ ...c, attnum: null })) });
+  useWorkspace.getState().addTab({
+    id: "q1",
+    title: "orders",
+    console: { db: shopDb, mode: "AutoCommit" },
+    table: { schema: "public", table: "orders", page: 0, query: EMPTY_QUERY },
+    file: null,
+  });
+  render(<ResultGrid meta={meta} done query={null} editing={null} />);
+  await user.pointer({ keys: "[MouseRight]", target: await screen.findByText("42") });
+  await screen.findByTestId("grid-menu-record");
+  await settle();
+  expect(screen.queryByTestId("grid-menu-follow-orders_customer_id_fkey") !== null).toBe(offered);
+});
+
+it("disables View as record on a staged new row", async () => {
+  const user = userEvent.setup();
+  const meta = queryResult([["1", "42"]]);
+  useTableEdits.getState().addRow("q1");
+  render(<ResultGrid meta={meta} done query={null} editing={EDITING} />);
+  await screen.findByText("42");
+  await user.pointer({ keys: "[MouseRight]", target: screen.getByTestId("grid-cell-1-1") });
+  expect((await screen.findByTestId("grid-menu-record")).hasAttribute("data-disabled")).toBe(true);
+  await user.keyboard("{Escape}");
+  await user.pointer({ keys: "[MouseRight]", target: screen.getByText("42") });
+  expect((await screen.findByTestId("grid-menu-record")).hasAttribute("data-disabled")).toBe(false);
+});
+
+it("follows a cut key by its full value, and a staged key by the value the grid shows", async () => {
+  const user = userEvent.setup();
+  const meta = queryResult(
+    [
+      ["1", "4200"],
+      ["2", "4300"],
+    ],
+    {
+      cut: [
+        [0, 1],
+        [1, 1],
+      ],
+      cell: (row) => (row === 0 ? "42000000" : "43000000"),
+    },
+  );
+  useTableEdits.getState().edit("q1", (e) => setCell(e, [{ column: "id", value: "2" }], "customer_id", "7", "4300"));
+  render(<ResultGrid meta={meta} done query={null} editing={EDITING} />);
+  await followFrom(user, await screen.findByTestId("grid-cell-0-1"));
+  await vi.waitFor(() => expect(lastOpened("customers")).toEqual(byId("42000000")));
+  await followFrom(user, screen.getByText("7"));
+  await vi.waitFor(() => expect(lastOpened("customers")).toEqual(byId("7")));
+});
+
+it("offers each copy of a single-column key its own follow", async () => {
+  const user = userEvent.setup();
+  const columns = [...ORDER_COLUMNS, ...ORDER_COLUMNS];
+  render(<ResultGrid meta={queryResult([["1", "42", "2", "9"]], { columns })} done query={null} editing={null} />);
+  await followFrom(user, await screen.findByText("9"));
+  await vi.waitFor(() => expect(lastOpened("customers")).toEqual(byId("9")));
+});
+
+it("names the key columns when two keys from one cell reach the same table", async () => {
+  const user = userEvent.setup();
+  const meta = queryResult([["1", "42", "shipped"]], {
+    columns: [...ORDER_COLUMNS, { name: "status", attnum: 3 }],
+    keys: [foreignKey("orders_customer_id_status_fkey", ["customer_id", "status"], "customers", ["id", "region"])],
+  });
+  render(<ResultGrid meta={meta} done query={null} editing={null} />);
+  await user.pointer({ keys: "[MouseRight]", target: await screen.findByText("42") });
+  await screen.findByTestId("grid-menu-follow-orders_customer_id_status_fkey");
+  expect(
+    screen
+      .getAllByRole("menuitem")
+      .map((item) => item.textContent)
+      .filter((label) => label?.startsWith("Go to")),
+  ).toEqual(["Go to referenced row in customers (customer_id)", "Go to referenced row in customers (customer_id, status)"]);
+});
+
+it.each(["{Shift>}{F10}{/Shift}", "{ContextMenu}"])("opens the focused cell's menu from the keyboard with %s", async (keys) => {
+  const user = userEvent.setup();
+  render(<ResultGrid meta={queryResult([["1", "42"]])} done query={null} editing={null} />);
+  await user.click(await screen.findByText("1"));
+  await user.keyboard("{ArrowRight}");
+  await user.keyboard(keys);
+  await user.click(await screen.findByTestId("grid-menu-follow-orders_customer_id_fkey"));
+  await vi.waitFor(() => expect(lastOpened("customers")).toEqual(byId("42")));
+});
+
+it("returns focus to the grid when a record view opened from the menu closes", async () => {
+  const user = userEvent.setup();
+  render(
+    <>
+      <ResultGrid meta={queryResult([["1", "42"]])} done query={null} editing={null} />
+      <Overlays />
+    </>,
+  );
+  await user.pointer({ keys: "[MouseRight]", target: await screen.findByText("42") });
+  await user.click(await screen.findByTestId("grid-menu-record"));
+  await screen.findByTestId("record-dialog");
+  await user.keyboard("{Escape}");
+  await vi.waitFor(() => expect(document.activeElement).toBe(screen.getByTestId("result-grid")));
 });

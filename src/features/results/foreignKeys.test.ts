@@ -37,7 +37,7 @@ const column = (name: string, attnum?: number): ColumnMeta => ({
 it("links each foreign key whose columns are all in the result, by result column index in key order", () => {
   const someColumns = tableColumns(view, { db: catalog.db, columns: [column("customer_id", 2), column("n")] }, null);
   expect(keyLinks(someColumns, () => detail)).toEqual([
-    { name: "orders_customer_id_fkey", schema: "public", table: "customers", resultColumns: [0], refColumns: ["id"] },
+    { name: "orders_customer_id_fkey", columns: ["customer_id"], schema: "public", table: "customers", resultColumns: [0], refColumns: ["id"] },
   ]);
 
   const allColumns = tableColumns(view, { db: catalog.db, columns: [column("status", 3), column("id", 1), column("customer_id", 2)] }, null);
@@ -45,6 +45,19 @@ it("links each foreign key whose columns are all in the result, by result column
     ["customers", [2]],
     ["addresses", [2, 0]],
   ]);
+});
+
+it("gives each copy of a single-column key its own link", () => {
+  const twoCopies = tableColumns(view, { db: catalog.db, columns: [column("customer_id", 2), column("id", 1), column("customer_id", 2)] }, null);
+  expect(keyLinks(twoCopies, () => detail).map((l) => [l.name, l.resultColumns])).toEqual([
+    ["orders_customer_id_fkey", [0]],
+    ["orders_customer_id_fkey", [2]],
+  ]);
+});
+
+it("refuses a multi-column key when the result holds a column of its table twice, as a self-join does", () => {
+  const selfJoin = tableColumns(view, { db: catalog.db, columns: [column("id", 1), column("customer_id", 2), column("id", 1), column("status", 3)] }, null);
+  expect(keyLinks(selfJoin, () => detail).map((l) => [l.name, l.resultColumns])).toEqual([["orders_customer_id_fkey", [1]]]);
 });
 
 it("matches a column without a source by name only on a browsing table tab, and only in the catalog's database", () => {

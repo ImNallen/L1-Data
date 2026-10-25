@@ -3,12 +3,13 @@ import type { RelationDetail, ResultMeta } from "../../ipc/bindings";
 import { findRelation, sourceColumn, useCatalog, viewFor, type CatalogView } from "../../state/catalog";
 import { sameDb } from "../../state/dbKey";
 import { detailKey, useRelationDetail } from "../../state/relationDetail";
+import { isTableTab, useWorkspace } from "../../state/workspace";
 
 export type BrowsedTable = { schema: string; table: string };
 
 type TableColumn = { oid: number; name: string; fk: boolean };
 
-export type KeyLink = { name: string; schema: string; table: string; resultColumns: number[]; refColumns: string[] };
+export type KeyLink = { name: string; columns: string[]; schema: string; table: string; resultColumns: number[]; refColumns: string[] };
 
 export function tableColumns(view: CatalogView | undefined, meta: Pick<ResultMeta, "db" | "columns">, table: BrowsedTable | null): (TableColumn | null)[] {
   if (!view || !sameDb(view.catalog.db, meta.db)) return meta.columns.map(() => null);
@@ -25,21 +26,29 @@ export function keyedRelations(columns: (TableColumn | null)[]): number[] {
 }
 
 export function keyLinks(columns: (TableColumn | null)[], detailOf: (oid: number) => RelationDetail | null | undefined): KeyLink[] {
-  return keyedRelations(columns).flatMap((oid) =>
-    (detailOf(oid)?.keys ?? []).flatMap((key) => {
+  return keyedRelations(columns).flatMap((oid) => {
+    const own = columns.flatMap((c) => (c?.oid === oid ? [c.name] : []));
+    const tableShownTwice = new Set(own).size < own.length;
+    const at = (name: string) => columns.flatMap((c, i) => (c?.oid === oid && c.name === name ? [i] : []));
+    return (detailOf(oid)?.keys ?? []).flatMap((key) => {
       if (key.kind.kind !== "Foreign") return [];
-      const at = key.columns.map((name) => columns.findIndex((c) => c?.oid === oid && c.name === name));
-      return at.every((i) => i >= 0)
-        ? [{ name: key.name, schema: key.kind.refSchema, table: key.kind.refTable, resultColumns: at, refColumns: key.kind.refColumns }]
-        : [];
-    }),
-  );
+      const { refSchema, refTable, refColumns } = key.kind;
+      const link = (resultColumns: number[]) => ({ name: key.name, columns: key.columns, schema: refSchema, table: refTable, resultColumns, refColumns });
+      const hits = key.columns.map(at);
+      if (hits.length === 1) return hits[0]!.map((i) => link([i]));
+      return !tableShownTwice && hits.every((h) => h.length === 1) ? [link(hits.map((h) => h[0]!))] : [];
+    });
+  });
 }
 
-export function useKeyLinks(meta: ResultMeta, table: BrowsedTable | null): KeyLink[] {
+export function useKeyLinks(meta: ResultMeta): KeyLink[] {
   const view = useCatalog((s) => viewFor(s.views, meta.db));
-  const schema = table?.schema;
-  const name = table?.table;
+  const sqlServerTablePage = useWorkspace((s) => {
+    const tab = s.tabs[meta.ref.tabId];
+    return meta.databaseKind === "SqlServer" && meta.allRows.kind === "Table" && tab && isTableTab(tab) ? tab.table : null;
+  });
+  const schema = sqlServerTablePage?.schema;
+  const name = sqlServerTablePage?.table;
   const columns = useMemo(
     () => tableColumns(view, meta, schema !== undefined && name !== undefined ? { schema, table: name } : null),
     [view, meta, schema, name],

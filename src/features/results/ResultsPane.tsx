@@ -304,7 +304,6 @@ export function ResultsPane({ tabId }: { tabId: TabId | null }) {
   const addDraft = useFilterDrafts((s) => s.add);
   const sort = useTableOrder(browsingTable);
   const gridQuery: GridQuery | null = browsingTable && {
-    table: browsingTable.table,
     sort,
     filtered: new Set(browsingTable.table.query.filters.map((f) => f.column)),
     onSort: (column, additive) => void cycleTableOrder(browsingTable, column, additive),
