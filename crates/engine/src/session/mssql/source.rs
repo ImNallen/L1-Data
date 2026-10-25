@@ -22,7 +22,8 @@ fn text(row: &[Option<String>], i: usize) -> Result<String, DetailError> {
 
 const FEATURES: &str = "SELECT COL_LENGTH('sys.indexes','optimize_for_sequential_key'),COL_LENGTH('sys.index_columns','column_store_order_ordinal'),
     COL_LENGTH('sys.partitions','xml_compression'),COL_LENGTH('sys.tables','ledger_type'),COL_LENGTH('sys.tables','is_node'),COL_LENGTH('sys.tables','history_retention_period'),
-    COL_LENGTH('sys.indexes','suppress_dup_key_messages'),COL_LENGTH('sys.sensitivity_classifications','label'),COL_LENGTH('sys.sensitivity_classifications','rank')";
+    COL_LENGTH('sys.indexes','suppress_dup_key_messages'),COL_LENGTH('sys.sensitivity_classifications','label'),COL_LENGTH('sys.sensitivity_classifications','rank'),
+    COL_LENGTH('sys.stats','auto_drop'),COL_LENGTH('sys.stats','has_persisted_sample')";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) struct Features {
@@ -34,6 +35,8 @@ pub(super) struct Features {
     retention: &'static str,
     suppress_dup_key: &'static str,
     classifications: Option<&'static str>,
+    auto_drop: &'static str,
+    persisted_sample: &'static str,
 }
 
 impl Features {
@@ -49,6 +52,8 @@ impl Features {
             retention: pick(5, "t.history_retention_period,t.history_retention_period_unit_desc", "NULL,NULL"),
             suppress_dup_key: pick(6, "i.suppress_dup_key_messages", "0"),
             classifications: has(7).then(|| pick(8, "sc.rank_desc", "NULL")),
+            auto_drop: pick(9, "st.auto_drop", "0"),
+            persisted_sample: pick(10, "st.has_persisted_sample", "0"),
         }
     }
 }
@@ -184,6 +189,7 @@ impl MsSession {
         let foreign_keys = batch.add(foreign_keys_sql(oid));
         let checks = batch.add(format!("SELECT name,definition,is_disabled,is_not_trusted,is_not_for_replication FROM sys.check_constraints WHERE parent_object_id={oid} ORDER BY name"));
         let indexes = batch.add(indexes_sql(oid, "i.is_primary_key=0 AND i.is_unique_constraint=0", f));
+        let statistics = batch.add(statistics_sql(oid, f));
         let triggers = batch.add(modules_sql(&format!("o.parent_object_id={oid} AND o.type IN ('TR','TA')")));
         let props = batch.add(properties_sql(&format!("o.object_id={oid}")));
         let privileges = batch.add(privileges_sql(&format!("o.object_id={oid}")));
@@ -197,7 +203,7 @@ impl MsSession {
                 let (_, module) = modules(&sets[view])?.into_iter().next().ok_or(DetailError::Gone)?;
                 let mut module = module.text()?;
                 module.omitted.extend(unseen(&sets[visibility], false)?);
-                let view = ddl::View { indexes: indexes_from(&sets[indexes])?, triggers: triggers_from(&sets[triggers])?, properties: properties(&sets[props])?, privileges: privileges_from(&sets[privileges])?, module };
+                let view = ddl::View { indexes: indexes_from(&sets[indexes])?, statistics: statistics_from(&sets[statistics])?, triggers: triggers_from(&sets[triggers])?, properties: properties(&sets[props])?, privileges: privileges_from(&sets[privileges])?, module };
                 Ok(script::object_script(&view.module.name, ddl::view(&view)))
             }
             "U" => {
@@ -225,6 +231,7 @@ impl MsSession {
                     foreign_keys: foreign_keys_from(&sets[foreign_keys])?,
                     checks: sets[checks].iter().map(|r| Ok(ddl::Check { name: text(r, 0)?, definition: r[1].clone(), state: state(r, 2)? })).collect::<Result<_, DetailError>>()?,
                     indexes: indexes_from(&sets[indexes])?,
+                    statistics: statistics_from(&sets[statistics])?,
                     triggers: triggers_from(&sets[triggers])?,
                     heap: sets[heap].first().map(|r| storage(r, 0)).transpose()?,
                     large_values: place(r, 11),
@@ -608,6 +615,38 @@ fn indexes_from(rows: &[Row]) -> Result<Vec<ddl::Index>, DetailError> {
         .collect())
 }
 
+fn statistics_sql(oid: i32, f: &Features) -> String {
+    format!(
+        "SELECT st.name,st.filter_definition,st.has_filter,st.no_recompute,{},st.is_incremental,{},c.name
+         FROM sys.stats st JOIN sys.stats_columns sc ON sc.object_id=st.object_id AND sc.stats_id=st.stats_id
+         JOIN sys.columns c ON c.object_id=sc.object_id AND c.column_id=sc.column_id
+         WHERE st.object_id={oid} AND st.user_created=1 ORDER BY st.name,sc.stats_column_id",
+        f.auto_drop, f.persisted_sample
+    )
+}
+
+fn statistics_from(rows: &[Row]) -> Result<Vec<ddl::Statistics>, DetailError> {
+    let mut statistics: Vec<ddl::Statistics> = vec![];
+    for r in rows {
+        let name = text(r, 0)?;
+        let column = text(r, 7)?;
+        match statistics.last_mut() {
+            Some(s) if s.name == name => s.columns.push(column),
+            _ => statistics.push(ddl::Statistics {
+                name,
+                columns: vec![column],
+                filter: r[1].clone(),
+                unreadable_filter: r[1].is_none() && bit(r, 2)?,
+                no_recompute: bit(r, 3)?,
+                auto_drop: bit(r, 4)?,
+                incremental: bit(r, 5)?,
+                persisted_sample: bit(r, 6)?,
+            }),
+        }
+    }
+    Ok(statistics)
+}
+
 enum Found {
     Text(ddl::Module),
     Clr { schema: String, name: String },
@@ -637,12 +676,12 @@ mod tests {
 
     #[test]
     fn a_server_without_a_feature_column_reads_a_constant_in_its_place() {
-        let sql2016 = Features::from_lengths(&[None, None, None, None, None, None, None, None, None]);
+        let sql2016 = Features::from_lengths(&vec![None; 11]);
         let query = relation_query(7, &sql2016);
         assert!(!query.contains("history_retention_period"), "{query}");
         assert!(query.contains("h.name,NULL,NULL,\n"), "{query}");
         assert!(!query.contains("ledger_type") && !query.contains("is_node"), "{query}");
-        let sql2022 = Features::from_lengths(&[Some("1".into()), Some("4".into()), Some("1".into()), Some("1".into()), Some("1".into()), Some("4".into()), Some("1".into()), Some("256".into()), Some("4".into())]);
+        let sql2022 = Features::from_lengths(&[Some("1".into()), Some("4".into()), Some("1".into()), Some("1".into()), Some("1".into()), Some("4".into()), Some("1".into()), Some("256".into()), Some("4".into()), Some("1".into()), Some("1".into())]);
         assert!(relation_query(7, &sql2022).contains("h.name,t.history_retention_period,t.history_retention_period_unit_desc,\n"));
         assert_eq!(Features::from_lengths(&[]), sql2016);
     }

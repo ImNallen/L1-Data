@@ -11,6 +11,7 @@ pub struct Table {
     pub foreign_keys: Vec<ForeignKey>,
     pub checks: Vec<Check>,
     pub indexes: Vec<Index>,
+    pub statistics: Vec<Statistics>,
     pub triggers: Vec<Trigger>,
     pub heap: Option<Storage>,
     pub large_values: Option<Place>,
@@ -154,6 +155,21 @@ pub struct Index {
     pub unreadable_filter: bool,
 }
 
+/// Statistics created by `CREATE STATISTICS`, which an index or the optimizer did not make.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Statistics {
+    pub name: String,
+    pub columns: Vec<String>,
+    pub filter: Option<String>,
+    pub unreadable_filter: bool,
+    pub no_recompute: bool,
+    pub auto_drop: bool,
+    /// Fails on the unpartitioned table the script creates.
+    pub incremental: bool,
+    /// Replays as no persisted sample, because the table the script creates is empty.
+    pub persisted_sample: bool,
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Storage {
     pub fill_factor: u8,
@@ -219,6 +235,7 @@ pub enum Trigger {
 pub struct View {
     pub module: Module,
     pub indexes: Vec<Index>,
+    pub statistics: Vec<Statistics>,
     pub triggers: Vec<Trigger>,
     pub properties: Vec<Property>,
     pub privileges: Vec<Privilege>,
@@ -315,7 +332,7 @@ pub fn table(t: &Table) -> Ddl {
         .collect();
     let hidden: Vec<&str> = t.checks.iter().filter(|c| c.definition.is_none()).map(|c| c.name.as_str()).chain(t.columns.iter().filter_map(|c| c.hidden_default.as_deref())).collect();
     let props: Vec<Property> = t.properties.iter().filter(|p| !p.part().is_some_and(|(kind, constraint)| kind == "CONSTRAINT" && hidden.contains(&constraint))).cloned().collect();
-    parts.extend(dependents(&name, disabled_keys, &t.indexes, &late, &t.triggers, &props, &mut warnings));
+    parts.extend(dependents(&name, disabled_keys, &t.indexes, &t.statistics, &late, &t.triggers, &props, &mut warnings));
     warnings.extend(privileges(&name, &t.privileges));
     warnings.extend(t.omitted.iter().map(|o| o.warning(&name)));
     Ddl { text: parts.join("\n"), warnings }
@@ -325,7 +342,7 @@ pub fn view(v: &View) -> Ddl {
     let mut warnings = vec![];
     let name = qualified(&v.module.schema, &v.module.name);
     let mut parts = vec![module_text(&v.module, &mut warnings)];
-    parts.extend(dependents(&name, std::iter::empty(), &v.indexes, &[], &v.triggers, &v.properties, &mut warnings));
+    parts.extend(dependents(&name, std::iter::empty(), &v.indexes, &v.statistics, &[], &v.triggers, &v.properties, &mut warnings));
     warnings.extend(privileges(&name, &v.privileges));
     Ddl { text: parts.join("\n"), warnings }
 }
@@ -367,7 +384,7 @@ pub fn module(m: &Module) -> Ddl {
 
 /// Indexes disable last, because a disabled clustered index makes its table unreadable to every
 /// later step.
-fn dependents<'a>(name: &str, disabled_keys: impl Iterator<Item = &'a str>, indexes: &'a [Index], after_indexes: &[String], triggers: &[Trigger], props: &[Property], warnings: &mut Vec<String>) -> Vec<String> {
+fn dependents<'a>(name: &str, disabled_keys: impl Iterator<Item = &'a str>, indexes: &'a [Index], statistics: &[Statistics], after_indexes: &[String], triggers: &[Trigger], props: &[Property], warnings: &mut Vec<String>) -> Vec<String> {
     let mut parts = vec![];
     let mut left_out = vec![];
     for i in indexes {
@@ -377,6 +394,10 @@ fn dependents<'a>(name: &str, disabled_keys: impl Iterator<Item = &'a str>, inde
         }
     }
     parts.extend(after_indexes.iter().cloned());
+    let statistics: String = statistics.iter().filter_map(|s| statistics_text(s, name, warnings)).collect();
+    if !statistics.is_empty() {
+        parts.push(format!("{statistics}GO\n"));
+    }
     for t in triggers {
         match t {
             Trigger::Text(m) => parts.push(module_text(m, warnings)),
@@ -627,6 +648,23 @@ fn index_text(i: &Index, table: &str, warnings: &mut Vec<String>) -> Option<Stri
     storage_warnings(&i.storage, &i.name, table, warnings);
     let set = if i.filter.is_some() || i.on_view || i.computed { INDEX_OPTIONS } else { "" };
     Some(format!("{set}{out};\nGO\n"))
+}
+
+fn statistics_text(s: &Statistics, table: &str, warnings: &mut Vec<String>) -> Option<String> {
+    let name = ident(&s.name);
+    if s.unreadable_filter {
+        warnings.push(format!("filtered statistics {name} on {table}, whose filter this login cannot read"));
+        return None;
+    }
+    for (on, option) in [(s.incremental, "INCREMENTAL"), (s.persisted_sample, "PERSIST_SAMPLE_PERCENT")] {
+        if on {
+            warnings.push(format!("{option} for statistics {name} on {table}"));
+        }
+    }
+    let filter = s.filter.as_ref().map_or(String::new(), |f| format!(" WHERE {f}"));
+    let options: Vec<&str> = [(s.no_recompute, "NORECOMPUTE"), (s.auto_drop, "AUTO_DROP = ON")].into_iter().filter_map(|(on, option)| on.then_some(option)).collect();
+    let with = if options.is_empty() { String::new() } else { format!(" WITH {}", options.join(", ")) };
+    Some(format!("CREATE STATISTICS {name} ON {table} ({}){filter}{with};\n", names(&s.columns)))
 }
 
 /// `OBJECT_DEFINITION` keeps the name a module was created with, so a module renamed by
@@ -1032,6 +1070,38 @@ GO
     }
 
     #[test]
+    fn user_statistics_replay_after_the_indexes_and_warn_for_what_cannot_replay() {
+        let stats = |name: &str| Statistics { name: name.into(), columns: vec!["id".into()], ..Statistics::default() };
+        let t = Table {
+            indexes: vec![index_on("IX", 2, &["id"])],
+            statistics: vec![
+                Statistics { columns: vec!["id".into(), "a]b".into()], filter: Some("([id]>(0))".into()), no_recompute: true, auto_drop: true, ..stats("st ü") },
+                Statistics { incremental: true, persisted_sample: true, ..stats("st_inc") },
+                Statistics { unreadable_filter: true, ..stats("st_hidden") },
+            ],
+            ..table_named("t")
+        };
+        let ddl = table(&t);
+        assert!(
+            ddl.text.ends_with(
+                "CREATE NONCLUSTERED INDEX [IX] ON [dbo].[t] ([id] ASC);
+GO
+
+CREATE STATISTICS [st ü] ON [dbo].[t] ([id], [a]]b]) WHERE ([id]>(0)) WITH NORECOMPUTE, AUTO_DROP = ON;
+CREATE STATISTICS [st_inc] ON [dbo].[t] ([id]);
+GO
+"
+            ),
+            "{}",
+            ddl.text
+        );
+        assert_eq!(
+            ddl.warnings,
+            ["INCREMENTAL for statistics [st_inc] on [dbo].[t]", "PERSIST_SAMPLE_PERCENT for statistics [st_inc] on [dbo].[t]", "filtered statistics [st_hidden] on [dbo].[t], whose filter this login cannot read"]
+        );
+    }
+
+    #[test]
     fn table_options_and_change_tracking_replay_after_the_table() {
         let t = Table { text_in_row: Some(500), large_values_out_of_row: true, change_tracking: Some(true), lock_escalation: "AUTO".into(), ..table_named("o]x") };
         assert!(
@@ -1316,7 +1386,7 @@ GO
             indexes: vec![Index { unique: true, on_view: true, storage: Storage { fill_factor: 90, ..Storage::default() }, ..index_on("IX_v", 1, &["id"]) }],
             triggers: vec![Trigger::Text(module("v_ins", "CREATE TRIGGER dbo.v_ins ON dbo.v INSTEAD OF INSERT AS SELECT 1"))],
             properties: vec![property("MS_Description", "bound", &[("SCHEMA", "dbo"), ("VIEW", "v")])],
-            privileges: vec![],
+            ..View::default()
         };
         assert_eq!(
             view(&v),
