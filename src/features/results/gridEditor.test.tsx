@@ -63,7 +63,7 @@ afterEach(() => {
 const pending = () => useTableEdits.getState().byTab.t1 ?? NO_EDITS;
 
 async function typeIntoStatus(user: ReturnType<typeof userEvent.setup>, text: string) {
-  render(<ResultGrid meta={meta} done bottomInset={0} query={null} editing={editing} />);
+  render(<ResultGrid meta={meta} done query={null} editing={editing} />);
   await user.dblClick(await screen.findByText("paid"));
   const editor = screen.getByTestId("grid-editor");
   await user.clear(editor);

@@ -20,9 +20,19 @@ import { useCatalog, viewFor } from "../../state/catalog";
 import { databaseKindFor } from "../../state/databaseKind";
 import { NO_EDITS, pendingCount, useTableEdits } from "../../state/tableEdits";
 import { isFiltered, isTableTab, useWorkspace, type TableTab } from "../../state/workspace";
-import { cx, IconButton, MenuContent, MenuItem, Spinner } from "../../ui/primitives";
+import { Button, cx, IconButton, MenuContent, MenuItem, Spinner } from "../../ui/primitives";
 import { useNow } from "../../ui/useNow";
-import { isBrowsing, lastTablePage, loadTableOnce, onEditorDocChanged, saveSettings, setTablePage, submitEdits, updateTableQuery } from "../editor/runActions";
+import {
+  isBrowsing,
+  lastTablePage,
+  loadTableOnce,
+  onEditorDocChanged,
+  revertEdits,
+  saveSettings,
+  setTablePage,
+  submitEdits,
+  updateTableQuery,
+} from "../editor/runActions";
 import { ExportMenu } from "./ExportMenu";
 import { FilterBar } from "./FilterBar";
 import { groupDigits, pageStatus, pluralRows } from "./format";
@@ -33,7 +43,6 @@ import { cycleTableOrder, filterForValue, useFilterDrafts, useTableOrder } from 
 const NO_OUTPUT: readonly OutputEntry[] = [];
 
 const PAGE_SIZES = [10, 100, 250, 500, 1000];
-const PAGER_INSET = 52;
 
 function TablePager({ tab, rows }: { tab: TableTab; rows: number }) {
   const size = useWorkspace((s) => s.settings.tablePageSize);
@@ -47,10 +56,7 @@ function TablePager({ tab, rows }: { tab: TableTab; rows: number }) {
   );
   const { label, isLast } = pageStatus(page, size, rows, isFiltered(query) ? null : estimate, exactRowCount);
   return (
-    <div
-      data-testid="table-pager"
-      className="absolute bottom-3 left-1/2 z-30 flex -translate-x-1/2 items-center gap-0.5 rounded-lg border border-control bg-raised p-1 text-ui-12.5 text-muted shadow-[var(--shadow-float)]"
-    >
+    <div data-testid="table-pager" className="flex h-9 shrink-0 items-center justify-center gap-0.5 border-t border-grid bg-bg px-2 text-ui-12.5 text-muted">
       <IconButton aria-label="First page" disabled={page === 0} onClick={() => setTablePage(tab.id, 0)}>
         <ChevronFirstIcon size={15} />
       </IconButton>
@@ -156,6 +162,7 @@ function EditBar({
   const edits = useTableEdits((s) => (tabId ? s.byTab[tabId] : undefined) ?? NO_EDITS);
   const pending = pendingCount(edits);
   const busy = useTableEdits((s) => (tabId ? s.submitting[tabId] === true : false));
+  if (!editable && pending === 0) return null;
   return (
     <div data-testid="edit-bar" className="flex items-center gap-0.5">
       <IconButton data-testid="add-row" aria-label="Add row" title="Add row" disabled={!editable} onClick={() => actions.current?.addRow()}>
@@ -170,29 +177,35 @@ function EditBar({
       >
         <MinusIcon size={16} />
       </IconButton>
-      <IconButton
-        data-testid="submit-edits"
-        aria-label="Submit changes"
-        title={canSubmit ? "Submit changes (⌘S)" : "SQL Server staged edits are unavailable. Use SQL scripts."}
-        disabled={!canSubmit || pending === 0 || busy}
-        className={cx(pending > 0 && "text-green!")}
-        onClick={() => tabId && void submitEdits(tabId)}
-      >
-        <CheckIcon size={16} />
-      </IconButton>
-      <IconButton
-        data-testid="revert-edits"
-        aria-label="Revert changes"
-        title="Revert changes"
-        disabled={pending === 0 || busy}
-        onClick={() => tabId && useTableEdits.getState().clear(tabId)}
-      >
-        <Undo2Icon size={16} />
-      </IconButton>
       {pending > 0 && (
-        <span data-testid="pending-count" className="ml-1.5 text-ui-12.5 whitespace-nowrap text-amber">
-          {pending} pending
-        </span>
+        <>
+          <div className="mx-1.5 h-4 w-px bg-control" />
+          <span data-testid="pending-count" className="mr-1.5 text-ui-12.5 whitespace-nowrap text-amber tabular-nums">
+            {pending} pending
+          </span>
+          <Button
+            data-testid="revert-edits"
+            variant="ghost"
+            className="h-7 px-2"
+            title="Discard the staged changes"
+            disabled={busy}
+            onClick={() => tabId && void revertEdits(tabId)}
+          >
+            <Undo2Icon size={14} />
+            Revert
+          </Button>
+          <Button
+            data-testid="submit-edits"
+            variant="primary"
+            className="h-7 px-2.5"
+            title={canSubmit ? "Send the staged changes (⌘S)" : "SQL Server staged edits are unavailable. Use SQL scripts."}
+            disabled={!canSubmit || busy}
+            onClick={() => tabId && void submitEdits(tabId)}
+          >
+            <CheckIcon size={14} />
+            Submit
+          </Button>
+        </>
       )}
     </div>
   );
@@ -225,7 +238,6 @@ function ResultBody({
   run,
   view,
   output,
-  bottomInset,
   query,
   editing,
   actions,
@@ -233,7 +245,6 @@ function ResultBody({
   run: RunState;
   view: ResultView;
   output: readonly OutputEntry[];
-  bottomInset: number;
   query: GridQuery | null;
   editing: GridEditing | null;
   actions: RefObject<GridActions | null>;
@@ -245,7 +256,6 @@ function ResultBody({
           key={`${view.result.meta.ref.runId}:${view.result.index}`}
           meta={view.result.meta}
           done={view.result.state !== "Streaming"}
-          bottomInset={bottomInset}
           query={query}
           editing={editing}
           actionsRef={actions}
@@ -402,9 +412,9 @@ export function ResultsPane({ tabId }: { tabId: TabId | null }) {
       {browsingTable && <FilterBar tab={browsingTable} />}
 
       <div className="relative flex min-h-0 flex-1 flex-col">
-        <ResultBody run={run} view={view} output={output} bottomInset={pager ? PAGER_INSET : 0} query={gridQuery} editing={editing} actions={actions} />
-        {pager && <TablePager tab={pager} rows={shown?.meta.rowCount ?? 0} />}
+        <ResultBody run={run} view={view} output={output} query={gridQuery} editing={editing} actions={actions} />
       </div>
+      {pager && <TablePager tab={pager} rows={shown?.meta.rowCount ?? 0} />}
     </section>
   );
 }

@@ -14,7 +14,7 @@ export function ErrorBlock({ error, label }: { error: QueryError; label?: ReactN
       {error.detail && <div className="text-muted">{error.detail}</div>}
       {error.hint && <div className="text-muted">Hint: {error.hint}</div>}
       {error.context && <div className="whitespace-pre-wrap text-dim">Context: {error.context}</div>}
-      {error.sqlstate && <div className="font-mono text-ui-11.5 text-faint">SQLSTATE {error.sqlstate}</div>}
+      {error.sqlstate && <div className="font-mono text-ui-11.5 text-dim">SQLSTATE {error.sqlstate}</div>}
     </>
   );
 }
@@ -36,7 +36,7 @@ function LineBody({ body }: { body: OutputEntry["body"] }) {
       return (
         <div className="text-dim">
           {pluralRows(body.rows)}
-          {body.truncated && " (truncated)"} · {formatElapsed(body.elapsedMs)}
+          {body.truncated && ", past the result limit"} · {formatElapsed(body.elapsedMs)}
         </div>
       );
     case "Command":
@@ -49,7 +49,7 @@ function LineBody({ body }: { body: OutputEntry["body"] }) {
       return (
         <>
           <div className="text-fg">
-            <Label className={body.severity === "WARNING" ? "text-amber" : "text-faint"}>{body.severity}:</Label>
+            <Label className={body.severity === "WARNING" ? "text-amber" : "text-dim"}>{body.severity}:</Label>
             {body.message}
           </div>
           {body.detail && <div className="text-dim">{body.detail}</div>}
@@ -82,7 +82,7 @@ function Line({ time, runStart, kind, severity, children }: LineProps) {
       data-severity={severity}
       className={cx("flex gap-4 px-5 [contain-intrinsic-size:auto_1.25rem] [content-visibility:auto]", runStart && "mt-2 border-t border-grid pt-2")}
     >
-      <span className="w-[8ch] shrink-0 text-faint">{time}</span>
+      <span className="w-[8ch] shrink-0 text-dim">{time}</span>
       <div className="min-w-0 flex-1 whitespace-pre-wrap">{children}</div>
     </div>
   );
