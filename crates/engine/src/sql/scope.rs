@@ -263,6 +263,8 @@ struct Frame {
     /// For a CTE's column list.
     group_names: Vec<String>,
     pending_cte: Option<(String, String, Option<Vec<String>>)>,
+    /// `WITH RECURSIVE`, so a CTE's body can name the CTE.
+    recursive: bool,
     /// A set operator or an `INSERT`'s query after the cursor ends the part of the statement the cursor is in.
     sealed: bool,
     seen: bool,
@@ -275,6 +277,8 @@ struct Frame {
     lateral: Option<Range<usize>>,
     /// The first FROM item of the join tree being read. A comma starts the next one.
     tree: usize,
+    /// How many CTEs the enclosing frame had defined when this one opened.
+    earlier_ctes: usize,
 }
 
 impl Frame {
@@ -290,12 +294,14 @@ impl Frame {
             item_lexemes: Vec::new(),
             group_names: Vec::new(),
             pending_cte: None,
+            recursive: false,
             sealed: false,
             seen: false,
             first_output: None,
             outer,
             lateral: None,
             tree: 0,
+            earlier_ctes: 0,
         }
     }
 }
@@ -472,7 +478,8 @@ impl<'a> Walk<'a> {
                 }
                 f.clause = Clause::Relation { role, slot: Slot::Aliased };
             }
-            (Clause::Cte, Class::Word | Class::Name) if !self.word(i).is_some_and(|w| ["AS", "RECURSIVE", "NOT", "MATERIALIZED"].contains(&w.as_str())) => {
+            (Clause::Cte, Class::Word) if self.is_word(i, "RECURSIVE") => self.top().recursive = true,
+            (Clause::Cte, Class::Word | Class::Name) if !self.word(i).is_some_and(|w| ["AS", "NOT", "MATERIALIZED"].contains(&w.as_str())) => {
                 let written = self.text[self.sig[i].span.clone()].to_owned();
                 let key = fold(self.kind, self.text, self.sig[i]);
                 self.top().pending_cte = Some((key, written, None));
@@ -631,14 +638,32 @@ impl<'a> Walk<'a> {
     }
 
     fn cte(&self, name: &str) -> Option<Cte> {
+        let mut child = None;
         let mut id = Some(*self.stack.last().unwrap());
         while let Some(f) = id {
             if let Some(c) = self.frames[f].ctes.iter().find(|c| same(self.kind, &c.key, name)) {
                 return Some(c.clone());
             }
+            if let Some(c) = child.and_then(|body| self.recursing(f, body)).filter(|c| same(self.kind, &c.key, name)) {
+                return Some(c);
+            }
+            child = Some(f);
             id = self.frames[f].parent;
         }
         None
+    }
+
+    /// The CTE whose `body`, a child of `frame`, is still being read, when that body may name it: in T-SQL, or after
+    /// `WITH RECURSIVE`. Its columns are its column list, else the first branch's output.
+    fn recursing(&self, frame: usize, body: usize) -> Option<Cte> {
+        let f = &self.frames[frame];
+        let (key, written, explicit) = f.pending_cte.as_ref()?;
+        if self.frames[body].origin != Origin::CteBody || !(f.recursive || self.kind == DatabaseKind::SqlServer) {
+            return None;
+        }
+        let columns = explicit.clone().or_else(|| self.frames[body].first_output.as_ref().map(|o| o.0.clone())).unwrap_or_default();
+        let star = if explicit.is_some() { Vec::new() } else { self.frames[body].first_output.as_ref().map(|o| o.1.clone()).unwrap_or_default() };
+        Some(Cte { key: key.clone(), written: written.clone(), columns, star })
     }
 
     fn open(&mut self, i: usize) {
@@ -678,6 +703,7 @@ impl<'a> Walk<'a> {
         let p = &self.frames[parent];
         let start = if self.kind == DatabaseKind::SqlServer { p.tree } else { 0 };
         frame.lateral = lateral.then(|| start..p.rels.len());
+        frame.earlier_ctes = p.ctes.len();
         self.frames.push(frame);
         self.stack.push(self.frames.len() - 1);
     }
@@ -820,9 +846,22 @@ impl<'a> Walk<'a> {
         }
         let relations = rels.iter().map(|r| ScopeRelation { reference: r.written.clone(), source: r.source.clone() }).collect();
         let mut ctes: Vec<String> = Vec::new();
-        for c in chain.iter().flat_map(|&f| self.frames[f].ctes.iter()) {
+        let recursing = chain.windows(2).filter_map(|w| self.recursing(w[1], w[0]));
+        let defined = chain.iter().enumerate().flat_map(|(k, &f)| {
+            let frame = &self.frames[f];
+            let body = k.checked_sub(1).map(|c| &self.frames[chain[c]]).filter(|b| b.origin == Origin::CteBody);
+            let seen = match body {
+                Some(_) if frame.recursive => frame.ctes.len(),
+                Some(b) if self.kind == DatabaseKind::SqlServer => b.earlier_ctes + 1,
+                Some(b) => b.earlier_ctes,
+                None => frame.ctes.len(),
+            };
+            let visible = &frame.ctes[..seen.min(frame.ctes.len())];
+            visible.iter().cloned()
+        });
+        for c in recursing.chain(defined) {
             if !ctes.contains(&c.written) {
-                ctes.push(c.written.clone());
+                ctes.push(c.written);
             }
         }
         let qualifier = (!self.parts.is_empty()).then(|| self.qualifier(&rels));
@@ -1188,6 +1227,24 @@ mod tests {
         let s = pg("with x as (select o.id, o.total as amount, count(*) n from orders o) select * from x where |");
         assert_eq!(refs(&s), [(Some("x"), &RelationSource::Derived { columns: vec!["id".into(), "amount".into(), "n".into()], star: vec![] })]);
         assert_eq!(pg("with recent as (select 1) |").keywords, MAIN_VERBS);
+    }
+
+    #[test]
+    fn a_recursive_cte_refers_to_itself_inside_its_body() {
+        let n = RelationSource::Derived { columns: vec!["n".into()], star: vec![] };
+        for s in [
+            pg("with recursive t as (select 1 as n union all select t.n + 1 from t where t.|) select * from t"),
+            pg("with recursive t(n) as (select 1 union all select n + 1 from t where t.|) select * from t"),
+            ms("WITH t(n) AS (SELECT 1 UNION ALL SELECT n + 1 FROM t WHERE t.|) SELECT * FROM t"),
+        ] {
+            assert_eq!((refs(&s), s.qualifier.clone(), s.ctes.clone()), (vec![(Some("t"), &n)], Some(Qualifier::Relation { index: 0 }), vec!["t".to_owned()]));
+        }
+        let s = pg("with recursive tree as (select 1 as n union all select n + 1 from tr|");
+        assert_eq!((s.expect, s.ctes), (Expect::Relation, vec!["tree".to_owned()]));
+        assert_eq!(pg("with a as (select 1), b as (select * from |), c as (select 1) select 1").ctes, ["a"]);
+        assert_eq!(pg("with recursive a as (select 1), b as (select * from |), c as (select 1) select 1").ctes, ["a", "b", "c"]);
+        let s = pg("with t as (select 1 as n union all select n + 1 from t where t.|) select * from t");
+        assert_eq!((refs(&s), s.ctes.is_empty()), (vec![(Some("t"), &table(None, "t"))], true));
     }
 
     #[test]
