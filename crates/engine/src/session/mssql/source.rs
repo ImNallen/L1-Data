@@ -20,7 +20,6 @@ fn text(row: &[Option<String>], i: usize) -> Result<String, DetailError> {
     Ok(required(row, i).map_err(failed)?.to_owned())
 }
 
-/// Catalog columns newer than SQL Server 2016 read as their default on a server that lacks them.
 struct Features {
     sequential_key: &'static str,
     columnstore_order: &'static str,
@@ -36,7 +35,6 @@ fn storage_columns(f: &Features) -> String {
     )
 }
 
-/// Only the first partition's compression is read, because a partitioned object already warns about its partition scheme.
 const STORAGE_JOINS: &str = "LEFT JOIN sys.stats st ON st.object_id=i.object_id AND st.stats_id=i.index_id
      OUTER APPLY (SELECT TOP 1 * FROM sys.partitions p WHERE p.object_id=i.object_id AND p.index_id=i.index_id ORDER BY p.partition_number) p
      JOIN sys.data_spaces ds ON ds.data_space_id=i.data_space_id";

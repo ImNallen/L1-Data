@@ -7,15 +7,12 @@ pub struct Table {
     pub name: String,
     pub unlogged: bool,
     pub foreign: Option<Foreign>,
-    /// Set only when it is not `heap`.
     pub access_method: Option<String>,
-    /// `reloptions`, then the TOAST table's options with a `toast.` prefix.
     pub options: Vec<String>,
     pub tablespace: Option<String>,
     pub comment: Option<String>,
     pub columns: Vec<Column>,
-    /// Sequences a column owns that its `serial` type does not create.
-    pub sequences: Vec<Sequence>,
+    pub owned_sequences: Vec<Sequence>,
     pub constraints: Vec<Constraint>,
     pub parent: Parent,
     pub partition_key: Option<String>,
@@ -31,7 +28,6 @@ pub struct Table {
     pub unscripted: Unscripted,
 }
 
-/// Properties no statement here recreates. Each one becomes a warning.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct Unscripted {
     pub privileges: bool,
@@ -41,7 +37,6 @@ pub struct Unscripted {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Foreign {
     pub server: String,
-    /// `ftoptions`, each `name=value`.
     pub options: Vec<String>,
 }
 
@@ -54,7 +49,6 @@ pub enum Parent {
         name: String,
         bound: String,
     },
-    /// Legacy inheritance, in `inhseqno` order.
     Inherits(Vec<(String, String)>),
 }
 
@@ -64,7 +58,6 @@ pub enum ReplicaIdentity {
     Default,
     Nothing,
     Full,
-    /// The index that says `replica_identity`.
     Index,
 }
 
@@ -78,25 +71,19 @@ pub struct Column {
     pub generated: Option<Generated>,
     pub identity: Option<Identity>,
     pub comment: Option<String>,
-    /// `attislocal`: the table declares the column itself, even when it also inherits it.
-    pub local: bool,
-    /// The parent's copy of an inherited column, which is what a replay starts from.
+    pub declared: bool,
     pub inherited: Option<Inherited>,
-    /// `attstattarget`, -1 for the default.
-    pub statistics: i32,
+    pub statistics: Option<i32>,
     pub storage: String,
     pub type_storage: String,
-    /// `attcompression`, empty for the default.
     pub compression: String,
     pub options: Vec<String>,
-    /// `attfdwoptions`, each `name=value`.
     pub fdw_options: Vec<String>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Inherited {
-    /// Orders columns as a replay lays them out: by parent, then by the parent's order.
-    pub position: i64,
+    pub replay_order: i64,
     pub default: Option<String>,
     pub not_null: bool,
     pub storage: String,
@@ -139,7 +126,6 @@ pub struct Constraint {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Index {
     pub name: String,
-    /// `pg_get_indexdef`, or `None` when a constraint creates the index.
     pub definition: Option<String>,
     pub comment: Option<String>,
     pub clustered: bool,
@@ -158,7 +144,6 @@ pub struct Trigger {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Rule {
     pub name: String,
-    /// `pg_get_ruledef`, which ends in `;`.
     pub definition: String,
     pub enabled: char,
     pub comment: Option<String>,
@@ -168,9 +153,7 @@ pub struct Rule {
 pub struct Policy {
     pub name: String,
     pub permissive: bool,
-    /// `polcmd`: `*`, `r`, `a`, `w`, or `d`.
     pub command: char,
-    /// Empty for `PUBLIC`.
     pub roles: Vec<String>,
     pub using: Option<String>,
     pub check: Option<String>,
@@ -182,8 +165,7 @@ pub struct Statistics {
     pub schema: String,
     pub name: String,
     pub definition: String,
-    /// -1 for the default.
-    pub target: i32,
+    pub target: Option<i32>,
     pub comment: Option<String>,
 }
 
@@ -222,7 +204,7 @@ fn table_statements(t: &Table, out: &mut Vec<String>, warnings: &mut Vec<String>
     let keyword = if t.foreign.is_some() { "FOREIGN TABLE" } else { "TABLE" };
     let (deferred, inline): (Vec<_>, Vec<_>) = t.constraints.iter().partition(|k| k.definition.ends_with(" NOT VALID"));
     let constraints = inline.iter().map(|k| format!("CONSTRAINT {} {}", ident(&k.name), k.definition));
-    out.extend(t.sequences.iter().map(create_sequence));
+    out.extend(t.owned_sequences.iter().map(create_sequence));
 
     let mut head = format!("CREATE {}{keyword} {name}", if t.unlogged { "UNLOGGED " } else { "" });
     match &t.parent {
@@ -235,7 +217,7 @@ fn table_statements(t: &Table, out: &mut Vec<String>, warnings: &mut Vec<String>
             head.push_str(&format!("\n    {bound}"));
         }
         parent => {
-            let columns = t.columns.iter().filter(|c| c.local).map(|c| if c.inherited.is_some() { merged_column(c) } else { column(c, &t.schema, &t.name) });
+            let columns = t.columns.iter().filter(|c| c.declared).map(|c| if c.inherited.is_some() { column_head(c) } else { column(c, &t.schema, &t.name) });
             let body: Vec<_> = columns.chain(constraints).collect();
             head.push_str(&format!(" (\n    {}\n)", body.join(",\n    ")));
             if let Parent::Inherits(parents) = parent {
@@ -260,10 +242,10 @@ fn table_statements(t: &Table, out: &mut Vec<String>, warnings: &mut Vec<String>
     }
     out.push(head);
 
-    out.extend(t.sequences.iter().map(|s| format!("ALTER SEQUENCE {} OWNED BY {name}.{}", qualified(&s.schema, &s.name), ident(&s.column))));
+    out.extend(t.owned_sequences.iter().map(|s| format!("ALTER SEQUENCE {} OWNED BY {name}.{}", qualified(&s.schema, &s.name), ident(&s.column))));
     out.extend(deferred.iter().map(|k| format!("ALTER TABLE {name} ADD CONSTRAINT {} {}", ident(&k.name), k.definition)));
     for c in &t.columns {
-        out.extend(column_changes(c, keyword, &name, !matches!(t.parent, Parent::Partition { .. }) && c.local && c.inherited.is_none()));
+        out.extend(column_changes(c, keyword, &name, !matches!(t.parent, Parent::Partition { .. }) && c.declared && c.inherited.is_none()));
     }
     indexes(&t.indexes, keyword, &t.schema, &name, out);
     match t.replica_identity {
@@ -291,8 +273,8 @@ fn table_statements(t: &Table, out: &mut Vec<String>, warnings: &mut Vec<String>
     for s in &t.statistics {
         let stat = qualified(&s.schema, &s.name);
         out.push(s.definition.clone());
-        if s.target != -1 {
-            out.push(format!("ALTER STATISTICS {stat} SET STATISTICS {}", s.target));
+        if let Some(target) = s.target {
+            out.push(format!("ALTER STATISTICS {stat} SET STATISTICS {target}"));
         }
         out.extend(comment(&format!("STATISTICS {stat}"), &s.comment));
     }
@@ -312,9 +294,8 @@ fn table_statements(t: &Table, out: &mut Vec<String>, warnings: &mut Vec<String>
     }
 }
 
-/// A replay lays out the parent's columns in the parent's order, then the table's own.
 fn in_replay_order(columns: &[Column]) -> bool {
-    let positions: Vec<i64> = columns.iter().map(|c| c.inherited.as_ref().map_or(i64::MAX, |p| p.position)).collect();
+    let positions: Vec<i64> = columns.iter().map(|c| c.inherited.as_ref().map_or(i64::MAX, |p| p.replay_order)).collect();
     positions.windows(2).all(|w| w[0] <= w[1])
 }
 
@@ -330,7 +311,7 @@ fn unscripted(u: Unscripted, name: &str) -> Vec<String> {
 }
 
 fn column(c: &Column, schema: &str, table: &str) -> String {
-    let mut out = merged_column(c);
+    let mut out = column_head(c);
     if let Some(identity) = &c.identity {
         out.push_str(&format!(" {}", identity_clause(identity, schema, table)));
     }
@@ -345,9 +326,7 @@ fn column(c: &Column, schema: &str, table: &str) -> String {
     out
 }
 
-/// A column the table also inherits takes its default and `NOT NULL` from the parent, so
-/// `column_changes` sets whatever differs.
-fn merged_column(c: &Column) -> String {
+fn column_head(c: &Column) -> String {
     let mut out = format!("{} {}", ident(&c.name), c.type_name);
     if let Some((schema, name)) = &c.collation {
         out.push_str(&format!(" COLLATE {}", if schema == "pg_catalog" { ident(name) } else { qualified(schema, name) }));
@@ -355,9 +334,6 @@ fn merged_column(c: &Column) -> String {
     out
 }
 
-/// The `ALTER ... ALTER COLUMN` statements that move a replayed column from what its
-/// declaration or its parent gives it to what the catalog says. `declared` is a column whose
-/// own definition already carries its default and `NOT NULL`.
 fn column_changes(c: &Column, keyword: &str, relation: &str, declared: bool) -> Vec<String> {
     let (default, not_null, storage, compression) = match &c.inherited {
         _ if declared => (c.default.as_ref(), c.not_null, &c.type_storage, ""),
@@ -371,8 +347,8 @@ fn column_changes(c: &Column, keyword: &str, relation: &str, declared: bool) -> 
     if c.not_null != not_null {
         changes.push(if c.not_null { "SET NOT NULL" } else { "DROP NOT NULL" }.into());
     }
-    if c.statistics != -1 {
-        changes.push(format!("SET STATISTICS {}", c.statistics));
+    if let Some(target) = c.statistics {
+        changes.push(format!("SET STATISTICS {target}"));
     }
     if &c.storage != storage {
         let kind = match c.storage.as_str() {
@@ -399,7 +375,6 @@ fn column_changes(c: &Column, keyword: &str, relation: &str, declared: bool) -> 
     changes.into_iter().map(|change| format!("ALTER {keyword} {relation} ALTER COLUMN {} {change}", ident(&c.name))).collect()
 }
 
-/// `name=value` pairs, as `pg_foreign_table` and `pg_attribute` store them.
 fn fdw_options(lead: &str, options: &[String]) -> String {
     if options.is_empty() {
         return String::new();
@@ -453,8 +428,6 @@ fn create_sequence(s: &Sequence) -> String {
     out
 }
 
-/// A replay names the identity's sequence `<table>_<column>_seq` in the table's schema unless
-/// told otherwise.
 fn identity_clause(i: &Identity, schema: &str, table: &str) -> String {
     let s = &i.sequence;
     let mut options = sequence_options(s);
@@ -528,7 +501,6 @@ pub fn routine(definition: &str, procedure: bool, signature: &str, description: 
     Ddl::complete(script(statements))
 }
 
-/// The index script of an index a constraint creates is the constraint.
 pub fn index_script(i: &Index, constraint: Option<&Constraint>, keyword: &str, schema: &str, relation: &str) -> Ddl {
     let mut statements: Vec<String> = constraint.map(|k| format!("ALTER {keyword} {relation} ADD CONSTRAINT {} {}", ident(&k.name), k.definition)).into_iter().collect();
     indexes(std::slice::from_ref(i), keyword, schema, relation, &mut statements);
@@ -659,7 +631,7 @@ mod tests {
     }
 
     fn col(name: &str, type_name: &str) -> Column {
-        Column { name: name.into(), type_name: type_name.into(), local: true, statistics: -1, storage: "x".into(), type_storage: "x".into(), ..Default::default() }
+        Column { name: name.into(), type_name: type_name.into(), declared: true, storage: "x".into(), type_storage: "x".into(), ..Default::default() }
     }
 
     #[test]
@@ -670,12 +642,12 @@ mod tests {
             comment: Some("it's".into()),
             columns: vec![
                 Column { not_null: true, identity: Some(Identity { always: false, sequence: sequence(1000, 10, 1, i64::MAX) }), ..col("id", "bigint") },
-                Column { collation: Some(("pg_catalog".into(), "C".into())), not_null: true, storage: "e".into(), statistics: 500, ..col("code", "text") },
+                Column { collation: Some(("pg_catalog".into(), "C".into())), not_null: true, storage: "e".into(), statistics: Some(500), ..col("code", "text") },
                 Column { default: Some("(price * qty)".into()), generated: Some(Generated::Stored), ..col("Total", "numeric(12,2)") },
                 Column { default: Some("'new'::text".into()), comment: Some("lifecycle".into()), compression: "l".into(), options: vec!["n_distinct=5".into()], ..col("status", "text") },
                 Column { not_null: true, ..col("seq", "bigserial") },
             ],
-            sequences: vec![Sequence { name: "old_seq".into(), start: 777, ..sequence(1, 1, 1, i64::MAX) }],
+            owned_sequences: vec![Sequence { name: "old_seq".into(), start: 777, ..sequence(1, 1, 1, i64::MAX) }],
             constraints: vec![
                 Constraint { name: "t_pkey".into(), definition: "PRIMARY KEY (id)".into(), comment: None },
                 Constraint { name: "positive".into(), definition: "CHECK ((id > 0)) NOT VALID".into(), comment: Some("checked later".into()) },
@@ -693,7 +665,7 @@ mod tests {
                 Policy { name: "own".into(), permissive: false, command: 'w', roles: vec!["Admins".into(), "app".into()], using: Some("(id > 0)".into()), check: Some("true".into()), comment: Some("p".into()) },
                 Policy { name: "all".into(), permissive: true, command: '*', ..Default::default() },
             ],
-            statistics: vec![Statistics { schema: "public".into(), name: "s".into(), definition: "CREATE STATISTICS public.s ON id, code FROM public.t".into(), target: 50, comment: None }],
+            statistics: vec![Statistics { schema: "public".into(), name: "s".into(), definition: "CREATE STATISTICS public.s ON id, code FROM public.t".into(), target: Some(50), comment: None }],
             ..Default::default()
         };
         assert_eq!(
@@ -768,7 +740,7 @@ COMMENT ON COLUMN public.t.status IS 'lifecycle';
 
     #[test]
     fn a_partition_tree_scripts_each_partition_after_its_parent_with_what_differs_from_it() {
-        let inherited = |default: Option<&str>| Some(Inherited { position: 1, default: default.map(Into::into), not_null: false, storage: "p".into(), compression: String::new() });
+        let inherited = |default: Option<&str>| Some(Inherited { replay_order: 1, default: default.map(Into::into), not_null: false, storage: "p".into(), compression: String::new() });
         let partition = |name: &str, columns: Vec<Column>| Table {
             schema: "public".into(),
             name: name.into(),
@@ -776,7 +748,7 @@ COMMENT ON COLUMN public.t.status IS 'lifecycle';
             parent: Parent::Partition { schema: "public".into(), name: "e".into(), bound: "FOR VALUES IN (1)".into() },
             ..Default::default()
         };
-        let v = Column { local: false, storage: "p".into(), type_storage: "p".into(), ..col("v", "integer") };
+        let v = Column { declared: false, storage: "p".into(), type_storage: "p".into(), ..col("v", "integer") };
         let leaf = Table {
             parent: Parent::Partition { schema: "public".into(), name: "e1".into(), bound: "DEFAULT".into() },
             ..partition("e1_rest", vec![Column { default: Some("7".into()), inherited: inherited(Some("7")), ..v.clone() }])
@@ -833,15 +805,15 @@ ALTER FOREIGN TABLE public.e2 ALTER COLUMN v OPTIONS (ADD column_name 'vv');
 
     #[test]
     fn an_inheritance_child_declares_its_own_columns_and_warns_when_a_replay_reorders_them() {
-        let from_base = |position: i64| Some(Inherited { position, default: None, not_null: false, storage: "x".into(), compression: String::new() });
+        let from_base = |position: i64| Some(Inherited { replay_order: position, default: None, not_null: false, storage: "x".into(), compression: String::new() });
         let t = Table {
             schema: "app".into(),
             name: "child".into(),
             columns: vec![
-                Column { local: false, inherited: from_base(1), default: Some("2".into()), ..col("id", "integer") },
+                Column { declared: false, inherited: from_base(1), default: Some("2".into()), ..col("id", "integer") },
                 Column { inherited: from_base(2), ..col("note", "text") },
                 col("extra", "text"),
-                Column { local: false, inherited: from_base(3), ..col("late", "integer") },
+                Column { declared: false, inherited: from_base(3), ..col("late", "integer") },
             ],
             parent: Parent::Inherits(vec![("app".into(), "base".into()), ("app".into(), "Other".into())]),
             unscripted: Unscripted { privileges: true, security_labels: true },
@@ -891,7 +863,7 @@ ALTER FOREIGN TABLE public.e2 ALTER COLUMN v OPTIONS (ADD column_name 'vv');
             name: "m".into(),
             materialized: true,
             query: " SELECT 1 AS day;".into(),
-            columns: vec![Column { statistics: 200, ..col("day", "integer") }],
+            columns: vec![Column { statistics: Some(200), ..col("day", "integer") }],
             indexes: vec![Index { name: "m_day".into(), definition: Some("CREATE UNIQUE INDEX m_day ON public.m USING btree (day)".into()), clustered: true, ..Default::default() }],
             ..Default::default()
         };

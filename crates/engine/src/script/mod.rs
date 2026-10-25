@@ -3,7 +3,6 @@ use crate::model::ObjectScript;
 pub mod postgres;
 pub mod tsql;
 
-/// A script and the properties it could not recreate.
 #[derive(Debug, Default, PartialEq, Eq)]
 pub struct Ddl {
     pub text: String,
@@ -16,7 +15,6 @@ impl Ddl {
     }
 }
 
-/// A warning is one comment line, so a newline in an object's name cannot end the comment.
 pub fn object_script(name: &str, ddl: Ddl) -> ObjectScript {
     let warnings: Vec<String> = ddl.warnings.iter().map(|w| w.replace(['\r', '\n'], " ")).collect();
     let mut text: String = warnings.iter().map(|w| format!("-- L1 Data could not script: {w}\n")).collect();

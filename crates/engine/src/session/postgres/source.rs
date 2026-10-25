@@ -23,14 +23,12 @@ const RELATION: &str = "SELECT c.relkind::text, n.nspname, c.relname, c.relpersi
      LEFT JOIN pg_foreign_table ft ON ft.ftrelid = c.oid LEFT JOIN pg_foreign_server fs ON fs.oid = ft.ftserver
      WHERE c.oid = $1";
 
-/// A column prints as `serial` only when its sequence has the name, type, and options that
-/// `serial` would give it. Any other sequence it owns is created by name.
 const COLUMNS: &str = "SELECT a.attname, coalesce(serial.name, format_type(a.atttypid, a.atttypmod)), a.attnotnull, a.attidentity::text, a.attgenerated::text,
         CASE WHEN serial.name IS NULL THEN pg_get_expr(d.adbin, d.adrelid) END,
         CASE WHEN a.attcollation <> t.typcollation THEN cn.nspname END, CASE WHEN a.attcollation <> t.typcollation THEN co.collname END,
         col_description(a.attrelid, a.attnum),
         ident.nspname, ident.relname, format_type(ident.seqtypid, NULL), ident.seqstart, ident.seqincrement, ident.seqmin, ident.seqmax, ident.seqcache, ident.seqcycle,
-        a.attislocal, a.attstattarget::int4, a.attstorage::text, t.typstorage::text, a.attcompression::text, coalesce(a.attoptions, '{}'), coalesce(a.attfdwoptions, '{}'),
+        a.attislocal, NULLIF(a.attstattarget, -1)::int4, a.attstorage::text, t.typstorage::text, a.attcompression::text, coalesce(a.attoptions, '{}'), coalesce(a.attfdwoptions, '{}'),
         pa.position, pa.def, pa.attnotnull, pa.attstorage::text, pa.attcompression::text, serial.seq
      FROM pg_attribute a
      JOIN pg_class c ON c.oid = a.attrelid
@@ -100,7 +98,7 @@ const POLICIES: &str = "SELECT p.polname, p.polpermissive, p.polcmd::text,
         pg_get_expr(p.polqual, p.polrelid), pg_get_expr(p.polwithcheck, p.polrelid), obj_description(p.oid, 'pg_policy')
      FROM pg_policy p WHERE p.polrelid = $1 ORDER BY p.polname";
 
-const STATISTICS: &str = "SELECT n.nspname, s.stxname, pg_get_statisticsobjdef(s.oid), coalesce(s.stxstattarget, -1)::int4, obj_description(s.oid, 'pg_statistic_ext')
+const STATISTICS: &str = "SELECT n.nspname, s.stxname, pg_get_statisticsobjdef(s.oid), NULLIF(s.stxstattarget, -1)::int4, obj_description(s.oid, 'pg_statistic_ext')
      FROM pg_statistic_ext s JOIN pg_namespace n ON n.oid = s.stxnamespace WHERE s.stxrelid = $1 ORDER BY s.stxname";
 
 const PARTITIONS: &str = "SELECT c.oid FROM pg_inherits i JOIN pg_class c ON c.oid = i.inhrelid
@@ -170,7 +168,6 @@ fn unscripted(r: &Row) -> ddl::Unscripted {
     ddl::Unscripted { privileges: r.get(16), security_labels: r.get(17) }
 }
 
-/// A partitioned table's script carries its whole partition tree.
 async fn table(tx: &Transaction<'_>, oid: u32, r: &Row) -> Result<ddl::Table, DetailError> {
     let params: &[&(dyn ToSql + Sync)] = &[&oid];
     let (columns, sequences, constraints, indexes, triggers, rules, policies, statistics, partitions) = tokio::try_join!(
@@ -209,7 +206,7 @@ async fn table(tx: &Transaction<'_>, oid: u32, r: &Row) -> Result<ddl::Table, De
         tablespace: r.get(14),
         comment: r.get(5),
         columns: columns.iter().map(column).collect(),
-        sequences: sequences
+        owned_sequences: sequences
             .iter()
             .filter(|s| !(s.get::<_, &str>(0) == schema && serials.iter().any(|n| n == s.get::<_, &str>(1))))
             .map(owned_sequence)
@@ -282,7 +279,7 @@ fn column(r: &Row) -> ddl::Column {
         "v" => Some(ddl::Generated::Virtual),
         _ => None,
     };
-    let inherited = r.get::<_, Option<i64>>(25).map(|position| ddl::Inherited { position, default: r.get(26), not_null: r.get(27), storage: r.get(28), compression: r.get(29) });
+    let inherited = r.get::<_, Option<i64>>(25).map(|position| ddl::Inherited { replay_order: position, default: r.get(26), not_null: r.get(27), storage: r.get(28), compression: r.get(29) });
     ddl::Column {
         name: r.get(0),
         type_name: r.get(1),
@@ -292,7 +289,7 @@ fn column(r: &Row) -> ddl::Column {
         generated,
         identity,
         comment: r.get(8),
-        local: r.get(18),
+        declared: r.get(18),
         inherited,
         statistics: r.get(19),
         storage: r.get(20),

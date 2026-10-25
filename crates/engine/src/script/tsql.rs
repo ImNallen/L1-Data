@@ -214,7 +214,6 @@ pub fn view(v: &View) -> Ddl {
     Ddl { text: parts.join("\n"), warnings }
 }
 
-/// `None` when SQL Server's index kind is one this script cannot create.
 pub fn index(i: &Index, table: &str) -> Option<Ddl> {
     let mut warnings = vec![];
     let mut text = index_text(i, table, &mut warnings)?;
