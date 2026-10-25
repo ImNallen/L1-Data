@@ -261,10 +261,12 @@ struct Frame {
     seen: bool,
     /// The first branch of a set operation names the output.
     first_output: Option<Output>,
+    /// The enclosing frame's clause when this one opened.
+    outer: Clause,
 }
 
 impl Frame {
-    fn new(parent: Option<usize>, query: bool, origin: Origin) -> Self {
+    fn new(parent: Option<usize>, query: bool, origin: Origin, outer: Clause) -> Self {
         Frame {
             parent,
             query,
@@ -279,6 +281,7 @@ impl Frame {
             sealed: false,
             seen: false,
             first_output: None,
+            outer,
         }
     }
 }
@@ -351,7 +354,7 @@ impl<'a> Walk<'a> {
             typed: typed_span,
             parts,
             line_start,
-            frames: vec![Frame::new(None, true, Origin::Statement)],
+            frames: vec![Frame::new(None, true, Origin::Statement, Clause::Start)],
             stack: vec![0],
             snapshot: None,
         })
@@ -640,7 +643,7 @@ impl<'a> Walk<'a> {
         if self.frames[parent].clause == Clause::Select {
             self.frames[parent].item_lexemes.push(i);
         }
-        self.frames.push(Frame::new(Some(parent), query, origin));
+        self.frames.push(Frame::new(Some(parent), query, origin, clause));
         self.stack.push(self.frames.len() - 1);
     }
 
@@ -894,12 +897,11 @@ impl<'a> Walk<'a> {
     }
 
     fn expect_in_group(&self, snap: &Snapshot, frame: &Frame) -> (Expect, Vec<&'static str>) {
-        let outer = frame.parent.map(|p| &self.frames[p]);
         let lead: Vec<&'static str> = if snap.seen { Vec::new() } else { vec!["SELECT"] };
-        match (frame.origin, outer.map(|o| o.clause)) {
+        match (frame.origin, frame.outer) {
             (Origin::CteColumns, _) => (Expect::Keyword, Vec::new()),
-            (_, Some(Clause::Relation { slot: Slot::Expect, .. })) => (Expect::Relation, lead),
-            (_, Some(Clause::Cte)) => (Expect::Keyword, lead),
+            (_, Clause::Relation { slot: Slot::Expect, .. }) => (Expect::Relation, lead),
+            (_, Clause::Cte) => (Expect::Keyword, lead),
             _ => {
                 let mut kw = lead;
                 kw.extend(EXPRESSION_WORDS);
@@ -1281,6 +1283,15 @@ mod tests {
         assert_eq!(derived("with x as (select id, name from a union select id, title from b) select * from x where |", Postgres).0, ["id", "name"]);
         assert_eq!(derived("with x as (update orders set total = 0 returning id) select * from x where |", Postgres), (vec![], vec![]));
         assert_eq!(pg("with x as (update orders set total = 0 returning id) select * from x where |").ctes, ["x"]);
+    }
+
+    #[test]
+    fn a_group_reads_the_clause_it_opened_in_not_the_text_after_the_cursor() {
+        let s = pg("select coalesce(|) from ");
+        assert_eq!((s.expect, s.functions.contains(&"abs")), (Expect::Expression, true));
+        assert_eq!(pg("select * from (|) x where a = 1").expect, Expect::Relation);
+        let s = pg("select t1.| from t1 union select b from t2 as x");
+        assert_eq!((refs(&s), s.qualifier.clone()), (vec![(Some("t1"), &table(None, "t1"))], Some(Qualifier::Relation { index: 0 })));
     }
 
     #[test]
