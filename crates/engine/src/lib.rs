@@ -195,7 +195,7 @@ impl Shared {
         let instance = self.instance(saved.id);
         let database = instance.as_ref().map_or(console.database.as_str(), |instance| instance.canonical_database(&console.database));
         let params = self.params(&saved, database)?;
-        let session = Session::open(&params, console.schema.as_deref(), &self.timezone).await?;
+        let session = Box::pin(Session::open(&params, console.schema.as_deref(), &self.timezone)).await?;
         Ok(console::IdleSession::new(session, saved))
     }
 
