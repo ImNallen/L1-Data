@@ -13,7 +13,7 @@ const script = fileURLToPath(new URL("./invoke.mjs", import.meta.url));
 const probe = (args) =>
   new Promise((resolve) => execFile(process.execPath, [script, ...args], (error, stdout, stderr) => resolve({ code: error?.code ?? 0, stdout, stderr })));
 
-async function fakeBridge({ finishAfterMs = 30, outcome = "Ok" } = {}) {
+async function fakeBridge({ finishAfterMs = 30, outcome = "Ok", replyAfterMs = 0 } = {}) {
   const calls = [];
   const streams = new Set();
   let nextRun = 1;
@@ -29,8 +29,8 @@ async function fakeBridge({ finishAfterMs = 30, outcome = "Ok" } = {}) {
       const command = req.url.replace("/invoke/", "");
       calls.push({ command, body });
       const runId = nextRun++;
-      res.end(JSON.stringify({ status: "ok", data: command === "console_run" ? { runId } : null }));
-      if (command !== "console_run") return;
+      setTimeout(() => res.end(JSON.stringify({ status: "ok", data: command === "console_run" ? { runId } : null })), replyAfterMs);
+      if (command !== "console_run" || finishAfterMs === null) return;
       setTimeout(() => {
         const event = { kind: "ConsoleChanged", run: { kind: "Finished", runId, outcome } };
         for (const stream of streams) stream.write(`data:${JSON.stringify(event)}\n\n`);
@@ -50,7 +50,7 @@ async function fakeBridge({ finishAfterMs = 30, outcome = "Ok" } = {}) {
 
 test("the original five-argument form sends one body to both sides", () => {
   const opts = parseOptions(["http://a/", "http://b", "connection_list", "{}", "3"]);
-  assert.deepEqual(opts, { bridges: ["http://a", "http://b"], command: "connection_list", runs: 3, bodies: ["{}", "{}"], wait: null, teardown: null, raw: null });
+  assert.deepEqual(opts, { bridges: ["http://a", "http://b"], command: "connection_list", runs: 3, bodies: ["{}", "{}"], wait: null, timeoutMs: 30000, teardown: null, raw: null });
 });
 
 test("per-side bodies replace the shared body", () => {
@@ -58,6 +58,7 @@ test("per-side bodies replace the shared body", () => {
   assert.deepEqual(opts.bodies, ["@a.json", "@b.json"]);
   assert.equal(opts.runs, 4);
   assert.equal(opts.wait, "timed");
+  assert.equal(parseOptions(["a", "b", "c", "1", "--body-a", "{}", "--body-b", "{}", "--wait", "untimed", "--timeout-ms", "500"]).timeoutMs, 500);
   assert.deepEqual(parseOptions(["a", "b", "c", "{}", "1", "--body-b", "{\"x\":1}"]).bodies, ["{}", "{\"x\":1}"]);
 });
 
@@ -75,6 +76,9 @@ test("bad arguments are refused", () => {
     ["a", "b", "c", "{}", "2", "--wait", "soon"],
     ["a", "b", "c", "{}", "2", "--teardown", "d"],
     ["a", "b", "c", "{}", "2", "--teardown-body", "{}"],
+    ["a", "b", "c", "{}", "2", "--wait", "timed", "--timeout-ms", "0"],
+    ["a", "b", "c", "{}", "2", "--wait", "timed", "--timeout-ms", "soon"],
+    ["a", "b", "c", "{}", "2", "--timeout-ms", "500"],
     ["a", "b", "c", "{}", "2", "--body"],
     ["a", "b", "c", "{}", "2", "--bogus", "x"],
   ];
@@ -144,6 +148,46 @@ test("a run that does not finish Ok fails the probe", async () => {
     const { code, stderr } = await probe([a.url, b.url, "console_run", "{}", "2", "--wait", "untimed"]);
     assert.equal(code, 1);
     assert.match(stderr, /finished Failed/);
+  } finally {
+    a.close();
+    b.close();
+  }
+});
+
+test("a timed wait never ends before the call returns", async () => {
+  const [a, b] = await Promise.all([fakeBridge({ finishAfterMs: 0, replyAfterMs: 100 }), fakeBridge({ finishAfterMs: 0, replyAfterMs: 100 })]);
+  try {
+    const { code, stdout, stderr } = await probe([a.url, b.url, "console_run", "{}", "2", "--wait", "timed"]);
+    assert.equal(code, 0, stderr);
+    const summary = JSON.parse(stdout);
+    assert.ok(summary.a.p50Ms >= 100 && summary.b.p50Ms >= 100, stdout);
+  } finally {
+    a.close();
+    b.close();
+  }
+});
+
+test("a run that never finishes fails the probe once the timeout passes, naming the run", async () => {
+  const [a, b] = await Promise.all([fakeBridge({ finishAfterMs: null }), fakeBridge()]);
+  try {
+    const started = performance.now();
+    const { code, stderr } = await probe([a.url, b.url, "console_run", "{}", "2", "--wait", "untimed", "--timeout-ms", "300"]);
+    assert.equal(code, 1);
+    assert.match(stderr, /run 1 did not finish within 300 ms/);
+    assert.ok(performance.now() - started < 5000, "the probe gave up instead of hanging");
+  } finally {
+    a.close();
+    b.close();
+  }
+});
+
+test("a shared body passed with both per-side bodies is ignored with a warning", async () => {
+  const [a, b] = await Promise.all([fakeBridge(), fakeBridge()]);
+  try {
+    const { code, stderr } = await probe([a.url, b.url, "noop", '{"shared":1}', "1", "--body-a", '{"side":"A"}', "--body-b", '{"side":"B"}']);
+    assert.equal(code, 0, stderr);
+    assert.match(stderr, /the shared body is ignored/);
+    assert.ok(a.calls.every((call) => call.body === '{"side":"A"}') && b.calls.every((call) => call.body === '{"side":"B"}'));
   } finally {
     a.close();
     b.close();
