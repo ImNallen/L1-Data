@@ -191,6 +191,16 @@ GO
 CREATE INDEX IX_parted ON dbo.parted (id) WITH (STATISTICS_INCREMENTAL = ON) ON ps_hostile (id);
 CREATE INDEX IX_parted_kind ON dbo.parted (kind) ON ps_hostile (id);
 GO
+CREATE STATISTICS st_parted ON dbo.parted (kind) WITH INCREMENTAL = ON;
+CREATE STATISTICS [st ü] ON [we]]ird s].[Par ent] ([select], [Id]) WHERE [Id] > 0 WITH NORECOMPUTE, AUTO_DROP = ON;
+CREATE STATISTICS st_total ON [we]]ird s].[Par ent] ([total]);
+CREATE STATISTICS st_view ON dbo.v_bound ([select]);
+GO
+SET NOCOUNT ON;
+INSERT dbo.lob (id) SELECT TOP 5000 ROW_NUMBER() OVER (ORDER BY (SELECT 1)) FROM sys.all_columns a CROSS JOIN sys.all_columns b;
+GO
+CREATE STATISTICS st_sampled ON dbo.lob (id) WITH SAMPLE 50 PERCENT, PERSIST_SAMPLE_PERCENT = ON;
+GO
 CREATE TABLE dbo.node_t (id int) AS NODE;
 GO
 CREATE USER app_reader WITHOUT LOGIN;

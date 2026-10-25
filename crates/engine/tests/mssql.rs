@@ -1032,6 +1032,10 @@ impl Harness {
                 FROM sys.extended_properties ep WHERE ep.class IN (1,2,7) AND ep.major_id=o.object_id AND SQL_VARIANT_PROPERTY(ep.value,'BaseType') IN ('nvarchar','varchar')
                   AND NOT EXISTS (SELECT 1 FROM sys.indexes x WHERE ep.class=7 AND x.object_id=ep.major_id AND x.index_id=ep.minor_id AND x.type=3)
                 UNION ALL
+                SELECT CONCAT(N'statistics ',st.name,' ',st.no_recompute,' ',st.has_filter,' ',st.filter_definition,' ',st.auto_drop,' ',
+                              (SELECT STRING_AGG(COL_NAME(sc.object_id,sc.column_id),',') WITHIN GROUP (ORDER BY sc.stats_column_id) FROM sys.stats_columns sc WHERE sc.object_id=st.object_id AND sc.stats_id=st.stats_id))
+                FROM sys.stats st WHERE st.object_id=o.object_id AND st.user_created=1
+                UNION ALL
                 SELECT CONCAT(N'classification ',COL_NAME(sc.major_id,sc.minor_id),' ',sc.label,' ',sc.label_id,' ',sc.information_type,' ',sc.information_type_id,' ',sc.rank)
                 FROM sys.sensitivity_classifications sc WHERE sc.class=1 AND sc.major_id=o.object_id
              ) f(fact)
@@ -1085,7 +1089,9 @@ async fn hostile_object_scripts_replay_every_property_or_warn() {
                     "partition scheme [ps_hostile] for index [IX_parted] on [dbo].[parted]",
                     "STATISTICS_INCREMENTAL for index [IX_parted] on [dbo].[parted]",
                     "partition scheme [ps_hostile] for index [IX_parted_kind] on [dbo].[parted]",
+                    "INCREMENTAL for statistics [st_parted] on [dbo].[parted]",
                 ],
+                "lob" => vec!["PERSIST_SAMPLE_PERCENT for statistics [st_sampled] on [dbo].[lob]"],
                 "temporal_history" => vec!["history table role for [dbo].[temporal] on [dbo].[temporal_history]"],
                 "Par ent" => vec!["privileges on [we]]ird s].[Par ent] (DELETE denied to [app_reader], SELECT granted to [app_reader], UPDATE ([select]) granted with grant option to [app_reader])"],
                 "v_bound" => vec!["privileges on [dbo].[v_bound] (SELECT granted to [public])"],
