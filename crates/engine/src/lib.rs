@@ -863,7 +863,7 @@ impl Engine {
             host: d.host.trim().to_owned(),
             port: d.port,
             database: d.database.trim().to_owned(),
-            user: d.user.trim().to_owned(),
+            user: if entra { String::new() } else { d.user.trim().to_owned() },
             ssl_mode: d.ssl_mode,
             ca_cert_path: d.ca_cert_path.filter(|p| !p.trim().is_empty()),
             has_password,

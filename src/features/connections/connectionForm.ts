@@ -78,6 +78,10 @@ export function signsInWithEntra(fields: Fields): boolean {
   return toSqlServerAuth(fields) === "EntraAzureCli";
 }
 
+export function toUser(fields: Fields): string {
+  return signsInWithEntra(fields) ? "" : fields.user.trim();
+}
+
 export function entraNeedsVerifiedTls(fields: Fields): boolean {
   return signsInWithEntra(fields) && fields.sslMode === "Require";
 }

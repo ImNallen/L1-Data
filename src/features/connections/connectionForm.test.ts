@@ -9,6 +9,7 @@ import {
   sshValid,
   toSqlServerAuth,
   toSshDraft,
+  toUser,
   type FormState,
   type PasswordEdit,
 } from "./connectionForm";
@@ -136,6 +137,12 @@ it("sends a sign-in choice only for SQL Server", () => {
   expect(toSqlServerAuth(initialFields(undefined, "SqlServer"))).toBe("SqlLogin");
   expect(toSqlServerAuth({ ...entra, databaseKind: "Postgres" })).toBeNull();
   expect(signsInWithEntra({ ...entra, databaseKind: "Postgres" })).toBe(false);
+});
+
+it("sends no user name for Entra, whose user field is hidden", () => {
+  const sqlServer = initialFields(undefined, "SqlServer");
+  expect(toUser({ ...sqlServer, user: " sa " })).toBe("sa");
+  expect(toUser({ ...sqlServer, sqlServerAuth: "EntraAzureCli" })).toBe("");
 });
 
 it("refuses Entra over TLS that skips the certificate check", () => {

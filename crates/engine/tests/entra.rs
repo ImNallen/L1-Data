@@ -85,6 +85,8 @@ async fn an_entra_connection_needs_no_user_and_saves_no_password() {
     let h = Harness::with_az("ok").await;
     let saved = h.engine.save_connection(entra("db.example.net", 1433)).await.unwrap();
     assert_eq!((saved.sql_server_auth, saved.has_password, saved.user.as_str()), (Some(SqlServerAuth::EntraAzureCli), false, ""));
+    let hidden_user = h.engine.save_connection(ConnectionDraft { id: Some(saved.id), user: "sa".into(), ..entra("db.example.net", 1433) }).await.unwrap();
+    assert_eq!(hidden_user.user, "", "the previous stable must find no user to try with an empty password");
     let login = h.engine.save_connection(ConnectionDraft { id: Some(saved.id), sql_server_auth: Some(SqlServerAuth::SqlLogin), ..entra("db.example.net", 1433) }).await;
     assert!(matches!(login, Err(SaveError::Invalid { message }) if message == "user is required"));
     let postgres = ConnectionDraft { database_kind: DatabaseKind::Postgres, user: "postgres".into(), ..entra("localhost", 5432) };
