@@ -11,6 +11,7 @@ import type {
   TableQuery,
   TableScript,
   TabSnapshot,
+  TxnError,
   WriteConfirmation,
 } from "../../ipc/bindings";
 import { connectionConfig } from "../../testing/connections";
@@ -38,6 +39,7 @@ import {
   submitEdits,
   revertEdits,
   cancelActive,
+  endTransaction,
   installRunBehavior,
   setTablePage,
   updateTableQuery,
@@ -1036,5 +1038,58 @@ describe("staged edits the engine asks about", () => {
     useWorkspace.getState().answer("btn");
     await again;
     expect(useTableEdits.getState().byTab[id]).toBeUndefined();
+  });
+});
+
+describe("a commit the engine asks about", () => {
+  const asked: TxnError = {
+    kind: "ConfirmWrites",
+    confirmation: { connection: "prod-postgres", database: "shop", unit: "Statement", writes: 1, statements: ["insert into t values (1)"], digest: "c1" },
+  };
+
+  function queueCommitReplies(...replies: (TxnError | null)[]) {
+    const commits: unknown[] = [];
+    mockIPC((cmd, args) => {
+      if (cmd === "script_outline") return { statements: [], atCursor: null, unitKind: "Statement" };
+      if (cmd !== "console_commit") return null;
+      commits.push(args);
+      const reply = replies.shift();
+      return reply ? Promise.reject(reply) : null;
+    });
+    return commits;
+  }
+
+  const question = () => {
+    const overlay = useWorkspace.getState().overlay;
+    return overlay.kind === "ask" ? overlay : null;
+  };
+
+  it("shows the engine's question, then commits with its digest", async () => {
+    const id = openSqlTab({ db: { connectionId: "prod", database: "shop" }, text: "" });
+    const commits = queueCommitReplies(asked);
+    const done = endTransaction(id, "commit");
+    await vi.waitFor(() => expect(question()).not.toBeNull());
+    expect(question()).toMatchObject({
+      title: "Commit 1 write on Production?",
+      body: "This transaction holds a write to prod-postgres / shop that ran before the connection was marked Production.",
+      statements: ["insert into t values (1)"],
+    });
+    expect(question()?.choices).toEqual([{ id: "btn", label: "Commit writes", variant: "danger" }]);
+    useWorkspace.getState().answer("btn");
+    await done;
+    expect(commits).toEqual([
+      { tabId: id, confirmed: null },
+      { tabId: id, confirmed: "c1" },
+    ]);
+  });
+
+  it("commits nothing when the question is cancelled", async () => {
+    const id = openSqlTab({ db: { connectionId: "prod", database: "shop" }, text: "" });
+    const commits = queueCommitReplies(asked);
+    const done = endTransaction(id, "commit");
+    await vi.waitFor(() => expect(question()).not.toBeNull());
+    useWorkspace.getState().close();
+    await done;
+    expect(commits).toEqual([{ tabId: id, confirmed: null }]);
   });
 });

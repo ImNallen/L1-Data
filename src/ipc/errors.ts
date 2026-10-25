@@ -136,6 +136,8 @@ export function txnErrorText(e: TxnError): string {
       return "The transaction had failed, so it was rolled back instead.";
     case "Query":
       return e.message;
+    case "ConfirmWrites":
+      return `Nothing was committed. This commit keeps writes on Production on ${e.confirmation.connection} / ${e.confirmation.database} and needs your confirmation.`;
     default: {
       const unreachable: never = e;
       return unreachable;

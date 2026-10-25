@@ -267,8 +267,31 @@ export function cancelActive(): boolean {
   return true;
 }
 
+/** The answer holds only for the target it named, so a target changed meanwhile drops the commit. */
+async function commitConfirmed(tab: Tab, asked: WriteConfirmation): Promise<boolean> {
+  const n = asked.writes;
+  const rest = n > asked.statements.length ? ` The first ${asked.statements.length} are shown.` : "";
+  const ok = await confirm({
+    title: `Commit ${plural(n, "write")} on Production?`,
+    body: `This transaction holds ${n === 1 ? "a write" : `${n} writes`} to ${asked.connection} / ${asked.database} that ran before the connection was marked Production.${rest}`,
+    statements: asked.statements,
+    confirmLabel: "Commit writes",
+  });
+  return ok && ws().tabs[tab.id]?.console === tab.console;
+}
+
 export async function endTransaction(tabId: TabId, verb: "commit" | "rollback"): Promise<void> {
-  const res = verb === "commit" ? await commands.consoleCommit(tabId) : await commands.consoleRollback(tabId);
+  if (verb === "rollback") {
+    const res = await commands.consoleRollback(tabId);
+    if (res.status === "error") notify(txnErrorText(res.error));
+    return;
+  }
+  const tab = ws().tabs[tabId];
+  let res = await commands.consoleCommit(tabId, null);
+  while (tab && res.status === "error" && res.error.kind === "ConfirmWrites") {
+    if (!(await commitConfirmed(tab, res.error.confirmation))) return;
+    res = await commands.consoleCommit(tabId, res.error.confirmation.digest);
+  }
   if (res.status === "error") notify(txnErrorText(res.error));
 }
 
