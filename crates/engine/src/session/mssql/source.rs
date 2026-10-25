@@ -80,10 +80,15 @@ impl MsSession {
                 let f = self.features().await?;
                 let table = self.rows(&format!("SELECT s.name,o.name FROM sys.objects o JOIN sys.schemas s ON s.schema_id=o.schema_id WHERE o.object_id={oid}")).await.map_err(failed)?;
                 let table = table.first().ok_or(DetailError::Gone)?;
-                let indexes = self.indexes(oid, &format!("i.name={}", quote_literal(name)), &f).await?;
+                let table = ddl::qualified(&text(table, 0)?, &text(table, 1)?);
+                let literal = quote_literal(name);
+                let props = self.properties(&format!("((ep.class=7 AND ep.major_id={oid} AND i.name={literal}) OR (ep.class=1 AND c.parent_object_id={oid} AND c.name={literal}))")).await?;
+                if let Some(key) = self.keys(oid, &format!("k.name={literal}"), &f).await?.first() {
+                    return Ok(script::object_script(name, ddl::key_script(key, &table, &props)));
+                }
+                let indexes = self.indexes(oid, &format!("i.name={literal}"), &f).await?;
                 let index = indexes.first().ok_or(DetailError::Gone)?;
-                let ddl = ddl::index(index, &ddl::qualified(&text(table, 0)?, &text(table, 1)?))
-                    .ok_or_else(|| refused(format!("Only clustered, nonclustered, and columnstore indexes can be scripted, and {name} is none of these.")))?;
+                let ddl = ddl::index(index, &table, &props).ok_or_else(|| refused(format!("Only clustered, nonclustered, and columnstore indexes can be scripted, and {name} is none of these.")))?;
                 Ok(script::object_script(name, ddl))
             }
         }
@@ -155,7 +160,7 @@ impl MsSession {
                     name: name.clone(),
                     ansi_nulls: bit(r, 3)?,
                     columns: self.columns(oid).await?,
-                    keys: self.keys(oid, f).await?,
+                    keys: self.keys(oid, "1=1", f).await?,
                     foreign_keys: self.foreign_keys(oid).await?,
                     checks: self.checks(oid).await?,
                     indexes: self.indexes(oid, "i.is_primary_key=0 AND i.is_unique_constraint=0", f).await?,
@@ -300,7 +305,7 @@ impl MsSession {
             .collect()
     }
 
-    async fn keys(&mut self, oid: i32, f: &Features) -> Result<Vec<ddl::Key>, DetailError> {
+    async fn keys(&mut self, oid: i32, filter: &str, f: &Features) -> Result<Vec<ddl::Key>, DetailError> {
         let rows = self
             .rows(&format!(
                 "SELECT k.name,k.type,i.type,c.name,ic.is_descending_key,{} FROM sys.key_constraints k
@@ -308,7 +313,7 @@ impl MsSession {
                  {STORAGE_JOINS}
                  JOIN sys.index_columns ic ON ic.object_id=i.object_id AND ic.index_id=i.index_id
                  JOIN sys.columns c ON c.object_id=ic.object_id AND c.column_id=ic.column_id
-                 WHERE k.parent_object_id={oid} AND ic.key_ordinal>0
+                 WHERE k.parent_object_id={oid} AND ic.key_ordinal>0 AND {filter}
                  ORDER BY CASE k.type WHEN 'PK' THEN 0 ELSE 1 END,k.name,ic.key_ordinal",
                 storage_columns(f)
             ))

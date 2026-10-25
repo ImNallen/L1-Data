@@ -103,6 +103,8 @@ CREATE TABLE dbo.refd (a int NOT NULL, b int NOT NULL, CONSTRAINT UQ_refd UNIQUE
 GO
 ALTER TABLE dbo.refd WITH NOCHECK ADD CONSTRAINT CK_refd CHECK (a > 0);
 GO
+EXEC sys.sp_addextendedproperty N'MS_Description', N'the key', N'SCHEMA', N'dbo', N'TABLE', N'refd', N'CONSTRAINT', N'UQ_refd';
+GO
 CREATE TABLE dbo.heap_pk (id int NOT NULL CONSTRAINT PK_heap PRIMARY KEY NONCLUSTERED, c int) WITH (DATA_COMPRESSION = PAGE);
 GO
 ALTER TABLE dbo.heap_pk SET (LOCK_ESCALATION = DISABLE);

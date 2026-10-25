@@ -214,13 +214,28 @@ pub fn view(v: &View) -> Ddl {
     Ddl { text: parts.join("\n"), warnings }
 }
 
-pub fn index(i: &Index, table: &str) -> Option<Ddl> {
+pub fn index(i: &Index, table: &str, props: &[Property]) -> Option<Ddl> {
     let mut warnings = vec![];
-    let mut text = index_text(i, table, &mut warnings)?;
-    if i.storage.disabled {
-        text.push_str(&disable(table, &[i.name.as_str()]));
+    let text = index_text(i, table, &mut warnings)?;
+    Some(standalone(text, &i.name, i.storage.disabled, table, props, warnings))
+}
+
+/// A key's index opens as the constraint, because a unique index would replay without it.
+pub fn key_script(k: &Key, table: &str, props: &[Property]) -> Ddl {
+    let mut warnings = vec![];
+    let text = format!("ALTER TABLE {table} ADD {};\nGO\n", key(k, table, &mut warnings));
+    standalone(text, &k.name, k.storage.disabled, table, props, warnings)
+}
+
+fn standalone(mut text: String, name: &str, disabled: bool, table: &str, props: &[Property], mut warnings: Vec<String>) -> Ddl {
+    if let Some(properties) = properties(props, &mut warnings) {
+        text.push('\n');
+        text.push_str(&properties);
     }
-    Some(Ddl { text, warnings })
+    if disabled {
+        text.push_str(&disable(table, &[name]));
+    }
+    Ddl { text, warnings }
 }
 
 pub fn module(m: &Module) -> Ddl {
@@ -751,7 +766,7 @@ GO
     #[test]
     fn columnstore_indexes_keep_order_filter_and_options_under_the_index_set_options() {
         let cci = Index { order: vec!["id".into()], storage: Storage { compression: Some("COLUMNSTORE_ARCHIVE".into()), compression_delay: Some(10), ..Storage::default() }, ..index_on("CCI", 5, &[]) };
-        assert_eq!(index(&cci, "[dbo].[c]"), Some(Ddl::complete("CREATE CLUSTERED COLUMNSTORE INDEX [CCI] ON [dbo].[c] ORDER ([id]) WITH (DATA_COMPRESSION = COLUMNSTORE_ARCHIVE, COMPRESSION_DELAY = 10);\nGO\n".into())));
+        assert_eq!(index(&cci, "[dbo].[c]", &[]), Some(Ddl::complete("CREATE CLUSTERED COLUMNSTORE INDEX [CCI] ON [dbo].[c] ORDER ([id]) WITH (DATA_COMPRESSION = COLUMNSTORE_ARCHIVE, COMPRESSION_DELAY = 10);\nGO\n".into())));
         let ncci = Index {
             include: vec!["id".into(), "a]b".into()],
             filter: Some("([id]>(0))".into()),
@@ -759,7 +774,7 @@ GO
             ..index_on("NCCI", 6, &[])
         };
         assert_eq!(
-            index(&ncci, "[dbo].[c]"),
+            index(&ncci, "[dbo].[c]", &[]),
             Some(Ddl::complete(format!("{INDEX_OPTIONS}CREATE NONCLUSTERED COLUMNSTORE INDEX [NCCI] ON [dbo].[c] ([id], [a]]b]) WHERE ([id]>(0));\nGO\n")))
         );
     }
@@ -773,11 +788,25 @@ GO
             ..index_on("IX opts", 2, &["g"])
         };
         assert_eq!(
-            index(&i, "[dbo].[t]"),
+            index(&i, "[dbo].[t]", &[]),
             Some(Ddl::complete(
                 "CREATE UNIQUE NONCLUSTERED INDEX [IX opts] ON [dbo].[t] ([g] ASC) INCLUDE ([t]) WITH (PAD_INDEX = ON, IGNORE_DUP_KEY = ON, FILLFACTOR = 70, ALLOW_ROW_LOCKS = OFF, ALLOW_PAGE_LOCKS = OFF, DATA_COMPRESSION = ROW);\nGO\nALTER INDEX [IX opts] ON [dbo].[t] DISABLE;\nGO\n".into()
             ))
         );
+    }
+
+    #[test]
+    fn a_key_index_opens_as_its_constraint_with_its_options_properties_and_disabled_state() {
+        let k = Key { name: "UQ_refd".into(), primary: false, clustered: false, columns: vec![("a".into(), false), ("b".into(), true)], storage: Storage { ignore_dup_key: true, deny_page_locks: true, disabled: true, ..Storage::default() } };
+        let props = [property("MS_Description", "the key", &[("SCHEMA", "dbo"), ("TABLE", "refd"), ("CONSTRAINT", "UQ_refd")])];
+        assert_eq!(
+            key_script(&k, "[dbo].[refd]", &props),
+            Ddl::complete(
+                "ALTER TABLE [dbo].[refd] ADD CONSTRAINT [UQ_refd] UNIQUE NONCLUSTERED ([a] ASC, [b] DESC) WITH (IGNORE_DUP_KEY = ON, ALLOW_PAGE_LOCKS = OFF);\nGO\n\nEXEC sys.sp_addextendedproperty @name = N'MS_Description', @value = N'the key', @level0type = N'SCHEMA', @level0name = N'dbo', @level1type = N'TABLE', @level1name = N'refd', @level2type = N'CONSTRAINT', @level2name = N'UQ_refd';\nGO\nALTER INDEX [UQ_refd] ON [dbo].[refd] DISABLE;\nGO\n".into()
+            )
+        );
+        let pk = Key { name: "PK_tickets".into(), primary: true, clustered: true, columns: vec![("id".into(), false)], storage: Storage::default() };
+        assert_eq!(key_script(&pk, "[dbo].[tickets]", &[]).text, "ALTER TABLE [dbo].[tickets] ADD CONSTRAINT [PK_tickets] PRIMARY KEY CLUSTERED ([id] ASC);\nGO\n");
     }
 
     #[test]
@@ -786,7 +815,7 @@ GO
         let ddl = table(&t);
         assert_eq!(ddl.warnings, ["XML index [IX x] on [dbo].[t]", "spatial index [SIX] on [dbo].[t]", "hash index [H] on [dbo].[t]", "index of type 9 [Q] on [dbo].[t]"]);
         assert!(ddl.text.ends_with("GO\n\nCREATE NONCLUSTERED INDEX [ok] ON [dbo].[t] ([id] ASC);\nGO\n"), "{}", ddl.text);
-        assert_eq!(index(&index_on("IX x", 3, &["x"]), "[dbo].[t]"), None);
+        assert_eq!(index(&index_on("IX x", 3, &["x"]), "[dbo].[t]", &[]), None);
     }
 
     #[test]

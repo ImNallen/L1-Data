@@ -955,6 +955,8 @@ async fn object_scripts_replay_into_an_empty_database_with_the_same_catalog() {
         assert!(text.starts_with("SET ANSI_NULLS ON\nGO\nSET QUOTED_IDENTIFIER ON\nGO\nCREATE   PROCEDURE dbo.cancel_order @order_id int AS\n") && text.ends_with("END;\nGO\n"), "{text}");
         let index = h.engine.object_script(h.db(), ScriptTarget::Index { relation_oid: relation("dbo", "orders"), name: "IX_orders_customer".into() }).await.unwrap();
         assert_eq!((index.title.as_str(), index.text.as_str()), ("IX_orders_customer.sql", "CREATE NONCLUSTERED INDEX [IX_orders_customer] ON [dbo].[orders] ([customer_id] ASC);\nGO\n"));
+        let pk = h.engine.object_script(h.db(), ScriptTarget::Index { relation_oid: relation("dbo", "tickets"), name: "PK_tickets".into() }).await.unwrap();
+        assert_eq!(pk.text, "ALTER TABLE [dbo].[tickets] ADD CONSTRAINT [PK_tickets] PRIMARY KEY CLUSTERED ([id] ASC);\nGO\n");
         let trigger = h.engine.object_script(h.db(), ScriptTarget::Trigger { relation_oid: relation("dbo", "tickets"), name: "tickets_touch".into() }).await.unwrap();
         assert!(trigger.text.contains("CREATE   TRIGGER dbo.tickets_touch ON dbo.tickets AFTER UPDATE AS"), "{}", trigger.text);
         assert!(matches!(h.engine.object_script(h.db(), ScriptTarget::Index { relation_oid: relation("dbo", "orders"), name: "missing".into() }).await, Err(DetailError::Gone)));
@@ -1125,10 +1127,17 @@ async fn hostile_object_scripts_replay_every_property_or_warn() {
         let schema_oid = |name: &str| catalog.schemas.iter().flat_map(|s| &s.relations).find(|r| r.name == name).unwrap().oid;
         let xml = src.engine.object_script(db.clone(), ScriptTarget::Index { relation_oid: schema_oid("warned"), name: "IX x".into() }).await;
         assert_eq!(refusal(xml), "Only clustered, nonclustered, and columnstore indexes can be scripted, and IX x is none of these.");
+        let unique = src.engine.object_script(db.clone(), ScriptTarget::Index { relation_oid: schema_oid("refd"), name: "UQ_refd".into() }).await.unwrap();
+        assert_eq!(
+            unique.text,
+            "ALTER TABLE [dbo].[refd] ADD CONSTRAINT [UQ_refd] UNIQUE NONCLUSTERED ([a] ASC, [b] ASC) WITH (IGNORE_DUP_KEY = ON, ALLOW_PAGE_LOCKS = OFF, DATA_COMPRESSION = PAGE);\nGO\n\nEXEC sys.sp_addextendedproperty @name = N'MS_Description', @value = N'the key', @level0type = N'SCHEMA', @level0name = N'dbo', @level1type = N'TABLE', @level1name = N'refd', @level2type = N'CONSTRAINT', @level2name = N'UQ_refd';\nGO\n"
+        );
+        let pk = src.engine.object_script(db.clone(), ScriptTarget::Index { relation_oid: schema_oid("Par ent"), name: "PK Par ent".into() }).await.unwrap();
+        assert_eq!(pk.text, "ALTER TABLE [we]]ird s].[Par ent] ADD CONSTRAINT [PK Par ent] PRIMARY KEY NONCLUSTERED ([Id] DESC) WITH (FILLFACTOR = 80);\nGO\n");
         let filtered = src.engine.object_script(db.clone(), ScriptTarget::Index { relation_oid: schema_oid("Par ent"), name: "UX ü".into() }).await.unwrap();
         assert_eq!(
             filtered.text,
-            "SET ANSI_NULLS, ANSI_PADDING, ANSI_WARNINGS, ARITHABORT, CONCAT_NULL_YIELDS_NULL, QUOTED_IDENTIFIER ON;\nSET NUMERIC_ROUNDABORT OFF;\nGO\nCREATE UNIQUE NONCLUSTERED INDEX [UX ü] ON [we]]ird s].[Par ent] ([unicode ü] ASC) WHERE ([unicode ü] IS NOT NULL);\nGO\n"
+            "SET ANSI_NULLS, ANSI_PADDING, ANSI_WARNINGS, ARITHABORT, CONCAT_NULL_YIELDS_NULL, QUOTED_IDENTIFIER ON;\nSET NUMERIC_ROUNDABORT OFF;\nGO\nCREATE UNIQUE NONCLUSTERED INDEX [UX ü] ON [we]]ird s].[Par ent] ([unicode ü] ASC) WHERE ([unicode ü] IS NOT NULL);\nGO\n\nEXEC sys.sp_addextendedproperty @name = N'MS_Description', @value = N'unique when set', @level0type = N'SCHEMA', @level0name = N'we]ird s', @level1type = N'TABLE', @level1name = N'Par ent', @level2type = N'INDEX', @level2name = N'UX ü';\nGO\n"
         );
     })
     .catch_unwind()
