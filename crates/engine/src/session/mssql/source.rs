@@ -500,7 +500,7 @@ fn foreign_keys_from(rows: &[Row]) -> Result<Vec<ddl::ForeignKey>, DetailError> 
 /// Clustered indexes come first, because a view's other indexes need its clustered index.
 fn indexes_sql(oid: i32, filter: &str, f: &Features) -> String {
     format!(
-        "SELECT i.name,i.is_unique,i.type,i.filter_definition,c.name,ic.is_descending_key,ic.is_included_column,{},o.type,{},c.is_computed,i.has_filter
+        "SELECT i.name,i.is_unique,i.type,i.filter_definition,c.name,ic.is_descending_key,ic.is_included_column,{},o.type,{},c.is_computed,i.has_filter,ic.key_ordinal
          FROM sys.indexes i JOIN sys.objects o ON o.object_id=i.object_id
          {STORAGE_JOINS}
          JOIN sys.index_columns ic ON ic.object_id=i.object_id AND ic.index_id=i.index_id
@@ -537,17 +537,22 @@ fn indexes_from(rows: &[Row]) -> Result<Vec<ddl::Index>, DetailError> {
                 (i, order)
             }
         };
-        index.computed |= bit(r, 24)?;
         let column = text(r, 4)?;
         let ordinal: u32 = number(r, 7).map_err(failed)?;
         if ordinal > 0 {
             order.push((ordinal, column.clone()));
         }
+        // SQL Server lists the partitioning column of an aligned index with key ordinal 0, though
+        // it is neither a key nor included.
+        let key = number::<u8>(r, 26).map_err(failed)? > 0;
         if bit(r, 6)? {
             index.include.push(column);
-        } else {
+        } else if key {
             index.keys.push((column, bit(r, 5)?));
+        } else {
+            continue;
         }
+        index.computed |= bit(r, 24)?;
     }
     Ok(indexes
         .into_iter()
