@@ -15,8 +15,8 @@ pub struct Target<'a> {
 impl Target<'_> {
     fn on_production(&self) -> bool {
         let production = |c: &ConnectionConfig| c.environment == Some(Environment::Production);
-        let server = |c: &ConnectionConfig| (c.host.clone(), c.port, c.ssh.clone());
-        let live_session_still_reaches_the_old_server = server(self.saved) != server(self.live);
+        let live_session_still_reaches_the_old_server =
+            (&self.saved.host, self.saved.port, &self.saved.ssh) != (&self.live.host, self.live.port, &self.live.ssh);
         production(self.saved) || (production(self.live) && live_session_still_reaches_the_old_server)
     }
 }
