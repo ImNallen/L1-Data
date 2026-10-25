@@ -2254,7 +2254,7 @@ async fn a_session_opened_on_production_still_asks_after_the_connection_moves_el
 
     let moved = ConnectionDraft {
         id: Some(h.conn),
-        host: "127.0.0.1".into(),
+        host: "moved.invalid".into(),
         password: PasswordInput::Keep,
         environment: Some(Environment::Local),
         ..draft_from_url(&url(), "dev").unwrap()
