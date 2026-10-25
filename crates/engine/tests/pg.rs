@@ -2214,6 +2214,7 @@ async fn staged_edits_on_production_apply_only_with_the_digest_of_the_same_edits
     let tab = h.sql_tab(TxnMode::AutoCommit).await;
     let table = edit_table(&mut h, tab).await;
     set_environment(&h, Some(Environment::Production)).await;
+    let reader = h.sql_tab(TxnMode::AutoCommit).await;
 
     let mut edits = changes(&table);
     edits.updates.push(RowUpdate { key: vec![cell("id", Some("1"))], set: vec![cell("note", Some("x"))] });
@@ -2222,17 +2223,17 @@ async fn staged_edits_on_production_apply_only_with_the_digest_of_the_same_edits
         Err(ApplyError::ConfirmWrites { confirmation }) => confirmation,
         other => panic!("expected ConfirmWrites, got {other:?}"),
     };
-    assert_eq!(asked.sends.count, 2);
+    assert_eq!((asked.sends.count, asked.holds.count), (2, 2), "the setup's auto-commit writes stay held, because no COMMIT ended them");
     assert_eq!(
         asked.sends.statements,
         [format!("UPDATE \"public\".\"{table}\" SET \"note\" = 'x' WHERE \"id\" = '1'"), format!("INSERT INTO \"public\".\"{table}\" (\"name\") VALUES ('d')")]
     );
-    assert_eq!(rows_of(&mut h, tab, &table).await, "1:a:NULL 2:b:NULL 3:c:NULL");
+    assert_eq!(rows_of(&mut h, reader, &table).await, "1:a:NULL 2:b:NULL 3:c:NULL");
 
     let mut other = edits.clone();
     other.inserts[0] = vec![cell("name", Some("e"))];
     assert!(matches!(h.engine.table_apply(tab, other, Some(asked.digest.clone())).await, Err(ApplyError::ConfirmWrites { .. })));
-    assert_eq!(rows_of(&mut h, tab, &table).await, "1:a:NULL 2:b:NULL 3:c:NULL", "a digest for other edits applies nothing");
+    assert_eq!(rows_of(&mut h, reader, &table).await, "1:a:NULL 2:b:NULL 3:c:NULL", "a digest for other edits applies nothing");
 
     assert!(h.engine.table_apply(tab, edits, Some(asked.digest)).await.unwrap().committed);
     assert_eq!(rows_of(&mut h, tab, &table).await, "1:a:x 2:b:NULL 3:c:NULL 4:d:NULL");
@@ -2407,6 +2408,53 @@ async fn every_run_on_production_asks_while_the_transaction_holds_writes_that_ra
 }
 
 #[tokio::test]
+async fn a_begin_behind_any_comment_holds_its_writes_until_production_asks() {
+    let mut h = Harness::start().await;
+    let oracle = h.oracle().await;
+    let table = unique("t_guard");
+    oracle.batch_execute(&format!("create table public.{table} (n int)")).await.unwrap();
+    for header in ["/*/ header */", "/* a /* b */ c */", "-- c\r"] {
+        set_environment(&h, Some(Environment::Staging)).await;
+        let tab = h.sql_tab(TxnMode::AutoCommit).await;
+        let held = format!("insert into public.{table} values (1)");
+        assert_eq!(h.run_ok(tab, &format!("{header} begin;\n{held};")).await.txn, TxnState::Active, "{header:?}");
+        set_environment(&h, Some(Environment::Production)).await;
+        for text in ["select now()", "commit"] {
+            let asked = asked_to_run(&h, tab, script(text), None).await;
+            assert_eq!(asked.holds.statements, [held.clone()], "{header:?} then {text}");
+        }
+        assert!(matches!(h.engine.console_commit(tab, None).await, Err(TxnError::ConfirmWrites { .. })), "{header:?}");
+        assert_eq!(count(&oracle, &table).await, 0, "{header:?}: nothing committed unasked");
+        h.engine.console_rollback(tab).await.unwrap();
+    }
+    oracle.batch_execute(&format!("drop table public.{table}")).await.unwrap();
+}
+
+#[tokio::test]
+async fn writes_stay_held_until_the_engine_sees_their_transaction_end() {
+    let mut h = Harness::start().await;
+    let oracle = h.oracle().await;
+    let table = unique("t_guard");
+    oracle.batch_execute(&format!("create table public.{table} (n int)")).await.unwrap();
+    set_environment(&h, Some(Environment::Staging)).await;
+    let tab = h.sql_tab(TxnMode::AutoCommit).await;
+    let write = format!("insert into public.{table} values (1)");
+    for end in ["commit", "rollback", "end", "abort"] {
+        set_environment(&h, Some(Environment::Staging)).await;
+        assert_eq!(h.run_ok(tab, &write).await.txn, TxnState::Idle);
+        set_environment(&h, Some(Environment::Production)).await;
+        let asked = asked_to_run(&h, tab, script("select 1"), None).await;
+        assert_eq!(asked.holds.statements, [write.clone()], "an Idle the engine infers does not end the write's transaction");
+        set_environment(&h, Some(Environment::Staging)).await;
+        h.run_ok(tab, end).await;
+        set_environment(&h, Some(Environment::Production)).await;
+        h.run_ok(tab, "select 1").await;
+    }
+    assert_eq!(count(&oracle, &table).await, 4);
+    oracle.batch_execute(&format!("drop table public.{table}")).await.unwrap();
+}
+
+#[tokio::test]
 async fn commit_and_chain_keeps_a_transaction_open_and_ends_the_writes_it_held() {
     let mut h = Harness::start().await;
     let oracle = h.oracle().await;
@@ -2435,7 +2483,26 @@ async fn commit_and_chain_keeps_a_transaction_open_and_ends_the_writes_it_held()
 }
 
 #[tokio::test]
-async fn prepared_transactions_on_production_wait_for_the_digest() {
+async fn prepared_transaction_statements_on_production_wait_for_the_digest() {
+    let mut h = Harness::start().await;
+    let oracle = h.oracle().await;
+    let table = unique("t_guard");
+    let gid = unique("l1_gid");
+    oracle.batch_execute(&format!("create table public.{table} (n int)")).await.unwrap();
+    let held = staging_writes_held_then_production(&mut h, &table).await;
+    let other = h.sql_tab(TxnMode::AutoCommit).await;
+    for (tab, text) in [(held, format!("prepare transaction '{gid}'")), (other, format!("commit prepared '{gid}'")), (other, format!("rollback prepared '{gid}'"))] {
+        let asked = asked_to_run(&h, tab, script(&text), None).await;
+        assert_eq!(asked.sends.statements, [text.clone()]);
+    }
+    let prepared: i64 = oracle.query_one(&format!("select count(*) from pg_prepared_xacts where gid = '{gid}'"), &[]).await.unwrap().get(0);
+    assert_eq!((prepared, count(&oracle, &table).await), (0, 0), "a refused statement prepares and commits nothing");
+    h.engine.console_rollback(held).await.unwrap();
+    oracle.batch_execute(&format!("drop table public.{table}")).await.unwrap();
+}
+
+#[tokio::test]
+async fn a_transaction_prepared_off_production_commits_on_production_only_with_the_digest() {
     let mut h = Harness::start().await;
     let oracle = h.oracle().await;
     let slots: String = oracle.query_one("show max_prepared_transactions", &[]).await.unwrap().get(0);
@@ -2447,20 +2514,21 @@ async fn prepared_transactions_on_production_wait_for_the_digest() {
     let gid = unique("l1_gid");
     oracle.batch_execute(&format!("create table public.{table} (n int)")).await.unwrap();
     let held = staging_writes_held_then_production(&mut h, &table).await;
-    asked_to_run(&h, held, script(&format!("prepare transaction '{gid}'")), None).await;
     let prepared = format!("select count(*) from pg_prepared_xacts where gid = '{gid}'");
     let prepared = async || oracle.query_one(&prepared, &[]).await.unwrap().get::<_, i64>(0);
-    assert_eq!(prepared().await, 0);
 
     set_environment(&h, Some(Environment::Staging)).await;
     h.run_ok(held, &format!("prepare transaction '{gid}'")).await;
     assert_eq!(prepared().await, 1);
     set_environment(&h, Some(Environment::Production)).await;
     let other = h.sql_tab(TxnMode::AutoCommit).await;
-    asked_to_run(&h, other, script(&format!("commit prepared '{gid}'")), None).await;
+    let commit = format!("commit prepared '{gid}'");
+    let asked = asked_to_run(&h, other, script(&commit), None).await;
     asked_to_run(&h, other, script(&format!("rollback prepared '{gid}'")), None).await;
     assert_eq!((prepared().await, count(&oracle, &table).await), (1, 0));
-    oracle.batch_execute(&format!("rollback prepared '{gid}'")).await.unwrap();
+    let accepted = h.engine.console_run(other, script(&commit), Some(asked.digest)).await.unwrap();
+    h.wait_finished(other, accepted.run_id).await;
+    assert_eq!((prepared().await, count(&oracle, &table).await), (0, 1));
     oracle.batch_execute(&format!("drop table public.{table}")).await.unwrap();
 }
 

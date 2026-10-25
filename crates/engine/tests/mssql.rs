@@ -838,6 +838,7 @@ async fn every_batch_on_production_asks_while_the_transaction_holds_writes_that_
         assert_eq!(h.engine.boot().consoles.into_iter().find(|c| c.tab_id == h.tab).unwrap().txn, TxnState::Open, "{text}: a refused batch sends nothing");
     }
     let asked = asked_to_run(&h, "IF @@TRANCOUNT > 0 COMMIT TRANSACTION", None).await;
+    assert_eq!(asked.holds.statements, ["BEGIN TRAN; INSERT INTO #held VALUES (1)"], "the server reported the CREATE TABLE committed");
     let id = h.engine.console_run(h.tab, RunRequest::Script { text: "IF @@TRANCOUNT > 0 COMMIT TRANSACTION".into(), target: RunTarget::All }, Some(asked.digest)).await.unwrap().run_id;
     assert_eq!(h.finish(id).await.txn, TxnState::Idle);
     let state = h.ok("SELECT @@TRANCOUNT, COUNT_BIG(*) FROM #held").await;
