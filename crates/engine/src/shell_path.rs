@@ -5,10 +5,12 @@ use std::time::Duration;
 const LOGIN_SHELL_TIMEOUT: Duration = Duration::from_secs(3);
 
 /// The PATH the engine looks up a child program on (an agent CLI, or `az`), and the PATH that
-/// program runs with. `LoginShell` is the app's: a Finder-launched app gets launchd's PATH, which
-/// misses where `claude`, `node`, and `az` live, so the login shell's PATH comes first, then the
-/// inherited one, then the usual install directories. `Fixed` is exactly the given PATH, with no
-/// shell and nothing added; tests pass an empty one, so nothing installed on the machine runs.
+/// program runs with. Only its absolute entries are kept, so neither the lookup nor a child's
+/// `#!/usr/bin/env` line can pick a program from the working directory. `LoginShell` is the app's:
+/// a Finder-launched app gets launchd's PATH, which misses where `claude`, `node`, and `az` live,
+/// so the login shell's PATH comes first, then the inherited one, then the usual install
+/// directories. `Fixed` is the given PATH, with no shell and nothing added; tests pass an empty
+/// one, so nothing installed on the machine runs.
 #[derive(Debug, Clone)]
 pub enum AgentPath {
     LoginShell,
@@ -16,20 +18,21 @@ pub enum AgentPath {
 }
 
 pub(crate) async fn search_path(agent_path: &AgentPath, home: &Path) -> OsString {
-    match agent_path {
-        AgentPath::Fixed(path) => path.clone(),
+    let dirs = match agent_path {
+        AgentPath::Fixed(path) => dirs(path),
         AgentPath::LoginShell => {
             let inherited = std::env::var_os("PATH").unwrap_or_default();
             let shell_path = login_shell_path().await.unwrap_or_default();
-            let mut dirs: Vec<PathBuf> = std::env::split_paths(&shell_path).chain(std::env::split_paths(&inherited)).filter(|p| !p.as_os_str().is_empty()).collect();
+            let mut dirs: Vec<PathBuf> = dirs(&shell_path).into_iter().chain(dirs(&inherited)).collect();
             for extra in [home.join(".local/bin"), home.join(".claude/local"), PathBuf::from("/opt/homebrew/bin"), PathBuf::from("/usr/local/bin")] {
                 if !dirs.contains(&extra) {
                     dirs.push(extra);
                 }
             }
-            std::env::join_paths(&dirs).unwrap_or(inherited)
+            dirs
         }
-    }
+    };
+    std::env::join_paths(dirs).unwrap_or_default()
 }
 
 pub(crate) fn dirs(path: &OsString) -> Vec<PathBuf> {
@@ -64,9 +67,11 @@ async fn login_shell_path() -> Option<OsString> {
 mod tests {
     use super::*;
 
-    #[test]
-    fn a_relative_path_entry_is_not_searched() {
+    #[tokio::test]
+    async fn a_child_gets_and_searches_only_absolute_path_entries() {
         let path = std::env::join_paths(["/opt/bin", ".", "", "node_modules/.bin", "/usr/bin"]).unwrap();
-        assert_eq!(dirs(&path), [PathBuf::from("/opt/bin"), PathBuf::from("/usr/bin")]);
+        let child = search_path(&AgentPath::Fixed(path), Path::new("/home/a")).await;
+        assert_eq!(child, std::env::join_paths(["/opt/bin", "/usr/bin"]).unwrap());
+        assert_eq!(dirs(&child), [PathBuf::from("/opt/bin"), PathBuf::from("/usr/bin")]);
     }
 }
