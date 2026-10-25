@@ -409,11 +409,11 @@ impl<'a> Walk<'a> {
                 let folded = fold(self.kind, self.text, self.sig[i]);
                 let f = self.top();
                 if let Some(start) = f.joined.take() {
-                    let (mut columns, mut star) = (Vec::new(), Vec::new());
+                    let (mut columns, mut star, mut known) = (Vec::new(), Vec::new(), true);
                     for rel in f.rels.drain(start..) {
-                        expand(&rel, &mut columns, &mut star);
+                        known &= expand(&rel, &mut columns, &mut star);
                     }
-                    let source = RelationSource::Derived { columns, star };
+                    let source = if known { RelationSource::Derived { columns, star } } else { RelationSource::Derived { columns: Vec::new(), star: Vec::new() } };
                     f.rels.push(Rel { written: None, folded: None, source, role, column_aliases: Vec::new() });
                 }
                 if !f.sealed
@@ -829,19 +829,20 @@ impl<'a> Walk<'a> {
         }
         let mut columns = Vec::new();
         let mut star = Vec::new();
+        let mut known = true;
         for item in &f.items {
             match item {
                 Item::Named(n) => columns.push(n.clone()),
-                Item::Star(None) => f.rels.iter().for_each(|r| expand(r, &mut columns, &mut star)),
+                Item::Star(None) => f.rels.iter().for_each(|r| known &= expand(r, &mut columns, &mut star)),
                 Item::Star(Some(q)) => {
                     if let Some(r) = f.rels.iter().find(|r| r.folded.as_deref().is_some_and(|k| same(self.kind, k, q))) {
-                        expand(r, &mut columns, &mut star);
+                        known &= expand(r, &mut columns, &mut star);
                     }
                 }
                 Item::Unnamed => {}
             }
         }
-        (columns, star)
+        if known { (columns, star) } else { (Vec::new(), Vec::new()) }
     }
 
     fn finish(self) -> Scope {
@@ -878,6 +879,10 @@ impl<'a> Walk<'a> {
             .iter()
             .map(|r| {
                 let mut rel = (*r).clone();
+                if !renames_known_columns(&rel) && !rel.column_aliases.is_empty() {
+                    rel.source = RelationSource::Derived { columns: Vec::new(), star: Vec::new() };
+                    rel.column_aliases.clear();
+                }
                 if let RelationSource::Table { schema, name } = &rel.source
                     && let Some(cte) = defined_later(&TableName { schema: schema.clone(), name: name.clone() })
                 {
@@ -1098,14 +1103,29 @@ impl<'a> Walk<'a> {
     }
 }
 
-fn expand(rel: &Rel, columns: &mut Vec<String>, star: &mut Vec<TableName>) {
+/// Adds what `rel` gives a `*`. False when a column alias list renames columns that only the catalog knows, which an
+/// output of names plus whole tables cannot say, so the caller offers no columns rather than wrong ones.
+fn expand(rel: &Rel, columns: &mut Vec<String>, star: &mut Vec<TableName>) -> bool {
     match &rel.source {
-        RelationSource::Table { schema, name } => star.push(TableName { schema: schema.clone(), name: name.clone() }),
-        RelationSource::Derived { columns: c, star: s } => {
-            let renamed = if s.is_empty() { &rel.column_aliases[..] } else { &[] };
-            columns.extend(renamed.iter().chain(c.iter().skip(renamed.len())).cloned());
-            star.extend(s.iter().cloned());
+        RelationSource::Table { .. } | RelationSource::Derived { .. } if !rel.column_aliases.is_empty() && !matches!(&rel.source, RelationSource::Derived { star, .. } if star.is_empty()) => false,
+        RelationSource::Table { schema, name } => {
+            star.push(TableName { schema: schema.clone(), name: name.clone() });
+            true
         }
+        RelationSource::Derived { columns: c, star: s } => {
+            columns.extend(rel.column_aliases.iter().chain(c.iter().skip(rel.column_aliases.len())).cloned());
+            star.extend(s.iter().cloned());
+            true
+        }
+    }
+}
+
+/// A column alias list renames by position, so it is right only over columns whose order is known: a derived output
+/// of names alone, or of whole tables alone, which the catalog lists in order.
+fn renames_known_columns(rel: &Rel) -> bool {
+    match &rel.source {
+        RelationSource::Derived { columns, star } => star.is_empty() || columns.is_empty(),
+        RelationSource::Table { .. } => true,
     }
 }
 
@@ -1670,6 +1690,23 @@ mod tests {
         assert_eq!(refs(&pg("update orders set status = 'x' from orders o where |")).len(), 2);
         assert_eq!(refs(&ms("MERGE INTO orders t USING customers s ON |")).len(), 2);
         assert!(!ms("SELECT |").functions.contains(&"STRING_SPLIT"));
+    }
+
+    #[test]
+    fn a_rename_over_columns_of_unknown_order_offers_no_columns() {
+        let nothing = RelationSource::Derived { columns: vec![], star: vec![] };
+        for marked in [
+            "select r.| from (select * from orders o(oid)) r",
+            "select r.| from (select *, 1 as x from orders) r(a)",
+            "with x(a) as (select *, 1 as extra from orders) select x.| from x",
+            "with x as (select * from orders o(oid)) select x.| from x",
+        ] {
+            let s = pg(marked);
+            assert_eq!((&s.relations[0].source, s.relations[0].column_aliases.len()), (&nothing, 0), "{marked:?}");
+        }
+        let s = pg("select r.| from (select * from orders) r(a)");
+        assert_eq!(named_columns(&s), [(Some("r"), vec!["a".to_owned()])]);
+        assert_eq!(s.relations[0].source, RelationSource::Derived { columns: vec![], star: vec![TableName { schema: None, name: "orders".into() }] });
     }
 
     #[test]
