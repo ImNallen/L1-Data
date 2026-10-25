@@ -114,13 +114,14 @@ fn config(p: &ConnectParams) -> Result<Config, ConnectError> {
 const LOGIN_FAILED: u32 = 18456;
 const UNTRUSTED_DOMAIN_LOGIN: u32 = 18452;
 
-/// The vendored driver follows this with advice for developers, such as `Config::trust_cert()`,
-/// which names settings the app does not have.
 const CERTIFICATE_REJECTED: &str = "the server's certificate was rejected during the TLS handshake: ";
+/// The vendored driver's advice for developers, such as `Config::trust_cert()`, starts here. It
+/// names settings the app does not have.
+const DEVELOPER_ADVICE: &str = " To connect anyway";
 
 fn tls_failure(message: String, entra: bool) -> ConnectError {
     let Some(rest) = message.strip_prefix(CERTIFICATE_REJECTED) else { return ConnectError::Tls { message: format!("TLS failed: {message}") } };
-    let reason = rest.split_once(". ").map_or(rest, |(reason, _)| reason).trim_end_matches('.');
+    let reason = rest.split_once(DEVELOPER_ADVICE).map_or(rest, |(reason, _)| reason).trim_end_matches('.');
     let message = if entra {
         format!("The server's certificate could not be verified, so the Microsoft Entra ID token was not sent. Entra ID sign-in needs a server with a publicly trusted certificate, such as Azure SQL. Check the host name, or ask the server's administrator for a publicly trusted certificate. Reason: {reason}.")
     } else {
@@ -391,6 +392,9 @@ mod login_tests {
             assert!(message.ends_with("Reason: invalid peer certificate: UnknownIssuer."), "{message}");
             assert!(!message.contains("Config::") && !message.contains("trust_cert"), "{message}");
         }
+        let old_cert = "the server's certificate was rejected during the TLS handshake: invalid peer certificate: Other(OtherError(UnsupportedCertVersion)). The SQL Server presented a certificate rustls considers too old (an outdated X.509 version), which frequently happens with the self-signed certificate SQL Server auto-generates. To connect anyway you can: (3) skip certificate validation entirely with `Config::trust_cert()`.".to_owned();
+        let ConnectError::Tls { message } = tls_failure(old_cert, false) else { panic!("a TLS failure stays Tls") };
+        assert!(message.ends_with("Reason: invalid peer certificate: Other(OtherError(UnsupportedCertVersion)). The SQL Server presented a certificate rustls considers too old (an outdated X.509 version), which frequently happens with the self-signed certificate SQL Server auto-generates."), "{message}");
         let ConnectError::Tls { message } = tls_failure("invalid dns name".into(), true) else { panic!("a TLS failure stays Tls") };
         assert_eq!(message, "TLS failed: invalid dns name");
     }
