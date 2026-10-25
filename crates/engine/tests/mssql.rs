@@ -168,6 +168,29 @@ async fn print_and_low_severity_raiserror_reach_the_output_log_in_server_order()
 }
 
 #[tokio::test]
+async fn a_nowait_message_streams_while_the_batch_waits_and_survives_cancel() {
+    let mut h = Harness::open(TxnMode::AutoCommit).await;
+    let id = h.start("RAISERROR('early', 0, 1) WITH NOWAIT; WAITFOR DELAY '00:00:30'; PRINT 'never'").await.run_id;
+    let (tab, events) = (h.tab, &mut h.events);
+    let early = tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            if let AppEvent::ConsoleOutput { tab_id, entries } = events.recv().await.unwrap()
+                && tab_id == tab
+                && let Some(entry) = entries.into_iter().find(|e| e.run_id == id && matches!(&e.body, OutputBody::Notice { .. }))
+            {
+                return entry.body;
+            }
+        }
+    })
+    .await
+    .expect("The NOWAIT message did not arrive while the batch waited");
+    assert!(matches!(early, OutputBody::Notice { message, .. } if message == "early"));
+    h.engine.console_cancel(h.tab).await;
+    let state = h.finish(id).await;
+    assert!(matches!(state.run, RunState::Finished { outcome: RunOutcome::Cancelled, .. }), "{:?}", state.run);
+}
+
+#[tokio::test]
 async fn sql_server_reports_each_statement_count_like_ssms() {
     let mut h = Harness::open(TxnMode::AutoCommit).await;
     let (state, log) = h

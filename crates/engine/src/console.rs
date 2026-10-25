@@ -2,7 +2,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
-use futures_util::StreamExt;
+use futures_util::{FutureExt, StreamExt};
 use tokio::sync::{Mutex, watch};
 
 use crate::Shared;
@@ -533,14 +533,23 @@ async fn run_outputs(console: &Console, shared: &Shared, session: &mut Session, 
     let mut failure = None;
     let mut nth: u16 = 0;
     let mut rerun: Option<Rerun> = None;
+    let mut log = Vec::new();
     let mut stream = session.query(sql);
-    while let Some(event) = stream.next().await {
+    loop {
+        let next = match stream.next().now_or_never() {
+            Some(next) => next,
+            None => {
+                console.output_all(shared, run_id, std::mem::take(&mut log));
+                stream.next().await
+            }
+        };
+        let Some(event) = next else { break };
         match event {
             Err(error) => { failure = Some(error); break; }
             Ok(QueryEvent::Prepared) if stop.load(Ordering::Relaxed) => { failure = Some(crate::session::error("Cancelled")); break; }
             Ok(QueryEvent::Prepared) => {}
             Ok(QueryEvent::Columns(mut columns)) => {
-                if let Some((set, out)) = active.take() { finish_rows(console, shared, index, &set, &mut outputs[out], started, &mut rows); }
+                if let Some((set, out)) = active.take() { finish_rows(&mut log, index, &set, &mut outputs[out], started, &mut rows); }
                 if let Some(table) = plan.page.as_ref().and_then(|p| p.relation.as_ref()) && plan.connection.database_kind == DatabaseKind::SqlServer {
                     if columns.len() != table.columns.len() || columns.iter().zip(&table.columns).any(|(actual, known)| actual.name != known.name || actual.r#type.category != known.category) {
                         failure = Some(crate::session::error("Table shape changed. Refresh the catalog before browsing again."));
@@ -572,7 +581,7 @@ async fn run_outputs(console: &Console, shared: &Shared, session: &mut Session, 
                 else { failure = Some(crate::session::error("Driver returned a row without result metadata")); break; }
             }
             Ok(QueryEvent::Complete { affected_rows }) => {
-                if let Some((set, out)) = active.take() { finish_rows(console, shared, index, &set, &mut outputs[out], started, &mut rows); }
+                if let Some((set, out)) = active.take() { finish_rows(&mut log, index, &set, &mut outputs[out], started, &mut rows); }
                 else {
                     let tag = match (plan.connection.database_kind, affected_rows) {
                         (_, None) => "Commands completed successfully".into(),
@@ -581,7 +590,7 @@ async fn run_outputs(console: &Console, shared: &Shared, session: &mut Session, 
                         (DatabaseKind::SqlServer, Some(n)) => format!("{n} rows affected"),
                     };
                     let elapsed_ms = elapsed_ms(started);
-                    console.output(shared, run_id, OutputBody::Command { statement: index as u16, tag: tag.clone(), elapsed_ms });
+                    log.push(OutputBody::Command { statement: index as u16, tag: tag.clone(), elapsed_ms });
                     if matches!(outputs.last(), Some(RunOutput::Command { .. })) {
                         outputs.pop();
                         tags.pop();
@@ -590,28 +599,30 @@ async fn run_outputs(console: &Console, shared: &Shared, session: &mut Session, 
                     outputs.push(RunOutput::Command { tag, affected_rows, elapsed_ms });
                 }
             }
-            Ok(QueryEvent::Notice(body)) => console.output(shared, run_id, body),
+            Ok(QueryEvent::Notice(body)) => log.push(body),
         }
         if last_emit.elapsed() >= STREAM_EMIT_INTERVAL {
             last_emit = Instant::now();
+            console.output_all(shared, run_id, std::mem::take(&mut log));
             if let Some((set, out)) = &active { set.set_elapsed(elapsed_ms(started)); outputs[*out] = RunOutput::Rows { result: set.meta(), state: RowsState::Streaming }; }
             console.edit(shared, run_id, |inner| Console::statements_mut(inner)[index].outputs = outputs.clone()).await?;
         }
     }
     drop(stream);
     if let Some((set, out)) = active {
-        if failure.is_none() { finish_rows(console, shared, index, &set, &mut outputs[out], started, &mut rows); }
+        if failure.is_none() { finish_rows(&mut log, index, &set, &mut outputs[out], started, &mut rows); }
         else { set.set_elapsed(elapsed_ms(started)); outputs[out] = RunOutput::Rows { result: set.meta(), state: if stop.load(Ordering::Relaxed) { RowsState::Cancelled } else { RowsState::Failed } }; }
     }
+    console.output_all(shared, run_id, log);
     console.edit(shared, run_id, |inner| Console::statements_mut(inner)[index].outputs = outputs).await?;
     Ok(match failure { Some(error) => Err(error), None => Ok((rows, tags)) })
 }
 
-fn finish_rows(console: &Console, shared: &Shared, index: usize, set: &ResultSet, output: &mut RunOutput, started: Instant, rows: &mut Option<u64>) {
+fn finish_rows(log: &mut Vec<OutputBody>, index: usize, set: &ResultSet, output: &mut RunOutput, started: Instant, rows: &mut Option<u64>) {
     set.set_elapsed(elapsed_ms(started));
     let meta = set.meta();
     *rows = Some(rows.unwrap_or(0) + meta.rows_seen);
-    console.output(shared, set.r#ref.run_id, OutputBody::Rows { statement: index as u16, rows: meta.rows_seen, elapsed_ms: meta.elapsed_ms, truncated: meta.truncated.is_some() });
+    log.push(OutputBody::Rows { statement: index as u16, rows: meta.rows_seen, elapsed_ms: meta.elapsed_ms, truncated: meta.truncated.is_some() });
     *output = RunOutput::Rows { result: meta, state: RowsState::Complete };
 }
 
