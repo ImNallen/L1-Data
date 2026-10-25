@@ -124,9 +124,9 @@ impl MsSession {
         let f = self.features().await?;
         match target {
             ScriptTarget::Relation { oid } => self.relation_script(native_object_id(*oid), &f).await,
-            ScriptTarget::Routine { oid } => self.module_script(&format!("o.object_id={}", native_object_id(*oid))).await,
+            ScriptTarget::Routine { oid } => self.module_script(&format!("o.object_id={}", native_object_id(*oid)), f).await,
             ScriptTarget::Trigger { relation_oid, name } => {
-                self.module_script(&format!("o.parent_object_id={} AND o.type IN ('TR','TA') AND o.name={}", native_object_id(*relation_oid), quote_literal(name))).await
+                self.module_script(&format!("o.parent_object_id={} AND o.type IN ('TR','TA') AND o.name={}", native_object_id(*relation_oid), quote_literal(name)), f).await
             }
             ScriptTarget::Index { relation_oid, name } => {
                 let oid = native_object_id(*relation_oid);
@@ -186,13 +186,16 @@ impl MsSession {
         let props = batch.add(properties_sql(&format!("o.object_id={oid}")));
         let privileges = batch.add(privileges_sql(&format!("o.object_id={oid}")));
         let classifications = f.classifications.map(|rank| batch.add(classifications_sql(oid, rank)));
+        let visibility = batch.add(visibility_sql(f));
         let sets = self.run_batch(batch).await?;
 
         let r = sets[relation].first().ok_or(DetailError::Gone)?;
         match required(r, 2).map_err(failed)?.trim() {
             "V" => {
                 let (_, module) = modules(&sets[view])?.into_iter().next().ok_or(DetailError::Gone)?;
-                let view = ddl::View { indexes: indexes_from(&sets[indexes])?, triggers: triggers_from(&sets[triggers])?, properties: properties(&sets[props])?, privileges: privileges_from(&sets[privileges])?, module: module.text()? };
+                let mut module = module.text()?;
+                module.omitted.extend(unseen(&sets[visibility], false)?);
+                let view = ddl::View { indexes: indexes_from(&sets[indexes])?, triggers: triggers_from(&sets[triggers])?, properties: properties(&sets[props])?, privileges: privileges_from(&sets[privileges])?, module };
                 Ok(script::object_script(&view.module.name, ddl::view(&view)))
             }
             "U" => {
@@ -230,6 +233,7 @@ impl MsSession {
                     properties: properties(&sets[props])?,
                     classifications: classifications.map_or(Ok(vec![]), |at| classifications_from(&sets[at]))?,
                     privileges: privileges_from(&sets[privileges])?,
+                    omitted: unseen(&sets[visibility], classifications.is_some())?,
                 };
                 Ok(script::object_script(&name, ddl::table(&table)))
             }
@@ -237,16 +241,18 @@ impl MsSession {
         }
     }
 
-    async fn module_script(&mut self, filter: &str) -> Result<ObjectScript, DetailError> {
+    async fn module_script(&mut self, filter: &str, f: Features) -> Result<ObjectScript, DetailError> {
         let mut batch = Batch::default();
         let found = batch.add(modules_sql(filter));
         let props = batch.add(properties_sql(&format!("ep.class IN (1,2) AND ep.major_id IN (SELECT o.object_id FROM sys.objects o WHERE {filter})")));
         let privileges = batch.add(privileges_sql(filter));
+        let visibility = batch.add(visibility_sql(&f));
         let sets = self.run_batch(batch).await?;
         let (_, module) = modules(&sets[found])?.into_iter().next().ok_or(DetailError::Gone)?;
         let mut module = module.text()?;
         module.properties = properties(&sets[props])?;
         module.privileges = privileges_from(&sets[privileges])?;
+        module.omitted.extend(unseen(&sets[visibility], false)?);
         Ok(script::object_script(&module.name, ddl::module(&module)))
     }
 }
@@ -281,7 +287,7 @@ fn modules(rows: &[Row]) -> Result<Vec<(i32, Found)>, DetailError> {
             };
             let parent = r[6].clone().zip(r[7].clone()).filter(|_| matches!(required(r, 9).map(str::trim), Ok("TR")));
             let order = r[10].as_deref().map_or(vec![], |o| o.split(',').filter_map(|e| e.split_once(' ')).map(|(when, event)| (when.to_owned(), event.to_owned())).collect());
-            let module = ddl::Module { schema, name, definition, ansi_nulls: bit(r, 3)?, quoted_identifier: bit(r, 4)?, disabled_on, order, parent, properties: vec![], privileges: vec![] };
+            let module = ddl::Module { schema, name, definition, ansi_nulls: bit(r, 3)?, quoted_identifier: bit(r, 4)?, disabled_on, order, parent, properties: vec![], privileges: vec![], omitted: vec![] };
             Ok((oid, Found::Text(module)))
         })
         .collect()
@@ -351,6 +357,25 @@ fn privileges_from(rows: &[Row]) -> Result<Vec<Privilege>, DetailError> {
         .collect()
 }
 
+/// Grants to a principal this login cannot see, and every classification without VIEW ANY
+/// SENSITIVITY CLASSIFICATION, are missing from the catalog views with no sign that they are.
+fn visibility_sql(f: &Features) -> String {
+    let classifications = if f.classifications.is_some() { "HAS_PERMS_BY_NAME(DB_NAME(),'DATABASE','VIEW ANY SENSITIVITY CLASSIFICATION')" } else { "1" };
+    format!("SELECT HAS_PERMS_BY_NAME(DB_NAME(),'DATABASE','VIEW DEFINITION'),{classifications}")
+}
+
+fn unseen(rows: &[Row], classified: bool) -> Result<Vec<ddl::Omitted>, DetailError> {
+    let r = rows.first().ok_or_else(|| refused("SQL Server returned no permission row."))?;
+    let mut omitted = vec![];
+    if !bit(r, 0)? {
+        omitted.push(ddl::Omitted::UnseenPrivileges);
+    }
+    if classified && !bit(r, 1)? {
+        omitted.push(ddl::Omitted::UnseenClassifications);
+    }
+    Ok(omitted)
+}
+
 fn classifications_sql(oid: i32, rank: &str) -> String {
     format!(
         "SELECT c.name,sc.label,CONVERT(nvarchar(36),sc.label_id),sc.information_type,CONVERT(nvarchar(36),sc.information_type_id),{rank}
@@ -416,7 +441,7 @@ fn columns_from(rows: &[Row]) -> Result<Vec<ddl::Column>, DetailError> {
                 filestream: bit(r, 24)?,
                 encrypted: bit(r, 25)?,
                 unreadable_computed: r[12].is_none() && bit(r, 29)?,
-                unreadable_default: r[14].is_some() && r[15].is_none(),
+                hidden_default: r[15].is_none().then(|| r[14].clone()).flatten(),
             })
         })
         .collect()

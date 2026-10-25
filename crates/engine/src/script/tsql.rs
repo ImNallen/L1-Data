@@ -21,6 +21,24 @@ pub struct Table {
     pub properties: Vec<Property>,
     pub classifications: Vec<Classification>,
     pub privileges: Vec<Privilege>,
+    pub omitted: Vec<Omitted>,
+}
+
+/// A property the script cannot recreate, which it names in a warning instead.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Omitted {
+    /// SQL Server hides grants to principals a login without VIEW DEFINITION on the database cannot see.
+    UnseenPrivileges,
+    UnseenClassifications,
+}
+
+impl Omitted {
+    fn warning(&self, object: &str) -> String {
+        match self {
+            Omitted::UnseenPrivileges => format!("a complete privilege list for {object}, because this login lacks VIEW DEFINITION on the database"),
+            Omitted::UnseenClassifications => format!("every sensitivity classification on {object}, because this login lacks VIEW ANY SENSITIVITY CLASSIFICATION"),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -55,7 +73,8 @@ pub struct Column {
     /// SQL Server hides a computed column's expression and a default's definition from a login
     /// without VIEW DEFINITION, while it still shows the column.
     pub unreadable_computed: bool,
-    pub unreadable_default: bool,
+    /// The name of a default constraint whose definition this login cannot read.
+    pub hidden_default: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -171,6 +190,7 @@ pub struct Module {
     pub parent: Option<(String, String)>,
     pub properties: Vec<Property>,
     pub privileges: Vec<Privilege>,
+    pub omitted: Vec<Omitted>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -261,8 +281,11 @@ pub fn table(t: &Table) -> Ddl {
             format!("ALTER TABLE {name} ADD {};\n{state}GO\n", foreign_key(f))
         })
         .collect();
-    parts.extend(dependents(&name, disabled_keys, &t.indexes, &late, &t.triggers, &t.properties, &mut warnings));
+    let hidden: Vec<&str> = t.checks.iter().filter(|c| c.definition.is_none()).map(|c| c.name.as_str()).chain(t.columns.iter().filter_map(|c| c.hidden_default.as_deref())).collect();
+    let props: Vec<Property> = t.properties.iter().filter(|p| !p.part().is_some_and(|(kind, constraint)| kind == "CONSTRAINT" && hidden.contains(&constraint))).cloned().collect();
+    parts.extend(dependents(&name, disabled_keys, &t.indexes, &late, &t.triggers, &props, &mut warnings));
     warnings.extend(privileges(&name, &t.privileges));
+    warnings.extend(t.omitted.iter().map(|o| o.warning(&name)));
     Ddl { text: parts.join("\n"), warnings }
 }
 
@@ -356,7 +379,7 @@ fn column(c: &Column, table: &str, warnings: &mut Vec<String>) -> String {
             warnings.push(format!("{property} on {path}"));
         }
     }
-    for (on, what) in [(c.unreadable_computed, "the computed expression"), (c.unreadable_default, "the default")] {
+    for (on, what) in [(c.unreadable_computed, "the computed expression"), (c.hidden_default.is_some(), "the default")] {
         if on {
             warnings.push(format!("{what} of {path}, which this login cannot read"));
         }
@@ -589,6 +612,7 @@ fn module_text(m: &Module, warnings: &mut Vec<String>) -> String {
     for (span, current) in edits.into_iter().rev() {
         definition.replace_range(span, &current);
     }
+    warnings.extend(m.omitted.iter().map(|o| o.warning(&name)));
     let mut out = format!("{}{definition}\nGO\n", set_options(m.ansi_nulls, m.quoted_identifier));
     if !m.order.is_empty() {
         let lines: String = m.order.iter().map(|(when, event)| format!("EXEC sys.sp_settriggerorder @triggername = {}, @order = N'{when}', @stmttype = N'{event}';\n", quote_literal(&name))).collect();
@@ -694,6 +718,7 @@ mod tests {
                 parent: Some(("dbo".into(), "tickets".into())),
                 properties: vec![],
                 privileges: vec![],
+                omitted: vec![],
             })],
             ..table_named("tickets")
         };
@@ -775,7 +800,7 @@ GO
     #[test]
     fn a_computed_expression_or_default_this_login_cannot_read_warns() {
         let mut warnings = vec![];
-        column(&Column { unreadable_computed: true, unreadable_default: true, ..col("b", "int") }, "[dbo].[t]", &mut warnings);
+        column(&Column { unreadable_computed: true, hidden_default: Some("DF_b".into()), ..col("b", "int") }, "[dbo].[t]", &mut warnings);
         assert_eq!(warnings, ["the computed expression of [dbo].[t].[b], which this login cannot read", "the default of [dbo].[t].[b], which this login cannot read"]);
     }
 
@@ -792,6 +817,31 @@ GO
             ["check constraint [CK_hidden] on [dbo].[t], whose definition this login cannot read", "filtered index [IX_hidden] on [dbo].[t], whose filter this login cannot read"]
         );
         assert!(!ddl.text.contains("CK_hidden") && !ddl.text.contains("IX_hidden"), "{}", ddl.text);
+    }
+
+    #[test]
+    fn a_left_out_check_or_default_takes_its_extended_property_with_it() {
+        let on = |constraint: &str| property("MS_Description", constraint, &[("SCHEMA", "dbo"), ("TABLE", "t"), ("CONSTRAINT", constraint)]);
+        let t = Table {
+            columns: vec![col("id", "int"), Column { hidden_default: Some("DF_hidden".into()), ..col("n", "int") }],
+            checks: vec![Check { name: "CK_hidden".into(), definition: None, state: State::default() }, Check { name: "CK_kept".into(), definition: Some("([id]>(0))".into()), state: State::default() }],
+            properties: vec![on("CK_hidden"), on("DF_hidden"), on("CK_kept")],
+            ..table_named("t")
+        };
+        let text = table(&t).text;
+        assert!(text.contains("@level2name = N'CK_kept'"), "{text}");
+        assert!(!text.contains("N'CK_hidden'") && !text.contains("N'DF_hidden'"), "{text}");
+    }
+
+    #[test]
+    fn privileges_and_classifications_this_login_may_not_see_warn() {
+        let t = Table { omitted: vec![Omitted::UnseenPrivileges, Omitted::UnseenClassifications], ..table_named("t") };
+        assert_eq!(
+            table(&t).warnings,
+            ["a complete privilege list for [dbo].[t], because this login lacks VIEW DEFINITION on the database", "every sensitivity classification on [dbo].[t], because this login lacks VIEW ANY SENSITIVITY CLASSIFICATION"]
+        );
+        let m = Module { omitted: vec![Omitted::UnseenPrivileges], ..procedure("CREATE PROCEDURE dbo.newname AS SELECT 1") };
+        assert_eq!(module(&m).warnings, ["a complete privilege list for [dbo].[newname], because this login lacks VIEW DEFINITION on the database"]);
     }
 
     #[test]
