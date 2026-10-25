@@ -1,3 +1,4 @@
+mod around;
 mod expression;
 mod format;
 mod table;
@@ -6,6 +7,7 @@ pub(crate) use expression::validate_expression;
 pub(crate) use format::format;
 pub(crate) use table::{browse_sql, count_sql, format_order_by, parse_order_by};
 
+pub(super) use around::statement_around;
 use super::scope::{Class, Lexeme};
 use super::{ByteTarget, DmlVerb, Invalidates, StmtKind, StmtSpan, relations::NameRef};
 
@@ -604,10 +606,9 @@ pub(crate) fn module_name(text: &str) -> Option<ModuleName> {
     (parts.len() <= 2).then(|| ModuleName { parts, span: tokens[at + 1].start..tokens[after - 1].end, on })
 }
 
-/// The lexemes of `text`, an unclosed quote or comment running to the end, and its `GO` lines.
-pub(super) fn completion_lexemes(text: &str) -> (Vec<Lexeme>, Vec<StmtSpan>) {
-    let tokens = lex_unclosed_to_end(text);
-    let go = separators(text, &tokens).unwrap_or_default();
+/// The lexemes of `text[range]`, an unclosed quote or comment running to its end.
+pub(super) fn completion_lexemes(text: &str, range: std::ops::Range<usize>) -> Vec<Lexeme> {
+    let tokens = lex_unclosed_to_end(&text[range.clone()]);
     let class = |t: &Token<'_>| match t.kind {
         Kind::Word => Class::Word,
         Kind::Ident => Class::Name,
@@ -626,7 +627,7 @@ pub(super) fn completion_lexemes(text: &str) -> (Vec<Lexeme>, Vec<StmtSpan>) {
             _ => Class::Other,
         },
     };
-    (tokens.iter().map(|t| Lexeme { class: class(t), span: t.start..t.end }).collect(), go)
+    tokens.iter().map(|t| Lexeme { class: class(t), span: range.start + t.start..range.start + t.end }).collect()
 }
 
 pub(super) fn lexeme_closed(lexeme: &str) -> bool {

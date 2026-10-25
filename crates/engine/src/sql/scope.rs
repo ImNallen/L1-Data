@@ -1,6 +1,5 @@
 use std::ops::Range;
 
-use super::keywords::{RESERVED, TYPE_OR_FUNCTION_NAME};
 use super::lex::{LexKind, lex};
 use super::relations::{VETTED, VETTED_SIZES};
 use super::split::split_statements;
@@ -89,79 +88,9 @@ fn postgres_statement(text: &str, at: usize) -> Vec<Lexeme> {
         .collect()
 }
 
-/// The statement around the cursor inside its `GO` batch. T-SQL needs no `;` between statements,
-/// so one starts at a `;` or at a statement verb that cannot continue the statement before it.
+/// The statement around the cursor inside its `GO` batch.
 fn tsql_statement(text: &str, at: usize) -> Vec<Lexeme> {
-    let (lexemes, go) = tsql::completion_lexemes(text);
-    let lo = go.iter().filter(|g| g.end <= at).map(|g| g.end).max().unwrap_or(0);
-    let hi = go.iter().filter(|g| g.start >= at).map(|g| g.start).min().unwrap_or(text.len());
-    let batch: Vec<Lexeme> = lexemes.into_iter().filter(|l| l.span.start >= lo && l.span.start < hi).collect();
-    let starts = tsql_statement_starts(text, &batch);
-    let start = starts.iter().copied().filter(|&s| s <= at).max().unwrap_or(lo);
-    let end = starts.iter().copied().filter(|&s| s > at).min().unwrap_or(hi);
-    batch.into_iter().filter(|l| l.span.start >= start && l.span.start < end).collect()
-}
-
-fn tsql_statement_starts(text: &str, batch: &[Lexeme]) -> Vec<usize> {
-    let word = |l: &Lexeme| (l.class == Class::Word).then(|| text[l.span.clone()].to_ascii_uppercase());
-    let mut starts = Vec::new();
-    let mut depth = 0usize;
-    let mut first: Option<String> = None;
-    let mut main_verb = false;
-    let mut source_begun = false;
-    let mut update = false;
-    let mut update_set = false;
-    let mut prev: Option<&Lexeme> = None;
-    for l in batch.iter().filter(|l| !matches!(l.class, Class::LineComment | Class::BlockComment)) {
-        match l.class {
-            Class::Open => depth += 1,
-            Class::Close => depth = depth.saturating_sub(1),
-            Class::Semi if depth == 0 => {
-                starts.push(l.span.end);
-                (first, main_verb, source_begun, update, update_set, prev) = (None, false, false, false, false, None);
-                continue;
-            }
-            Class::Word if depth == 0 => {
-                let w = word(l).unwrap_or_default();
-                let prev_word = prev.and_then(word);
-                let after_comma = prev.is_some_and(|p| p.class == Class::Comma);
-                let set_option = first.as_deref() == Some("SET");
-                let continues = after_comma
-                    || prev_word.as_deref().is_some_and(|p| {
-                        ["UNION", "ALL", "EXCEPT", "INTERSECT", "FOR", "AFTER", "OF", "THEN", "INSTEAD", "OR", "NOT", "GRANT", "DENY", "REVOKE"].contains(&p)
-                            || p == "ON" && !set_option
-                    });
-                let cte_body = first.as_deref() == Some("WITH") && !main_verb;
-                let insert_source = first.as_deref() == Some("INSERT") && !source_begun;
-                let starts_new = first.is_some()
-                    && !continues
-                    && match w.as_str() {
-                        "SELECT" => !cte_body && !insert_source,
-                        "INSERT" | "UPDATE" | "DELETE" | "MERGE" => !cte_body,
-                        "SET" => !update || update_set,
-                        "EXEC" | "EXECUTE" => !insert_source,
-                        "IF" => !matches!(first.as_deref(), Some("DROP" | "ALTER" | "CREATE")),
-                        "DECLARE" | "PRINT" | "WHILE" | "RETURN" | "BEGIN" | "CREATE" | "ALTER" | "DROP" | "TRUNCATE" | "THROW" | "RAISERROR" | "USE" | "GRANT" | "DENY" | "REVOKE" => true,
-                        _ => false,
-                    };
-                if starts_new {
-                    starts.push(l.span.start);
-                    (first, main_verb, source_begun, update, update_set) = (None, false, false, false, false);
-                }
-                if first.is_none() {
-                    first = Some(w.clone());
-                } else if first.as_deref() == Some("WITH") && ["SELECT", "INSERT", "UPDATE", "DELETE", "MERGE"].contains(&w.as_str()) {
-                    main_verb = true;
-                }
-                source_begun |= matches!(w.as_str(), "VALUES" | "SELECT" | "EXEC" | "EXECUTE");
-                update_set = update && (update_set || w == "SET") && w != "UPDATE";
-                update |= w == "UPDATE";
-            }
-            _ => {}
-        }
-        prev = Some(l);
-    }
-    starts
+    tsql::completion_lexemes(text, tsql::statement_around(text, at))
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -326,7 +255,6 @@ struct Walk<'a> {
     parts: Vec<String>,
     /// The cursor's word starts its line after a lexeme a statement can end on, so it may begin the next statement.
     line_start: bool,
-    typed_upper: String,
     frames: Vec<Frame>,
     stack: Vec<usize>,
     snapshot: Option<Snapshot>,
@@ -377,7 +305,6 @@ impl<'a> Walk<'a> {
             typed: typed_span,
             parts,
             line_start,
-            typed_upper: text[from..at.max(from)].to_ascii_uppercase(),
             frames: vec![Frame::new(None, true, Origin::Statement, Clause::Start)],
             stack: vec![0],
             snapshot: None,
@@ -561,6 +488,10 @@ impl<'a> Walk<'a> {
             "INSERT" | "MERGE" => Clause::Next(&["INTO"]),
             "DELETE" => Clause::Next(&["FROM"]),
             "WITH" if clause == Clause::Start => Clause::Cte,
+            "WITH" if matches!(clause, Clause::Relation { role: Role::Into, .. }) && !next_opens => {
+                self.leave_part(|r| r.role == Role::Into);
+                Clause::Cte
+            }
             "WITH" if named && next_opens => {
                 let skip_to = self.matching_close(i + 1);
                 return Some(skip_to + 1);
@@ -1055,7 +986,7 @@ impl<'a> Walk<'a> {
                     Role::Update => vec!["SET"],
                     Role::Table => Vec::new(),
                 };
-                let expect = if slot == Slot::Named && !self.starts_unaliasable_keyword(&kw) { Expect::Alias } else { Expect::Keyword };
+                let expect = if slot == Slot::Named { Expect::Alias } else { Expect::Keyword };
                 (expect, kw)
             }
             Clause::On { target, fresh, .. } => {
@@ -1103,17 +1034,6 @@ impl<'a> Walk<'a> {
                 (Expect::Expression, kw)
             }
         }
-    }
-
-    fn starts_unaliasable_keyword(&self, keywords: &[&str]) -> bool {
-        let reserved = |word: &str| match self.kind {
-            DatabaseKind::Postgres => {
-                let word = word.to_ascii_lowercase();
-                RESERVED.contains(&word.as_str()) || TYPE_OR_FUNCTION_NAME.contains(&word.as_str())
-            }
-            DatabaseKind::SqlServer => tsql::RESERVED.contains(&word),
-        };
-        self.typed_upper.len() >= 2 && keywords.iter().any(|k| k.starts_with(&self.typed_upper) && k.split(' ').next().is_some_and(reserved))
     }
 
     fn after_from(&self) -> Vec<&'static str> {
@@ -1617,18 +1537,18 @@ mod tests {
     }
 
     #[test]
-    fn a_word_after_a_relation_that_starts_a_reserved_keyword_offers_the_keywords() {
+    fn a_word_after_a_relation_may_be_its_alias_and_the_keywords_that_follow_are_listed() {
         for (s, keyword) in [
             (pg("select * from orders wh|"), "WHERE"),
-            (pg("select * from orders lim|"), "LIMIT"),
-            (pg("select * from orders o join customers c whe|"), "WHERE"),
-            (pg("select * from orders le|"), "LEFT JOIN"),
+            (pg("select * from order_items li|"), "LIMIT"),
+            (pg("select * from orders ord|"), "ORDER BY"),
+            (pg("select * from orders where|"), "WHERE"),
             (ms("SELECT * FROM orders WH|"), "WHERE"),
             (ms("SELECT * FROM orders ORD|"), "ORDER BY"),
         ] {
-            assert_eq!((s.expect, s.keywords.contains(&keyword)), (Expect::Keyword, true), "{keyword}");
+            assert_eq!((s.expect, s.keywords.contains(&keyword)), (Expect::Alias, true), "{keyword}");
         }
-        assert_eq!(ms("SELECT * FROM orders LIM|").expect, Expect::Alias);
+        assert_eq!(pg("select * from orders o join customers c whe|").expect, Expect::Keyword);
     }
 
     #[test]
@@ -1717,6 +1637,27 @@ mod tests {
         assert_eq!(refs(&s), [(Some("o"), &table(None, "orders"))]);
         let s = ms("UPDATE o SET status = 1, total = o.| FROM orders o");
         assert_eq!((refs(&s).len(), s.expect), (1, Expect::Expression));
+    }
+
+    #[test]
+    fn a_cte_that_opens_a_block_or_a_body_is_in_scope() {
+        for marked in [
+            "CREATE PROCEDURE p AS\nBEGIN\n  WITH recent AS (SELECT * FROM orders) SELECT * FROM rec|",
+            "CREATE VIEW v AS WITH recent AS (SELECT * FROM orders) SELECT * FROM rec|",
+            "IF 1 = 1 BEGIN WITH recent AS (SELECT * FROM orders) SELECT * FROM rec|",
+            "BEGIN TRY WITH recent AS (SELECT * FROM orders) SELECT * FROM rec|",
+            "SELECT 1;\nWITH recent AS (SELECT * FROM orders) SELECT * FROM rec|",
+        ] {
+            assert_eq!(ms(marked).ctes, ["recent"], "{marked:?}");
+        }
+        let s = ms("WITH x AS (SELECT id FROM orders) INSERT INTO t (id) SELECT x.| FROM x");
+        assert_eq!((s.ctes.clone(), s.qualifier), (vec!["x".to_owned()], Some(Qualifier::Relation { index: 0 })));
+        let s = pg("insert into orders (status) with recent as (select * from orders) select * from rec|");
+        assert_eq!((s.expect, s.ctes), (Expect::Relation, vec!["recent".to_owned()]));
+        let s = ms("BEGIN TRAN t WITH MARK 'm'\nSELECT * FROM orders o WHERE o.|");
+        assert_eq!(refs(&s), [(Some("o"), &table(None, "orders"))]);
+        let s = ms("SELECT * FROM orders o WITH (NOLOCK) WHERE o.|");
+        assert_eq!(refs(&s), [(Some("o"), &table(None, "orders"))]);
     }
 
     #[test]
