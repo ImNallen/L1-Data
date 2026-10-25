@@ -13,7 +13,7 @@ use crate::sql::{Invalidates, StmtKind, StmtSpan};
 use crate::store::HistoryInsert;
 use crate::text::{OffsetMap, synthesize_tag};
 use crate::txn::{StmtOutcome, TransactionPlan, txn_after};
-use crate::writes::Checked;
+use crate::writes::WritesChecked;
 
 pub(crate) const STREAM_EMIT_INTERVAL: Duration = Duration::from_millis(100);
 const OUTPUT_COALESCE: Duration = Duration::from_millis(5);
@@ -138,14 +138,13 @@ impl ConsoleInner {
 
 /// What holds a tab's session while it is out of its slot. `ConsoleState.work` and
 /// `ConsoleState.export` both derive from this one value, so an export's progress leaves the
-/// snapshot on every path out of `Busy`: return, close, and disconnect. Work that can write or
-/// commit carries the proof that the Production check passed.
+/// snapshot on every path out of `Busy`: return, close, and disconnect.
 pub enum Work {
-    Run(Checked),
+    Run(WritesChecked),
     Count,
-    Commit(Checked),
+    Commit(WritesChecked),
     Rollback,
-    Edit(Checked),
+    Edit(WritesChecked),
     Probe,
     Export(ExportProgress),
 }
@@ -163,8 +162,6 @@ impl Work {
     }
 }
 
-/// A tab's open session and the connection config it opened from. Its fields are private, so
-/// `Console::take_session` is the only way to take the session out.
 pub struct IdleSession {
     session: Session,
     opened: ConnectionConfig,
@@ -296,7 +293,7 @@ impl Console {
         let SessionSlot::Idle(_) = inner.session else { return None };
         let SessionSlot::Idle(IdleSession { session, opened }) = std::mem::replace(&mut inner.session, SessionSlot::Empty) else { unreachable!() };
         if let Work::Run(checked) | Work::Commit(checked) | Work::Edit(checked) = &work {
-            checked.settle(&mut inner.unasked);
+            checked.mark_held_writes_asked(&mut inner.unasked);
         }
         let stop = Arc::new(AtomicBool::new(false));
         inner.session = SessionSlot::Busy {
@@ -418,7 +415,6 @@ pub struct RunPlan {
     pub database: String,
     pub connection: ConnectionConfig,
     pub page: Option<TablePage>,
-    /// The session is off Production, so the writes this run leaves in the open transaction stay unasked.
     pub writes_stay_unasked: bool,
 }
 

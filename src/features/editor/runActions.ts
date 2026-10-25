@@ -174,7 +174,6 @@ function heldWrites(asked: WriteConfirmation): string {
   return `This transaction holds ${h === 1 ? "a write" : `${h} writes`} to ${asked.connection} / ${asked.database} that ran before the connection was marked Production.`;
 }
 
-/** The engine sends the first few writes of each list, held writes first. */
 function shownWrites(asked: WriteConfirmation): { statements: string[]; note: string } {
   const statements = [...asked.holds.statements, ...asked.sends.statements];
   const total = asked.holds.count + asked.sends.count;

@@ -1805,7 +1805,6 @@ pub struct WriteConfirmation {
     pub connection: String,
     pub database: String,
     pub unit: ExecutionUnitKind,
-    /// The writes this action sends.
     pub sends: WriteList,
     /// The writes the tab's open transaction holds that ran before its session counted as Production. Any run on
     /// the tab, and Commit, can commit them.

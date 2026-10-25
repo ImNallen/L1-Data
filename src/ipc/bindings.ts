@@ -1503,7 +1503,6 @@ export type WriteConfirmation = {
 	connection: string,
 	database: string,
 	unit: ExecutionUnitKind,
-	/**  The writes this action sends. */
 	sends: WriteList,
 	/**
 	 *  The writes the tab's open transaction holds that ran before its session counted as Production. Any run on

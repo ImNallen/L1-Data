@@ -16,21 +16,17 @@ pub struct Target<'a> {
     pub unasked: &'a WriteList,
 }
 
-/// Proof that `check` passed. `Console::take_session` hands a tab's session to work that can write or commit only
-/// in exchange for one, and only `check` makes one.
 #[derive(Debug)]
-pub struct Checked {
+pub struct WritesChecked {
     on_production: bool,
 }
 
-impl Checked {
-    /// Off Production, the writes the work runs join the transaction's unasked writes.
+impl WritesChecked {
     pub fn writes_stay_unasked(&self) -> bool {
         !self.on_production
     }
 
-    /// On Production the check asked about the unasked writes the transaction held, or there were none.
-    pub fn settle(&self, unasked: &mut WriteList) {
+    pub fn mark_held_writes_asked(&self, unasked: &mut WriteList) {
         if self.on_production {
             *unasked = WriteList::default();
         }
@@ -58,21 +54,21 @@ impl Target<'_> {
     }
 }
 
-/// On Production, work that writes asks first, and so does any work while the transaction holds unasked writes,
-/// because any statement or batch can commit them.
-pub fn check(target: &Target, statements: &[&str], confirmed: Option<&WriteDigest>) -> Result<Checked, WriteConfirmation> {
+/// Held writes make any work ask, because a batch can commit them in forms the classifier cannot see, such as
+/// `IF @@TRANCOUNT > 0 COMMIT` or `PREPARE TRANSACTION` followed by `COMMIT PREPARED` from another session.
+pub fn check(target: &Target, statements: &[&str], confirmed: Option<&WriteDigest>) -> Result<WritesChecked, WriteConfirmation> {
     if !target.on_production() {
-        return Ok(Checked { on_production: false });
+        return Ok(WritesChecked { on_production: false });
     }
     let kind = target.saved.database_kind;
     let mut sends = WriteList::default();
     statements.iter().filter(|sql| text::is_write(sql, kind)).for_each(|sql| sends.add(sql));
     if sends.count == 0 && target.unasked.count == 0 {
-        return Ok(Checked { on_production: true });
+        return Ok(WritesChecked { on_production: true });
     }
     let digest = target.digest(statements);
     if confirmed == Some(&digest) {
-        return Ok(Checked { on_production: true });
+        return Ok(WritesChecked { on_production: true });
     }
     Err(WriteConfirmation {
         connection: target.saved.name.clone(),
@@ -213,10 +209,10 @@ mod tests {
         assert_eq!((asked.sends.count, asked.holds.count), (2, 2));
 
         let mut unasked = held.clone();
-        check(&open(&production, &held), WORK, Some(&asked.digest)).unwrap().settle(&mut unasked);
+        check(&open(&production, &held), WORK, Some(&asked.digest)).unwrap().mark_held_writes_asked(&mut unasked);
         assert_eq!(unasked.count, 0, "the confirmed question listed them");
         let mut unasked = held.clone();
-        check(&open(&staging, &held), WORK, None).unwrap().settle(&mut unasked);
+        check(&open(&staging, &held), WORK, None).unwrap().mark_held_writes_asked(&mut unasked);
         assert_eq!(unasked.count, 2, "a check off Production keeps them");
     }
 

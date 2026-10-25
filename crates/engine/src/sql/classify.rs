@@ -11,7 +11,6 @@ pub enum StmtKind {
     Begin,
     Commit,
     Rollback,
-    /// `COMMIT AND CHAIN` or `ROLLBACK AND CHAIN`: it ends the transaction and opens the next one.
     CommitAndChain,
     RollbackAndChain,
     Savepoint,

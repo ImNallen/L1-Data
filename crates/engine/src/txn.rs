@@ -42,7 +42,7 @@ pub fn txn_after(state: TxnState, kind: &StmtKind, outcome: StmtOutcome) -> TxnS
         (Idle, _, _) => Idle,
         (_, CommitAndChain, Ok) | (_, RollbackAndChain, Ok) => Active,
         (_, Commit, Ok) | (_, Rollback, Ok) => Idle,
-        // A failed COMMIT (deferred constraint, serialization) rolls back and ends the block, and opens no chained one.
+        // A failed COMMIT (deferred constraint, serialization) rolls back and ends the block.
         (_, Commit, Err) | (_, CommitAndChain, Err) => Idle,
         (_, RollbackTo, Ok) => Active,
         (Active, _, Ok) => Active,

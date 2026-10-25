@@ -928,7 +928,9 @@ describe("a run the engine asks about", () => {
   it("lists the writes the transaction holds when a run that writes nothing could commit them", async () => {
     connection();
     openSqlTab({ db: { connectionId: "prod", database: "shop" }, text: "select 1\ncommit" });
-    const runs = queueRunReplies(asked("d1", { sends: { count: 0, statements: [] }, holds: { count: 2, statements: ["insert into t values (1)", "delete from t"] } }));
+    const runs = queueRunReplies(
+      asked("d1", { sends: { count: 0, statements: [] }, holds: { count: 2, statements: ["insert into t values (1)", "delete from t"] } }),
+    );
     runActive({ kind: "all" });
     await vi.waitFor(() => expect(question()).not.toBeNull());
     expect(question()).toMatchObject({
@@ -1002,7 +1004,14 @@ describe("staged edits the engine asks about", () => {
   const key = [{ column: "id", value: "1" }];
   const asked: ApplyError = {
     kind: "ConfirmWrites",
-    confirmation: { connection: "prod-postgres", database: "shop", unit: "Statement", sends: { count: 2, statements: [] }, holds: { count: 0, statements: [] }, digest: "d1" },
+    confirmation: {
+      connection: "prod-postgres",
+      database: "shop",
+      unit: "Statement",
+      sends: { count: 2, statements: [] },
+      holds: { count: 0, statements: [] },
+      digest: "d1",
+    },
   };
   const question = () => {
     const overlay = useWorkspace.getState().overlay;
@@ -1086,7 +1095,14 @@ describe("staged edits the engine asks about", () => {
 describe("a commit the engine asks about", () => {
   const asked: TxnError = {
     kind: "ConfirmWrites",
-    confirmation: { connection: "prod-postgres", database: "shop", unit: "Statement", sends: { count: 0, statements: [] }, holds: { count: 1, statements: ["insert into t values (1)"] }, digest: "c1" },
+    confirmation: {
+      connection: "prod-postgres",
+      database: "shop",
+      unit: "Statement",
+      sends: { count: 0, statements: [] },
+      holds: { count: 1, statements: ["insert into t values (1)"] },
+      digest: "c1",
+    },
   };
 
   function queueCommitReplies(...replies: (TxnError | null)[]) {
