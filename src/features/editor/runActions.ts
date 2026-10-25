@@ -169,9 +169,13 @@ function deferPageForPendingWork(tabId: TabId, target: PageTarget | undefined): 
   return true;
 }
 
-function heldWrites(asked: WriteConfirmation): string {
-  const h = asked.holds.count;
-  return `${h === 1 ? "A write" : `${h} writes`} to ${asked.connection} / ${asked.database} ran before the connection was marked Production, and this tab's transaction may still hold ${h === 1 ? "it" : "them"}.`;
+/** A held write may still be open or may have committed already, so each sentence must hold for both. */
+function heldWrites(asked: WriteConfirmation, action: "this run can commit" | "this commit keeps" | "applying these changes can commit"): string {
+  const one = asked.holds.count === 1;
+  return [
+    `${one ? "A write" : `${asked.holds.count} writes`} to ${asked.connection} / ${asked.database} ran on this tab before the connection was marked Production.`,
+    `If ${one ? "it is" : "they are"} still in this tab's transaction, ${action} ${one ? "it" : "them"}.`,
+  ].join(" ");
 }
 
 function shownWrites(asked: WriteConfirmation): { statements: string[]; note: string } {
@@ -188,7 +192,7 @@ async function writesConfirmed(tab: Tab, asked: WriteConfirmation): Promise<bool
   const { statements, note } = shownWrites(asked);
   const body = [
     n > 0 && `This run sends ${n} ${unit} that ${n === 1 ? "writes" : "write"} to ${asked.connection} / ${asked.database}.`,
-    h > 0 && `${heldWrites(asked)} Any run can commit ${h === 1 ? "it" : "them"}.`,
+    h > 0 && heldWrites(asked, "this run can commit"),
     note,
   ];
   const ok = await confirm({
@@ -288,7 +292,7 @@ async function commitConfirmed(tab: Tab, asked: WriteConfirmation): Promise<bool
   const { statements, note } = shownWrites(asked);
   const ok = await confirm({
     title: `Commit ${plural(asked.holds.count, "write")} on Production?`,
-    body: [heldWrites(asked), note].filter(Boolean).join(" "),
+    body: [heldWrites(asked, "this commit keeps"), note].filter(Boolean).join(" "),
     statements,
     confirmLabel: "Commit writes",
   });
@@ -500,7 +504,7 @@ async function editsConfirmed(tab: TableTab, edits: TableEdits, asked: WriteConf
     title: `Apply ${plural(asked.sends.count, "change")} on Production?`,
     body: [
       `This sends ${what} to ${tab.table.schema}.${tab.table.table} on ${asked.connection} / ${asked.database}.`,
-      asked.holds.count > 0 && heldWrites(asked),
+      asked.holds.count > 0 && heldWrites(asked, "applying these changes can commit"),
     ]
       .filter(Boolean)
       .join(" "),

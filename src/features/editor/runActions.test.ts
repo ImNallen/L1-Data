@@ -935,7 +935,7 @@ describe("a run the engine asks about", () => {
     await vi.waitFor(() => expect(question()).not.toBeNull());
     expect(question()).toMatchObject({
       title: "Run on Production?",
-      body: "2 writes to prod-postgres / shop ran before the connection was marked Production, and this tab's transaction may still hold them. Any run can commit them.",
+      body: "2 writes to prod-postgres / shop ran on this tab before the connection was marked Production. If they are still in this tab's transaction, this run can commit them.",
       statements: ["insert into t values (1)", "delete from t"],
     });
     expect(question()?.choices).toEqual([{ id: "btn", label: "Run", variant: "danger" }]);
@@ -951,7 +951,7 @@ describe("a run the engine asks about", () => {
     await vi.waitFor(() => expect(question()).not.toBeNull());
     expect(question()).toMatchObject({
       title: "Run 2 writes on Production?",
-      body: "This run sends 2 statements that write to prod-postgres / shop. 4 writes to prod-postgres / shop ran before the connection was marked Production, and this tab's transaction may still hold them. Any run can commit them. 5 of 6 are shown.",
+      body: "This run sends 2 statements that write to prod-postgres / shop. 4 writes to prod-postgres / shop ran on this tab before the connection was marked Production. If they are still in this tab's transaction, this run can commit them. 5 of 6 are shown.",
       statements: ["delete from a", "delete from b", "delete from c", "update orders set n = 1", "delete from orders"],
     });
   });
@@ -1052,7 +1052,7 @@ describe("staged edits the engine asks about", () => {
     const done = submitEdits(id);
     await vi.waitFor(() => expect(question()).not.toBeNull());
     expect(question()).toMatchObject({
-      body: "This sends 1 update and 1 delete to public.orders on prod-postgres / shop. A write to prod-postgres / shop ran before the connection was marked Production, and this tab's transaction may still hold it.",
+      body: "This sends 1 update and 1 delete to public.orders on prod-postgres / shop. A write to prod-postgres / shop ran on this tab before the connection was marked Production. If it is still in this tab's transaction, applying these changes can commit it.",
       statements: ["insert into t values (1)"],
     });
     useWorkspace.getState().close();
@@ -1129,7 +1129,7 @@ describe("a commit the engine asks about", () => {
     await vi.waitFor(() => expect(question()).not.toBeNull());
     expect(question()).toMatchObject({
       title: "Commit 1 write on Production?",
-      body: "A write to prod-postgres / shop ran before the connection was marked Production, and this tab's transaction may still hold it.",
+      body: "A write to prod-postgres / shop ran on this tab before the connection was marked Production. If it is still in this tab's transaction, this commit keeps it.",
       statements: ["insert into t values (1)"],
     });
     expect(question()?.choices).toEqual([{ id: "btn", label: "Commit writes", variant: "danger" }]);
