@@ -415,7 +415,7 @@ fn columns_from(rows: &[Row]) -> Result<Vec<ddl::Column>, DetailError> {
 
 fn keys_sql(oid: i32, filter: &str, f: &Features) -> String {
     format!(
-        "SELECT k.name,k.type,i.type,c.name,ic.is_descending_key,{} FROM sys.key_constraints k
+        "SELECT k.name,k.type,i.type,c.name,ic.is_descending_key,{},c.is_computed FROM sys.key_constraints k
          JOIN sys.indexes i ON i.object_id=k.parent_object_id AND i.index_id=k.unique_index_id
          {STORAGE_JOINS}
          JOIN sys.index_columns ic ON ic.object_id=i.object_id AND ic.index_id=i.index_id
@@ -432,13 +432,17 @@ fn keys_from(rows: &[Row]) -> Result<Vec<ddl::Key>, DetailError> {
         let name = text(r, 0)?;
         let column = (text(r, 3)?, bit(r, 4)?);
         match keys.last_mut() {
-            Some(k) if k.name == name => k.columns.push(column),
+            Some(k) if k.name == name => {
+                k.columns.push(column);
+                k.computed |= bit(r, 20)?;
+            }
             _ => keys.push(ddl::Key {
                 name,
                 primary: required(r, 1).map_err(failed)?.trim() == "PK",
                 clustered: required(r, 2).map_err(failed)? == "1",
                 columns: vec![column],
                 storage: storage(r, 5)?,
+                computed: bit(r, 20)?,
             }),
         }
     }
@@ -487,7 +491,7 @@ fn foreign_keys_from(rows: &[Row]) -> Result<Vec<ddl::ForeignKey>, DetailError> 
 /// Clustered indexes come first, because a view's other indexes need its clustered index.
 fn indexes_sql(oid: i32, filter: &str, f: &Features) -> String {
     format!(
-        "SELECT i.name,i.is_unique,i.type,i.filter_definition,c.name,ic.is_descending_key,ic.is_included_column,{},o.type,{}
+        "SELECT i.name,i.is_unique,i.type,i.filter_definition,c.name,ic.is_descending_key,ic.is_included_column,{},o.type,{},c.is_computed
          FROM sys.indexes i JOIN sys.objects o ON o.object_id=i.object_id
          {STORAGE_JOINS}
          JOIN sys.index_columns ic ON ic.object_id=i.object_id AND ic.index_id=i.index_id
@@ -516,12 +520,14 @@ fn indexes_from(rows: &[Row]) -> Result<Vec<ddl::Index>, DetailError> {
                     filter: r[3].clone(),
                     on_view: required(r, 8).map_err(failed)?.trim() == "V",
                     storage: storage(r, 9)?,
+                    computed: false,
                 };
                 indexes.push((index, vec![]));
                 let (i, order) = indexes.last_mut().expect("pushed above");
                 (i, order)
             }
         };
+        index.computed |= bit(r, 24)?;
         let column = text(r, 4)?;
         let ordinal: u32 = number(r, 7).map_err(failed)?;
         if ordinal > 0 {

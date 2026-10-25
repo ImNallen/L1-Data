@@ -67,6 +67,7 @@ pub struct Key {
     pub clustered: bool,
     pub columns: Vec<(String, bool)>,
     pub storage: Storage,
+    pub computed: bool,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -109,6 +110,7 @@ pub struct Index {
     pub filter: Option<String>,
     pub on_view: bool,
     pub storage: Storage,
+    pub computed: bool,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -218,7 +220,8 @@ pub fn table(t: &Table) -> Ddl {
         with.push(format!("SYSTEM_VERSIONING = ON (HISTORY_TABLE = {}{retention})", qualified(&v.schema, &v.name)));
     }
     let with = if with.is_empty() { String::new() } else { format!(" WITH ({})", with.join(", ")) };
-    let mut parts = vec![format!("{}CREATE TABLE {name} (\n    {}\n){with};\nGO\n", set_options(t.ansi_nulls, true), body.join(",\n    "))];
+    let set = if t.keys.iter().any(|k| k.computed) { INDEX_OPTIONS } else { "" };
+    let mut parts = vec![format!("{}{set}CREATE TABLE {name} (\n    {}\n){with};\nGO\n", set_options(t.ansi_nulls, true), body.join(",\n    "))];
     let states: Vec<String> = early
         .iter()
         .map(|f| (&f.name, &f.state))
@@ -264,7 +267,8 @@ pub fn index(i: &Index, table: &str, props: &[Property]) -> Option<Ddl> {
 
 pub fn key_script(k: &Key, table: &str, props: &[Property]) -> Ddl {
     let mut warnings = vec![];
-    let text = format!("ALTER TABLE {table} ADD {};\nGO\n", key(k, table, &mut warnings));
+    let set = if k.computed { INDEX_OPTIONS } else { "" };
+    let text = format!("{set}ALTER TABLE {table} ADD {};\nGO\n", key(k, table, &mut warnings));
     standalone(text, &k.name, k.storage.disabled, table, props, warnings)
 }
 
@@ -527,7 +531,7 @@ fn index_text(i: &Index, table: &str, warnings: &mut Vec<String>) -> Option<Stri
     };
     out.push_str(&with_options(&storage));
     storage_warnings(&i.storage, &i.name, table, warnings);
-    let set = if i.filter.is_some() || i.on_view { INDEX_OPTIONS } else { "" };
+    let set = if i.filter.is_some() || i.on_view || i.computed { INDEX_OPTIONS } else { "" };
     Some(format!("{set}{out};\nGO\n"))
 }
 
@@ -606,7 +610,7 @@ mod tests {
     }
 
     fn index_on(name: &str, kind: u8, keys: &[&str]) -> Index {
-        Index { name: name.into(), kind, unique: false, keys: keys.iter().map(|k| (k.to_string(), false)).collect(), include: vec![], order: vec![], filter: None, on_view: false, storage: Storage::default() }
+        Index { name: name.into(), kind, unique: false, keys: keys.iter().map(|k| (k.to_string(), false)).collect(), include: vec![], order: vec![], filter: None, on_view: false, storage: Storage::default(), computed: false }
     }
 
     fn property(name: &str, value: &str, path: &[(&str, &str)]) -> Property {
@@ -626,8 +630,8 @@ mod tests {
                 Column { nullable: true, ..col("a]b", "[lab].[phone]") },
             ],
             keys: vec![
-                Key { name: "PK_tickets".into(), primary: true, clustered: true, columns: vec![("id".into(), false)], storage: Storage::default() },
-                Key { name: "UQ_code".into(), primary: false, clustered: false, columns: vec![("code".into(), true)], storage: Storage::default() },
+                Key { name: "PK_tickets".into(), primary: true, clustered: true, columns: vec![("id".into(), false)], storage: Storage::default() , computed: false },
+                Key { name: "UQ_code".into(), primary: false, clustered: false, columns: vec![("code".into(), true)], storage: Storage::default() , computed: false },
             ],
             foreign_keys: vec![ForeignKey {
                 name: "FK_owner".into(),
@@ -818,8 +822,8 @@ GO
         let options = Storage { fill_factor: 80, pad_index: true, ignore_dup_key: true, no_recompute: true, deny_row_locks: true, deny_page_locks: true, sequential_key: true, compression: Some("PAGE".into()), xml_compression: true, ..Storage::default() };
         let t = Table {
             keys: vec![
-                Key { name: "PK_h".into(), primary: true, clustered: false, columns: vec![("id".into(), false)], storage: Storage { fill_factor: 80, ..Storage::default() } },
-                Key { name: "UQ_h".into(), primary: false, clustered: false, columns: vec![("id".into(), false)], storage: Storage { disabled: true, ..options } },
+                Key { name: "PK_h".into(), primary: true, clustered: false, columns: vec![("id".into(), false)], storage: Storage { fill_factor: 80, ..Storage::default() } , computed: false },
+                Key { name: "UQ_h".into(), primary: false, clustered: false, columns: vec![("id".into(), false)], storage: Storage { disabled: true, ..options } , computed: false },
             ],
             heap: Some(Storage { compression: Some("PAGE".into()), ..Storage::default() }),
             lock_escalation: "DISABLE".into(),
@@ -849,7 +853,7 @@ GO
     fn filegroups_and_partition_schemes_warn_for_the_heap_keys_indexes_and_large_values() {
         let on = |place: Place| Storage { place: Some(place), ..Storage::default() };
         let t = Table {
-            keys: vec![Key { name: "PK_p".into(), primary: true, clustered: false, columns: vec![("id".into(), false)], storage: on(Place::Filegroup("FG keys".into())) }],
+            keys: vec![Key { name: "PK_p".into(), primary: true, clustered: false, columns: vec![("id".into(), false)], storage: on(Place::Filegroup("FG keys".into())) , computed: false }],
             indexes: vec![Index { storage: on(Place::PartitionScheme("ps]x".into())), ..index_on("IX_p", 2, &["id"]) }],
             heap: Some(on(Place::PartitionScheme("ps".into()))),
             large_values: Some(Place::Filegroup("LOB".into())),
@@ -894,7 +898,7 @@ GO
     #[test]
     fn incremental_statistics_and_suppressed_duplicate_key_messages_warn() {
         let t = Table {
-            keys: vec![Key { name: "PK_i".into(), primary: true, clustered: true, columns: vec![("id".into(), false)], storage: Storage { unscripted: Unscripted { incremental: true, ..Unscripted::default() }, ..Storage::default() } }],
+            keys: vec![Key { name: "PK_i".into(), primary: true, clustered: true, columns: vec![("id".into(), false)], storage: Storage { unscripted: Unscripted { incremental: true, ..Unscripted::default() }, ..Storage::default() } , computed: false }],
             indexes: vec![Index { unique: true, storage: Storage { ignore_dup_key: true, unscripted: Unscripted { suppress_dup_key_messages: true, ..Unscripted::default() }, ..Storage::default() }, ..index_on("UX_i", 2, &["id"]) }],
             ..table_named("i")
         };
@@ -908,7 +912,7 @@ GO
     fn a_system_versioned_table_keeps_its_period_history_table_and_retention() {
         let t = Table {
             columns: vec![col("id", "int"), Column { generated: 1, ..col("vf", "datetime2(7)") }, Column { generated: 2, hidden: true, ..col("vt", "datetime2(7)") }],
-            keys: vec![Key { name: "PK_t".into(), primary: true, clustered: true, columns: vec![("id".into(), false)], storage: Storage::default() }],
+            keys: vec![Key { name: "PK_t".into(), primary: true, clustered: true, columns: vec![("id".into(), false)], storage: Storage::default() , computed: false }],
             period: Some(("vf".into(), "vt".into())),
             versioning: Some(Versioning { schema: "dbo".into(), name: "t_history".into(), retention: Some((6, "MONTH".into())) }),
             ..table_named("t")
@@ -967,7 +971,7 @@ GO
 
     #[test]
     fn a_key_index_opens_as_its_constraint_with_its_options_properties_and_disabled_state() {
-        let k = Key { name: "UQ_refd".into(), primary: false, clustered: false, columns: vec![("a".into(), false), ("b".into(), true)], storage: Storage { ignore_dup_key: true, deny_page_locks: true, disabled: true, ..Storage::default() } };
+        let k = Key { name: "UQ_refd".into(), primary: false, clustered: false, columns: vec![("a".into(), false), ("b".into(), true)], storage: Storage { ignore_dup_key: true, deny_page_locks: true, disabled: true, ..Storage::default() } , computed: false };
         let props = [property("MS_Description", "the key", &[("SCHEMA", "dbo"), ("TABLE", "refd"), ("CONSTRAINT", "UQ_refd")])];
         assert_eq!(
             key_script(&k, "[dbo].[refd]", &props),
@@ -975,8 +979,18 @@ GO
                 "ALTER TABLE [dbo].[refd] ADD CONSTRAINT [UQ_refd] UNIQUE NONCLUSTERED ([a] ASC, [b] DESC) WITH (IGNORE_DUP_KEY = ON, ALLOW_PAGE_LOCKS = OFF);\nGO\n\nEXEC sys.sp_addextendedproperty @name = N'MS_Description', @value = N'the key', @level0type = N'SCHEMA', @level0name = N'dbo', @level1type = N'TABLE', @level1name = N'refd', @level2type = N'CONSTRAINT', @level2name = N'UQ_refd';\nGO\nALTER INDEX [UQ_refd] ON [dbo].[refd] DISABLE;\nGO\n".into()
             )
         );
-        let pk = Key { name: "PK_tickets".into(), primary: true, clustered: true, columns: vec![("id".into(), false)], storage: Storage::default() };
+        let pk = Key { name: "PK_tickets".into(), primary: true, clustered: true, columns: vec![("id".into(), false)], storage: Storage::default() , computed: false };
         assert_eq!(key_script(&pk, "[dbo].[tickets]", &[]).text, "ALTER TABLE [dbo].[tickets] ADD CONSTRAINT [PK_tickets] PRIMARY KEY CLUSTERED ([id] ASC);\nGO\n");
+    }
+
+    #[test]
+    fn an_index_or_key_on_a_computed_column_gets_the_index_set_options() {
+        let i = Index { computed: true, ..index_on("IX total", 2, &["total"]) };
+        assert_eq!(index(&i, "[dbo].[t]", &[]).unwrap().text, format!("{INDEX_OPTIONS}CREATE NONCLUSTERED INDEX [IX total] ON [dbo].[t] ([total] ASC);\nGO\n"));
+        let k = Key { name: "UQ_total".into(), primary: false, clustered: false, columns: vec![("total".into(), false)], storage: Storage::default(), computed: true };
+        assert!(key_script(&k, "[dbo].[t]", &[]).text.starts_with(&format!("{INDEX_OPTIONS}ALTER TABLE [dbo].[t] ADD CONSTRAINT [UQ_total]")));
+        let t = Table { keys: vec![k], ..table_named("t") };
+        assert!(table(&t).text.starts_with(&format!("{HEAD}{INDEX_OPTIONS}CREATE TABLE [dbo].[t] (")), "{}", table(&t).text);
     }
 
     #[test]

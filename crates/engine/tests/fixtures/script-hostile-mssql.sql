@@ -26,6 +26,7 @@ CREATE CLUSTERED INDEX [CIX select] ON [we]]ird s].[Par ent] ([select]);
 CREATE NONCLUSTERED COLUMNSTORE INDEX [NCCI] ON [we]]ird s].[Par ent] ([Id], [a]]b]) WHERE [Id] > 0;
 CREATE UNIQUE INDEX [UX ü] ON [we]]ird s].[Par ent] ([unicode ü]) WHERE [unicode ü] IS NOT NULL;
 CREATE INDEX [IX disabled] ON [we]]ird s].[Par ent] ([t] DESC);
+CREATE INDEX [IX total] ON [we]]ird s].[Par ent] ([total]);
 GO
 ALTER INDEX [IX disabled] ON [we]]ird s].[Par ent] DISABLE;
 GO

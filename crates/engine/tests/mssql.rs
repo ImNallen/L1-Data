@@ -1152,6 +1152,11 @@ async fn hostile_object_scripts_replay_every_property_or_warn() {
         );
         let pk = src.engine.object_script(db.clone(), ScriptTarget::Index { relation_oid: schema_oid("Par ent"), name: "PK Par ent".into() }).await.unwrap();
         assert_eq!(pk.text, "ALTER TABLE [we]]ird s].[Par ent] ADD CONSTRAINT [PK Par ent] PRIMARY KEY NONCLUSTERED ([Id] DESC) WITH (FILLFACTOR = 80);\nGO\n");
+        let computed = src.engine.object_script(db.clone(), ScriptTarget::Index { relation_oid: schema_oid("Par ent"), name: "IX total".into() }).await.unwrap();
+        assert_eq!(
+            computed.text,
+            "SET ANSI_NULLS, ANSI_PADDING, ANSI_WARNINGS, ARITHABORT, CONCAT_NULL_YIELDS_NULL, QUOTED_IDENTIFIER ON;\nSET NUMERIC_ROUNDABORT OFF;\nGO\nCREATE NONCLUSTERED INDEX [IX total] ON [we]]ird s].[Par ent] ([total] ASC);\nGO\n"
+        );
         let filtered = src.engine.object_script(db.clone(), ScriptTarget::Index { relation_oid: schema_oid("Par ent"), name: "UX ü".into() }).await.unwrap();
         assert_eq!(
             filtered.text,
