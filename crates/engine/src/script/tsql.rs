@@ -80,6 +80,16 @@ pub struct Column {
     pub unreadable_computed: bool,
     /// The name of a default constraint whose definition this login cannot read.
     pub hidden_default: Option<String>,
+    /// A default or rule object bound with `sp_bindefault` or `sp_bindrule`.
+    pub bound_default: Option<Bound>,
+    pub bound_rule: Option<Bound>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Bound {
+    Object { schema: String, name: String },
+    /// SQL Server shows that a column has a bound object, but not which, to a login that cannot see it.
+    Hidden,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -272,6 +282,10 @@ pub fn table(t: &Table) -> Ddl {
     if !states.is_empty() {
         parts.push(format!("{}\nGO\n", states.join("\n")));
     }
+    let binds: Vec<String> = t.columns.iter().flat_map(|c| bindings(c, &name, &mut warnings)).collect();
+    if !binds.is_empty() {
+        parts.push(format!("{}\nGO\n", binds.join("\n")));
+    }
     let mut settings = vec![];
     if let Some(limit) = t.text_in_row {
         settings.push(format!("EXEC sys.sp_tableoption @TableNamePattern = {}, @OptionName = N'text in row', @OptionValue = N'{limit}';", quote_literal(&name)));
@@ -443,6 +457,20 @@ fn column(c: &Column, table: &str, warnings: &mut Vec<String>) -> String {
         out.push_str(&format!(" CONSTRAINT {} DEFAULT {definition}", ident(constraint)));
     }
     out
+}
+
+fn bindings(c: &Column, table: &str, warnings: &mut Vec<String>) -> Vec<String> {
+    let path = format!("{table}.{}", ident(&c.name));
+    [(&c.bound_default, "default", "sp_bindefault @defname"), (&c.bound_rule, "rule", "sp_bindrule @rulename")]
+        .into_iter()
+        .filter_map(|(bound, what, procedure)| match bound.as_ref()? {
+            Bound::Object { schema, name } => Some(format!("EXEC sys.{procedure} = {}, @objname = {};", quote_literal(&qualified(schema, name)), quote_literal(&path))),
+            Bound::Hidden => {
+                warnings.push(format!("the {what} bound to {path}, which this login cannot see"));
+                None
+            }
+        })
+        .collect()
 }
 
 fn classification(table: &str, c: &Classification) -> String {
@@ -978,6 +1006,29 @@ GO
 "
             ))
         );
+    }
+
+    #[test]
+    fn bound_defaults_and_rules_replay_after_the_table_or_warn_when_hidden() {
+        let object = |name: &str| Some(Bound::Object { schema: "dbo".into(), name: name.into() });
+        let t = Table {
+            columns: vec![Column { bound_default: object("d_zero"), bound_rule: object("r'pos"), ..col("q ü", "int") }, Column { bound_default: Some(Bound::Hidden), bound_rule: Some(Bound::Hidden), ..col("h", "int") }],
+            ..table_named("b]t")
+        };
+        let ddl = table(&t);
+        assert!(
+            ddl.text.ends_with(
+                "GO
+
+EXEC sys.sp_bindefault @defname = N'[dbo].[d_zero]', @objname = N'[dbo].[b]]t].[q ü]';
+EXEC sys.sp_bindrule @rulename = N'[dbo].[r''pos]', @objname = N'[dbo].[b]]t].[q ü]';
+GO
+"
+            ),
+            "{}",
+            ddl.text
+        );
+        assert_eq!(ddl.warnings, ["the default bound to [dbo].[b]]t].[h], which this login cannot see", "the rule bound to [dbo].[b]]t].[h], which this login cannot see"]);
     }
 
     #[test]

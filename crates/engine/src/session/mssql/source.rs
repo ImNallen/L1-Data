@@ -402,7 +402,9 @@ fn columns_sql(oid: i32) -> String {
             CONVERT(nvarchar(40),ic.seed_value),CONVERT(nvarchar(40),ic.increment_value),cc.definition,cc.is_persisted,dc.name,dc.definition,
             COALESCE(ic.is_not_for_replication,0),c.is_sparse,c.is_column_set,c.is_rowguidcol,mc.masking_function,c.generated_always_type,c.is_hidden,
             CASE WHEN c.is_ansi_padded=0 AND t.name IN ('char','varchar','binary','varbinary') THEN 1 ELSE 0 END,c.is_filestream,
-            CASE WHEN c.encryption_type IS NULL THEN 0 ELSE 1 END,SCHEMA_NAME(xsc.schema_id),xsc.name,c.is_xml_document,c.is_computed
+            CASE WHEN c.encryption_type IS NULL THEN 0 ELSE 1 END,SCHEMA_NAME(xsc.schema_id),xsc.name,c.is_xml_document,c.is_computed,
+            CASE WHEN c.default_object_id<>0 AND dc.object_id IS NULL THEN 1 ELSE 0 END,OBJECT_SCHEMA_NAME(c.default_object_id),OBJECT_NAME(c.default_object_id),
+            CASE WHEN c.rule_object_id<>0 THEN 1 ELSE 0 END,OBJECT_SCHEMA_NAME(c.rule_object_id),OBJECT_NAME(c.rule_object_id)
          FROM sys.columns c
          JOIN sys.types ut ON ut.user_type_id=c.user_type_id
          LEFT JOIN sys.types t ON t.user_type_id=c.system_type_id AND t.system_type_id=t.user_type_id
@@ -447,9 +449,21 @@ fn columns_from(rows: &[Row]) -> Result<Vec<ddl::Column>, DetailError> {
                 encrypted: bit(r, 25)?,
                 unreadable_computed: r[12].is_none() && bit(r, 29)?,
                 hidden_default: r[15].is_none().then(|| r[14].clone()).flatten(),
+                bound_default: bound(r, 30)?,
+                bound_rule: bound(r, 33)?,
             })
         })
         .collect()
+}
+
+fn bound(r: &[Option<String>], at: usize) -> Result<Option<ddl::Bound>, DetailError> {
+    if !bit(r, at)? {
+        return Ok(None);
+    }
+    Ok(Some(match (r[at + 1].clone(), r[at + 2].clone()) {
+        (Some(schema), Some(name)) => ddl::Bound::Object { schema, name },
+        _ => ddl::Bound::Hidden,
+    }))
 }
 
 fn keys_sql(oid: i32, filter: &str, f: &Features) -> String {
