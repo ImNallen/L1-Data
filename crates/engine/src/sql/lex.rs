@@ -68,14 +68,20 @@ pub(crate) fn lex(sql: &str) -> Vec<Lexeme> {
 }
 
 pub(crate) fn lex_strings(sql: &str, strings: Strings) -> Vec<Lexeme> {
-    let mut out = Vec::new();
+    lexemes(sql, strings).collect()
+}
+
+pub(crate) fn lexemes(sql: &str, strings: Strings) -> impl Iterator<Item = Lexeme> + '_ {
     let mut i = 0;
-    while i < sql.len() {
+    std::iter::from_fn(move || {
+        if i >= sql.len() {
+            return None;
+        }
         let (kind, end) = lexeme_at(sql, i, strings);
-        out.push(Lexeme { kind, span: i..end });
+        let lexeme = Lexeme { kind, span: i..end };
         i = end;
-    }
-    out
+        Some(lexeme)
+    })
 }
 
 fn lexeme_at(sql: &str, i: usize, strings: Strings) -> (LexKind, usize) {

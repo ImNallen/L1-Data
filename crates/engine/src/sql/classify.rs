@@ -1,3 +1,5 @@
+use super::lex::{LexKind, Lexeme, Strings, lexemes};
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DmlVerb {
     Insert,
@@ -49,7 +51,7 @@ impl StmtKind {
 }
 
 pub fn classify(stmt: &str) -> StmtKind {
-    let words: Vec<String> = keywords(stmt).take(4).map(|w| w.to_ascii_uppercase()).collect();
+    let words: Vec<String> = top_level_words(stmt).take(4).map(|w| w.to_ascii_uppercase()).collect();
     let w = |i: usize| words.get(i).map(String::as_str).unwrap_or("");
     match w(0) {
         "BEGIN" | "START" => StmtKind::Begin,
@@ -92,7 +94,7 @@ fn chains(words: &[String]) -> bool {
 /// The source or target follows the first `FROM` or `TO`: the table name before it is any number
 /// of words, and a column list or query is parenthesized. A quoted file name yields no keyword.
 fn copy_kind(stmt: &str) -> StmtKind {
-    let mut words = keywords(stmt).map(|w| w.to_ascii_uppercase());
+    let mut words = top_level_words(stmt).map(|w| w.to_ascii_uppercase());
     let target = words.by_ref().find(|w| w == "FROM" || w == "TO").and_then(|_| words.next());
     match target.as_deref() {
         Some("STDIN" | "STDOUT") => StmtKind::CopyStdio,
@@ -116,38 +118,19 @@ fn ddl_tag(words: &[String]) -> String {
     }
 }
 
-/// Identifier-like words of a statement, skipping comments, quoted strings and identifiers, and
-/// anything inside parentheses.
-fn keywords(stmt: &str) -> impl Iterator<Item = &str> {
-    let bytes = stmt.as_bytes();
-    let mut i = 0;
+fn top_level_words(stmt: &str) -> impl Iterator<Item = &str> {
     let mut depth = 0usize;
-    std::iter::from_fn(move || {
-        while i < bytes.len() {
-            let c = bytes[i];
-            if c == b'-' && bytes.get(i + 1) == Some(&b'-') {
-                i = stmt[i..].find('\n').map_or(bytes.len(), |n| i + n);
-            } else if c == b'/' && bytes.get(i + 1) == Some(&b'*') {
-                i = stmt[i..].find("*/").map_or(bytes.len(), |n| i + n + 2);
-            } else if c == b'\'' || c == b'"' {
-                i = stmt[i + 1..].find(c as char).map_or(bytes.len(), |n| i + n + 2);
-            } else if c == b'(' {
-                depth += 1;
-                i += 1;
-            } else if c == b')' {
-                depth = depth.saturating_sub(1);
-                i += 1;
-            } else if depth == 0 && (c.is_ascii_alphabetic() || c == b'_') {
-                let start = i;
-                while i < bytes.len() && (bytes[i].is_ascii_alphanumeric() || bytes[i] == b'_') {
-                    i += 1;
-                }
-                return Some(&stmt[start..i]);
-            } else {
-                i += 1;
-            }
+    lexemes(stmt, Strings::Standard).filter_map(move |Lexeme { kind, span }| match kind {
+        LexKind::Open => {
+            depth += 1;
+            None
         }
-        None
+        LexKind::Close => {
+            depth = depth.saturating_sub(1);
+            None
+        }
+        LexKind::Word if depth == 0 => Some(&stmt[span]),
+        _ => None,
     })
 }
 
@@ -184,6 +167,28 @@ mod tests {
         assert_eq!(classify("select 'it''s -- not a comment'"), StmtKind::Query);
         assert_eq!(classify("explain analyze select 1"), StmtKind::Query);
         assert_eq!(classify("show search_path"), StmtKind::Query);
+    }
+
+    #[test]
+    fn comments_end_where_the_splitter_ends_them() {
+        for sql in [
+            "/*/ header */ begin",
+            "/* a /* b */ c */ begin",
+            "/* x; /* nested; */ y */ begin",
+            "/*\n\nselect 1 */ begin",
+            "/**/begin",
+            "-- c\rbegin",
+            "-- a;b\nbegin",
+            "-- header\n/* note */ begin",
+        ] {
+            assert_eq!(classify(sql), StmtKind::Begin, "{sql:?}");
+        }
+        for sql in ["/* a /* b */ begin", "-- begin", "/*/ begin */"] {
+            assert_eq!(classify(sql), StmtKind::Other(String::new()), "{sql:?}");
+        }
+        assert_eq!(classify("select $$ begin $$"), StmtKind::Query);
+        assert_eq!(classify("copy t from $$/tmp/x$$"), StmtKind::Other("COPY".into()));
+        assert_eq!(classify("copy t (a) from E'\\'stdin'"), StmtKind::Other("COPY".into()));
     }
 
     #[test]
