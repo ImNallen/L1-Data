@@ -66,8 +66,8 @@ A passing typecheck does not show that a UI change works. Drive the real UI agai
 
 To compare a command's latency on two bridges, such as one built from `main` and one from your branch, run `node dev/perf/invoke.mjs <bridge-a> <bridge-b> <command> <json or @file> <runs>`. It calls each bridge once to warm up, then alternates the calls between the bridges and prints the p50 and p95 of each in milliseconds as JSON. It fails on any reply that is not a successful command. These options adapt it to commands that need more:
 
-- `--body-a` and `--body-b` give each bridge its own body, because each bridge has its own connection and tab IDs. With both, leave out the shared body.
-- `--wait untimed` waits after each call for the run's `Finished` event on `/events`, so the next `console_run` on the tab does not return `Busy`. The sample is still the call alone, which is the time to accept the run. `--wait timed` measures from the call to the `Finished` event. Both fail when the run's outcome is not `Ok`.
+- `--body-a` and `--body-b` give each bridge its own body, because each bridge has its own connection and tab IDs. With both, leave out the shared body, which the probe would ignore with a warning.
+- `--wait untimed` waits after each call for the run's `Finished` event on `/events`, so the next `console_run` on the tab does not return `Busy`. The sample is still the call alone, which is the time to accept the run. `--wait timed` measures from the call to the later of its reply and the `Finished` event. Both fail when the run's outcome is not `Ok`, and when no `Finished` event arrives within `--timeout-ms` of the reply, 30000 by default.
 - `--teardown <command>` calls a command after each sample, untimed, with `--teardown-body`, or `--teardown-body-a` and `--teardown-body-b`. A `connection_connect` probe needs `--teardown connection_disconnect` with `{"id":"<id>","force":true}`, or every sample after the first times a connection that is already open.
 - `--raw <path>` also writes every sample, in milliseconds, to a JSON file.
 

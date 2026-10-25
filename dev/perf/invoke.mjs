@@ -7,7 +7,10 @@ const USAGE = `usage: node dev/perf/invoke.mjs <bridge-a> <bridge-b> <command> [
 
   --body-a, --body-b <json | @file>   the side's request body, in place of the shared one
   --wait untimed | timed              after each call, wait for the run's Finished event and fail
-                                      unless it is Ok. timed measures from the call to the event.
+                                      unless it is Ok. timed measures from the call to the later
+                                      of the reply and the event.
+  --timeout-ms <ms>                   fail when a run has not finished this long after its call
+                                      returns, default 30000
   --teardown <command>                call after each sample, untimed
   --teardown-body <json | @file>      its body, or per side with --teardown-body-a, --teardown-body-b
   --raw <path>                        write every sample to a JSON file`;
@@ -16,6 +19,7 @@ const OPTIONS = {
   "body-a": { type: "string" },
   "body-b": { type: "string" },
   wait: { type: "string" },
+  "timeout-ms": { type: "string" },
   teardown: { type: "string" },
   "teardown-body": { type: "string" },
   "teardown-body-a": { type: "string" },
@@ -31,8 +35,14 @@ export function parseOptions(argv) {
   const runs = Number(positionals.at(-1));
   if (!Number.isInteger(runs) || runs < 1) throw new Error(`runs must be a positive integer, not ${positionals.at(-1)}`);
   if (values.wait !== undefined && values.wait !== "untimed" && values.wait !== "timed") throw new Error("--wait takes untimed or timed");
+  const timeoutMs = Number(values["timeout-ms"] ?? 30000);
+  if (!Number.isInteger(timeoutMs) || timeoutMs < 1) throw new Error(`--timeout-ms must be a positive integer, not ${values["timeout-ms"]}`);
+  if (values["timeout-ms"] !== undefined && values.wait === undefined) throw new Error("--timeout-ms needs --wait");
   const bodies = [values["body-a"] ?? body, values["body-b"] ?? body];
   if (bodies.includes(undefined)) throw new Error("each side needs a body");
+  if (body !== undefined && values["body-a"] !== undefined && values["body-b"] !== undefined) {
+    console.error("warning: --body-a and --body-b are both set, so the shared body is ignored");
+  }
   let teardown = null;
   if (values.teardown !== undefined) {
     const shared = values["teardown-body"];
@@ -47,6 +57,7 @@ export function parseOptions(argv) {
     runs,
     bodies,
     wait: values.wait ?? null,
+    timeoutMs,
     teardown,
     raw: values.raw ?? null,
   };
@@ -109,15 +120,28 @@ async function watchRuns(bridge, signal) {
   return (runId) => run(runId).finished;
 }
 
+async function finishedWithin(finished, runId, timeoutMs, bridge) {
+  let timer;
+  const timeout = new Promise((_, reject) => {
+    timer = setTimeout(() => reject(new Error(`${bridge} run ${runId} did not finish within ${timeoutMs} ms`)), timeoutMs);
+  });
+  try {
+    return await Promise.race([finished(runId), timeout]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 async function sample(side, opts, finished) {
   const started = performance.now();
   const reply = await invoke(side.bridge, opts.command, side.body);
-  let ms = performance.now() - started;
+  const replied = performance.now();
+  let ms = replied - started;
   if (finished) {
     if (reply?.runId === undefined) throw new Error(`${side.bridge} ${opts.command}: --wait needs a reply with a runId, got ${JSON.stringify(reply)}`);
-    const { at, outcome } = await finished(reply.runId);
+    const { at, outcome } = await finishedWithin(finished, reply.runId, opts.timeoutMs, side.bridge);
     if (outcome !== "Ok") throw new Error(`${side.bridge} run ${reply.runId} finished ${outcome}`);
-    if (opts.wait === "timed") ms = at - started;
+    if (opts.wait === "timed") ms = Math.max(replied, at) - started;
   }
   if (opts.teardown) await invoke(side.bridge, opts.teardown.command, side.teardownBody);
   return ms;
