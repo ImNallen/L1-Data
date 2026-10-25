@@ -114,6 +114,7 @@ async fn main() {
         data_dir,
         keys: Arc::new(MemoryKeyStore::default()),
         agent_path: AgentPath::LoginShell,
+        az_binary: std::env::var_os("L1_DATA_AZ_BINARY").map(Into::into),
         user_known_hosts: engine::openssh_known_hosts(),
         updates: Arc::new(updates),
     })

@@ -20,7 +20,7 @@ impl Harness {
     }
 
     async fn open_in(dir: tempfile::TempDir) -> Self {
-        let engine = Engine::open(EngineConfig { data_dir: dir.path().join("data"), keys: Arc::new(MemoryKeyStore::default()), agent_path: AgentPath::Fixed("".into()), user_known_hosts: None, updates: Arc::new(engine::ScriptedTransport::named("off").unwrap()) }).await.unwrap();
+        let engine = Engine::open(EngineConfig { data_dir: dir.path().join("data"), keys: Arc::new(MemoryKeyStore::default()), agent_path: AgentPath::Fixed("".into()), az_binary: None, user_known_hosts: None, updates: Arc::new(engine::ScriptedTransport::named("off").unwrap()) }).await.unwrap();
         let events = engine.subscribe();
         Self { engine, events, dir }
     }
@@ -759,7 +759,7 @@ async fn chats_persist_across_open_and_a_mid_turn_row_recovers_as_lost() {
     .join()
     .unwrap();
     let data_dir = std::fs::read_to_string(dir.path().join("data-dir")).unwrap();
-    let engine = Engine::open(EngineConfig { data_dir: data_dir.into(), keys: Arc::new(MemoryKeyStore::default()), agent_path: AgentPath::Fixed("".into()), user_known_hosts: None, updates: Arc::new(engine::ScriptedTransport::named("off").unwrap()) }).await.unwrap();
+    let engine = Engine::open(EngineConfig { data_dir: data_dir.into(), keys: Arc::new(MemoryKeyStore::default()), agent_path: AgentPath::Fixed("".into()), az_binary: None, user_known_hosts: None, updates: Arc::new(engine::ScriptedTransport::named("off").unwrap()) }).await.unwrap();
     let listed = engine.boot().chats;
     assert_eq!(listed.iter().map(|c| (c.id, c.status.clone())).collect::<Vec<_>>(), [(lost, ChatStatus::Idle)]);
     let view = engine.assistant_open(lost).await.unwrap();

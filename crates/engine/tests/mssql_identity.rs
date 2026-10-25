@@ -26,7 +26,7 @@ fn draft(database: &str) -> ConnectionDraft {
 }
 
 async fn open(dir: &std::path::Path, keys: Arc<MemoryKeyStore>) -> Arc<Engine> {
-    Engine::open(EngineConfig { data_dir: dir.into(), keys, agent_path: AgentPath::Fixed("".into()), user_known_hosts: None, updates: Arc::new(engine::ScriptedTransport::named("off").unwrap()) }).await.unwrap()
+    Engine::open(EngineConfig { data_dir: dir.into(), keys, agent_path: AgentPath::Fixed("".into()), az_binary: None, user_known_hosts: None, updates: Arc::new(engine::ScriptedTransport::named("off").unwrap()) }).await.unwrap()
 }
 
 fn console(connection_id: ConnectionId, database: &str) -> ConsoleConfig {

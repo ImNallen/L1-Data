@@ -60,7 +60,7 @@ impl Harness {
     }
 
     async fn start_updating(dir: tempfile::TempDir, draft: ConnectionDraft, updates: Arc<dyn UpdateTransport>) -> Self {
-        let engine = Engine::open(EngineConfig { data_dir: dir.path().to_owned(), keys: Arc::new(MemoryKeyStore::default()), agent_path: AgentPath::Fixed("".into()), user_known_hosts: None, updates })
+        let engine = Engine::open(EngineConfig { data_dir: dir.path().to_owned(), keys: Arc::new(MemoryKeyStore::default()), agent_path: AgentPath::Fixed("".into()), az_binary: None, user_known_hosts: None, updates })
             .await
             .unwrap();
         let events = engine.subscribe();

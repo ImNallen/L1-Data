@@ -181,7 +181,7 @@ The `claude-smoke` test needs the `claude` CLI installed and signed in, and the 
 | `L1_DATA_TEST_MSSQL_PASSWORD` | The `sa` password for the SQL Server Rust integration tests. Default is the development fixture password above. |
 | `L1_DATA_BRIDGE_PORT` | The port the dev-bridge listens on, and the port vite gives the page for it. `dev/bridge-smoke.sh` and `dev/mssql-smoke.py` use it too. Default `7077`. |
 | `L1_DATA_VITE_PORT` | The port vite serves the UI on, and the only port the dev-bridge accepts requests from. Default `5173`. `pnpm tauri dev` needs the default. |
-| `L1_DATA_AZ_BINARY` | The program the engine runs instead of `az` on the PATH for Entra ID sign-in, such as `target/debug/fake-az`. A relative path is relative to the working directory. Ignored when the engine has a fixed PATH, as in tests. |
+| `L1_DATA_AZ_BINARY` | The program the dev-bridge's engine runs instead of `az` on the PATH for Entra ID sign-in, such as `target/debug/fake-az`. A relative path is relative to the working directory. Only the dev-bridge reads it. The app ignores it. |
 | `L1_FAKE_AZ_SCENARIO`, `L1_FAKE_AZ_LOG` | The scenario and call log of `fake-az`. AGENTS.md describes them. |
 | `L1_DATA_UPDATE_SCENARIO` | The scripted update feed the dev-bridge serves: `current` (the default), `available`, `nightly-build`, `offline`, `bad-signature`, `install-fails`, or `off`. AGENTS.md describes each. |
 | `UPDATE_BINDINGS=1` | Makes the bindings drift test rewrite `src/ipc/bindings.ts` instead of failing. |

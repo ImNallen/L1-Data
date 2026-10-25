@@ -175,6 +175,7 @@ mod tests {
             data_dir: dir.path().to_owned(),
             keys: Arc::new(MemoryKeyStore::default()),
             agent_path: AgentPath::Fixed("".into()),
+            az_binary: None,
             user_known_hosts: None,
             updates: Arc::new(ScriptedTransport::named("off").unwrap()),
         })
@@ -326,6 +327,7 @@ mod tests {
             data_dir: dir.path().to_owned(),
             keys: Arc::new(MemoryKeyStore::default()),
             agent_path: AgentPath::Fixed("".into()),
+            az_binary: None,
             user_known_hosts: None,
             updates: Arc::new(ScriptedTransport::named("off").unwrap()),
         };

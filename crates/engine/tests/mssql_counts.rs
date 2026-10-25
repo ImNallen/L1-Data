@@ -24,7 +24,7 @@ impl Harness {
         let fixture = FIXTURES.lock().await;
         let dir = tempfile::tempdir().unwrap();
         let engine = Engine::open(EngineConfig {
-            data_dir: dir.path().into(), keys: Arc::new(MemoryKeyStore::default()), agent_path: AgentPath::Fixed("".into()), user_known_hosts: None,
+            data_dir: dir.path().into(), keys: Arc::new(MemoryKeyStore::default()), agent_path: AgentPath::Fixed("".into()), az_binary: None, user_known_hosts: None,
             updates: Arc::new(engine::ScriptedTransport::named("off").unwrap()),
         }).await.unwrap();
         let connection = engine.save_connection(ConnectionDraft {

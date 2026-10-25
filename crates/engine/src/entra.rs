@@ -7,7 +7,6 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use crate::model::ConnectError;
 use crate::shell_path::{self, AgentPath, is_executable};
 
-const AZ_BINARY_ENV: &str = "L1_DATA_AZ_BINARY";
 const RESOURCE: &str = "https://database.windows.net/";
 const REFRESH_BEFORE: Duration = Duration::from_secs(5 * 60);
 const AZ_TIMEOUT: Duration = Duration::from_secs(30);
@@ -47,8 +46,7 @@ impl std::fmt::Debug for AzCli {
 }
 
 impl AzCli {
-    pub(crate) fn new(agent_path: AgentPath) -> Self {
-        let binary = matches!(agent_path, AgentPath::LoginShell).then(|| std::env::var_os(AZ_BINARY_ENV).map(PathBuf::from)).flatten();
+    pub(crate) fn new(agent_path: AgentPath, binary: Option<PathBuf>) -> Self {
         Self { agent_path, binary, path: tokio::sync::OnceCell::new(), state: tokio::sync::Mutex::default(), fetched: AtomicU64::new(0) }
     }
 
@@ -106,7 +104,7 @@ impl AzCli {
     fn program(&self, path: &OsString) -> Result<PathBuf, ConnectError> {
         let missing = |at: String| auth(format!("Microsoft Entra ID sign-in uses the Azure CLI, which was not found {at}. Install the Azure CLI, run `az login`, then try again."));
         if let Some(binary) = &self.binary {
-            return if is_executable(binary) { Ok(binary.clone()) } else { Err(missing(format!("at {} ({AZ_BINARY_ENV})", binary.display()))) };
+            return if is_executable(binary) { Ok(binary.clone()) } else { Err(missing(format!("at {}", binary.display()))) };
         }
         shell_path::dirs(path).iter().flat_map(|dir| AZ_NAMES.iter().map(move |name| dir.join(name))).find(|p| is_executable(p)).ok_or_else(|| missing("on the PATH".into()))
     }
@@ -158,7 +156,7 @@ mod tests {
     }
 
     fn seeded(access: &str, refresh_at: SystemTime) -> AzCli {
-        let cli = AzCli::new(AgentPath::Fixed("".into()));
+        let cli = AzCli::new(AgentPath::Fixed("".into()), None);
         cli.state.try_lock().unwrap().cached = Some(Cached { access: access.into(), refresh_at });
         cli
     }

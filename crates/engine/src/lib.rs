@@ -55,6 +55,9 @@ pub struct EngineConfig {
     pub data_dir: PathBuf,
     pub keys: Arc<dyn KeyStore>,
     pub agent_path: AgentPath,
+    /// The program Entra ID sign-in runs in place of `az` on the PATH. The dev-bridge passes
+    /// `L1_DATA_AZ_BINARY`. The app passes `None`, so a release build never reads that variable.
+    pub az_binary: Option<PathBuf>,
     /// The OpenSSH known_hosts that SSH tunnels also trust, read at each dial and never written.
     /// The app passes `openssh_known_hosts()`. Tests pass `None`, so they never read the
     /// developer's file.
@@ -731,7 +734,7 @@ impl Engine {
             view_edits: tokio::sync::Mutex::new(()),
             timezone: iana_time_zone::get_timezone().unwrap_or_else(|_| "UTC".into()),
             runtime: tokio::runtime::Handle::current(),
-            az: Arc::new(entra::AzCli::new(cfg.agent_path.clone())),
+            az: Arc::new(entra::AzCli::new(cfg.agent_path.clone(), cfg.az_binary)),
             providers: provider::Providers::new(cfg.agent_path),
             assistant: assistant::Assistant::new(),
             process_groups: Arc::new(provider::agent::ProcessGroups::default()),
@@ -1660,6 +1663,7 @@ mod tests {
             data_dir: dir.path().join("nested"),
             keys: Arc::new(MemoryKeyStore::default()),
             agent_path: AgentPath::Fixed("".into()),
+            az_binary: None,
             user_known_hosts: None,
             updates: Arc::new(crate::ScriptedTransport::named("off").unwrap()),
         })
@@ -1799,7 +1803,7 @@ mod tests {
     #[tokio::test]
     async fn passwordless_save_clear_and_delete_never_touch_the_keychain() {
         let dir = tempfile::tempdir().unwrap();
-        let engine = Engine::open(EngineConfig { data_dir: dir.path().to_owned(), keys: Arc::new(NoKeychain), agent_path: AgentPath::Fixed("".into()), user_known_hosts: None, updates: Arc::new(crate::ScriptedTransport::named("off").unwrap()) }).await.unwrap();
+        let engine = Engine::open(EngineConfig { data_dir: dir.path().to_owned(), keys: Arc::new(NoKeychain), agent_path: AgentPath::Fixed("".into()), az_binary: None, user_known_hosts: None, updates: Arc::new(crate::ScriptedTransport::named("off").unwrap()) }).await.unwrap();
         let saved = engine.save_connection(ConnectionDraft { password: PasswordInput::Clear, ..draft("dev") }).await.unwrap();
         let kept = engine
             .save_connection(ConnectionDraft { id: Some(saved.id), password: PasswordInput::Keep, ..draft("dev") })
@@ -1818,7 +1822,7 @@ mod tests {
         engine.shared.store.kv_set(KV_SETTINGS, &newer).unwrap();
         engine.shutdown().await;
         drop(engine);
-        let config = EngineConfig { data_dir: dir.path().join("nested"), keys: Arc::new(MemoryKeyStore::default()), agent_path: AgentPath::Fixed("".into()), user_known_hosts: None, updates: Arc::new(crate::ScriptedTransport::named("off").unwrap()) };
+        let config = EngineConfig { data_dir: dir.path().join("nested"), keys: Arc::new(MemoryKeyStore::default()), agent_path: AgentPath::Fixed("".into()), az_binary: None, user_known_hosts: None, updates: Arc::new(crate::ScriptedTransport::named("off").unwrap()) };
         let reopened = Engine::open(config).await.unwrap();
         assert_eq!(reopened.boot().settings.max_rows, Settings::default().max_rows);
         assert_eq!(reopened.shared.store.kv_get::<serde_json::Value>(KV_SETTINGS).unwrap(), Some(newer));
@@ -1828,7 +1832,7 @@ mod tests {
     async fn connections_settings_and_workspace_persist_across_open() {
         let dir = tempfile::tempdir().unwrap();
         let keys = Arc::new(MemoryKeyStore::default());
-        let cfg = || EngineConfig { data_dir: dir.path().to_owned(), keys: keys.clone(), agent_path: AgentPath::Fixed("".into()), user_known_hosts: None, updates: Arc::new(crate::ScriptedTransport::named("off").unwrap()) };
+        let cfg = || EngineConfig { data_dir: dir.path().to_owned(), keys: keys.clone(), agent_path: AgentPath::Fixed("".into()), az_binary: None, user_known_hosts: None, updates: Arc::new(crate::ScriptedTransport::named("off").unwrap()) };
         let password = |engine: &Engine, id| engine.shared.saved_secret(id, SecretSlot::Database).unwrap();
         let saved = {
             let engine = Engine::open(cfg()).await.unwrap();
@@ -1914,7 +1918,7 @@ mod tests {
     #[tokio::test]
     async fn an_invalid_tunnel_is_rejected_before_any_secret_is_sealed() {
         let dir = tempfile::tempdir().unwrap();
-        let engine = Engine::open(EngineConfig { data_dir: dir.path().to_owned(), keys: Arc::new(NoKeychain), agent_path: AgentPath::Fixed("".into()), user_known_hosts: None, updates: Arc::new(crate::ScriptedTransport::named("off").unwrap()) }).await.unwrap();
+        let engine = Engine::open(EngineConfig { data_dir: dir.path().to_owned(), keys: Arc::new(NoKeychain), agent_path: AgentPath::Fixed("".into()), az_binary: None, user_known_hosts: None, updates: Arc::new(crate::ScriptedTransport::named("off").unwrap()) }).await.unwrap();
         let tunnel = SshTunnelDraft { host: "bastion".into(), port: 22, user: "tunnel".into(), auth: SshAuth::Password, secret: PasswordInput::Set("pw".into()) };
         for bad in [
             SshTunnelDraft { host: " ".into(), ..tunnel.clone() },
