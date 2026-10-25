@@ -27,25 +27,28 @@ fn flag(key: &str, value: &str) -> Result<bool, String> {
     }
 }
 
-fn first_property(authority: &str) -> Option<usize> {
-    authority.match_indices(';').map(|(i, _)| i).find(|&i| {
-        let rest = &authority[i + 1..];
-        let name = rest.find(|c: char| !(c.is_ascii_alphanumeric() || c == '_' || c == ' ')).unwrap_or(rest.len());
-        name > 0 && rest[name..].starts_with('=')
-    })
+fn first_property(text: &str) -> Option<usize> {
+    let names_a_value = |after: &str| after.split(';').next().and_then(|segment| segment.find('=')).is_some_and(|eq| eq > 0);
+    text.match_indices(';').map(|(i, _)| i).find(|&i| names_a_value(&text[i + 1..]))
 }
 
-fn split_jdbc_properties_after_host(input: &str) -> Result<(&str, Option<&str>), String> {
+fn split_jdbc_properties(input: &str) -> Result<(&str, Option<&str>), String> {
     let Some(authority_start) = input.find("://").map(|i| i + 3) else { return Ok((input, None)) };
     let authority_end = input[authority_start..].find(['/', '?', '#']).map_or(input.len(), |i| authority_start + i);
-    let authority = &input[authority_start..authority_end];
-    let user_info_end = first_property(authority).unwrap_or(authority.len());
-    let host_start = authority[..user_info_end].rfind('@').map_or(authority_start, |i| authority_start + i + 1);
-    let Some(i) = input[host_start..authority_end].find(';') else { return Ok((input, None)) };
-    if authority_end < input.len() {
-        return Err("SQL Server URL properties run to the end of the URL. Percent-encode a /, ?, or # inside a property value as %2F, %3F, or %23.".into());
+    let Some(start) = first_property(&input[authority_start..authority_end]).map(|i| authority_start + i) else { return Ok((input, None)) };
+    let properties = &input[start + 1..];
+    if properties.split(';').any(|p| p.contains('@') && !p.split_once('=').is_some_and(|(key, _)| key.eq_ignore_ascii_case("user"))) {
+        return Err("This SQL Server URL is ambiguous. An @ after its first ;name=value property could also end the user name and password. Percent-encode a ; in a password as %3B, or an @ in a property value as %40. Only a user value can hold a plain @.".into());
     }
-    Ok((&input[..host_start + i], Some(&input[host_start + i + 1..])))
+    if let Some((c, encoded)) = properties.chars().find_map(|c| match c {
+        '/' => Some((c, "%2F")),
+        '?' => Some((c, "%3F")),
+        '#' => Some((c, "%23")),
+        _ => None,
+    }) {
+        return Err(format!("SQL Server URL properties run to the end of the URL. Percent-encode a {c} inside a property value as {encoded}."));
+    }
+    Ok((&input[..start], Some(properties)))
 }
 
 pub(super) fn parse(input: &str, name: &str) -> Result<ConnectionDraft, String> {
@@ -57,7 +60,7 @@ pub(super) fn parse(input: &str, name: &str) -> Result<ConnectionDraft, String> 
             return Err("SQL Server URL contains invalid percent encoding".into());
         }
     }
-    let (input, properties) = split_jdbc_properties_after_host(input)?;
+    let (input, properties) = split_jdbc_properties(input)?;
     let (_, authority) = input.split_once("://").ok_or("Use mssql:// or sqlserver:// with a TCP host")?;
     let raw_path = authority.split(['?', '#']).next().unwrap_or_default().split_once('/').map(|(_, p)| p).unwrap_or_default();
     if raw_path.contains('/') || matches!(raw_path, "." | "..") {
@@ -68,6 +71,9 @@ pub(super) fn parse(input: &str, name: &str) -> Result<ConnectionDraft, String> 
         return Err("SQL Server URL fragments are unsupported".into());
     }
     let host = url.host_str().filter(|h| !h.is_empty()).ok_or("SQL Server URL needs a TCP host")?;
+    if host.contains(';') {
+        return Err("SQL Server URL properties need a name and value".into());
+    }
     if host.contains([',', '\\', '%']) {
         return Err("SQL Server URL requires one TCP host; named instances and multi-host URLs are unsupported".into());
     }
@@ -192,31 +198,49 @@ mod tests {
         assert_eq!(draft_from_url("sqlserver://localhost/my;db", "").unwrap().database, "my;db");
         assert_eq!(draft_from_url("mssql://localhost/shop;database=other", "").unwrap().database, "shop;database=other");
         assert_eq!(password("sqlserver://localhost;user=sa;password=a%2Fb%40c"), "a/b@c");
-        for url in ["sqlserver://sa:a;b=c@localhost/shop", "sqlserver://sa:123;database=evil@localhost/shop"] {
-            assert!(draft_from_url(url, "").is_err(), "{url} reads as properties after host sa, which a path cannot follow");
-        }
     }
 
     #[test]
-    fn an_at_sign_inside_a_property_value_never_ends_the_user_info() {
-        let draft = draft_from_url("sqlserver://db.example.net;user=me@contoso.com;authentication=ActiveDirectoryAzCli", "").unwrap();
-        assert_eq!((draft.host.as_str(), draft.sql_server_auth), ("db.example.net", Some(SqlServerAuth::EntraAzureCli)));
-        let draft = draft_from_url("sqlserver://srv.database.windows.net;database=mydb;user=myadmin@myserver;password=pw;encrypt=true", "").unwrap();
-        assert_eq!((draft.host.as_str(), draft.database.as_str(), draft.user.as_str()), ("srv.database.windows.net", "mydb", "myadmin@myserver"));
-        assert!(matches!(draft.password, PasswordInput::Set(p) if p == "pw"));
-        let draft = draft_from_url("sqlserver://sa@db.example.net:1444;password=p@ss@word", "").unwrap();
+    fn an_at_sign_after_the_first_property_outside_a_user_value_is_ambiguous() {
+        for url in [
+            "sqlserver://admin:12;password=hunter2@db.corp",
+            "sqlserver://srv;app-name=foo@evil.com;password=pw",
+            "sqlserver://srv;a:b=c@evil.com;password=pw",
+            "sqlserver://srv;a@b=c@evil.com;password=pw",
+            "sqlserver://sa:a;b=c@localhost/shop",
+            "sqlserver://sa:123;database=evil@localhost/shop",
+            "sqlserver://sa@db.example.net:1444;password=p@ss@word",
+            "sqlserver://db.example.net;Initial Catalog=a@b",
+            "sqlserver://db.example.net;database=shop;x@y",
+        ] {
+            let message = draft_from_url(url, "").unwrap_err();
+            assert!(message.contains("ambiguous") && message.contains("; in a password as %3B") && message.contains("@ in a property value as %40"), "{url}: {message}");
+            assert!(!message.contains("%2F"), "{url} names only the characters that apply: {message}");
+        }
+        let draft = draft_from_url("sqlserver://sa@db.example.net:1444;password=p%40ss%40word", "").unwrap();
         assert_eq!((draft.host.as_str(), draft.port, draft.user.as_str()), ("db.example.net", 1444, "sa"));
         assert!(matches!(draft.password, PasswordInput::Set(p) if p == "p@ss@word"));
-        for url in ["sqlserver://db.example.net;Initial Catalog=a@b", "sqlserver://db.example.net;Trusted_Connection=a@b"] {
-            assert!(draft_from_url(url, "").unwrap_err().starts_with("Unsupported SQL Server URL property"), "{url}");
-        }
     }
 
     #[test]
-    fn a_path_query_or_fragment_after_properties_is_refused() {
-        for url in ["sqlserver://host;database=shop?sslmode=require", "sqlserver://host;database=shop#frag", "sqlserver://host;database=shop/x", "sqlserver://localhost;user=sa;password=a/b"] {
+    fn an_at_sign_in_a_user_value_never_ends_the_user_info() {
+        let draft = draft_from_url("sqlserver://db.example.net;user=me@contoso.com;authentication=ActiveDirectoryAzCli", "").unwrap();
+        assert_eq!((draft.host.as_str(), draft.sql_server_auth), ("db.example.net", Some(SqlServerAuth::EntraAzureCli)));
+        let draft = draft_from_url("sqlserver://srv.database.windows.net:1433;database=mydb;user=myadmin@myserver;password=pw;encrypt=true", "").unwrap();
+        assert_eq!((draft.host.as_str(), draft.port, draft.database.as_str(), draft.user.as_str()), ("srv.database.windows.net", 1433, "mydb", "myadmin@myserver"));
+        assert!(matches!(draft.password, PasswordInput::Set(p) if p == "pw"));
+    }
+
+    #[test]
+    fn a_path_query_or_fragment_after_properties_is_refused_naming_the_character() {
+        for (url, named) in [
+            ("sqlserver://host;database=shop?sslmode=require", "a ? inside a property value as %3F"),
+            ("sqlserver://host;database=shop#frag", "a # inside a property value as %23"),
+            ("sqlserver://host;database=shop/x", "a / inside a property value as %2F"),
+            ("sqlserver://localhost;user=sa;password=a/b", "a / inside a property value as %2F"),
+        ] {
             let message = draft_from_url(url, "").unwrap_err();
-            assert!(message.contains("Percent-encode"), "{url}: {message}");
+            assert!(message.contains(named) && message.matches('%').count() == 1, "{url}: {message}");
         }
         let draft = draft_from_url("sqlserver://host;database=shop%3Fx%23y%2Fz", "").unwrap();
         assert_eq!(draft.database, "shop?x#y/z");
