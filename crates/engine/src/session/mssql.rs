@@ -286,9 +286,13 @@ impl MsSession {
     }
 
     pub(super) async fn rows(&mut self, sql: &str) -> Result<Vec<Vec<Option<String>>>, QueryError> {
+        Ok(self.results(sql).await?.concat())
+    }
+    /// The rows of each result set a batch returns, in order.
+    pub(super) async fn results(&mut self, sql: &str) -> Result<Vec<Vec<Vec<Option<String>>>>, QueryError> {
         let mut attempt = 1;
         loop {
-            match self.read_rows(sql).await {
+            match self.read_results(sql).await {
                 Err(e) if self.metadata && deadlock_victim(&e) && attempt < DEADLOCK_ATTEMPTS => {
                     tokio::time::sleep(DEADLOCK_BACKOFF * attempt).await;
                     attempt += 1;
@@ -297,20 +301,7 @@ impl MsSession {
             }
         }
     }
-    async fn read_rows(&mut self, sql: &str) -> Result<Vec<Vec<Option<String>>>, QueryError> {
-        let mut stream = self.query(sql);
-        let mut rows = Vec::new();
-        let mut failed = None;
-        while let Some(event) = stream.next().await {
-            match event? {
-                QueryEvent::Row(row) => rows.push(row),
-                QueryEvent::ServerError(e) => { failed.get_or_insert(e); }
-                _ => {}
-            }
-        }
-        failed.map_or(Ok(rows), Err)
-    }
-    pub(super) async fn results(&mut self, sql: &str) -> Result<Vec<Vec<Vec<Option<String>>>>, QueryError> {
+    async fn read_results(&mut self, sql: &str) -> Result<Vec<Vec<Vec<Option<String>>>>, QueryError> {
         let mut stream = self.query(sql);
         let mut sets: Vec<Vec<Vec<Option<String>>>> = Vec::new();
         let mut failed = None;
