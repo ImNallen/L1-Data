@@ -646,7 +646,7 @@ impl Shared {
 
     async fn console_txn_command(self: &Arc<Self>, tab: TabId, commit: bool, confirmed: Option<WriteDigest>) -> Result<(), TxnError> {
         let console = self.console(tab).ok_or(TxnError::NoTransaction)?;
-        let (mut session, aborted, run_id) = {
+        let (mut session, commits, run_id) = {
             let mut inner = console.inner.lock().await;
             let idle = match &inner.session {
                 SessionSlot::Busy { .. } => return Err(TxnError::Busy),
@@ -654,26 +654,26 @@ impl Shared {
                 SessionSlot::Idle(_) if inner.txn == TxnState::Idle => return Err(TxnError::NoTransaction),
                 SessionSlot::Idle(idle) => idle,
             };
-            let aborted = inner.txn == TxnState::Aborted;
-            let work = if commit && !aborted {
+            let work = if commit && inner.txn != TxnState::Aborted {
                 let saved = self.config(inner.config.connection_id).ok_or(TxnError::NoTransaction)?;
                 let target = writes::Target { saved: &saved, opened: idle.opened(), console: &inner.config, txn: inner.txn, unasked: &inner.unasked };
                 Work::Commit(writes::check(&target, &["COMMIT"], confirmed.as_ref()).map_err(|confirmation| TxnError::ConfirmWrites { confirmation })?)
             } else {
                 Work::Rollback
             };
+            let commits = matches!(work, Work::Commit(_));
             let run_id = self.next_run_id();
             let (session, _stop) = console.take_session(&mut inner, run_id, work).expect("slot is idle");
             console.publish(&mut inner, self);
-            (session, aborted, run_id)
+            (session, commits, run_id)
         };
-        let (kind, sql) = if commit && !aborted { (sql::StmtKind::Commit, "COMMIT") } else { (sql::StmtKind::Rollback, "ROLLBACK") };
+        let (kind, sql) = if commits { (sql::StmtKind::Commit, "COMMIT") } else { (sql::StmtKind::Rollback, "ROLLBACK") };
         let started = std::time::Instant::now();
-        let mut result = session.finish_transaction(commit && !aborted).await;
+        let mut result = session.finish_transaction(commits).await;
         let elapsed_ms = started.elapsed().as_millis().min(u32::MAX as u128) as u32;
         let fatal = result.as_ref().err().filter(|e| e.severity == "FATAL").map(|e| e.message.clone());
         let lost = session.closed_reason_settled(fatal).await;
-        if commit && !aborted && lost.is_some() {
+        if commits && lost.is_some() {
             if let Err(error) = &mut result { error.message = format!("Commit outcome is unknown because the session was lost: {}", error.message); }
         }
         let mut lines = vec![console::statement_line(0, sql)];
@@ -687,16 +687,18 @@ impl Shared {
         let edited = console
             .edit(self, run_id, |inner| {
                 let txn = session.observed_txn().unwrap_or_else(|| txn::txn_after(inner.txn, &kind, outcome));
+                if txn::ended(&kind, outcome, session.observed_txn()) {
+                    inner.unasked = WriteList::default();
+                }
                 let retired = Console::return_session(inner, session, txn, lost);
-                let committed = commit && !aborted && result.is_ok();
-                retired.or_else(|| inner.finish_refreshes(committed))
+                retired.or_else(|| inner.finish_refreshes(commits && result.is_ok()))
             })
             .await;
         if let Ok(Some((db, owed))) = edited {
             self.schedule_refreshes(db, owed);
         }
         match result {
-            Ok(()) if commit && aborted => Err(TxnError::RolledBack),
+            Ok(()) if commit && !commits => Err(TxnError::RolledBack),
             Ok(()) => Ok(()),
             Err(error) => Err(TxnError::Query(error)),
         }
@@ -1507,9 +1509,13 @@ impl Engine {
         }
         console.output_all(s, run_id, lines);
         let held = writes_stay_unasked && outcome.is_ok();
+        let ended = !inside && (finish.is_some() || outcome.is_err());
         let returned = console.edit(s, run_id, |inner| {
             if held {
                 plan.iter().for_each(|edit| inner.unasked.add(&edit.sql));
+            }
+            if ended {
+                inner.unasked = WriteList::default();
             }
             Console::return_session(inner, session, after, lost)
         });

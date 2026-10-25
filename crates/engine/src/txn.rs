@@ -51,6 +51,14 @@ pub fn txn_after(state: TxnState, kind: &StmtKind, outcome: StmtOutcome) -> TxnS
     }
 }
 
+pub fn ended(kind: &StmtKind, outcome: StmtOutcome, observed: Option<TxnState>) -> bool {
+    use StmtKind::*;
+    match observed {
+        Some(state) => state == TxnState::Idle,
+        None => outcome == StmtOutcome::Ok && matches!(kind, Commit | Rollback | CommitAndChain | RollbackAndChain),
+    }
+}
+
 pub fn needs_implicit_begin(mode: TxnMode, state: TxnState, kind: &StmtKind) -> bool {
     use StmtKind::*;
     mode == TxnMode::Manual
@@ -125,6 +133,20 @@ mod tests {
         for (from, kind, outcome, to) in table {
             assert_eq!(txn_after(from, &kind, outcome), to, "{from:?} + {kind:?}/{outcome:?}");
         }
+    }
+
+    #[test]
+    fn only_a_reported_or_successful_end_ends_a_transaction() {
+        for kind in all_kinds() {
+            let ends = matches!(kind, Commit | Rollback | CommitAndChain | RollbackAndChain);
+            assert_eq!(ended(&kind, Ok, None), ends, "{kind:?}");
+            assert!(!ended(&kind, Err, None), "{kind:?}: a failed statement shows no end");
+            assert!(ended(&kind, Err, Some(Idle)), "{kind:?}: the server reports no transaction");
+            assert!(!ended(&kind, Ok, Some(Active)), "{kind:?}: the server reports one open");
+        }
+        let missed_begin = Other("HEADER".into());
+        assert_eq!(txn_after(Idle, &missed_begin, Ok), Idle);
+        assert!(!ended(&missed_begin, Ok, None), "an Idle the engine infers is not an end it saw");
     }
 
     #[test]

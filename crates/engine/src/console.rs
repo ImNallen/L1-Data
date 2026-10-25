@@ -330,10 +330,11 @@ impl Console {
         let SessionSlot::Busy { opened, .. } = std::mem::replace(&mut inner.session, SessionSlot::Empty) else { unreachable!("Console::edit holds the slot") };
         inner.txn = txn;
         inner.txn_depth = session.txn_depth();
-        let due = match lost {
+        match lost {
             Some(reason) => {
                 let transaction = session.transaction_loss(txn);
                 inner.txn = TxnState::Idle;
+                inner.unasked = WriteList::default();
                 inner.txn_depth = None;
                 inner.session = SessionSlot::Lost { reason, transaction };
                 inner.finish_refreshes(false)
@@ -342,11 +343,7 @@ impl Console {
                 inner.session = SessionSlot::Idle(IdleSession { session, opened });
                 None
             }
-        };
-        if inner.txn == TxnState::Idle {
-            inner.unasked = WriteList::default();
         }
-        due
     }
 
     /// Cancels any run and drops the session; the console itself stays. A task holding the
@@ -502,7 +499,8 @@ pub async fn run_task(console: Arc<Console>, shared: Arc<Shared>, mut session: S
             e
         });
         if let Err(e) = &result { if e.severity == "FATAL" { fatal = Some(e.message.clone()); } }
-        txn = session.observed_txn().unwrap_or_else(|| txn_after(txn, &stmt.kind, if result.is_ok() { StmtOutcome::Ok } else { StmtOutcome::Err }));
+        let finished = if result.is_ok() { StmtOutcome::Ok } else { StmtOutcome::Err };
+        txn = session.observed_txn().unwrap_or_else(|| txn_after(txn, &stmt.kind, finished));
         let (status, history) = match &result {
             Ok((rows, tags)) => (StmtStatus::Finished, if let Some(rows) = rows { HistoryOutcome::Rows { rows: *rows } } else { HistoryOutcome::Command { tag: tags.join("; ") } }),
             Err(_) if cancelled => (StmtStatus::Cancelled, HistoryOutcome::Cancelled),
@@ -510,7 +508,7 @@ pub async fn run_task(console: Arc<Console>, shared: Arc<Shared>, mut session: S
         };
         let unasked_write = plan.writes_stay_unasked && crate::text::is_write(sql, plan.connection.database_kind);
         let chained = result.is_ok() && matches!(stmt.kind, StmtKind::CommitAndChain | StmtKind::RollbackAndChain);
-        let ended = txn == TxnState::Idle || chained;
+        let ended = crate::txn::ended(&stmt.kind, finished, session.observed_txn());
         let due = console.edit(&shared, run_id, |inner| {
             let committed = result.is_ok() && inner.txn != TxnState::Aborted && !matches!(stmt.kind, StmtKind::Rollback | StmtKind::RollbackAndChain);
             inner.txn = txn;

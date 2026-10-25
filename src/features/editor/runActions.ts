@@ -171,7 +171,7 @@ function deferPageForPendingWork(tabId: TabId, target: PageTarget | undefined): 
 
 function heldWrites(asked: WriteConfirmation): string {
   const h = asked.holds.count;
-  return `This transaction holds ${h === 1 ? "a write" : `${h} writes`} to ${asked.connection} / ${asked.database} that ran before the connection was marked Production.`;
+  return `${h === 1 ? "A write" : `${h} writes`} to ${asked.connection} / ${asked.database} ran before the connection was marked Production, and this tab's transaction may still hold ${h === 1 ? "it" : "them"}.`;
 }
 
 function shownWrites(asked: WriteConfirmation): { statements: string[]; note: string } {

@@ -1505,8 +1505,8 @@ export type WriteConfirmation = {
 	unit: ExecutionUnitKind,
 	sends: WriteList,
 	/**
-	 *  The writes the tab's open transaction holds that ran before its session counted as Production. Any run on
-	 *  the tab, and Commit, can commit them.
+	 *  The writes that ran before the tab's session counted as Production, in a transaction the engine has not seen
+	 *  end. Any run on the tab, and Commit, can commit them.
 	 */
 	holds: WriteList,
 	digest: WriteDigest,
