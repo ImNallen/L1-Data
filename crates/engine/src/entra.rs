@@ -6,19 +6,15 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use crate::model::ConnectError;
 use crate::shell_path::{self, AgentPath, is_executable};
 
-/// Names the program to run instead of `az` on the PATH. Read only under `AgentPath::LoginShell`,
-/// so tests with a fixed PATH never see a developer's setting.
 const AZ_BINARY_ENV: &str = "L1_DATA_AZ_BINARY";
 const RESOURCE: &str = "https://database.windows.net/";
 const REFRESH_BEFORE: Duration = Duration::from_secs(5 * 60);
 const AZ_TIMEOUT: Duration = Duration::from_secs(30);
 const AZ_NAMES: &[&str] = if cfg!(windows) { &["az.cmd", "az.exe"] } else { &["az"] };
 
-/// Microsoft Entra ID access tokens for Azure SQL, from the user's `az login`. The engine stores no
-/// Azure credential. It keeps the last token in memory until five minutes before it expires, so
-/// every session of every Entra connection shares one `az` call.
 pub(crate) struct AzCli {
     agent_path: AgentPath,
+    binary: Option<PathBuf>,
     path: tokio::sync::OnceCell<OsString>,
     cached: tokio::sync::Mutex<Option<Cached>>,
 }
@@ -42,10 +38,10 @@ impl std::fmt::Debug for AzCli {
 
 impl AzCli {
     pub(crate) fn new(agent_path: AgentPath) -> Self {
-        Self { agent_path, path: tokio::sync::OnceCell::new(), cached: tokio::sync::Mutex::new(None) }
+        let binary = matches!(agent_path, AgentPath::LoginShell).then(|| std::env::var_os(AZ_BINARY_ENV).map(PathBuf::from)).flatten();
+        Self { agent_path, binary, path: tokio::sync::OnceCell::new(), cached: tokio::sync::Mutex::new(None) }
     }
 
-    /// The lock is held across `az`, so concurrent session opens make one call.
     pub(crate) async fn token(&self) -> Result<String, ConnectError> {
         let mut cached = self.cached.lock().await;
         if let Some(c) = cached.as_ref().filter(|c| SystemTime::now() < c.refresh_at) {
@@ -56,8 +52,6 @@ impl AzCli {
         Ok(token.access)
     }
 
-    /// Drops `access` after the server refused it, so a user who runs `az login` again gets a new
-    /// token at the next try. A newer token another session fetched meanwhile stays.
     pub(crate) async fn forget(&self, access: &str) {
         let mut cached = self.cached.lock().await;
         if cached.as_ref().is_some_and(|c| c.access == access) {
@@ -88,9 +82,8 @@ impl AzCli {
 
     fn program(&self, path: &OsString) -> Result<PathBuf, ConnectError> {
         let missing = |at: String| auth(format!("Microsoft Entra ID sign-in uses the Azure CLI, which was not found {at}. Install the Azure CLI, run `az login`, then try again."));
-        if let (AgentPath::LoginShell, Some(binary)) = (&self.agent_path, std::env::var_os(AZ_BINARY_ENV)) {
-            let binary = PathBuf::from(binary);
-            return if is_executable(&binary) { Ok(binary) } else { Err(missing(format!("at {} ({AZ_BINARY_ENV})", binary.display()))) };
+        if let Some(binary) = &self.binary {
+            return if is_executable(binary) { Ok(binary.clone()) } else { Err(missing(format!("at {} ({AZ_BINARY_ENV})", binary.display()))) };
         }
         shell_path::dirs(path).iter().flat_map(|dir| AZ_NAMES.iter().map(move |name| dir.join(name))).find(|p| is_executable(p)).ok_or_else(|| missing("on the PATH".into()))
     }
@@ -101,7 +94,7 @@ fn auth(message: String) -> ConnectError {
 }
 
 /// `expires_on` is POSIX seconds, which az prints from 2.54 on. `expiresOn` is local time with no
-/// zone, so it is not read: a token without `expires_on` is used once and not kept.
+/// zone, so it is not read.
 fn parse(stdout: &[u8]) -> Result<Token, String> {
     #[derive(serde::Deserialize)]
     #[serde(rename_all = "camelCase")]
@@ -168,7 +161,6 @@ mod tests {
         assert!(cli.token().await.is_err());
     }
 
-    /// The perf probe for a cached read: `cargo test -p engine --lib entra::tests::cached_reads -- --nocapture`.
     #[tokio::test]
     async fn cached_reads_take_under_a_millisecond() {
         let cli = seeded("cached", SystemTime::now() + Duration::from_secs(3600));

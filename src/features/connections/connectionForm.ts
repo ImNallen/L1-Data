@@ -70,12 +70,10 @@ export function isDirty(existing: ConnectionConfig | undefined, form: FormState)
   return fieldChanged || form.password.kind !== initialPassword(existing).kind || form.sshSecret.kind !== initialSshSecret(existing).kind || form.url !== "";
 }
 
-/** Only SQL Server has a choice of sign-in, and a missing one is a SQL login. */
 export function toSqlServerAuth(fields: Fields): SqlServerAuth | null {
   return fields.databaseKind === "SqlServer" ? fields.sqlServerAuth : null;
 }
 
-/** Entra ID signs in with the account of `az login`, so the form shows no user or password. */
 export function signsInWithEntra(fields: Fields): boolean {
   return toSqlServerAuth(fields) === "EntraAzureCli";
 }

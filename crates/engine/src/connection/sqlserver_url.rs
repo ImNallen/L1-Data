@@ -19,9 +19,6 @@ fn authentication(value: &str) -> Result<SqlServerAuth, String> {
     }
 }
 
-/// Reads `scheme://host[:port][/database][?sslmode=...&Authentication=...]`, optionally followed by
-/// JDBC-style `;key=value` properties, as in `sqlserver://host;database=shop;Authentication=ActiveDirectoryAzCli`.
-/// The first `;` starts the properties, so a `;` in the user or password must be percent-encoded.
 pub(super) fn parse(input: &str, name: &str) -> Result<ConnectionDraft, String> {
     if input.chars().any(char::is_control) {
         return Err("SQL Server URL cannot contain control characters".into());

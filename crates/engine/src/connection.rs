@@ -26,8 +26,6 @@ pub struct ConnectParams {
     pub ssl_mode: SslMode,
     pub ca_cert_path: Option<String>,
     pub via: Option<SshRoute>,
-    /// Set for a SQL Server connection that signs in with Microsoft Entra ID. `user` and
-    /// `password` are then unused.
     pub entra: Option<Arc<AzCli>>,
 }
 
