@@ -807,8 +807,9 @@ impl Engine {
             return Err(invalid("database is required"));
         }
         let sql_server_auth = d.sql_server_auth.filter(|_| d.database_kind == DatabaseKind::SqlServer);
+        let newer_sign_in = || SaveError::Invalid { message: format!("{NEWER_SIGN_IN} Choose SQL login or Microsoft Entra ID.") };
         if sql_server_auth == Some(SqlServerAuth::Unknown) {
-            return Err(SaveError::Invalid { message: format!("{NEWER_SIGN_IN} Choose SQL login or Microsoft Entra ID.") });
+            return Err(newer_sign_in());
         }
         let entra = connection::uses_entra(d.database_kind, sql_server_auth);
         if !entra && d.user.trim().is_empty() {
@@ -831,6 +832,9 @@ impl Engine {
         let existing = d.id.and_then(|id| s.config(id));
         if existing.as_ref().is_some_and(|c| c.database_kind != d.database_kind) {
             return Err(invalid("An existing connection cannot change database kind. Create a new connection."));
+        }
+        if sql_server_auth.is_none() && existing.as_ref().is_some_and(|c| c.sql_server_auth == Some(SqlServerAuth::Unknown)) {
+            return Err(newer_sign_in());
         }
         let id = d.id.unwrap_or_else(|| ConnectionId(uuid::Uuid::new_v4()));
         let store = |e: StoreError| SaveError::Store { message: e.to_string() };
@@ -1702,8 +1706,12 @@ mod tests {
         let newer = ConnectionDraft { id: Some(saved.id), sql_server_auth: Some(SqlServerAuth::Unknown), ..login };
         let Err(ConnectError::Auth { message }) = engine.test_connection(newer.clone()).await else { panic!("a newer method must not test as another one") };
         assert!(message.contains("newer version of L1 Data"), "{message}");
-        let Err(SaveError::Invalid { message }) = engine.save_connection(newer).await else { panic!("a newer method must not be rewritten") };
+        let Err(SaveError::Invalid { message }) = engine.save_connection(newer.clone()).await else { panic!("a newer method must not be rewritten") };
         assert!(message.contains("newer version of L1 Data"), "{message}");
+        let Err(SaveError::Invalid { message }) = engine.save_connection(ConnectionDraft { sql_server_auth: None, ..newer.clone() }).await else { panic!("a save that names no method must not replace a newer one") };
+        assert!(message.contains("newer version of L1 Data"), "{message}");
+        let chosen = engine.save_connection(ConnectionDraft { sql_server_auth: Some(SqlServerAuth::SqlLogin), ..newer }).await.unwrap();
+        assert_eq!(chosen.sql_server_auth, Some(SqlServerAuth::SqlLogin), "naming a method replaces the newer one");
     }
 
     #[tokio::test]
