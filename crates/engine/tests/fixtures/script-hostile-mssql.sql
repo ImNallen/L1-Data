@@ -124,6 +124,11 @@ CREATE TABLE dbo.refr (
 GO
 ALTER TABLE dbo.refr NOCHECK CONSTRAINT FK_refr;
 GO
+CREATE TABLE dbo.tree (id int NOT NULL, parent int NULL);
+CREATE UNIQUE INDEX UX_tree ON dbo.tree (id);
+ALTER TABLE dbo.tree ADD CONSTRAINT FK_tree FOREIGN KEY (parent) REFERENCES dbo.tree (id);
+ALTER TABLE dbo.tree NOCHECK CONSTRAINT FK_tree;
+GO
 CREATE TABLE dbo.sparse_set (id int PRIMARY KEY, s1 int SPARSE NULL, s2 varchar(10) SPARSE NULL, cs xml COLUMN_SET FOR ALL_SPARSE_COLUMNS);
 GO
 CREATE TABLE dbo.cci (id int NOT NULL, v int NULL);

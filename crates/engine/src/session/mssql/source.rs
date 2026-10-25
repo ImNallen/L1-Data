@@ -447,7 +447,9 @@ fn keys_from(rows: &[Row]) -> Result<Vec<ddl::Key>, DetailError> {
 
 fn foreign_keys_sql(oid: i32) -> String {
     format!(
-        "SELECT fk.name,c.name,rs.name,ro.name,rc.name,fk.delete_referential_action_desc,fk.update_referential_action_desc,fk.is_disabled,fk.is_not_trusted,fk.is_not_for_replication
+        "SELECT fk.name,c.name,rs.name,ro.name,rc.name,fk.delete_referential_action_desc,fk.update_referential_action_desc,fk.is_disabled,fk.is_not_trusted,fk.is_not_for_replication,
+            CASE WHEN fk.referenced_object_id=fk.parent_object_id AND EXISTS (SELECT 1 FROM sys.indexes ri WHERE ri.object_id=fk.referenced_object_id
+                 AND ri.index_id=fk.key_index_id AND ri.is_primary_key=0 AND ri.is_unique_constraint=0) THEN 1 ELSE 0 END
          FROM sys.foreign_keys fk JOIN sys.foreign_key_columns fc ON fc.constraint_object_id=fk.object_id
          JOIN sys.columns c ON c.object_id=fc.parent_object_id AND c.column_id=fc.parent_column_id
          JOIN sys.objects ro ON ro.object_id=fc.referenced_object_id JOIN sys.schemas rs ON rs.schema_id=ro.schema_id
@@ -475,6 +477,7 @@ fn foreign_keys_from(rows: &[Row]) -> Result<Vec<ddl::ForeignKey>, DetailError> 
                 on_delete: text(r, 5)?,
                 on_update: text(r, 6)?,
                 state: state(r, 7)?,
+                after_indexes: bit(r, 10)?,
             }),
         }
     }

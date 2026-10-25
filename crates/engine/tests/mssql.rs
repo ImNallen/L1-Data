@@ -1114,7 +1114,7 @@ async fn hostile_object_scripts_replay_every_property_or_warn() {
         scripted.sort();
         assert_eq!(
             scripted,
-            ["Par ent", "bare_in", "bare_moved", "cci", "f_scalar", "go_in_comment", "heap_pk", "moved", "newname", "parted", "qi_off", "refd", "refr", "sparse_set", "temporal", "temporal_history", "v_bound", "warned"]
+            ["Par ent", "bare_in", "bare_moved", "cci", "f_scalar", "go_in_comment", "heap_pk", "moved", "newname", "parted", "qi_off", "refd", "refr", "sparse_set", "temporal", "temporal_history", "tree", "v_bound", "warned"]
         );
 
         dst.replay_in_dependency_order(tables).await;

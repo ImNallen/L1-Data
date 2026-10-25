@@ -86,6 +86,7 @@ pub struct ForeignKey {
     pub on_delete: String,
     pub on_update: String,
     pub state: State,
+    pub after_indexes: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -201,7 +202,8 @@ pub fn table(t: &Table) -> Ddl {
     }
     let mut body: Vec<String> = t.columns.iter().map(|c| column(c, &name, &mut warnings)).collect();
     body.extend(t.keys.iter().map(|k| key(k, &name, &mut warnings)));
-    body.extend(t.foreign_keys.iter().map(foreign_key));
+    let (late, early): (Vec<&ForeignKey>, Vec<&ForeignKey>) = t.foreign_keys.iter().partition(|f| f.after_indexes);
+    body.extend(early.iter().map(|f| foreign_key(f)));
     body.extend(t.checks.iter().map(|c| format!("CONSTRAINT {} CHECK {}{}", ident(&c.name), replication(&c.state), c.definition)));
     if let Some((start, end)) = &t.period {
         body.push(format!("PERIOD FOR SYSTEM_TIME ({}, {})", ident(start), ident(end)));
@@ -217,8 +219,7 @@ pub fn table(t: &Table) -> Ddl {
     }
     let with = if with.is_empty() { String::new() } else { format!(" WITH ({})", with.join(", ")) };
     let mut parts = vec![format!("{}CREATE TABLE {name} (\n    {}\n){with};\nGO\n", set_options(t.ansi_nulls, true), body.join(",\n    "))];
-    let states: Vec<String> = t
-        .foreign_keys
+    let states: Vec<String> = early
         .iter()
         .map(|f| (&f.name, &f.state))
         .chain(t.checks.iter().map(|c| (&c.name, &c.state)))
@@ -234,7 +235,14 @@ pub fn table(t: &Table) -> Ddl {
         parts.push(format!("{}GO\n", t.classifications.iter().map(|c| classification(&name, c)).collect::<String>()));
     }
     let disabled_keys = t.keys.iter().filter(|k| k.storage.disabled).map(|k| k.name.as_str());
-    parts.extend(dependents(&name, disabled_keys, &t.indexes, &t.triggers, &t.properties, &mut warnings));
+    let late: Vec<String> = late
+        .iter()
+        .map(|f| {
+            let state = constraint_state(&name, &f.name, &f.state).map_or(String::new(), |s| format!("{s}\n"));
+            format!("ALTER TABLE {name} ADD {};\n{state}GO\n", foreign_key(f))
+        })
+        .collect();
+    parts.extend(dependents(&name, disabled_keys, &t.indexes, &late, &t.triggers, &t.properties, &mut warnings));
     warnings.extend(privileges(&name, &t.privileges));
     Ddl { text: parts.join("\n"), warnings }
 }
@@ -243,7 +251,7 @@ pub fn view(v: &View) -> Ddl {
     let mut warnings = vec![];
     let name = qualified(&v.module.schema, &v.module.name);
     let mut parts = vec![module_text(&v.module, &mut warnings)];
-    parts.extend(dependents(&name, std::iter::empty(), &v.indexes, &v.triggers, &v.properties, &mut warnings));
+    parts.extend(dependents(&name, std::iter::empty(), &v.indexes, &[], &v.triggers, &v.properties, &mut warnings));
     warnings.extend(privileges(&name, &v.privileges));
     Ddl { text: parts.join("\n"), warnings }
 }
@@ -284,7 +292,7 @@ pub fn module(m: &Module) -> Ddl {
 
 /// Indexes disable last, because a disabled clustered index makes its table unreadable to every
 /// later step.
-fn dependents<'a>(name: &str, disabled_keys: impl Iterator<Item = &'a str>, indexes: &'a [Index], triggers: &[Trigger], props: &[Property], warnings: &mut Vec<String>) -> Vec<String> {
+fn dependents<'a>(name: &str, disabled_keys: impl Iterator<Item = &'a str>, indexes: &'a [Index], after_indexes: &[String], triggers: &[Trigger], props: &[Property], warnings: &mut Vec<String>) -> Vec<String> {
     let mut parts = vec![];
     let mut left_out = vec![];
     for i in indexes {
@@ -293,6 +301,7 @@ fn dependents<'a>(name: &str, disabled_keys: impl Iterator<Item = &'a str>, inde
             None => left_out.push(("INDEX", i.name.as_str())),
         }
     }
+    parts.extend(after_indexes.iter().cloned());
     for t in triggers {
         match t {
             Trigger::Text(m) => parts.push(module_text(m, warnings)),
@@ -629,6 +638,7 @@ mod tests {
                 on_delete: "CASCADE".into(),
                 on_update: "SET_NULL".into(),
                 state: State::default(),
+                after_indexes: false,
             }],
             checks: vec![Check { name: "CK_qty".into(), definition: "([qty]>(0))".into(), state: State::default() }],
             indexes: vec![Index { include: vec!["qty".into()], ..index_on("IX_code", 2, &["code"]) }],
@@ -729,6 +739,7 @@ GO
             on_delete: "NO_ACTION".into(),
             on_update: "NO_ACTION".into(),
             state,
+            after_indexes: false,
         };
         let t = Table {
             checks: vec![
@@ -758,6 +769,44 @@ ALTER TABLE [dbo].[c] WITH NOCHECK CHECK CONSTRAINT [FK_untrusted];
 ALTER TABLE [dbo].[c] NOCHECK CONSTRAINT [CK_off];
 ALTER TABLE [dbo].[c] NOCHECK CONSTRAINT [CK_untrusted];
 ALTER TABLE [dbo].[c] WITH NOCHECK CHECK CONSTRAINT [CK_untrusted];
+GO
+"
+            ))
+        );
+    }
+
+    #[test]
+    fn a_foreign_key_to_its_own_tables_unique_index_follows_the_index_with_its_state() {
+        let t = Table {
+            columns: vec![col("id", "int"), Column { nullable: true, ..col("parent", "int") }],
+            foreign_keys: vec![ForeignKey {
+                name: "FK_tree".into(),
+                columns: vec!["parent".into()],
+                ref_schema: "dbo".into(),
+                ref_table: "tree".into(),
+                ref_columns: vec!["id".into()],
+                on_delete: "NO_ACTION".into(),
+                on_update: "NO_ACTION".into(),
+                state: State { disabled: true, untrusted: true, not_for_replication: false },
+                after_indexes: true,
+            }],
+            indexes: vec![Index { unique: true, ..index_on("UX_tree", 2, &["id"]) }],
+            ..table_named("tree")
+        };
+        assert_eq!(
+            table(&t),
+            Ddl::complete(format!(
+                "{HEAD}CREATE TABLE [dbo].[tree] (
+    [id] int NOT NULL,
+    [parent] int NULL
+);
+GO
+
+CREATE UNIQUE NONCLUSTERED INDEX [UX_tree] ON [dbo].[tree] ([id] ASC);
+GO
+
+ALTER TABLE [dbo].[tree] ADD CONSTRAINT [FK_tree] FOREIGN KEY ([parent]) REFERENCES [dbo].[tree] ([id]);
+ALTER TABLE [dbo].[tree] NOCHECK CONSTRAINT [FK_tree];
 GO
 "
             ))
