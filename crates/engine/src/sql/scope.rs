@@ -190,7 +190,8 @@ enum Clause {
     Cte,
     Select,
     Relation { role: Role, slot: Slot },
-    On { target: usize, fresh: bool },
+    /// `tree` is the first FROM item of the join tree the `ON` belongs to, and `target` the item it joins.
+    On { tree: usize, target: usize, fresh: bool },
     Where,
     GroupBy,
     Having,
@@ -267,8 +268,11 @@ struct Frame {
     first_output: Option<Output>,
     /// The enclosing frame's clause when this one opened.
     outer: Clause,
-    /// For a `LATERAL` or `APPLY` subquery, how many of the enclosing frame's FROM items stand to its left.
-    left: Option<usize>,
+    /// For a `LATERAL` or `APPLY` subquery, the enclosing frame's FROM items it can see: those to its left, and for
+    /// `APPLY` only those of its own join tree.
+    lateral: Option<Range<usize>>,
+    /// The first FROM item of the join tree being read. A comma starts the next one.
+    tree: usize,
 }
 
 impl Frame {
@@ -288,7 +292,8 @@ impl Frame {
             seen: false,
             first_output: None,
             outer,
-            left: None,
+            lateral: None,
+            tree: 0,
         }
     }
 }
@@ -429,8 +434,8 @@ impl<'a> Walk<'a> {
             }
             return i + 1;
         }
-        if let Clause::On { target, fresh: true } = self.frames[id].clause {
-            self.frames[id].clause = Clause::On { target, fresh: false };
+        if let Clause::On { tree, target, fresh: true } = self.frames[id].clause {
+            self.frames[id].clause = Clause::On { tree, target, fresh: false };
         }
         if let Some(w) = self.word(i) {
             if let Some(next) = self.enter_clause(i, &w) {
@@ -441,8 +446,10 @@ impl<'a> Walk<'a> {
         match (clause, class) {
             (Clause::Select, Class::Comma) => self.end_item(),
             (Clause::Select, _) => self.top().item_lexemes.push(i),
-            (Clause::Relation { role, .. }, Class::Comma) if matches!(role, Role::From | Role::Join | Role::Using) => {
-                self.top().clause = Clause::Relation { role, slot: Slot::Expect };
+            (Clause::Relation { role: Role::From | Role::Join | Role::Using, .. } | Clause::On { .. }, Class::Comma) => {
+                let f = self.top();
+                f.tree = f.rels.len();
+                f.clause = Clause::Relation { role: Role::From, slot: Slot::Expect };
             }
             (Clause::Relation { role, slot: Slot::Expect }, Class::Word | Class::Name) => return self.relation(i, role),
             (Clause::Relation { role, slot: Slot::Expect }, Class::Param) => {
@@ -496,7 +503,7 @@ impl<'a> Walk<'a> {
             "GROUP" if prev.as_deref() == Some("WITHIN") => return None,
             "ON" => match clause {
                 Clause::Relation { role: Role::From | Role::Join | Role::Using, slot: Slot::Named | Slot::Aliased } if !self.top().rels.is_empty() => {
-                    Clause::On { target: self.top().rels.len() - 1, fresh: true }
+                    Clause::On { tree: self.top().tree, target: self.top().rels.len() - 1, fresh: true }
                 }
                 _ => Clause::Other,
             },
@@ -547,7 +554,12 @@ impl<'a> Walk<'a> {
         if clause == Clause::Select {
             self.end_item();
         }
-        self.top().clause = to;
+        let f = self.top();
+        let merge_source = matches!(to, Clause::Relation { role: Role::Using, .. }) && f.rels.iter().any(|r| r.role == Role::Into);
+        if matches!(to, Clause::Relation { role: Role::From | Role::Using, .. }) && !merge_source {
+            f.tree = f.rels.len();
+        }
+        f.clause = to;
         Some(i + 1)
     }
 
@@ -652,7 +664,9 @@ impl<'a> Walk<'a> {
         }
         let lateral = origin == Origin::Derived && i.checked_sub(1).is_some_and(|p| self.is_word(p, "LATERAL") || self.is_word(p, "APPLY"));
         let mut frame = Frame::new(Some(parent), query, origin, clause);
-        frame.left = lateral.then(|| self.frames[parent].rels.len());
+        let p = &self.frames[parent];
+        let start = if self.kind == DatabaseKind::SqlServer { p.tree } else { 0 };
+        frame.lateral = lateral.then(|| start..p.rels.len());
         self.frames.push(frame);
         self.stack.push(self.frames.len() - 1);
     }
@@ -779,10 +793,10 @@ impl<'a> Walk<'a> {
         let mut child: Option<&Frame> = None;
         for &f in &chain {
             let frame_rels = &self.frames[f].rels;
-            let visible = match (child.map(|c| (c.origin, c.left)), snap.clause) {
-                (Some((Origin::Derived, Some(left))), _) => &frame_rels[..left.min(frame_rels.len())],
+            let visible = match (child.map(|c| (c.origin, c.lateral.clone())), snap.clause) {
+                (Some((Origin::Derived, Some(left))), _) => frame_rels.get(left).unwrap_or_default(),
                 (Some((Origin::Derived | Origin::CteBody, None)), _) => &[],
-                (None, Clause::On { target, .. }) => &frame_rels[..(target + 1).min(frame_rels.len())],
+                (None, Clause::On { tree, target, .. }) => &frame_rels[tree.min(target)..(target + 1).min(frame_rels.len())],
                 _ => &frame_rels[..],
             };
             rels.extend(visible.iter().filter(|r| !self.aliased_elsewhere(r, frame_rels)));
@@ -798,9 +812,9 @@ impl<'a> Walk<'a> {
         let qualifier = (!self.parts.is_empty()).then(|| self.qualifier(&rels));
         let frame = &self.frames[snap.frame];
         let (mut expect, mut keywords) = if frame.query { self.expect(snap, frame) } else { self.expect_in_group(snap, frame) };
-        if let Expect::JoinCondition { target } = &mut expect {
-            let dropped = frame.rels.iter().take(*target as usize).filter(|r| self.aliased_elsewhere(r, &frame.rels)).count();
-            *target -= dropped as u16;
+        if let (Expect::JoinCondition { target }, Clause::On { tree, .. }) = (&mut expect, snap.clause) {
+            let before = frame.rels.get(tree..*target as usize).unwrap_or_default();
+            *target = before.iter().filter(|r| !self.aliased_elsewhere(r, &frame.rels)).count() as u16;
         }
         if self.line_start && matches!(expect, Expect::Keyword | Expect::Alias | Expect::Expression) {
             keywords.extend(if self.kind == DatabaseKind::Postgres { PG_STATEMENTS } else { TSQL_STATEMENTS });
@@ -877,7 +891,7 @@ impl<'a> Walk<'a> {
                 };
                 (expect, kw)
             }
-            Clause::On { target, fresh } => {
+            Clause::On { target, fresh, .. } => {
                 let (_, kw) = expression([&["AND", "OR"][..], &self.after_from()].concat());
                 match u16::try_from(target) {
                     Ok(target) if fresh => (Expect::JoinCondition { target }, kw),
@@ -1188,6 +1202,8 @@ mod tests {
         ] {
             assert_eq!((refs(&s), s.qualifier.clone()), (both.clone(), Some(Qualifier::Relation { index: 1 })));
         }
+        assert_eq!(refs(&pg("select * from a, orders o join lateral (select * from customers c where c.id = o.|) x on true")).len(), 3);
+        assert_eq!(refs(&ms("SELECT * FROM a, orders o CROSS APPLY (SELECT * FROM customers c WHERE c.id = o.|) x")), both);
         let s = pg("select * from orders o, (select * from customers c where c.id = o.|) x");
         assert_eq!((refs(&s), s.qualifier.clone()), (vec![(Some("c"), &table(None, "customers"))], Some(Qualifier::Name { parts: vec!["o".into()] })));
     }
@@ -1282,6 +1298,25 @@ mod tests {
         assert_eq!(refs(&pg("insert into orders (id, |) select 1 from customers")), [(Some("orders"), &table(None, "orders"))]);
         let s = ms("INSERT INTO archive SELECT * FROM orders o\nSELECT * FROM customers c WHERE c.|");
         assert_eq!(refs(&s), [(Some("c"), &table(None, "customers"))]);
+    }
+
+    #[test]
+    fn a_join_condition_sees_only_its_own_join_tree() {
+        let (o, c) = (table(None, "orders"), table(None, "customers"));
+        for s in [pg("select * from a, orders o join customers c on |"), ms("SELECT * FROM a, orders o JOIN customers c ON |")] {
+            assert_eq!((refs(&s), s.expect), (vec![(Some("o"), &o), (Some("c"), &c)], Expect::JoinCondition { target: 1 }));
+        }
+        let s = pg("select * from orders o join customers c on c.id = o.customer_id, products p join reviews r on |");
+        assert_eq!((refs(&s), s.expect), (vec![(Some("p"), &table(None, "products")), (Some("r"), &table(None, "reviews"))], Expect::JoinCondition { target: 1 }));
+        let s = pg("select * from orders o join customers c on true, products p where |");
+        assert_eq!(refs(&s).len(), 3);
+        let s = ms("UPDATE o SET o.x = 1 FROM orders o JOIN customers c ON |");
+        assert_eq!((refs(&s), s.expect), (vec![(Some("o"), &o), (Some("c"), &c)], Expect::JoinCondition { target: 1 }));
+        for s in [pg("update orders t set status = 'x' from customers a join products p on |"), pg("delete from orders t using customers a join products p on |")] {
+            assert_eq!((refs(&s).iter().map(|r| r.0).collect::<Vec<_>>(), s.expect), (vec![Some("a"), Some("p")], Expect::JoinCondition { target: 1 }));
+        }
+        let s = ms("MERGE INTO orders t USING customers s ON |");
+        assert_eq!((refs(&s), s.expect), (vec![(Some("t"), &o), (Some("s"), &c)], Expect::JoinCondition { target: 1 }));
     }
 
     #[test]
