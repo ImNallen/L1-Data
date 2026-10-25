@@ -92,7 +92,6 @@ struct StoreState {
 
 pub struct SavedConnections {
     pub configs: Vec<ConnectionConfig>,
-    /// Rows that do not parse, such as one a newer build saved. They are skipped, so one cannot hide the rest.
     pub unreadable: u32,
 }
 

@@ -35,8 +35,6 @@ fn first_property(authority: &str) -> Option<usize> {
     })
 }
 
-/// The user info ends at the last `@` before the first `;name=`, so an `@` inside a property value,
-/// as in `user=admin@server`, never moves the host. Properties run to the end of the URL.
 fn split_jdbc_properties_after_host(input: &str) -> Result<(&str, Option<&str>), String> {
     let Some(authority_start) = input.find("://").map(|i| i + 3) else { return Ok((input, None)) };
     let authority_end = input[authority_start..].find(['/', '?', '#']).map_or(input.len(), |i| authority_start + i);

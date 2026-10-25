@@ -61,8 +61,6 @@ fn refused_port() -> u16 {
     std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port()
 }
 
-/// A port that accepts each connection and closes it, so a sign-in gets past the dial and fails
-/// at the TDS handshake.
 fn closing_port() -> u16 {
     let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     let port = listener.local_addr().unwrap().port();
