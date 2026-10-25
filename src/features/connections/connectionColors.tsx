@@ -25,7 +25,7 @@ export function connectionColor(color: string | null): string | null {
 export function ConnectionColorDot({ color, className }: { color: string | null; className?: string }) {
   const hex = connectionColor(color);
   if (!hex) return null;
-  return <span aria-hidden className={cx("inline-block size-2 shrink-0 rounded-full", className)} style={{ backgroundColor: hex }} />;
+  return <span aria-hidden className={cx("inline-block size-2 shrink-0 rounded-[2px]", className)} style={{ backgroundColor: hex }} />;
 }
 
 /** Local and an unset environment draw nothing, so an icon always means a shared server. The shape differs as well as

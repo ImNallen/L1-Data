@@ -243,14 +243,14 @@ function ColorPicker({ value, onChange, labelledBy }: { value: ColorChoice; onCh
             data-testid={`conn-color-${id ?? "none"}`}
             onClick={() => onChange(id)}
             className={cx(
-              "grid size-6 place-items-center rounded-full outline-none focus-visible:ring-2 focus-visible:ring-accent-border",
+              "grid size-6 place-items-center rounded-md outline-none focus-visible:ring-2 focus-visible:ring-accent-border",
               checked && "ring-2 ring-run ring-offset-2 ring-offset-raised",
             )}
           >
             {color ? (
-              <span className="size-4 rounded-full" style={{ backgroundColor: color.hex }} />
+              <span className="size-4 rounded-[4px]" style={{ backgroundColor: color.hex }} />
             ) : (
-              <span className="size-4 rounded-full border border-dashed border-dim" />
+              <span className="size-4 rounded-[4px] border border-dashed border-dim" />
             )}
           </button>
         );

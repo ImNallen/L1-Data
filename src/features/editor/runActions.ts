@@ -168,20 +168,25 @@ function deferPageForPendingWork(tabId: TabId, target: PageTarget | undefined): 
   return true;
 }
 
+const SHOWN_WRITES = 3;
+
 /** The answer holds only for the target it named, so a target changed meanwhile drops the run. */
 async function writesConfirmed(tab: Tab, text: string, target: RunTarget): Promise<boolean> {
   const db = tabTarget(tab);
   const config = db ? ws().configs[db.connectionId] : undefined;
   if (!db || config?.environment !== "Production") return true;
   const unchanged = () => ws().tabs[tab.id]?.console === tab.console;
-  const writes = await commands.scriptWrites(text, target, config.databaseKind);
+  const writeRanges = await commands.scriptWrites(text, target, config.databaseKind);
   if (!unchanged()) return false;
-  if (writes.length === 0) return true;
-  const n = writes.length;
+  if (writeRanges.length === 0) return true;
+  const n = writeRanges.length;
   const unit = config.databaseKind === "SqlServer" ? (n === 1 ? "batch" : "batches") : n === 1 ? "statement" : "statements";
+  const shown = writeRanges.slice(0, SHOWN_WRITES);
+  const rest = n > shown.length ? ` The first ${shown.length} are shown.` : "";
   const ok = await confirm({
     title: `Run ${plural(n, "write")} on Production?`,
-    body: `This run sends ${n} ${unit} that ${n === 1 ? "writes" : "write"} to ${config.name} / ${db.database}.`,
+    body: `This run sends ${n} ${unit} that ${n === 1 ? "writes" : "write"} to ${config.name} / ${db.database}.${rest}`,
+    statements: shown.map((r) => text.slice(r.from, r.to).trim()),
     confirmLabel: "Run writes",
   });
   return ok && unchanged();
@@ -442,10 +447,41 @@ export async function submitEdits(tabId: TabId): Promise<void> {
   const store = useTableEdits.getState();
   if (!store.beginSubmit(tabId)) return;
   try {
-    await applyEdits(tab, edits);
+    if (await editsConfirmed(tab, edits)) await applyEdits(tab, edits);
   } finally {
     store.endSubmit(tabId);
   }
+}
+
+async function editsConfirmed(tab: TableTab, edits: TableEdits): Promise<boolean> {
+  const config = ws().configs[tab.console.db.connectionId];
+  if (config?.environment !== "Production") return true;
+  const updates = Object.keys(edits.updates).filter((k) => !(k in edits.deletes)).length;
+  const parts = [
+    edits.inserts.length > 0 && plural(edits.inserts.length, "insert"),
+    updates > 0 && plural(updates, "update"),
+    Object.keys(edits.deletes).length > 0 && plural(Object.keys(edits.deletes).length, "delete"),
+  ].filter((p): p is string => p !== false);
+  const what = parts.length > 1 ? `${parts.slice(0, -1).join(", ")} and ${parts.at(-1)}` : parts[0];
+  const ok = await confirm({
+    title: `Apply ${plural(pendingCount(edits), "change")} on Production?`,
+    body: `This sends ${what} to ${tab.table.schema}.${tab.table.table} on ${config.name} / ${tab.console.db.database}.`,
+    confirmLabel: "Apply changes",
+  });
+  const now = ws().tabs[tab.id];
+  return ok && now?.console === tab.console && useTableEdits.getState().byTab[tab.id] === edits;
+}
+
+export async function revertEdits(tabId: TabId): Promise<void> {
+  const edits = useTableEdits.getState().byTab[tabId];
+  const n = edits ? pendingCount(edits) : 0;
+  if (n === 0) return;
+  const ok = await confirm({
+    title: `Revert ${plural(n, "change")}?`,
+    body: "The staged changes are discarded. Nothing has been sent to the database.",
+    confirmLabel: "Revert",
+  });
+  if (ok && useTableEdits.getState().byTab[tabId] === edits) useTableEdits.getState().clear(tabId);
 }
 
 async function applyEdits(tab: TableTab, edits: TableEdits): Promise<void> {

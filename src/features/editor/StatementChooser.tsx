@@ -122,9 +122,9 @@ function ChooserPanel({ chooser }: { chooser: OpenChooser }) {
           { kind: "statement", index },
           `statement-choice-${index + 1}`,
           <>
-            <span className="w-4 shrink-0 text-right text-ui-12 text-faint tabular-nums">{index + 1}</span>
+            <span className="w-4 shrink-0 text-right text-ui-12 text-dim tabular-nums">{index + 1}</span>
             <span className="min-w-0 flex-1 truncate font-mono text-ui-12.5">{statementLabel(text, range)}</span>
-            <span className="shrink-0 pl-4 text-ui-11.5 text-faint tabular-nums">{`line ${lines[index]}`}</span>
+            <span className="shrink-0 pl-4 text-ui-11.5 text-dim tabular-nums">{`line ${lines[index]}`}</span>
           </>,
         ),
       )}

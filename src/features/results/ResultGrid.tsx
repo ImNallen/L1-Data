@@ -19,7 +19,7 @@ import {
   ToggleLeftIcon,
   type LucideIcon,
 } from "lucide-react";
-import { useEffect, useImperativeHandle, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore, type KeyboardEvent, type Ref } from "react";
+import { useEffect, useId, useImperativeHandle, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore, type KeyboardEvent, type Ref } from "react";
 import type { ColumnMeta, Density, FontSetting, ResultMeta, TypeCategory } from "../../ipc/bindings";
 import { DENSITY_FACTOR, gridRowHeight } from "../../shell/appearance";
 import { commandForKey } from "../../shell/commands";
@@ -268,17 +268,30 @@ export function primaryKeyColumns(views: Record<DbKey, CatalogView>, meta: Pick<
   return meta.columns.map((c) => isPrimaryKey(view, c.source));
 }
 
+const VALUE_MARKS = {
+  default: { text: "DEFAULT", label: undefined, border: "" },
+  null: { text: "NULL", label: undefined, border: "border" },
+  empty: { text: "empty", label: "Empty string", border: "border border-dashed" },
+} as const;
+
+function ValueMark({ kind, deleted }: { kind: keyof typeof VALUE_MARKS; deleted: boolean }) {
+  const mark = VALUE_MARKS[kind];
+  return (
+    <span aria-label={mark.label} className={cx("rounded-[3px] border-faint px-1 font-sans text-ui-11 leading-4 italic", mark.border, !deleted && "text-dim")}>
+      {mark.text}
+    </span>
+  );
+}
+
 export function ResultGrid({
   meta,
   done,
-  bottomInset,
   query,
   editing,
   actionsRef,
 }: {
   meta: ResultMeta;
   done: boolean;
-  bottomInset: number;
   query: GridQuery | null;
   editing: GridEditing | null;
   actionsRef?: Ref<GridActions | null>;
@@ -356,7 +369,6 @@ export function ResultGrid({
     estimateSize: () => rowH,
     paddingStart: headerH,
     scrollPaddingStart: headerH,
-    paddingEnd: bottomInset,
     overscan: 12,
   });
   const cols = useVirtualizer({
@@ -522,6 +534,9 @@ export function ResultGrid({
   const totalWidth = Math.max(cols.getTotalSize(), viewport);
   const focus = selection?.focus;
   const fullRows = fullRowRange(selection, columns.length);
+  const gridId = useId();
+  const cellId = (row: number, col: number) => `${gridId}-${row}-${col}`;
+  const focusRendered = focus && virtualRows.some((vr) => vr.index === focus.row) && virtualCols.some((vc) => vc.index === focus.col);
   const [menuCell, setMenuCell] = useState<Cell | null>(null);
   const menuColumn = menuCell ? columns[menuCell.col]?.name : undefined;
   const menuValue = menuCell && menuCell.row < rowCount ? cache.get(menuCell.row)?.[menuCell.col] : undefined;
@@ -536,16 +551,26 @@ export function ResultGrid({
       data-row-count={rowCount}
       data-pending={edits.inserts.length + Object.keys(edits.updates).length + Object.keys(edits.deletes).length}
       tabIndex={0}
+      role="grid"
+      aria-label="Result"
+      aria-rowcount={total + 1}
+      aria-colcount={columns.length + 1}
+      aria-multiselectable
+      aria-readonly={!editable}
+      aria-activedescendant={focusRendered ? cellId(focus.row, focus.col) : undefined}
       onKeyDown={onKeyDown}
       onContextMenu={(e) => {
         if (!(e.target as Element).closest("[data-testid^='grid-cell-']")) e.preventDefault();
       }}
       className="relative min-h-0 flex-1 overflow-auto bg-bg outline-none"
     >
-      <div style={{ width: totalWidth, height: rows.getTotalSize(), position: "relative" }}>
-        <div className="sticky top-0 z-20 border-b border-grid bg-bg" style={{ height: headerH, width: totalWidth }}>
+      <div role="presentation" style={{ width: totalWidth, height: rows.getTotalSize(), position: "relative" }}>
+        <div role="row" aria-rowindex={1} className="sticky top-0 z-20 border-b border-grid bg-bg" style={{ height: headerH, width: totalWidth }}>
           <div
-            className="sticky left-0 z-10 flex h-full items-center justify-center border-r border-grid bg-bg font-mono text-code-sm text-faint"
+            role="columnheader"
+            aria-colindex={1}
+            aria-label="Row number"
+            className="sticky left-0 z-10 flex h-full items-center justify-center border-r border-grid bg-bg font-mono text-code-sm text-dim"
             style={{ width: rowNumW }}
           >
             #
@@ -559,6 +584,9 @@ export function ResultGrid({
               <div
                 key={vc.key}
                 data-testid={`grid-header-${vc.index}`}
+                role="columnheader"
+                aria-colindex={vc.index + 2}
+                aria-sort={sortKey ? (sortKey.desc ? "descending" : "ascending") : undefined}
                 title={`${c.name} ${c.type.display}${editing && !editing.writableColumns.has(c.name) ? "\nRead-only column" : ""}${query ? "\nClick to sort, Shift-click to add to the sort" : ""}`}
                 onClick={query ? (e) => query.onSort(c.name, e.shiftKey) : undefined}
                 className={cx(
@@ -617,6 +645,8 @@ export function ResultGrid({
             <div
               key={vr.key}
               data-testid={`grid-row-${vr.index}`}
+              role="row"
+              aria-rowindex={vr.index + 2}
               data-state={added ? "new" : deleted ? "deleted" : changed ? "changed" : undefined}
               className={cx(
                 "group absolute left-0 border-b border-grid",
@@ -627,6 +657,8 @@ export function ResultGrid({
             >
               <div
                 data-testid={`grid-rownum-${vr.index}`}
+                role="rowheader"
+                aria-colindex={1}
                 onMouseDown={(e) => {
                   if (e.button !== 0) return;
                   dragging.current = "rows";
@@ -641,7 +673,7 @@ export function ResultGrid({
                     ? "bg-cell-select text-fg"
                     : focus?.row === vr.index
                       ? "bg-hover text-fg"
-                      : "bg-bg text-faint group-hover:bg-hover",
+                      : "bg-bg text-dim group-hover:bg-hover",
                 )}
                 style={{ width: rowNumW }}
               >
@@ -659,6 +691,10 @@ export function ResultGrid({
                   <div
                     key={vc.key}
                     data-testid={`grid-cell-${vr.index}-${vc.index}`}
+                    id={cellId(vr.index, vc.index)}
+                    role="gridcell"
+                    aria-colindex={vc.index + 2}
+                    aria-selected={selected}
                     onMouseDown={(e) => {
                       if (e.button !== 0) return;
                       dragging.current = "cells";
@@ -681,7 +717,7 @@ export function ResultGrid({
                       changed && c.name in changed && "bg-amber/15",
                       selected && "bg-cell-select",
                       deleted && "text-faint line-through",
-                      focused && "outline outline-1 -outline-offset-1 outline-focus",
+                      focused && "outline-2 -outline-offset-2 outline-focus outline-solid",
                     )}
                     style={{ left: vc.start, width: vc.size }}
                   >
@@ -716,9 +752,11 @@ export function ResultGrid({
                         className="absolute inset-0 z-10 bg-bg px-2 font-mono text-code text-fg outline outline-1 -outline-offset-1 outline-focus"
                       />
                     ) : value === DEFAULT ? (
-                      <span className={cx("italic", !deleted && "text-dim")}>DEFAULT</span>
+                      <ValueMark kind="default" deleted={deleted} />
                     ) : value === undefined ? null : value === null ? (
-                      <span className={cx(!deleted && "text-dim")}>NULL</span>
+                      <ValueMark kind="null" deleted={deleted} />
+                    ) : value === "" ? (
+                      <ValueMark kind="empty" deleted={deleted} />
                     ) : (
                       <>
                         <span className={cx("min-w-0 truncate whitespace-pre", !deleted && "text-fg")}>

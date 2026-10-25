@@ -21,7 +21,7 @@ export const editorTheme = EditorView.theme({
   ".cm-scroller": { fontFamily: "var(--code-font)", lineHeight: "var(--code-line-height)", overflow: "auto" },
   ".cm-content": { padding: "12px 0 24px", caretColor: "var(--color-fg)" },
   ".cm-line": { padding: `0 16px 0 ${LINE_PADDING_LEFT}px` },
-  ".cm-gutters": { backgroundColor: "var(--color-bg)", color: "var(--color-faint)", border: "none" },
+  ".cm-gutters": { backgroundColor: "var(--color-bg)", color: "var(--color-dim)", border: "none" },
   ".cm-lineNumbers .cm-gutterElement": { minWidth: "30px", padding: "0 0 0 8px", textAlign: "right" },
   // The run mark's box sits behind the text, so the active line lets it show through. fg at 5.5% over bg reads as --color-hover.
   ".cm-activeLine": { backgroundColor: "color-mix(in srgb, var(--color-fg) 5.5%, transparent)" },
@@ -98,7 +98,7 @@ export const editorTheme = EditorView.theme({
   ".cm-panel.cm-search [name=close]:hover": { backgroundColor: "var(--color-hover)", color: "var(--color-fg)" },
   ".cm-textfield": { ...panelControl, width: "200px", backgroundColor: "var(--color-bg)", color: "var(--color-fg)", outline: "none" },
   ".cm-textfield:focus": { borderColor: "var(--color-accent-border)" },
-  ".cm-textfield::placeholder": { color: "var(--color-faint)" },
+  ".cm-textfield::placeholder": { color: "var(--color-dim)" },
   ".cm-button": { ...panelControl, backgroundColor: "transparent", backgroundImage: "none", color: "var(--color-fg)", textTransform: "capitalize" },
   ".cm-button:hover": { backgroundColor: "var(--color-hover)" },
   ".cm-button:active": { backgroundImage: "none", backgroundColor: "var(--color-selected)" },

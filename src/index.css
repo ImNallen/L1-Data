@@ -6,8 +6,6 @@
 
   /* Spacing follows the Density setting and text-ui-* the Interface font size; shell/appearance.ts paints both inputs. */
   --spacing: calc(0.25rem * var(--density));
-  --text-ui-8\.5: calc(8.5px * var(--ui-scale));
-  --text-ui-9\.5: calc(9.5px * var(--ui-scale));
   --text-ui-10: calc(10px * var(--ui-scale));
   --text-ui-10\.5: calc(10.5px * var(--ui-scale));
   --text-ui-11: calc(11px * var(--ui-scale));
@@ -47,7 +45,7 @@
   --color-danger: #ff6467;
   --color-cell-select: #172338;
   --color-run-icon: #00d492;
-  --color-focus: #3a5f9e;
+  --color-focus: #5b8def;
   --color-accent-border: #2c4a7a;
   --color-handle: #2a2a2a;
   --color-handle-hover: #4a4a4a;
@@ -171,8 +169,8 @@ textarea,
 
 @layer base {
   :where(button, [tabindex], [role="tab"]):focus-visible {
-    outline: 1px solid var(--color-focus);
-    outline-offset: -1px;
+    outline: 2px solid var(--color-focus);
+    outline-offset: -2px;
   }
 }
 

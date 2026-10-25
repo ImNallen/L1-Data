@@ -67,7 +67,13 @@ export type Choice<C extends string> = { id: C; label: string; variant: "primary
  * question all answer `null`. The dialog's test ids are `<testId>-dialog`, `<testId>-cancel`, and
  * `<testId>-<choice id>`.
  */
-export type Question<C extends string> = { testId?: string; title: string; body: string; choices: readonly Choice<C>[] };
+export type Question<C extends string> = {
+  testId?: string;
+  title: string;
+  body: string;
+  statements?: readonly string[];
+  choices: readonly Choice<C>[];
+};
 
 /** `query` filters the settings in place; while it is set the page lists matches instead of `section`. */
 export type Screen = { kind: "workspace" } | { kind: "settings"; section: SettingsSectionId; query: string };
@@ -348,11 +354,28 @@ let askSeq = 0;
 export function ask<C extends string>(q: Question<C>): Promise<C | null> {
   return new Promise((resolve) => {
     const settle = (choice: string | null) => resolve(choice as C | null);
-    useWorkspace.getState().open({ kind: "ask", seq: ++askSeq, testId: q.testId ?? "ask", title: q.title, body: q.body, choices: q.choices, settle });
+    useWorkspace.getState().open({
+      kind: "ask",
+      seq: ++askSeq,
+      testId: q.testId ?? "ask",
+      title: q.title,
+      body: q.body,
+      statements: q.statements ?? [],
+      choices: q.choices,
+      settle,
+    });
   });
 }
 
 /** A question with one danger button, `confirm-btn`, in a `confirm-dialog`. Resolves `true` when it is pressed. */
-export async function confirm(q: { title: string; body: string; confirmLabel: string }): Promise<boolean> {
-  return (await ask({ testId: "confirm", title: q.title, body: q.body, choices: [{ id: "btn", label: q.confirmLabel, variant: "danger" }] })) === "btn";
+export async function confirm(q: { title: string; body: string; statements?: readonly string[]; confirmLabel: string }): Promise<boolean> {
+  return (
+    (await ask({
+      testId: "confirm",
+      title: q.title,
+      body: q.body,
+      statements: q.statements,
+      choices: [{ id: "btn", label: q.confirmLabel, variant: "danger" }],
+    })) === "btn"
+  );
 }

@@ -14,6 +14,7 @@ import {
   ListFilterIcon,
   ListIcon,
   SigmaIcon,
+  SquareFunctionIcon,
   TableIcon,
   ToggleLeftIcon,
   TypeIcon,
@@ -77,11 +78,12 @@ function Row({
   contextMenu,
   quietChevron,
   keepChevronSpace,
+  title,
   active,
 }: {
   quietChevron?: boolean;
-  /** A leaf keeps the chevron's width, so its icon lines up with expandable siblings. */
   keepChevronSpace?: boolean;
+  title?: string;
   /** Its picker is open. */
   active?: boolean;
   path: string;
@@ -134,6 +136,7 @@ function Row({
       aria-expanded={expandable ? open : undefined}
       aria-selected={selected}
       aria-level={depth + 1}
+      title={title}
       tabIndex={-1}
       onClick={onClick}
       onDoubleClick={onDoubleClick}
@@ -142,7 +145,7 @@ function Row({
       className={cx(
         "group mx-2 flex cursor-default gap-1.5 rounded-md pr-2.5",
         twoLines ? "items-start py-1" : "h-7 items-center",
-        selected || active ? "bg-selected" : "hover:bg-hover data-[state=open]:bg-hover",
+        selected ? "bg-cell-select" : active ? "bg-selected" : "hover:bg-hover data-[state=open]:bg-hover",
       )}
     >
       <span
@@ -211,18 +214,32 @@ const COLUMN_GLYPHS: Partial<Record<TypeCategory, LucideIcon>> = {
 
 const glyph = (Glyph: LucideIcon, className = "text-muted") => <Glyph size={14} className={className} />;
 
-/** A detail row's name in mono, with marks after it that stay visible when the name is cut. */
-function DetailName({ name, marks }: { name: ReactNode; marks?: ReactNode }) {
+function DetailName({
+  name,
+  title,
+  marks,
+  detail,
+  nameClass = "font-mono text-ui-12.5",
+}: {
+  name: ReactNode;
+  title: string;
+  marks?: ReactNode;
+  detail?: string;
+  nameClass?: string;
+}) {
   return (
     <span className="flex min-w-0 items-center gap-1">
-      <span className="truncate font-mono text-ui-12.5">{name}</span>
+      <span title={title} className={cx("min-w-0 truncate", nameClass)}>
+        {name}
+      </span>
       {marks}
+      {detail !== undefined && (
+        <span title={detail} className="min-w-0 flex-1 basis-0 truncate pl-2 text-right font-mono text-ui-11 text-muted">
+          {detail}
+        </span>
+      )}
     </span>
   );
-}
-
-function Trailing({ children }: { children: string }) {
-  return <span className="max-w-[65%] shrink-0 truncate pl-2 font-mono text-ui-11 text-muted">{children}</span>;
 }
 
 function ColumnRow({ path, depth, column, ranges }: { path: string; depth: number; column: ColumnInfo; ranges?: readonly TextRange[] }) {
@@ -237,9 +254,9 @@ function ColumnRow({ path, depth, column, ranges }: { path: string; depth: numbe
       path={`${path}/${column.name}`}
       depth={depth}
       expandable={false}
+      keepChevronSpace
       icon={glyph(COLUMN_GLYPHS[column.category] ?? CircleSmallIcon)}
-      label={<DetailName name={<Highlight text={column.name} ranges={ranges} />} marks={marks} />}
-      trailing={<Trailing>{columnType(column)}</Trailing>}
+      label={<DetailName name={<Highlight text={column.name} ranges={ranges} />} title={column.name} marks={marks} detail={columnType(column)} />}
     />
   );
 }
@@ -257,9 +274,9 @@ function TextRow({ path, depth, icon, name, text }: { path: string; depth: numbe
       path={path}
       depth={depth}
       expandable={false}
+      keepChevronSpace
       icon={icon}
-      label={<DetailName name={name} />}
-      trailing={<Trailing>{text.trailing}</Trailing>}
+      label={<DetailName name={name} title={name} detail={text.trailing} />}
       second={text.second}
     />
   );
@@ -292,9 +309,9 @@ function detailGroups(path: string, depth: number, schema: string, rel: Relation
             path={at("defaults", d.column)}
             depth={depth}
             expandable={false}
+            keepChevronSpace
             icon={glyph(EqualIcon)}
-            label={<DetailName name={d.column} />}
-            trailing={<Trailing>{defaultText(d.value)}</Trailing>}
+            label={<DetailName name={d.column} title={d.column} detail={defaultText(d.value)} />}
           />
         )),
     },
@@ -414,6 +431,7 @@ function RelationRow({
         onDoubleClick={() => openTableTab({ db, schema, relation: rel.name })}
         contextMenu={<NewMenu db={db} />}
         icon={relationIcon(rel)}
+        title={rel.name}
         label={rel.name}
       />
       {open && <RelationGroups path={me} depth={depth + 1} db={db} schema={schema} rel={rel} version={version} expanded={expanded} />}
@@ -439,6 +457,8 @@ export function FunctionRow({
       path={`${path}/${fn.name}`}
       depth={depth}
       expandable={false}
+      keepChevronSpace
+      icon={glyph(SquareFunctionIcon)}
       onDoubleClick={() => {
         const { active, tabs, configs, notify } = useWorkspace.getState();
         const target = tabTarget(active ? tabs[active] : undefined);
@@ -458,11 +478,13 @@ export function FunctionRow({
         insertAtCursor(active, fn.insertText);
       }}
       label={
-        <span title={`${fn.name}(${fn.args}) → ${fn.returns}`} className="text-ui-13.5">
-          <Highlight text={fn.name} ranges={ranges} />
-        </span>
+        <DetailName
+          name={<Highlight text={fn.name} ranges={ranges} />}
+          title={`${fn.name}(${fn.args}) → ${fn.returns}`}
+          detail={fn.returns}
+          nameClass="text-ui-13.5"
+        />
       }
-      trailing={<span className="shrink-0 truncate pl-2 font-mono text-ui-11 text-muted">{fn.returns}</span>}
     />
   );
 }
@@ -831,6 +853,7 @@ function FilteredRelationNode({
         onDoubleClick={() => openTableTab({ db, schema, relation: rel.name })}
         contextMenu={<NewMenu db={db} />}
         icon={relationIcon(rel)}
+        title={rel.name}
         label={<Highlight text={rel.name} ranges={ranges} />}
       />
       {open && columns.map((c) => <ColumnRow key={c.column.attnum} path={`${me}/#columns`} depth={4} column={c.column} ranges={c.ranges} />)}

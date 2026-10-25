@@ -19,7 +19,7 @@ export function DatabaseBadge({ databaseKind }: { databaseKind: DatabaseKind }) 
     <span
       title={DATABASE_LABEL[databaseKind]}
       aria-label={DATABASE_LABEL[databaseKind]}
-      className="inline-grid h-4 min-w-[18px] place-items-center rounded-[4px] bg-badge-bg px-[3px] font-mono text-ui-8.5 font-bold leading-none tracking-tight text-badge"
+      className="inline-grid h-4 min-w-[20px] place-items-center rounded-[4px] bg-badge-bg px-[3px] font-mono text-ui-10 font-bold leading-none tracking-tight text-badge"
     >
       {databaseKind === "Postgres" ? "PG" : "MS"}
     </span>

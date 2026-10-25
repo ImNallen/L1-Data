@@ -39,7 +39,7 @@ it("prints each entry as a timestamped line in DataGrip's Output order", () => {
   ).toEqual([
     { kind: "Statement", severity: undefined, runStart: false, text: "09:05:07>select slow_echo(0.01)" },
     { kind: "Notice", severity: "WARNING", runStart: false, text: "09:05:07WARNING:carefulmore" },
-    { kind: "Rows", severity: undefined, runStart: false, text: "09:05:07200,000 rows (truncated) · 1.20 s" },
+    { kind: "Rows", severity: undefined, runStart: false, text: "09:05:07200,000 rows, past the result limit · 1.20 s" },
     { kind: "Info", severity: undefined, runStart: false, text: "09:05:07BEGIN (implicit)" },
     { kind: "Command", severity: undefined, runStart: false, text: "09:05:07UPDATE 3 · 4 ms" },
     { kind: "Statement", severity: undefined, runStart: true, text: "09:05:07>select 1/0" },

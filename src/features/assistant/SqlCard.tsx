@@ -40,7 +40,7 @@ export function SqlCard({
   return (
     <div data-testid="sql-card" className="overflow-hidden rounded-lg border border-control">
       <div className="flex h-8 items-center gap-2 border-b border-border pr-1 pl-3">
-        <span className="font-mono text-ui-9.5 font-bold tracking-tight text-badge">SQL</span>
+        <span className="font-mono text-ui-10.5 font-bold tracking-tight text-badge">SQL</span>
         {relations.length > 0 && (
           <span data-testid="sql-card-uses" className="min-w-0 truncate text-ui-12 text-dim">
             Uses {relations.join(", ")}

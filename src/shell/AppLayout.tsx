@@ -9,7 +9,7 @@ import { ResultsPane } from "../features/results/ResultsPane";
 import { SettingsPage } from "../features/settings/SettingsScreen";
 import { Sidebar } from "../features/sidebar/Sidebar";
 import { InstallingOverlay } from "../features/updates/InstallingOverlay";
-import { useWorkspace, type Screen } from "../state/workspace";
+import { isTableTab, useWorkspace, type Screen } from "../state/workspace";
 import { Kbd } from "../ui/primitives";
 import { START_COMMANDS, handleGlobalKey, shortcutLabel } from "./commands";
 import { Overlays } from "./Overlays";
@@ -50,8 +50,11 @@ function StartCommands() {
   );
 }
 
+const TABLE_EDITOR_PX = 96;
+
 function MainArea() {
   const active = useWorkspace((s) => (s.active ? s.tabs[s.active] : undefined));
+  const tableTab = isTableTab(active);
   const showResults = useWorkspace((s) => s.layout.results);
   const resultsHeight = useWorkspace((s) => s.layout.resultsHeight);
   const resultsPx = useRef<number | null>(null);
@@ -61,9 +64,15 @@ function MainArea() {
     if (resultsPx.current !== null && resultsPx.current !== layout.resultsHeight) setLayout({ resultsHeight: resultsPx.current });
   };
 
+  // A Panel reads defaultSize only on mount, so switching between a table tab and a query tab remounts the split.
   return (
-    <Group orientation="vertical" className="min-h-0 flex-1" onLayoutChanged={saveResultsHeight}>
-      <Panel id="editor" minSize={80}>
+    <Group key={tableTab ? "table" : "query"} orientation="vertical" className="min-h-0 flex-1" onLayoutChanged={tableTab ? undefined : saveResultsHeight}>
+      <Panel
+        id="editor"
+        minSize={80}
+        defaultSize={tableTab && showResults ? TABLE_EDITOR_PX : undefined}
+        groupResizeBehavior={tableTab ? "preserve-pixel-size" : "preserve-relative-size"}
+      >
         {active ? <SqlEditor tabId={active.id} /> : <StartCommands />}
       </Panel>
       {showResults && (
@@ -71,11 +80,11 @@ function MainArea() {
           <ResizeHandle id="results-resize" label="Resize results" line="horizontal" lineColor="bg-border" />
           <Panel
             id="results"
-            defaultSize={resultsHeight}
+            defaultSize={tableTab ? undefined : resultsHeight}
             minSize={120}
-            groupResizeBehavior="preserve-pixel-size"
+            groupResizeBehavior={tableTab ? "preserve-relative-size" : "preserve-pixel-size"}
             onResize={(size) => {
-              resultsPx.current = Math.round(size.inPixels);
+              if (!tableTab) resultsPx.current = Math.round(size.inPixels);
             }}
           >
             <ResultsPane tabId={active?.id ?? null} />

@@ -130,7 +130,7 @@ const RECIPES: Record<Appearance, Record<Token, Recipe>> = {
     accentForeground: onAccent,
     cellSelect: tint(0.243),
     runIcon: onAccent,
-    focus: tint(0.717),
+    focus: lift(0.15),
     accentBorder: tint(0.557),
     handle: ink(0.17),
     handleHover: ink(0.32),

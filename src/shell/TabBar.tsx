@@ -61,7 +61,7 @@ function TabItem({ id }: { id: TabId }) {
       {tab.table ? (
         <TableIcon size={14} className="shrink-0 text-muted" />
       ) : (
-        <span className="font-mono text-ui-9.5 font-bold tracking-tight text-badge">SQL</span>
+        <span className="font-mono text-ui-10.5 font-bold tracking-tight text-badge">SQL</span>
       )}
       {editing ? (
         <input

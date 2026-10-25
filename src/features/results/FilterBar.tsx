@@ -74,7 +74,7 @@ function FilterChip({
             if (e.key === "Escape") setValue(filter.value);
           }}
           style={{ width: `${Math.max(5, Math.min(24, value.length + 1))}ch` }}
-          className="h-5 min-w-0 rounded bg-bg px-1 font-mono text-ui-12 text-fg outline-none placeholder:text-faint focus:ring-1 focus:ring-accent-border"
+          className="h-5 min-w-0 rounded bg-bg px-1 font-mono text-ui-12 text-fg outline-none placeholder:text-dim focus:ring-1 focus:ring-accent-border"
         />
       )}
       <IconButton aria-label={`Remove ${filter.column} filter`} className="size-5" onClick={onRemove}>
@@ -121,7 +121,7 @@ function ClauseInput({
           if (e.key === "Enter" && dirty) onApply(text);
           if (e.key === "Escape") setText(applied);
         }}
-        className="min-w-0 flex-1 bg-transparent font-mono text-ui-12.5 text-fg outline-none placeholder:text-faint"
+        className="min-w-0 flex-1 bg-transparent font-mono text-ui-12.5 text-fg outline-none placeholder:font-sans placeholder:text-dim"
       />
       {dirty && <span className="shrink-0 text-ui-11 text-dim">↵</span>}
     </label>
@@ -141,7 +141,7 @@ export function FilterBar({ tab }: { tab: TableTab }) {
         label="WHERE"
         testId="filter-where"
         applied={query.where}
-        placeholder="region = 'EU-West'"
+        placeholder="a condition, then Enter"
         onApply={(where) => update((q) => ({ ...q, where }))}
         className="min-w-[200px] flex-[3]"
       />
@@ -172,7 +172,7 @@ export function FilterBar({ tab }: { tab: TableTab }) {
         label="ORDER BY"
         testId="filter-order-by"
         applied={query.orderBy}
-        placeholder="created_at DESC"
+        placeholder="columns, then Enter"
         onApply={(orderBy) => update((q) => ({ ...q, orderBy }))}
         className="min-w-[160px] flex-[2]"
       />
