@@ -90,6 +90,12 @@ pub async fn relation_detail(engine: State<'_, Arc<Engine>>, db: DatabaseRef, oi
 
 #[tauri::command]
 #[specta::specta]
+pub async fn object_script(engine: State<'_, Arc<Engine>>, db: DatabaseRef, target: ScriptTarget) -> Result<ObjectScript, DetailError> {
+    engine.object_script(db, target).await
+}
+
+#[tauri::command]
+#[specta::specta]
 pub async fn exact_row_count(engine: State<'_, Arc<Engine>>, tab_id: TabId, db: DatabaseRef, schema: String, table: String, query: TableQuery) -> Result<u64, CountError> {
     engine.exact_row_count(tab_id, db, schema, table, query).await
 }

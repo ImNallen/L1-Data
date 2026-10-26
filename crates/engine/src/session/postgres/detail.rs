@@ -1,6 +1,7 @@
 use tokio_postgres::Client;
 
 use crate::model::{ColumnDefault, DatabaseRef, DefaultValue, FkAction, IndexInfo, KeyInfo, KeyKind, RelationDetail, TriggerEvent, TriggerInfo, TriggerImplementation, TriggerTiming};
+use crate::script::postgres::{group_end, top_level};
 
 /// Reads one relation's defaults, keys, indexes, and triggers. Every query is an index lookup on
 /// the relation's OID, so the cost does not grow with the size of the database. `None` when the
@@ -152,50 +153,6 @@ pub fn index_keys(indexdef: &str) -> &str {
         end = group_end(indexdef, end + " INCLUDE ".len()).unwrap_or(end);
     }
     &indexdef[open..end]
-}
-
-/// Byte offset of the first `needle` outside quotes and parentheses.
-fn top_level(s: &str, needle: &str) -> Option<usize> {
-    let mut walk = Walk::default();
-    s.char_indices().find_map(|(i, c)| (walk.step(c) == 0 && !walk.quoted() && s[i..].starts_with(needle)).then_some(i))
-}
-
-/// Byte offset just past the `)` that closes the `(` at `open`.
-fn group_end(s: &str, open: usize) -> Option<usize> {
-    let mut walk = Walk::default();
-    for (i, c) in s[open..].char_indices() {
-        let closes = c == ')' && !walk.quoted();
-        if walk.step(c) == 0 && closes {
-            return Some(open + i + 1);
-        }
-    }
-    None
-}
-
-/// Parenthesis depth outside single- and double-quoted text. A doubled quote inside a quoted
-/// run closes and reopens it, which leaves the state right.
-#[derive(Default)]
-struct Walk {
-    depth: u32,
-    quote: Option<char>,
-}
-
-impl Walk {
-    fn quoted(&self) -> bool {
-        self.quote.is_some()
-    }
-
-    fn step(&mut self, c: char) -> u32 {
-        match (self.quote, c) {
-            (Some(q), c) if c == q => self.quote = None,
-            (Some(_), _) => {}
-            (None, '\'' | '"') => self.quote = Some(c),
-            (None, '(') => self.depth += 1,
-            (None, ')') => self.depth = self.depth.saturating_sub(1),
-            _ => {}
-        }
-        self.depth
-    }
 }
 
 /// `'pending'::text` gives `'pending'`; anything but a lone cast literal comes back unchanged.

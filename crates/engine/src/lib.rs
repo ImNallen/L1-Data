@@ -10,6 +10,7 @@ pub mod model;
 mod provider;
 mod results;
 mod saved;
+mod script;
 mod secrets;
 mod session;
 mod shell_path;
@@ -540,6 +541,13 @@ impl Shared {
             .await
             .map_err(|e| DetailError::Failed { message: e.message })?
             .ok_or(DetailError::Gone)
+    }
+
+    async fn object_script(self: &Arc<Self>, db: &DatabaseRef, target: &ScriptTarget) -> Result<ObjectScript, DetailError> {
+        let (instance, slot) = self.slot(db).map_err(|error| DetailError::Catalog { error })?;
+        let mut meta = slot.meta.lock().await;
+        let session = self.session_in(&instance, &slot, &mut meta).await.map_err(|e| DetailError::Failed { message: connection::connect_error_text(&e) })?;
+        session.script(target).await
     }
 
     async fn connect(self: &Arc<Self>, id: ConnectionId) -> Result<ServerInfo, ConnectError> {
@@ -1196,6 +1204,11 @@ impl Engine {
     /// session when the tree opens the relation. The engine keeps no copy.
     pub async fn relation_detail(&self, db: DatabaseRef, oid: u32) -> Result<RelationDetail, DetailError> {
         self.shared.relation_detail(&db, oid).await
+    }
+
+    /// The DDL that creates `target`, read on the database's metadata session.
+    pub async fn object_script(&self, db: DatabaseRef, target: ScriptTarget) -> Result<ObjectScript, DetailError> {
+        self.shared.object_script(&db, &target).await
     }
 
     /// A connection, database, or mode change needs an idle tab with no open transaction. A

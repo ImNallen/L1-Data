@@ -845,3 +845,371 @@ async fn every_batch_on_production_asks_while_the_transaction_holds_writes_that_
     let state = h.ok("SELECT @@TRANCOUNT, COUNT_BIG(*) FROM #held").await;
     assert_eq!(h.rows(Harness::rowsets(&state)[0])[0], vec![Some("0".into()), Some("1".into())], "the confirmed batch committed the held write");
 }
+
+impl Harness {
+    async fn all_rows(&mut self, sql: &str) -> Vec<Vec<Option<String>>> {
+        let state = self.ok(sql).await;
+        let set = Harness::rowsets(&state)[0];
+        self.engine.result_page(set.r#ref, 0, set.row_count).unwrap().rows
+    }
+
+    async fn replay_in_dependency_order(&mut self, mut scripts: Vec<String>) {
+        while !scripts.is_empty() {
+            let mut failed = vec![];
+            for script in &scripts {
+                let state = self.run(script).await;
+                if !matches!(state.run, RunState::Finished { outcome: RunOutcome::Ok, .. }) {
+                    failed.push(script.clone());
+                }
+            }
+            assert!(failed.len() < scripts.len(), "no script replays: {failed:#?}");
+            scripts = failed;
+        }
+    }
+
+    async fn catalog_facts(&mut self) -> Vec<String> {
+        let seeded = format!("o.name NOT LIKE '%{}%'", "[0-9a-f]".repeat(32));
+        self.all_rows(&format!(
+            "SELECT s.name+'.'+o.name+' '+LEFT(f.fact COLLATE DATABASE_DEFAULT,80)+' '+CONVERT(char(64),HASHBYTES('SHA2_256',f.fact COLLATE DATABASE_DEFAULT),2)
+             FROM sys.objects o JOIN sys.schemas s ON s.schema_id=o.schema_id
+             CROSS APPLY (
+                SELECT CONCAT(N'object ',o.type)
+                UNION ALL
+                SELECT CONCAT(N'column ',c.column_id,' ',c.name,' ',TYPE_NAME(c.user_type_id),' ',c.max_length,' ',c.precision,' ',c.scale,' ',c.is_nullable,' ',c.collation_name,' ',
+                              CONVERT(nvarchar(40),ic.seed_value),' ',CONVERT(nvarchar(40),ic.increment_value),' ',cc.definition,' ',cc.is_persisted,' ',dc.name,' ',dc.definition)
+                FROM sys.columns c LEFT JOIN sys.identity_columns ic ON ic.object_id=c.object_id AND ic.column_id=c.column_id
+                LEFT JOIN sys.computed_columns cc ON cc.object_id=c.object_id AND cc.column_id=c.column_id
+                LEFT JOIN sys.default_constraints dc ON dc.object_id=c.default_object_id
+                WHERE c.object_id=o.object_id AND o.type='U'
+                UNION ALL
+                SELECT CONCAT(N'index ',i.name,' ',i.type,' ',i.is_unique,' ',i.is_primary_key,' ',i.is_unique_constraint,' ',i.filter_definition,' ',
+                              (SELECT STRING_AGG(CONCAT(c.name,' ',ic.is_descending_key,' ',ic.is_included_column),',') WITHIN GROUP (ORDER BY ic.is_included_column,ic.key_ordinal,ic.index_column_id)
+                               FROM sys.index_columns ic JOIN sys.columns c ON c.object_id=ic.object_id AND c.column_id=ic.column_id WHERE ic.object_id=i.object_id AND ic.index_id=i.index_id))
+                FROM sys.indexes i WHERE i.object_id=o.object_id AND i.index_id>0
+                UNION ALL
+                SELECT CONCAT(N'foreign key ',fk.name,' ',fk.delete_referential_action,' ',fk.update_referential_action,' ',
+                              (SELECT STRING_AGG(CONCAT(c.name,'>',OBJECT_SCHEMA_NAME(fc.referenced_object_id),'.',OBJECT_NAME(fc.referenced_object_id),'.',rc.name),',') WITHIN GROUP (ORDER BY fc.constraint_column_id)
+                               FROM sys.foreign_key_columns fc JOIN sys.columns c ON c.object_id=fc.parent_object_id AND c.column_id=fc.parent_column_id
+                               JOIN sys.columns rc ON rc.object_id=fc.referenced_object_id AND rc.column_id=fc.referenced_column_id WHERE fc.constraint_object_id=fk.object_id))
+                FROM sys.foreign_keys fk WHERE fk.parent_object_id=o.object_id
+                UNION ALL
+                SELECT CONCAT(N'check ',k.name,' ',k.definition) FROM sys.check_constraints k WHERE k.parent_object_id=o.object_id
+                UNION ALL
+                SELECT CONCAT(N'trigger ',t.name,' ',t.is_disabled,' ',m.uses_ansi_nulls,' ',m.uses_quoted_identifier,' ',TRIM(CHAR(13)+CHAR(10)+CHAR(9)+' ' FROM m.definition))
+                FROM sys.triggers t JOIN sys.sql_modules m ON m.object_id=t.object_id WHERE t.parent_id=o.object_id
+                UNION ALL
+                SELECT CONCAT(N'module ',m.uses_ansi_nulls,' ',m.uses_quoted_identifier,' ',TRIM(CHAR(13)+CHAR(10)+CHAR(9)+' ' FROM m.definition)) FROM sys.sql_modules m WHERE m.object_id=o.object_id
+             ) f(fact)
+             WHERE o.type IN ('U','V','P','FN','IF','TF') AND s.name IN ('dbo','lab') AND {seeded}
+             ORDER BY 1"
+        ))
+        .await
+        .into_iter()
+        .map(|r| r[0].clone().unwrap())
+        .collect()
+    }
+}
+
+#[tokio::test]
+async fn object_scripts_replay_into_an_empty_database_with_the_same_catalog() {
+    let mut h = Harness::open(TxnMode::AutoCommit).await;
+    let name = format!("t_script_{}", uuid::Uuid::new_v4().simple());
+    h.ok(&format!("CREATE DATABASE [{name}]")).await;
+    let mut scratch = Harness::open(TxnMode::AutoCommit).await;
+    let outcome = AssertUnwindSafe(async {
+        scratch.engine.console_configure(scratch.tab, ConsoleConfig { connection_id: scratch.connection, database: name.clone(), schema: Some("dbo".into()), mode: TxnMode::AutoCommit }).await.unwrap();
+        scratch.ok("CREATE SCHEMA lab").await;
+        let catalog = h.engine.catalog(h.db()).await.unwrap();
+        let seeded = |name: &str| !name.as_bytes().windows(32).any(|w| w.iter().all(u8::is_ascii_hexdigit));
+        let mut tables = vec![];
+        let mut modules = vec![];
+        for schema in catalog.schemas.iter().filter(|s| s.name == "dbo" || s.name == "lab") {
+            for rel in schema.relations.iter().filter(|r| seeded(&r.name)) {
+                let script = h.engine.object_script(h.db(), ScriptTarget::Relation { oid: rel.oid }).await.unwrap();
+                assert_eq!(script.title, format!("{}.sql", rel.name));
+                if rel.kind == RelKind::Table { tables.push(script.text) } else { modules.push(script.text) }
+            }
+            for f in schema.functions.iter().filter(|f| seeded(&f.name)) {
+                modules.push(h.engine.object_script(h.db(), ScriptTarget::Routine { oid: f.oid }).await.unwrap().text);
+            }
+        }
+        scratch.replay_in_dependency_order(tables).await;
+        scratch.replay_in_dependency_order(modules).await;
+        assert_eq!(scratch.catalog_facts().await, h.catalog_facts().await);
+
+        let relation = |schema: &str, name: &str| catalog.schemas.iter().find(|s| s.name == schema).unwrap().relations.iter().find(|r| r.name == name).unwrap().oid;
+        let tickets = h.engine.object_script(h.db(), ScriptTarget::Relation { oid: relation("dbo", "tickets") }).await.unwrap().text;
+        for part in [
+            "CREATE TABLE [dbo].[tickets] (\n",
+            "[id] int IDENTITY(100,5) NOT NULL,",
+            "[code] nvarchar(20) COLLATE Latin1_General_BIN2 NOT NULL,",
+            "[quantity] int NOT NULL CONSTRAINT [DF_tickets_quantity] DEFAULT ((1)),",
+            "[total] AS ([price]*[quantity]) PERSISTED,",
+            "CONSTRAINT [PK_tickets] PRIMARY KEY CLUSTERED ([id] ASC),",
+            "SET QUOTED_IDENTIFIER ON\nGO\nCREATE   TRIGGER dbo.tickets_touch",
+        ] {
+            assert!(tickets.contains(part), "{part} missing from {tickets}");
+        }
+        let procedure = catalog.schemas.iter().flat_map(|s| &s.functions).find(|f| f.name == "cancel_order").unwrap().oid;
+        let text = h.engine.object_script(h.db(), ScriptTarget::Routine { oid: procedure }).await.unwrap().text;
+        assert!(text.starts_with("SET ANSI_NULLS ON\nGO\nSET QUOTED_IDENTIFIER ON\nGO\nCREATE   PROCEDURE dbo.cancel_order @order_id int AS\n") && text.ends_with("END;\nGO\n"), "{text}");
+        let index = h.engine.object_script(h.db(), ScriptTarget::Index { relation_oid: relation("dbo", "orders"), name: "IX_orders_customer".into() }).await.unwrap();
+        assert_eq!((index.title.as_str(), index.text.as_str()), ("IX_orders_customer.sql", "CREATE NONCLUSTERED INDEX [IX_orders_customer] ON [dbo].[orders] ([customer_id] ASC);\nGO\n"));
+        let pk = h.engine.object_script(h.db(), ScriptTarget::Index { relation_oid: relation("dbo", "tickets"), name: "PK_tickets".into() }).await.unwrap();
+        assert_eq!(pk.text, "ALTER TABLE [dbo].[tickets] ADD CONSTRAINT [PK_tickets] PRIMARY KEY CLUSTERED ([id] ASC);\nGO\n");
+        let trigger = h.engine.object_script(h.db(), ScriptTarget::Trigger { relation_oid: relation("dbo", "tickets"), name: "tickets_touch".into() }).await.unwrap();
+        assert!(trigger.text.contains("CREATE   TRIGGER dbo.tickets_touch ON dbo.tickets AFTER UPDATE AS"), "{}", trigger.text);
+        assert!(matches!(h.engine.object_script(h.db(), ScriptTarget::Index { relation_oid: relation("dbo", "orders"), name: "missing".into() }).await, Err(DetailError::Gone)));
+    })
+    .catch_unwind()
+    .await;
+    drop(scratch);
+    h.ok(&format!("ALTER DATABASE [{name}] SET SINGLE_USER WITH ROLLBACK IMMEDIATE; DROP DATABASE [{name}]")).await;
+    if let Err(panic) = outcome {
+        std::panic::resume_unwind(panic);
+    }
+}
+
+impl Harness {
+    async fn target(&mut self, database: &str) -> DatabaseRef {
+        self.engine.console_configure(self.tab, ConsoleConfig { connection_id: self.connection, database: database.into(), schema: Some("dbo".into()), mode: TxnMode::AutoCommit }).await.unwrap();
+        DatabaseRef { connection_id: self.connection, database: database.into() }
+    }
+
+    /// Boxed, because a debug build keeps each inline call's whole future in the caller's stack
+    /// frame, and enough of them overflow the test thread's stack.
+    async fn script(&self, db: &DatabaseRef, target: ScriptTarget) -> Result<ObjectScript, DetailError> {
+        Box::pin(self.engine.object_script(db.clone(), target)).await
+    }
+
+    async fn hostile_facts(&mut self) -> Vec<String> {
+        self.all_rows(
+            "SELECT s.name+'.'+o.name+' '+f.fact COLLATE DATABASE_DEFAULT
+             FROM sys.objects o JOIN sys.schemas s ON s.schema_id=o.schema_id
+             CROSS APPLY (
+                SELECT CONCAT(N'object ',o.type,' ',t.uses_ansi_nulls,' ',t.lock_escalation_desc,' ',t.temporal_type,' ',OBJECT_SCHEMA_NAME(t.history_table_id),'.',OBJECT_NAME(t.history_table_id),' ',
+                              t.history_retention_period,' ',t.history_retention_period_unit_desc,' ',
+                              (SELECT CONCAT(COL_NAME(pe.object_id,pe.start_column_id),'-',COL_NAME(pe.object_id,pe.end_column_id)) FROM sys.periods pe WHERE pe.object_id=o.object_id),' ',
+                              t.text_in_row_limit,' ',t.large_value_types_out_of_row,' ',(SELECT CONCAT('change tracking ',ct.is_track_columns_updated_on) FROM sys.change_tracking_tables ct WHERE ct.object_id=o.object_id))
+                FROM (SELECT 1) one(x) LEFT JOIN sys.tables t ON t.object_id=o.object_id
+                UNION ALL
+                SELECT CONCAT(N'column ',c.column_id,' ',c.name,' ',TYPE_NAME(c.user_type_id),' ',c.max_length,' ',c.precision,' ',c.scale,' ',c.is_nullable,' ',c.collation_name,' ',
+                              CONVERT(nvarchar(40),ic.seed_value),' ',CONVERT(nvarchar(40),ic.increment_value),' ',ic.is_not_for_replication,' ',cc.definition,' ',cc.is_persisted,' ',dc.name,' ',dc.definition,' ',
+                              c.is_sparse,' ',c.is_column_set,' ',c.is_rowguidcol,' ',mc.masking_function,' ',c.generated_always_type,' ',c.is_hidden,' ',
+                              OBJECT_NAME(c.default_object_id),' ',OBJECT_SCHEMA_NAME(c.rule_object_id),'.',OBJECT_NAME(c.rule_object_id))
+                FROM sys.columns c LEFT JOIN sys.identity_columns ic ON ic.object_id=c.object_id AND ic.column_id=c.column_id
+                LEFT JOIN sys.computed_columns cc ON cc.object_id=c.object_id AND cc.column_id=c.column_id
+                LEFT JOIN sys.default_constraints dc ON dc.object_id=c.default_object_id
+                LEFT JOIN sys.masked_columns mc ON mc.object_id=c.object_id AND mc.column_id=c.column_id
+                WHERE c.object_id=o.object_id AND o.type IN ('U','V')
+                UNION ALL
+                SELECT CONCAT(N'index ',i.name,' ',i.type,' ',i.is_unique,' ',i.is_primary_key,' ',i.is_unique_constraint,' ',i.filter_definition,' ',i.fill_factor,' ',i.is_padded,' ',i.ignore_dup_key,' ',
+                              i.allow_row_locks,' ',i.allow_page_locks,' ',i.optimize_for_sequential_key,' ',i.compression_delay,' ',i.is_disabled,' ',st.no_recompute,' ',
+                              (SELECT TOP 1 CONCAT(p.data_compression_desc,' ',p.xml_compression) FROM sys.partitions p WHERE p.object_id=i.object_id AND p.index_id=i.index_id ORDER BY p.partition_number),' ',
+                              (SELECT STRING_AGG(CONCAT(c.name,' ',ic.key_ordinal,' ',ic.is_descending_key,' ',ic.is_included_column,' ',ic.column_store_order_ordinal),',') WITHIN GROUP (ORDER BY ic.is_included_column,ic.key_ordinal,ic.index_column_id)
+                               FROM sys.index_columns ic JOIN sys.columns c ON c.object_id=ic.object_id AND c.column_id=ic.column_id
+                               WHERE ic.object_id=i.object_id AND ic.index_id=i.index_id AND i.index_id>0 AND (ic.key_ordinal>0 OR ic.is_included_column=1 OR ic.partition_ordinal=0)))
+                FROM sys.indexes i LEFT JOIN sys.stats st ON st.object_id=i.object_id AND st.stats_id=i.index_id WHERE i.object_id=o.object_id AND i.type NOT IN (3,4) AND i.is_hypothetical=0
+                UNION ALL
+                SELECT CONCAT(N'foreign key ',fk.name,' ',fk.delete_referential_action,' ',fk.update_referential_action,' ',fk.is_disabled,' ',fk.is_not_trusted,' ',fk.is_not_for_replication,' ',
+                              (SELECT STRING_AGG(CONCAT(c.name,'>',OBJECT_SCHEMA_NAME(fc.referenced_object_id),'.',OBJECT_NAME(fc.referenced_object_id),'.',rc.name),',') WITHIN GROUP (ORDER BY fc.constraint_column_id)
+                               FROM sys.foreign_key_columns fc JOIN sys.columns c ON c.object_id=fc.parent_object_id AND c.column_id=fc.parent_column_id
+                               JOIN sys.columns rc ON rc.object_id=fc.referenced_object_id AND rc.column_id=fc.referenced_column_id WHERE fc.constraint_object_id=fk.object_id))
+                FROM sys.foreign_keys fk WHERE fk.parent_object_id=o.object_id
+                UNION ALL
+                SELECT CONCAT(N'check ',k.name,' ',k.definition,' ',k.is_disabled,' ',k.is_not_trusted,' ',k.is_not_for_replication) FROM sys.check_constraints k WHERE k.parent_object_id=o.object_id
+                UNION ALL
+                SELECT CONCAT(N'trigger ',t.name,' ',t.is_disabled,' ',m.uses_ansi_nulls,' ',m.uses_quoted_identifier,' ',TRIM(CHAR(13)+CHAR(10)+CHAR(9)+' ' FROM m.definition),' ',
+                              (SELECT STRING_AGG(CONCAT(te.type_desc,te.is_first,te.is_last),',') WITHIN GROUP (ORDER BY te.type) FROM sys.trigger_events te WHERE te.object_id=t.object_id))
+                FROM sys.triggers t JOIN sys.sql_modules m ON m.object_id=t.object_id WHERE t.parent_id=o.object_id AND t.name NOT IN ('enc_trg','renamed_trg')
+                UNION ALL
+                SELECT CONCAT(N'module ',m.uses_ansi_nulls,' ',m.uses_quoted_identifier,' ',TRIM(CHAR(13)+CHAR(10)+CHAR(9)+' ' FROM m.definition))
+                FROM sys.sql_modules m WHERE m.object_id=o.object_id AND o.name NOT IN ('newname','moved','bare_moved','bare_in','renamed_trg')
+                UNION ALL
+                SELECT CONCAT(N'property ',ep.class,' ',CASE ep.class WHEN 7 THEN (SELECT name FROM sys.indexes WHERE object_id=ep.major_id AND index_id=ep.minor_id)
+                                                                  WHEN 2 THEN (SELECT name FROM sys.parameters WHERE object_id=ep.major_id AND parameter_id=ep.minor_id)
+                                                                  ELSE COL_NAME(ep.major_id,ep.minor_id) END,' ',ep.name,' ',CONVERT(nvarchar(max),ep.value),' ',CONVERT(sysname,SQL_VARIANT_PROPERTY(ep.value,'BaseType')))
+                FROM sys.extended_properties ep WHERE ep.class IN (1,2,7) AND ep.major_id=o.object_id AND SQL_VARIANT_PROPERTY(ep.value,'BaseType') IN ('nvarchar','varchar')
+                  AND NOT EXISTS (SELECT 1 FROM sys.indexes x WHERE ep.class=7 AND x.object_id=ep.major_id AND x.index_id=ep.minor_id AND x.type=3)
+                UNION ALL
+                SELECT CONCAT(N'statistics ',st.name,' ',st.no_recompute,' ',st.has_filter,' ',st.filter_definition,' ',st.auto_drop,' ',
+                              (SELECT STRING_AGG(COL_NAME(sc.object_id,sc.column_id),',') WITHIN GROUP (ORDER BY sc.stats_column_id) FROM sys.stats_columns sc WHERE sc.object_id=st.object_id AND sc.stats_id=st.stats_id))
+                FROM sys.stats st WHERE st.object_id=o.object_id AND st.user_created=1
+                UNION ALL
+                SELECT CONCAT(N'classification ',COL_NAME(sc.major_id,sc.minor_id),' ',sc.label,' ',sc.label_id,' ',sc.information_type,' ',sc.information_type_id,' ',sc.rank)
+                FROM sys.sensitivity_classifications sc WHERE sc.class=1 AND sc.major_id=o.object_id
+             ) f(fact)
+             WHERE o.is_ms_shipped=0 AND s.name<>'cdc' AND o.type IN ('U','V','P','FN','IF','TF','TR','C','F','PK','UQ','D') AND o.name NOT IN ('enc','node_t','enc_trg')
+             ORDER BY 1",
+        )
+        .await
+        .into_iter()
+        .map(|r| r[0].clone().unwrap())
+        .collect()
+    }
+}
+
+fn refusal(result: Result<ObjectScript, DetailError>) -> String {
+    match result {
+        Err(DetailError::Failed { message }) => message,
+        other => panic!("expected a refusal, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn hostile_object_scripts_replay_every_property_or_warn() {
+    let mut h = Harness::open(TxnMode::AutoCommit).await;
+    let source = format!("t_hostile_{}", uuid::Uuid::new_v4().simple());
+    let replay = format!("{source}_replay");
+    h.ok(&format!("CREATE DATABASE [{source}]; CREATE DATABASE [{replay}]")).await;
+    let mut src = Harness::open(TxnMode::AutoCommit).await;
+    let mut dst = Harness::open(TxnMode::AutoCommit).await;
+    let outcome = AssertUnwindSafe(Box::pin(async {
+        let db = src.target(&source).await;
+        src.ok(include_str!("fixtures/script-hostile-mssql.sql")).await;
+        dst.target(&replay).await;
+        dst.ok("CREATE SCHEMA [we]]ird s]").await;
+        dst.ok("CREATE TYPE [we]]ird s].phone FROM nvarchar(20) NOT NULL").await;
+        dst.ok("ALTER DATABASE CURRENT SET CHANGE_TRACKING = ON").await;
+        dst.ok("CREATE DEFAULT dbo.d_zero AS 0;").await;
+        dst.ok("CREATE RULE dbo.r_pos AS @v > 0").await;
+        src.engine.refresh_catalog(db.clone()).await.unwrap();
+        let catalog = src.engine.catalog(db.clone()).await.unwrap();
+
+        let warned = |name: &str| -> Vec<&str> {
+            match name {
+                "shapes" => vec!["spatial index [SIX] on [dbo].[shapes]"],
+                "on_fg" => vec!["filegroup [l1_fg] for large values on [dbo].[on_fg]", "filegroup [l1_fg] on [dbo].[on_fg]"],
+                "warned" => vec![
+                    "ANSI_PADDING OFF on [dbo].[warned].[pad]",
+                    "XML index [IX x] on [dbo].[warned]",
+                    "trigger [dbo].[enc_trg] on [dbo].[warned], whose text is encrypted or hidden from this login",
+                    "extended property [Version] of type int on [dbo].[warned]",
+                ],
+                "parted" => vec![
+                    "partition scheme [ps_hostile] on [dbo].[parted]",
+                    "data compression that differs by partition on [dbo].[parted]",
+                    "partition scheme [ps_hostile] for index [IX_parted] on [dbo].[parted]",
+                    "STATISTICS_INCREMENTAL for index [IX_parted] on [dbo].[parted]",
+                    "partition scheme [ps_hostile] for index [IX_parted_kind] on [dbo].[parted]",
+                    "INCREMENTAL for statistics [st_parted] on [dbo].[parted]",
+                ],
+                "lob" => vec!["PERSIST_SAMPLE_PERCENT for statistics [st_sampled] on [dbo].[lob]"],
+                "refd" => vec!["owner [app_reader] of [dbo].[refd], set by ALTER AUTHORIZATION"],
+                "as_owner" => vec!["the owner [dbo] that EXECUTE AS OWNER on [dbo].[as_owner] runs as", "signature by certificate [cert_hostile] on [dbo].[as_owner]"],
+                "np" => vec!["numbered procedure [dbo].[np];2"],
+                "tree" => vec!["change data capture on [dbo].[tree]"],
+                "heap_pk" => vec!["hypothetical index [hx] on [dbo].[heap_pk]"],
+                "temporal_history" => vec!["history table role for [dbo].[temporal] on [dbo].[temporal_history]"],
+                "Par ent" => vec!["privileges on [we]]ird s].[Par ent] (DELETE denied to [app_reader], SELECT granted to [app_reader], UPDATE ([select]) granted with grant option to [app_reader])"],
+                "v_bound" => vec!["privileges on [dbo].[v_bound] (SELECT granted to [public])"],
+                "f_scalar" => vec!["privileges on [dbo].[f_scalar] (EXECUTE granted to [app_reader])"],
+                _ => vec![],
+            }
+        };
+        let mut tables = vec![];
+        let mut modules = vec![];
+        let mut scripted = vec![];
+        // Change data capture adds the cdc schema and the system table dbo.systranschemas.
+        for schema in catalog.schemas.iter().filter(|s| s.name != "cdc") {
+            for rel in schema.relations.iter().filter(|r| r.name != "systranschemas") {
+                let result = src.script(&db, ScriptTarget::Relation { oid: rel.oid }).await;
+                if rel.name == "node_t" {
+                    assert_eq!(refusal(result), "Graph node tables cannot be scripted yet.");
+                    continue;
+                }
+                let script = result.unwrap();
+                assert_eq!(script.warnings, warned(&rel.name), "{}", rel.name);
+                scripted.push(rel.name.clone());
+                match (rel.kind, rel.name.as_str()) {
+                    (_, "temporal_history") => {}
+                    (RelKind::Table, _) => tables.push(script.text),
+                    _ => modules.push(script.text),
+                }
+            }
+            for f in &schema.functions {
+                let result = src.script(&db, ScriptTarget::Routine { oid: f.oid }).await;
+                if f.name == "enc" {
+                    let message = "SQL Server has no readable definition for [dbo].[enc]. The module is encrypted, or this login lacks VIEW DEFINITION permission.";
+                    assert_eq!(refusal(result), message);
+                    continue;
+                }
+                let script = result.unwrap();
+                assert_eq!(script.warnings, warned(&f.name), "{}", f.name);
+                scripted.push(f.name.clone());
+                modules.push(script.text);
+            }
+        }
+        scripted.sort();
+        assert_eq!(
+            scripted,
+            ["Par ent", "as_owner", "bare_in", "bare_moved", "bound t", "cci", "f_scalar", "go_in_comment", "heap_pk", "ledgerish", "lob", "moved", "newname", "np", "on_fg", "parted", "qi_off", "refd", "refr", "renamed_t", "shapes", "sparse_set", "temporal", "temporal_history", "tree", "v_bound", "warned"]
+        );
+
+        dst.replay_in_dependency_order(tables).await;
+        dst.replay_in_dependency_order(modules).await;
+        assert_eq!(dst.hostile_facts().await, src.hostile_facts().await);
+
+        let retargeted = dst.all_rows("SELECT OBJECT_DEFINITION(OBJECT_ID(N'dbo.renamed_trg')),OBJECT_NAME(parent_id) FROM sys.triggers WHERE name=N'renamed_trg'").await;
+        assert_eq!(retargeted, [[Some("CREATE TRIGGER dbo.renamed_trg ON [dbo].[renamed_t] AFTER INSERT AS SET NOCOUNT ON;".to_owned()), Some("renamed_t".to_owned())]]);
+        let renamed = dst
+            .all_rows(
+                "SELECT OBJECT_DEFINITION(OBJECT_ID(N'dbo.newname')),OBJECT_ID(N'dbo.oldname'),OBJECT_DEFINITION(OBJECT_ID(N'[we]]ird s].moved')),OBJECT_ID(N'dbo.moved'),
+                        OBJECT_DEFINITION(OBJECT_ID(N'[we]]ird s].bare_moved')),OBJECT_DEFINITION(OBJECT_ID(N'[we]]ird s].bare_in')),OBJECT_ID(N'dbo.bare_moved'),OBJECT_ID(N'dbo.bare_in')",
+            )
+            .await;
+        assert_eq!(
+            renamed,
+            [[
+                Some("CREATE PROCEDURE [dbo].[newname] AS SELECT 1".to_owned()),
+                None,
+                Some("CREATE PROCEDURE /* dbo.x */ [we]]ird s].[moved] @p int AS SELECT @p".to_owned()),
+                None,
+                Some("CREATE PROCEDURE [we]]ird s].[bare_moved] AS SELECT 2".to_owned()),
+                Some("CREATE PROCEDURE [we]]ird s].[bare_in] AS SELECT 3".to_owned()),
+                None,
+                None,
+            ]]
+        );
+        let schema_oid = |name: &str| catalog.schemas.iter().flat_map(|s| &s.relations).find(|r| r.name == name).unwrap().oid;
+        let xml = src.script(&db, ScriptTarget::Index { relation_oid: schema_oid("warned"), name: "IX x".into() }).await;
+        assert_eq!(refusal(xml), "Only clustered, nonclustered, and columnstore indexes can be scripted, and IX x is none of these.");
+        let ordered = src.script(&db, ScriptTarget::Trigger { relation_oid: schema_oid("refr"), name: "refr_a".into() }).await.unwrap();
+        assert!(
+            ordered.text.ends_with("EXEC sys.sp_settriggerorder @triggername = N'[dbo].[refr_a]', @order = N'Last', @stmttype = N'INSERT';\nEXEC sys.sp_settriggerorder @triggername = N'[dbo].[refr_a]', @order = N'First', @stmttype = N'UPDATE';\nGO\n"),
+            "{}",
+            ordered.text
+        );
+        let encrypted = src.script(&db, ScriptTarget::Trigger { relation_oid: schema_oid("warned"), name: "enc_trg".into() }).await;
+        assert_eq!(refusal(encrypted), "SQL Server has no readable definition for [dbo].[enc_trg]. The module is encrypted, or this login lacks VIEW DEFINITION permission.");
+        let unique = src.script(&db, ScriptTarget::Index { relation_oid: schema_oid("refd"), name: "UQ_refd".into() }).await.unwrap();
+        assert_eq!(
+            unique.text,
+            "ALTER TABLE [dbo].[refd] ADD CONSTRAINT [UQ_refd] UNIQUE NONCLUSTERED ([a] ASC, [b] ASC) WITH (IGNORE_DUP_KEY = ON, ALLOW_PAGE_LOCKS = OFF, DATA_COMPRESSION = PAGE);\nGO\n\nEXEC sys.sp_addextendedproperty @name = N'MS_Description', @value = N'the key', @level0type = N'SCHEMA', @level0name = N'dbo', @level1type = N'TABLE', @level1name = N'refd', @level2type = N'CONSTRAINT', @level2name = N'UQ_refd';\nGO\n"
+        );
+        let parted = src.script(&db, ScriptTarget::Index { relation_oid: schema_oid("parted"), name: "IX_parted_kind".into() }).await.unwrap();
+        assert_eq!(parted.text, "-- L1 Data could not script: partition scheme [ps_hostile] for index [IX_parted_kind] on [dbo].[parted]\n\nCREATE NONCLUSTERED INDEX [IX_parted_kind] ON [dbo].[parted] ([kind] ASC);\nGO\n");
+        let pk = src.script(&db, ScriptTarget::Index { relation_oid: schema_oid("Par ent"), name: "PK Par ent".into() }).await.unwrap();
+        assert_eq!(pk.text, "ALTER TABLE [we]]ird s].[Par ent] ADD CONSTRAINT [PK Par ent] PRIMARY KEY NONCLUSTERED ([Id] DESC) WITH (FILLFACTOR = 80);\nGO\n");
+        let computed = src.script(&db, ScriptTarget::Index { relation_oid: schema_oid("Par ent"), name: "IX total".into() }).await.unwrap();
+        assert_eq!(
+            computed.text,
+            "SET ANSI_NULLS, ANSI_PADDING, ANSI_WARNINGS, ARITHABORT, CONCAT_NULL_YIELDS_NULL, QUOTED_IDENTIFIER ON;\nSET NUMERIC_ROUNDABORT OFF;\nGO\nCREATE NONCLUSTERED INDEX [IX total] ON [we]]ird s].[Par ent] ([total] ASC);\nGO\n"
+        );
+        let filtered = src.script(&db, ScriptTarget::Index { relation_oid: schema_oid("Par ent"), name: "UX ü".into() }).await.unwrap();
+        assert_eq!(
+            filtered.text,
+            "SET ANSI_NULLS, ANSI_PADDING, ANSI_WARNINGS, ARITHABORT, CONCAT_NULL_YIELDS_NULL, QUOTED_IDENTIFIER ON;\nSET NUMERIC_ROUNDABORT OFF;\nGO\nCREATE UNIQUE NONCLUSTERED INDEX [UX ü] ON [we]]ird s].[Par ent] ([unicode ü] ASC) WHERE ([unicode ü] IS NOT NULL);\nGO\n\nEXEC sys.sp_addextendedproperty @name = N'MS_Description', @value = N'unique when set', @level0type = N'SCHEMA', @level0name = N'we]ird s', @level1type = N'TABLE', @level1name = N'Par ent', @level2type = N'INDEX', @level2name = N'UX ü';\nGO\n"
+        );
+    }))
+    .catch_unwind()
+    .await;
+    drop(src);
+    drop(dst);
+    for name in [&source, &replay] {
+        h.ok(&format!("ALTER DATABASE [{name}] SET SINGLE_USER WITH ROLLBACK IMMEDIATE; DROP DATABASE [{name}]")).await;
+    }
+    if let Err(panic) = outcome {
+        std::panic::resume_unwind(panic);
+    }
+}

@@ -1,5 +1,6 @@
 mod catalog;
 mod detail;
+mod source;
 mod values;
 
 use super::{QueryEvent, QueryStream, error};
@@ -36,6 +37,7 @@ pub(super) struct MsSession {
     cancel: watch::Sender<u64>,
     closed: watch::Sender<Option<String>>,
     metadata: bool,
+    script_features: Option<source::Features>,
 }
 
 #[derive(Clone)]
@@ -192,6 +194,7 @@ impl MsSession {
             cancel,
             closed,
             metadata: false,
+            script_features: None,
         })
     }
     pub(super) async fn open_metadata(p: &ConnectParams) -> Result<Self, ConnectError> {
@@ -283,9 +286,13 @@ impl MsSession {
     }
 
     pub(super) async fn rows(&mut self, sql: &str) -> Result<Vec<Vec<Option<String>>>, QueryError> {
+        Ok(self.results(sql).await?.concat())
+    }
+    /// The rows of each result set a batch returns, in order.
+    pub(super) async fn results(&mut self, sql: &str) -> Result<Vec<Vec<Vec<Option<String>>>>, QueryError> {
         let mut attempt = 1;
         loop {
-            match self.read_rows(sql).await {
+            match self.read_results(sql).await {
                 Err(e) if self.metadata && deadlock_victim(&e) && attempt < DEADLOCK_ATTEMPTS => {
                     tokio::time::sleep(DEADLOCK_BACKOFF * attempt).await;
                     attempt += 1;
@@ -294,18 +301,21 @@ impl MsSession {
             }
         }
     }
-    async fn read_rows(&mut self, sql: &str) -> Result<Vec<Vec<Option<String>>>, QueryError> {
+    async fn read_results(&mut self, sql: &str) -> Result<Vec<Vec<Vec<Option<String>>>>, QueryError> {
         let mut stream = self.query(sql);
-        let mut rows = Vec::new();
+        let mut sets: Vec<Vec<Vec<Option<String>>>> = Vec::new();
         let mut failed = None;
         while let Some(event) = stream.next().await {
             match event? {
-                QueryEvent::Row(row) => rows.push(row),
-                QueryEvent::ServerError(e) => { failed.get_or_insert(e); }
+                QueryEvent::Columns(_) => sets.push(Vec::new()),
+                QueryEvent::Row(row) => sets.last_mut().ok_or_else(|| error("SQL Server sent a row before its columns"))?.push(row),
+                QueryEvent::ServerError(e) => {
+                    failed.get_or_insert(e);
+                }
                 _ => {}
             }
         }
-        failed.map_or(Ok(rows), Err)
+        failed.map_or(Ok(sets), Err)
     }
     pub(super) async fn batch(&mut self, sql: &str) -> Result<(), QueryError> {
         self.rows(sql).await.map(drop)
@@ -501,6 +511,14 @@ mod tests {
         let error = session.rows("USE reporting; SELECT DB_NAME()").await.unwrap_err();
         assert!(error.message.contains("Execution database changed to reporting"), "{}", error.message);
         assert!(session.closed_reason().is_some());
+    }
+
+    #[tokio::test]
+    async fn a_batch_that_fails_partway_returns_the_server_error_not_fewer_result_sets() {
+        let mut session = MsSession::open(&params()).await.unwrap();
+        let error = session.results("SELECT 1; SELECT 1/0; SELECT 2").await.unwrap_err();
+        assert!(error.message.contains("Divide by zero"), "{}", error.message);
+        assert_eq!(session.results("SELECT 1; SELECT 2 WHERE 1=0").await.unwrap(), vec![vec![vec![Some("1".to_owned())]], vec![]]);
     }
 
     async fn stopped(observer: &mut MsSession, pid: i32) {

@@ -111,6 +111,7 @@ routes! { e;
     connection_edit_view(id: ConnectionId, edit: ViewEdit) => e.edit_view(id, edit).await;
     connection_probe_databases(id: ConnectionId, databases: Vec<String>) => { e.probe_databases(id, databases); ok(()) };
     relation_detail(db: DatabaseRef, oid: u32) => e.relation_detail(db, oid).await;
+    object_script(db: DatabaseRef, target: ScriptTarget) => e.object_script(db, target).await;
     exact_row_count(tab_id: TabId, db: DatabaseRef, schema: String, table: String, query: TableQuery) => e.exact_row_count(tab_id, db, schema, table, query).await;
     console_configure(tab_id: TabId, config: ConsoleConfig) => e.console_configure(tab_id, config).await;
     script_outline(text: String, cursor: DocOffset, database_kind: DatabaseKind) => ok(e.script_outline(&text, cursor, database_kind));

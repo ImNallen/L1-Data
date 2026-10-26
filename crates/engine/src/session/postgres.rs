@@ -1,5 +1,6 @@
 mod catalog;
 mod detail;
+mod source;
 mod types;
 
 use std::error::Error as _;
@@ -384,6 +385,7 @@ impl PgSession {
     pub(super) async fn count_schemas(&self) -> Result<u32, QueryError> { catalog::count_schemas(&self.client).await.map_err(|e| query_failure(e, None)) }
     pub(super) async fn catalog(&self, db: DatabaseRef, version: u64, extra: &[String]) -> Result<Catalog, QueryError> { catalog::load(&self.client, db, version, extra).await.map_err(|e| query_failure(e, None)) }
     pub(super) async fn detail(&self, db: DatabaseRef, oid: u32, version: u64) -> Result<Option<RelationDetail>, QueryError> { detail::load(&self.client, db, oid, version).await.map_err(|e| query_failure(e, None)) }
+    pub(super) async fn script(&mut self, target: &ScriptTarget) -> Result<ObjectScript, DetailError> { source::load(&mut self.client, target).await }
     pub(super) async fn count(&self, sql: &str) -> Result<u64, QueryError> {
         let row = self.client.query_one(sql, &[]).await.map_err(|e| query_failure(e, Some(sql)))?;
         u64::try_from(row.get::<_, i64>(0)).map_err(|_| super::error("Negative row count"))

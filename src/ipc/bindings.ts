@@ -18,6 +18,7 @@ export const commands = {
 	connectionEditView: (id: ConnectionId, edit: ViewEdit) => typedError<null, CatalogError>(__TAURI_INVOKE("connection_edit_view", { id, edit })),
 	connectionProbeDatabases: (id: ConnectionId, databases: string[]) => __TAURI_INVOKE<void>("connection_probe_databases", { id, databases }),
 	relationDetail: (db: DatabaseRef, oid: number) => typedError<RelationDetail, DetailError>(__TAURI_INVOKE("relation_detail", { db, oid })),
+	objectScript: (db: DatabaseRef, target: ScriptTarget) => typedError<ObjectScript, DetailError>(__TAURI_INVOKE("object_script", { db, target })),
 	exactRowCount: (tabId: TabId, db: DatabaseRef, schema: string, table: string, query: TableQuery) => typedError<number, CountError>(__TAURI_INVOKE("exact_row_count", { tabId, db, schema, table, query })),
 	consoleConfigure: (tabId: TabId, config: ConsoleConfig) => typedError<ConsoleState, ConfigureError>(__TAURI_INVOKE("console_configure", { tabId, config })),
 	scriptOutline: (text: string, cursor: DocOffset, databaseKind: DatabaseKind) => __TAURI_INVOKE<ScriptOutline>("script_outline", { text, cursor, databaseKind }),
@@ -487,7 +488,7 @@ export type DefaultValue =
 export type Density = "Compact" | "Standard" | "Spacious";
 
 export type DetailError = { kind: "Catalog"; error: CatalogError } | 
-/**  The relation was dropped after the catalog the caller holds was read. */
+/**  The object was dropped after the catalog the caller holds was read. */
 { kind: "Gone" } | { kind: "Failed"; message: string };
 
 export type DisconnectError = { kind: "OpenTransactions"; tabs: OpenTxn[] } | { kind: "Store"; message: string };
@@ -863,6 +864,16 @@ export type ModelOption = {
 	recommended: boolean,
 };
 
+/**  The DDL that creates one object. */
+export type ObjectScript = {
+	/**  The tab title: the object's name and `.sql`. */
+	title: string,
+	/**  Starts with one `-- L1 Data could not script: ...` line per warning. */
+	text: string,
+	/**  The properties of the object that `text` does not recreate. */
+	warnings: string[],
+};
+
 /**  A console whose transaction would be lost by a disconnect, a close, or a restart. */
 export type OpenTxn = {
 	tabId: TabId,
@@ -1164,6 +1175,12 @@ export type ScriptOutline = {
 	statements: DocRange[],
 	atCursor: number | null,
 };
+
+/**
+ *  An object the tree can script. `oid` is the catalog's `Relation.oid` or `FunctionInfo.oid`.
+ *  An index or trigger is named within its relation, as `RelationDetail` lists it.
+ */
+export type ScriptTarget = { kind: "Relation"; oid: number } | { kind: "Routine"; oid: number } | { kind: "Index"; relationOid: number; name: string } | { kind: "Trigger"; relationOid: number; name: string };
 
 export type SendError = { kind: "Busy" } | { kind: "EmptyMessage" } | { kind: "ProviderOff"; provider: ProviderKind } | 
 /**  The chat's model left the provider's list since it was picked. */

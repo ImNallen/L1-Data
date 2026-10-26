@@ -291,7 +291,7 @@ export function detailErrorText(e: DetailError): string {
     case "Catalog":
       return catalogErrorText(e.error);
     case "Gone":
-      return "This relation no longer exists.";
+      return "This object no longer exists.";
     case "Failed":
       return e.message;
     default: {

@@ -2610,3 +2610,435 @@ async fn ddl_committed_by_commit_and_chain_refreshes_the_catalog() {
     assert!(catalog.relation("public", &table).is_some(), "the chained commit kept the table");
     h.run_ok(tab, &format!("drop table public.{table}")).await;
 }
+
+const TYPES_NO_SCRIPT_MAKES: &str = "create schema lab; create type lab.mood as enum ('sad', 'ok', 'happy')";
+
+const SEED_RELATIONS: &str = "n.nspname IN ('public', 'lab') AND c.relkind IN ('r', 'p', 'v', 'm') AND c.relname !~ '[0-9a-f]{32}'";
+
+async fn catalog_facts(client: &tokio_postgres::Client, relations: &str) -> Vec<String> {
+    let sql = format!(
+        "SELECT n.nspname || '.' || c.relname || ' ' || f.fact
+         FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
+         LEFT JOIN pg_am am ON am.oid = c.relam
+         LEFT JOIN pg_foreign_table ft ON ft.ftrelid = c.oid LEFT JOIN pg_foreign_server fs ON fs.oid = ft.ftserver,
+         LATERAL (
+            SELECT concat_ws(' ', 'relation', c.relkind, c.relpersistence, pg_get_partkeydef(c.oid), pg_get_expr(c.relpartbound, c.oid), obj_description(c.oid, 'pg_class'),
+                             c.reloptions, (SELECT t.reloptions FROM pg_class t WHERE t.oid = c.reltoastrelid), c.relrowsecurity, c.relforcerowsecurity, c.relreplident,
+                             c.relispopulated, am.amname, fs.srvname, ft.ftoptions, c.reloftype::regtype,
+                             (SELECT string_agg(h.inhparent::regclass::text, ',' ORDER BY h.inhseqno) FROM pg_inherits h WHERE h.inhrelid = c.oid))
+            UNION ALL
+            SELECT concat_ws(' ', 'column', a.attnum, a.attname, format_type(a.atttypid, a.atttypmod), a.attnotnull, a.attidentity, a.attgenerated,
+                             pg_get_expr(d.adbin, d.adrelid), (SELECT co.collnamespace::regnamespace::text || '.' || quote_ident(co.collname) FROM pg_collation co WHERE co.oid = a.attcollation), col_description(c.oid, a.attnum), a.attislocal, a.attinhcount,
+                             a.attstattarget, a.attstorage, to_jsonb(a) ->> 'attcompression', a.attoptions, a.attfdwoptions)
+            FROM pg_attribute a LEFT JOIN pg_attrdef d ON d.adrelid = a.attrelid AND d.adnum = a.attnum
+            WHERE a.attrelid = c.oid AND a.attnum > 0 AND NOT a.attisdropped
+            UNION ALL
+            SELECT concat_ws(' ', 'sequence', dep.deptype, a.attname, sc.oid::regclass, format_type(s.seqtypid, NULL), s.seqstart, s.seqincrement, s.seqmin, s.seqmax, s.seqcache, s.seqcycle,
+                             sc.relpersistence, obj_description(sc.oid, 'pg_class'))
+            FROM pg_depend dep JOIN pg_class sc ON sc.oid = dep.objid AND sc.relkind = 'S' JOIN pg_sequence s ON s.seqrelid = sc.oid
+            JOIN pg_attribute a ON a.attrelid = dep.refobjid AND a.attnum = dep.refobjsubid
+            WHERE dep.classid = 'pg_class'::regclass AND dep.refclassid = 'pg_class'::regclass AND dep.refobjid = c.oid AND dep.deptype IN ('a', 'i')
+            UNION ALL
+            SELECT concat_ws(' ', 'constraint', k.conname, pg_get_constraintdef(k.oid), k.convalidated, k.conislocal, k.coninhcount, obj_description(k.oid, 'pg_constraint'))
+            FROM pg_constraint k WHERE k.conrelid = c.oid
+            UNION ALL
+            SELECT concat_ws(' ', 'index', pg_get_indexdef(i.indexrelid), i.indisclustered, i.indisreplident, obj_description(i.indexrelid, 'pg_class'),
+                             (SELECT string_agg(a.attnum || '=' || a.attstattarget, ',' ORDER BY a.attnum) FROM pg_attribute a WHERE a.attrelid = i.indexrelid),
+                             (SELECT ic.reltablespace FROM pg_class ic WHERE ic.oid = i.indexrelid))
+            FROM pg_index i WHERE i.indrelid = c.oid
+            UNION ALL
+            SELECT concat_ws(' ', 'trigger', pg_get_triggerdef(t.oid), t.tgenabled, obj_description(t.oid, 'pg_trigger')) FROM pg_trigger t WHERE t.tgrelid = c.oid AND NOT t.tgisinternal
+            UNION ALL
+            SELECT concat_ws(' ', 'rule', pg_get_ruledef(r.oid), r.ev_enabled, obj_description(r.oid, 'pg_rewrite')) FROM pg_rewrite r WHERE r.ev_class = c.oid AND r.rulename <> '_RETURN'
+            UNION ALL
+            SELECT concat_ws(' ', 'policy', p.polname, p.polpermissive, p.polcmd, p.polroles::regrole[], pg_get_expr(p.polqual, p.polrelid), pg_get_expr(p.polwithcheck, p.polrelid),
+                             obj_description(p.oid, 'pg_policy'))
+            FROM pg_policy p WHERE p.polrelid = c.oid
+            UNION ALL
+            SELECT concat_ws(' ', 'statistics', pg_get_statisticsobjdef(x.oid), to_jsonb(x) ->> 'stxstattarget', obj_description(x.oid, 'pg_statistic_ext')) FROM pg_statistic_ext x WHERE x.stxrelid = c.oid
+            UNION ALL
+            SELECT concat_ws(' ', 'query', pg_get_viewdef(c.oid)) WHERE c.relkind IN ('v', 'm')
+         ) f(fact)
+         WHERE {relations}
+         ORDER BY 1"
+    );
+    client.query(&sql, &[]).await.unwrap().iter().map(|r| r.get(0)).collect()
+}
+
+/// `DROP DATABASE ... WITH (FORCE)` needs PostgreSQL 13, and the seeded round trip runs on 12 too.
+async fn drop_database(client: &tokio_postgres::Client, name: &str) {
+    for _ in 0..50 {
+        client.execute("select pg_terminate_backend(pid) from pg_stat_activity where datname = $1 and pid <> pg_backend_pid()", &[&name]).await.unwrap();
+        if client.batch_execute(&format!("drop database {name}")).await.is_ok() {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    panic!("could not drop database {name}");
+}
+
+/// What a routine's script must recreate. Its owner and privileges are only warned about.
+async fn routine_facts(client: &tokio_postgres::Client, schema: &str) -> Vec<String> {
+    let sql = "SELECT concat_ws(' ', p.oid::regprocedure, pg_get_functiondef(p.oid), obj_description(p.oid, 'pg_proc'), p.prosecdef,
+                                (SELECT string_agg(e.extname, ',' ORDER BY e.extname) FROM pg_depend d JOIN pg_extension e ON e.oid = d.refobjid
+                                 WHERE d.classid = 'pg_proc'::regclass AND d.objid = p.oid AND d.refclassid = 'pg_extension'::regclass AND d.deptype = 'x'))
+               FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace WHERE n.nspname = $1 ORDER BY 1";
+    client.query(sql, &[&schema]).await.unwrap().iter().map(|r| r.get(0)).collect()
+}
+
+async fn replay_in_dependency_order(client: &tokio_postgres::Client, mut scripts: Vec<String>) {
+    while !scripts.is_empty() {
+        let mut failed = vec![];
+        for script in &scripts {
+            if let Err(e) = client.batch_execute(script).await {
+                failed.push((script.clone(), e.as_db_error().map(|e| e.message().to_owned())));
+            }
+        }
+        assert!(failed.len() < scripts.len(), "no script replays: {failed:#?}");
+        scripts = failed.into_iter().map(|(script, _)| script).collect();
+    }
+}
+
+#[tokio::test]
+async fn object_scripts_replay_into_an_empty_database_with_the_same_catalog() {
+    let h = Harness::start().await;
+    h.engine.connect(h.conn).await.unwrap();
+    let (shop, connection) = tokio_postgres::connect(&url(), NoTls).await.unwrap();
+    tokio::spawn(connection);
+    let name = unique("t_db_script");
+    shop.batch_execute(&format!("create database {name}")).await.unwrap();
+    let mut config: tokio_postgres::Config = url().parse().unwrap();
+    let (scratch, connection) = config.dbname(&name).connect(NoTls).await.unwrap();
+    tokio::spawn(connection);
+
+    let outcome = futures_util::FutureExt::catch_unwind(std::panic::AssertUnwindSafe(async {
+        let script = async |target: ScriptTarget| h.engine.object_script(h.db(), target).await;
+        let oids = async |sql: &str| shop.query(sql, &[]).await.unwrap().iter().map(|r| r.get::<_, u32>(0)).collect::<Vec<_>>();
+
+        scratch.batch_execute(TYPES_NO_SCRIPT_MAKES).await.unwrap();
+        scratch.batch_execute("set check_function_bodies = off").await.unwrap();
+        let routines = oids("select p.oid from pg_proc p join pg_namespace n on n.oid = p.pronamespace where n.nspname = 'public' and p.prokind <> 'a' and p.proname !~ '[0-9a-f]{32}' order by p.oid").await;
+        let mut texts = vec![];
+        for oid in routines {
+            let s = script(ScriptTarget::Routine { oid }).await.unwrap();
+            assert!(s.text.starts_with("CREATE OR REPLACE "), "{}", s.text);
+            texts.push(s.text);
+        }
+        replay_in_dependency_order(&scratch, texts).await;
+
+        let relations = oids(&format!("select c.oid from pg_class c join pg_namespace n on n.oid = c.relnamespace where {SEED_RELATIONS} and not c.relispartition order by c.oid")).await;
+        let mut texts = vec![];
+        for oid in relations {
+            texts.push(script(ScriptTarget::Relation { oid }).await.unwrap().text);
+        }
+        replay_in_dependency_order(&scratch, texts).await;
+        assert_eq!(catalog_facts(&scratch, SEED_RELATIONS).await, catalog_facts(&shop, SEED_RELATIONS).await);
+
+        let oid = async |name: &str| oids(&format!("select '{name}'::regclass::oid")).await[0];
+        let orders = script(ScriptTarget::Relation { oid: oid("public.orders").await }).await.unwrap();
+        assert_eq!(orders.title, "orders.sql");
+        assert!(orders.text.starts_with("CREATE TABLE public.orders (\n    id bigint GENERATED ALWAYS AS IDENTITY NOT NULL,\n"), "{}", orders.text);
+        for line in [
+            "    CONSTRAINT orders_customer_id_fkey FOREIGN KEY (customer_id) REFERENCES public.customers(id),\n",
+            "CREATE INDEX orders_open_idx ON public.orders USING btree (status) WHERE (status <> 'paid'::text);\n",
+            "CREATE TRIGGER orders_audit AFTER INSERT OR DELETE OR UPDATE ON public.orders FOR EACH ROW EXECUTE FUNCTION public.audit_order();\n",
+        ] {
+            assert!(orders.text.contains(line), "{line} missing from {}", orders.text);
+        }
+        let partition = script(ScriptTarget::Relation { oid: oid("public.order_events_2026_h1").await }).await.unwrap();
+        assert_eq!(
+            partition.text,
+            "CREATE TABLE public.order_events_2026_h1 PARTITION OF public.order_events
+    FOR VALUES FROM ('2026-01-01') TO ('2026-07-01');
+
+DO $l1$
+DECLARE
+    entry text[];
+    attached regclass;
+    occupant regclass;
+BEGIN
+    FOREACH entry SLICE 1 IN ARRAY ARRAY[
+        ['public.order_events_2026_h1', 'public.order_events_kind_idx', 'order_events_2026_h1_kind_idx'],
+        ['public.order_events_2026_h1', 'public.order_events_pkey', 'order_events_2026_h1_pkey']
+    ] LOOP
+        attached := (SELECT h.inhrelid FROM pg_catalog.pg_inherits h JOIN pg_catalog.pg_index i ON i.indexrelid = h.inhrelid
+                     WHERE h.inhparent = pg_catalog.to_regclass(entry[2]) AND i.indrelid = entry[1]::regclass);
+        occupant := (SELECT c.oid FROM pg_catalog.pg_class c WHERE c.relname = entry[3]
+                     AND c.relnamespace = (SELECT a.relnamespace FROM pg_catalog.pg_class a WHERE a.oid = attached));
+        IF attached IS NULL THEN
+            RAISE WARNING 'L1 Data found no index on % attached to %, so it could not name it %', entry[1], entry[2], entry[3];
+        ELSIF occupant IS NULL THEN
+            EXECUTE pg_catalog.format('ALTER INDEX %s RENAME TO %I', attached, entry[3]);
+        ELSIF occupant <> attached AND EXISTS (SELECT FROM pg_catalog.pg_inherits h JOIN pg_catalog.pg_index i ON i.indexrelid = h.inhrelid
+                                               WHERE h.inhrelid = occupant AND i.indrelid = entry[1]::regclass) THEN
+            EXECUTE pg_catalog.format('ALTER INDEX %s RENAME TO %I', occupant, 'l1_' || occupant::oid);
+            EXECUTE pg_catalog.format('ALTER INDEX %s RENAME TO %I', attached, entry[3]);
+        ELSIF occupant <> attached THEN
+            IF (SELECT c.relname FROM pg_catalog.pg_class c WHERE c.oid = attached) <> 'l1_' || attached::oid THEN
+                EXECUTE pg_catalog.format('ALTER INDEX %s RENAME TO %I', attached, 'l1_' || attached::oid);
+            END IF;
+            RAISE WARNING 'L1 Data named index % instead of %, because %, which this script did not create, has that name', attached, entry[3], occupant;
+        END IF;
+    END LOOP;
+END
+$l1$;
+"
+        );
+        let index = script(ScriptTarget::Index { relation_oid: oid("public.orders").await, name: "orders_open_idx".into() }).await.unwrap();
+        assert_eq!((index.title.as_str(), index.text.as_str()), ("orders_open_idx.sql", "CREATE INDEX orders_open_idx ON public.orders USING btree (status) WHERE (status <> 'paid'::text);\n"));
+        let pkey = script(ScriptTarget::Index { relation_oid: oid("public.orders").await, name: "orders_pkey".into() }).await.unwrap();
+        assert_eq!(pkey.text, "ALTER TABLE public.orders ADD CONSTRAINT orders_pkey PRIMARY KEY (id);\n");
+        let trigger = script(ScriptTarget::Trigger { relation_oid: oid("public.orders").await, name: "orders_set_updated_at".into() }).await.unwrap();
+        assert_eq!(trigger.text, "CREATE TRIGGER orders_set_updated_at BEFORE UPDATE ON public.orders FOR EACH ROW EXECUTE FUNCTION public.set_updated_at();\n");
+
+        let aggregate = oids("select 'public.product_of(numeric)'::regprocedure::oid").await[0];
+        assert!(matches!(script(ScriptTarget::Routine { oid: aggregate }).await, Err(DetailError::Failed { message }) if message == "Aggregates cannot be scripted yet."));
+        assert!(matches!(script(ScriptTarget::Index { relation_oid: oid("public.orders").await, name: "missing".into() }).await, Err(DetailError::Gone)));
+        let detail = h.engine.relation_detail(h.db(), oid("public.orders").await).await.unwrap();
+        assert_eq!(detail.triggers.len(), 2, "the metadata session left the script's read-only transaction");
+    }))
+    .await;
+    drop(scratch);
+    drop_database(&shop, &name).await;
+    if let Err(panic) = outcome {
+        std::panic::resume_unwind(panic);
+    }
+}
+
+/// Names a replay's copies of the parent's indexes would take are held by the partition's own index
+/// and own unique constraint, and in one target by an index on another table.
+const NAME_CLASHES: &str = "CREATE SCHEMA a;
+CREATE TABLE a.nat (id int, k int) PARTITION BY RANGE (id);
+CREATE TABLE a.nat_1 PARTITION OF a.nat FOR VALUES FROM (0) TO (10);
+CREATE INDEX ON a.nat_1 (k) WHERE k > 0;
+ALTER TABLE a.nat_1 ADD CONSTRAINT nat_1_id_idx UNIQUE (id);
+CREATE INDEX nat_k ON a.nat (k);
+CREATE INDEX nat_id ON a.nat (id) WITH (fillfactor = 50);
+ALTER INDEX a.nat_1_id_idx1 SET (fillfactor = 33);
+COMMENT ON INDEX a.nat_1_k_idx1 IS 'attached';
+ALTER TABLE a.nat_1 CLUSTER ON nat_1_k_idx1;";
+
+#[tokio::test]
+async fn a_partition_tree_replays_its_index_names_without_a_clash_and_leaves_other_tables_alone() {
+    let h = Harness::start().await;
+    h.engine.connect(h.conn).await.unwrap();
+    let (shop, connection) = tokio_postgres::connect(&url(), NoTls).await.unwrap();
+    tokio::spawn(connection);
+    let (source, clean, crowded) = (unique("t_db_clash"), unique("t_db_clash_clean"), unique("t_db_clash_crowded"));
+    for name in [&source, &clean, &crowded] {
+        shop.batch_execute(&format!("create database {name}")).await.unwrap();
+    }
+    h.engine.refresh_connection(h.conn).await.unwrap();
+    h.edit_view(ViewEdit::Database { name: source.clone(), shown: true }).await;
+    let (notices, mut heard) = tokio::sync::mpsc::unbounded_channel::<String>();
+    let connect = async |name: &str| {
+        let mut config: tokio_postgres::Config = url().parse().unwrap();
+        let (client, mut connection) = config.dbname(name).connect(NoTls).await.unwrap();
+        let notices = notices.clone();
+        tokio::spawn(async move {
+            while let Some(Ok(message)) = std::future::poll_fn(|cx| connection.poll_message(cx)).await {
+                if let tokio_postgres::AsyncMessage::Notice(notice) = message {
+                    let _ = notices.send(notice.message().to_owned());
+                }
+            }
+        });
+        client
+    };
+    let (original, replay, beside) = (connect(&source).await, connect(&clean).await, connect(&crowded).await);
+    let schema_a = "n.nspname = 'a' AND c.relkind IN ('r', 'p')";
+    let version: i32 = shop.query_one("select current_setting('server_version_num')::int4", &[]).await.unwrap().get(0);
+    let space = (version >= 150000).then(|| unique("t_ts"));
+    if let Some(space) = &space {
+        shop.batch_execute("set allow_in_place_tablespaces = on").await.unwrap();
+        shop.batch_execute(&format!("create tablespace {space} location ''")).await.unwrap();
+    }
+
+    let outcome = futures_util::FutureExt::catch_unwind(std::panic::AssertUnwindSafe(async {
+        original.batch_execute(NAME_CLASHES).await.unwrap();
+        if let Some(space) = &space {
+            original.batch_execute(&format!("ALTER INDEX a.nat_1_k_idx1 SET TABLESPACE {space}")).await.unwrap();
+        }
+        let nat: u32 = original.query_one("select 'a.nat'::regclass::oid", &[]).await.unwrap().get(0);
+        let script = h.engine.object_script(h.db_named(&source), ScriptTarget::Relation { oid: nat }).await.unwrap();
+        assert!(script.warnings.is_empty(), "{:?}", script.warnings);
+
+        replay.batch_execute(&format!("CREATE SCHEMA a;\n{}", script.text)).await.unwrap_or_else(|e| panic!("{e:?}\n{}", script.text));
+        assert_eq!(catalog_facts(&replay, schema_a).await, catalog_facts(&original, schema_a).await);
+
+        beside.batch_execute("CREATE SCHEMA a; CREATE TABLE a.bystander (v int); CREATE INDEX nat_1_k_idx1 ON a.bystander (v);").await.unwrap();
+        while heard.try_recv().is_ok() {}
+        beside.batch_execute(&script.text).await.unwrap_or_else(|e| panic!("{e:?}\n{}", script.text));
+        let index_of = "SELECT c.relname, i.indisclustered, coalesce(obj_description(c.oid, 'pg_class'), '') FROM pg_index i JOIN pg_class c ON c.oid = i.indexrelid";
+        let bystander = beside.query_one(&format!("{index_of} WHERE i.indrelid = 'a.bystander'::regclass"), &[]).await.unwrap();
+        assert_eq!((bystander.get::<_, &str>(0), bystander.get::<_, bool>(1), bystander.get::<_, &str>(2)), ("nat_1_k_idx1", false, ""), "the index on another table keeps its name and gets nothing");
+        let copy = beside.query_one(&format!("{index_of} JOIN pg_inherits h ON h.inhrelid = i.indexrelid WHERE i.indrelid = 'a.nat_1'::regclass AND h.inhparent = 'a.nat_k'::regclass"), &[]).await.unwrap();
+        let copy_name: String = copy.get(0);
+        assert!(copy_name.starts_with("l1_"), "{copy_name}");
+        assert_eq!((copy.get::<_, bool>(1), copy.get::<_, &str>(2)), (true, "attached"), "the copy moves out of the way of the partition's own index and still gets its properties");
+        let mut warnings = vec![];
+        while let Ok(notice) = heard.try_recv() {
+            warnings.push(notice);
+        }
+        assert_eq!(warnings, [format!("L1 Data named index a.{copy_name} instead of nat_1_k_idx1, because a.nat_1_k_idx1, which this script did not create, has that name")]);
+    }))
+    .await;
+    drop((original, replay, beside));
+    for name in [&source, &clean, &crowded] {
+        drop_database(&shop, name).await;
+    }
+    if let Some(space) = &space {
+        shop.batch_execute(&format!("drop tablespace {space}")).await.unwrap();
+    }
+    if let Err(panic) = outcome {
+        std::panic::resume_unwind(panic);
+    }
+}
+
+const HOSTILE: &str = include_str!("fixtures/script-hostile-pg.sql");
+const HOSTILE_PRELUDE: &str = include_str!("fixtures/script-hostile-pg-prelude.sql");
+const HOSTILE_RELATIONS: &str = "n.nspname IN ('Weird \"S\"', 'app', 'order') AND c.relkind IN ('r', 'p', 'v', 'm', 'f')";
+
+#[tokio::test]
+async fn hostile_object_scripts_replay_every_property_or_warn() {
+    let h = Harness::start().await;
+    h.engine.connect(h.conn).await.unwrap();
+    let (shop, connection) = tokio_postgres::connect(&url(), NoTls).await.unwrap();
+    tokio::spawn(connection);
+    let (source, target) = (unique("t_db_hostile"), unique("t_db_hostile_replay"));
+    for name in [&source, &target] {
+        shop.batch_execute(&format!("create database {name}")).await.unwrap();
+    }
+    h.engine.refresh_connection(h.conn).await.unwrap();
+    h.edit_view(ViewEdit::Database { name: source.clone(), shown: true }).await;
+    let connect = async |name: &str| {
+        let mut config: tokio_postgres::Config = url().parse().unwrap();
+        let (client, connection) = config.dbname(name).connect(NoTls).await.unwrap();
+        tokio::spawn(connection);
+        client
+    };
+    let (original, replay) = (connect(&source).await, connect(&target).await);
+
+    let outcome = futures_util::FutureExt::catch_unwind(std::panic::AssertUnwindSafe(async {
+        original.batch_execute(HOSTILE).await.unwrap();
+        assert!(original.batch_execute("CREATE UNIQUE INDEX CONCURRENTLY dups_v ON app.dups (v)").await.is_err(), "the duplicate rows leave dups_v invalid");
+        replay.batch_execute(HOSTILE_PRELUDE).await.unwrap();
+        let db = h.db_named(&source);
+        let script = async |target: ScriptTarget| h.engine.object_script(db.clone(), target).await.unwrap();
+        let oids = async |sql: &str| original.query(sql, &[]).await.unwrap().iter().map(|r| r.get::<_, u32>(0)).collect::<Vec<_>>();
+        let oid = async |name: &str| oids(&format!("select '{name}'::regclass::oid")).await[0];
+
+        let mut texts = vec![];
+        let mut warned = std::collections::BTreeMap::new();
+        for oid in oids("select p.oid from pg_proc p join pg_namespace n on n.oid = p.pronamespace where n.nspname = 'app' order by p.oid").await {
+            let s = script(ScriptTarget::Routine { oid }).await;
+            if !s.warnings.is_empty() {
+                warned.insert(s.title.clone(), s.warnings.clone());
+            }
+            texts.push(s.text);
+        }
+        assert_eq!(
+            warned,
+            std::collections::BTreeMap::from([
+                ("f_out.sql".to_owned(), vec!["owner pg_database_owner of app.f_out(a integer, OUT b integer, OUT c integer)".to_owned()]),
+                ("labeled_fn.sql".to_owned(), vec!["security labels on app.labeled_fn()".to_owned()]),
+                (
+                    "sec_def.sql".to_owned(),
+                    vec![
+                        "owner l1data of app.sec_def(integer), whose privileges the SECURITY DEFINER function runs with".to_owned(),
+                        "privileges on app.sec_def(integer) (EXECUTE revoked from PUBLIC)".to_owned()
+                    ]
+                ),
+            ])
+        );
+        replay_in_dependency_order(&replay, texts).await;
+        assert_eq!(routine_facts(&replay, "app").await, routine_facts(&original, "app").await);
+
+        let mut texts = vec![];
+        let mut warned = std::collections::BTreeMap::new();
+        for oid in oids(&format!("select c.oid from pg_class c join pg_namespace n on n.oid = c.relnamespace where {HOSTILE_RELATIONS} and not c.relispartition order by c.oid")).await {
+            let s = script(ScriptTarget::Relation { oid }).await;
+            if !s.warnings.is_empty() {
+                assert!(s.text.starts_with(&s.warnings.iter().map(|w| format!("-- L1 Data could not script: {w}\n")).collect::<String>()), "{}", s.text);
+                warned.insert(s.title.clone(), s.warnings.clone());
+            }
+            texts.push(s.text);
+        }
+        replay_in_dependency_order(&replay, texts).await;
+        assert_eq!(
+            warned,
+            std::collections::BTreeMap::from([
+                ("My View.sql".to_owned(), vec!["owner l1data of app.\"My View\", whose privileges the view's query is checked against".to_owned()]),
+                ("child.sql".to_owned(), vec!["the column order of app.child, because a replay puts inherited columns first".to_owned()]),
+                ("dups.sql".to_owned(), vec!["the invalid state of index app.dups_v, which a replay builds valid".to_owned()]),
+                ("group.sql".to_owned(), vec!["membership of \"order\".\"group\" in publication hostile_schema_pub through schema \"order\"".to_owned()]),
+                (
+                    "labeled.sql".to_owned(),
+                    vec![
+                        "security labels on app.labeled".to_owned(),
+                        "security labels on app.labeled.note".to_owned(),
+                        "security labels on app.labeled_id_seq".to_owned(),
+                        "security labels on app.labeled_s_seq".to_owned(),
+                    ]
+                ),
+                ("mv.sql".to_owned(), vec!["owner l1data of app.mv, whose privileges a refresh runs the query with".to_owned()]),
+                ("pt.sql".to_owned(), vec!["the partial attachment of index app.pt_only, which a replay attaches to every partition".to_owned()]),
+                ("refd.sql".to_owned(), vec!["membership of app.refd in publication hostile_pub".to_owned()]),
+                ("ren.sql".to_owned(), vec!["privileges on app.ren_custom_seq (USAGE granted to pg_read_all_data)".to_owned()]),
+                ("ri.sql".to_owned(), vec!["owner pg_database_owner of app.ri_2".to_owned()]),
+                ("select.sql".to_owned(), vec!["privileges on app.\"select\" (SELECT granted to pg_read_all_data, UPDATE (\"Mixed\") granted to pg_read_all_data)".to_owned()]),
+                ("v_def.sql".to_owned(), vec!["owner l1data of app.v_def, whose privileges the view's query is checked against".to_owned()]),
+            ])
+        );
+        let reordered = |facts: Vec<String>| facts.into_iter().filter(|f| !f.starts_with("app.child column") && !f.starts_with("app.pt1 index")).collect::<Vec<_>>();
+        assert_eq!(reordered(catalog_facts(&replay, HOSTILE_RELATIONS).await), reordered(catalog_facts(&original, HOSTILE_RELATIONS).await));
+        let columns = "select string_agg(attname, ',' order by attname) from pg_attribute where attrelid = 'app.child'::regclass and attnum > 0";
+        let (a, b) = (original.query_one(columns, &[]).await.unwrap(), replay.query_one(columns, &[]).await.unwrap());
+        assert_eq!(a.get::<_, String>(0), b.get::<_, String>(0));
+
+        let mig = script(ScriptTarget::Relation { oid: oid("app.mig").await }).await.text;
+        assert!(mig.starts_with("CREATE SEQUENCE app.mig_old_seq AS bigint START WITH 777;\n\nCREATE TABLE app.mig (\n    id integer GENERATED BY DEFAULT AS IDENTITY NOT NULL\n);\n"), "{mig}");
+        let ev = script(ScriptTarget::Relation { oid: oid("app.ev").await }).await.text;
+        for part in [
+            "CREATE TABLE app.ev_a PARTITION OF app.ev\n    FOR VALUES IN ('a') PARTITION BY RANGE (d);\n",
+            "CREATE UNLOGGED TABLE app.ev_a_2026 PARTITION OF app.ev_a (\n    CONSTRAINT ev_a_2026_chk CHECK ((v > 0))\n)\n    FOR VALUES FROM ('2026-01-01') TO ('2027-01-01');\n",
+            "ALTER TABLE app.ev_a_2026 ALTER COLUMN v SET DEFAULT 9;\n",
+            "CREATE INDEX ev_a_2026_local ON app.ev_a_2026 USING btree (v);\n",
+            "ALTER TABLE app.ev_b ALTER COLUMN v DROP DEFAULT;\n",
+            "ALTER TABLE app.ev_b ALTER COLUMN v SET NOT NULL;\n",
+            "CREATE FOREIGN TABLE app.ev_remote PARTITION OF app.ev\n    FOR VALUES IN ('r') SERVER hostile_server OPTIONS (table_name 'ev, remote', \"Odd\" 'it''s');\n",
+            "ALTER FOREIGN TABLE app.ev_remote ALTER COLUMN v OPTIONS (ADD column_name 'vv');\n",
+        ] {
+            assert!(ev.contains(part), "{part} missing from {ev}");
+        }
+        let leaf = script(ScriptTarget::Relation { oid: oid("app.ev_a").await }).await.text;
+        assert!(leaf.contains("CREATE UNLOGGED TABLE app.ev_a_2026 PARTITION OF app.ev_a"), "{leaf}");
+        let parent = script(ScriptTarget::Relation { oid: oid("\"Weird \"\"S\"\"\".parent").await }).await.text;
+        for part in ["ALTER TABLE \"Weird \"\"S\"\"\".parent ENABLE ROW LEVEL SECURITY;\n", "ALTER TABLE \"Weird \"\"S\"\"\".parent FORCE ROW LEVEL SECURITY;\n", "CREATE POLICY everyone ON"] {
+            assert!(parent.contains(part), "{part} missing from {parent}");
+        }
+        let tree = script(ScriptTarget::Relation { oid: oid("app.tree").await }).await.text;
+        assert!(tree.ends_with("CREATE UNIQUE INDEX tree_id ON app.tree USING btree (id);\n\nALTER TABLE app.tree ADD CONSTRAINT tree_parent FOREIGN KEY (parent) REFERENCES app.tree(id);\n"), "{tree}");
+        let child = script(ScriptTarget::Relation { oid: oid("app.child").await }).await.text;
+        assert!(child.contains(") INHERITS (app.base);\n"), "{child}");
+        let attached = script(ScriptTarget::Index { relation_oid: oid("app.nat_1").await, name: "nat_1_k_idx1".into() }).await.text;
+        assert_eq!(attached, "CREATE INDEX nat_1_k_idx1 ON app.nat_1 USING btree (k);\n\nALTER INDEX app.nat_k ATTACH PARTITION app.nat_1_k_idx1;\n");
+        let attached_key = script(ScriptTarget::Index { relation_oid: oid("app.ffp_1").await, name: "ffp one key".into() }).await.text;
+        assert_eq!(
+            attached_key,
+            "ALTER TABLE app.ffp_1 ADD CONSTRAINT \"ffp one key\" PRIMARY KEY (id, k) WITH (fillfactor=60);\n\nALTER INDEX app.ffp_pkey ATTACH PARTITION app.\"ffp one key\";\n\nCOMMENT ON CONSTRAINT \"ffp one key\" ON app.ffp_1 IS 'cloned key';\n"
+        );
+        let pkey = script(ScriptTarget::Index { relation_oid: oid("\"Weird \"\"S\"\"\".parent").await, name: "parent_pkey".into() }).await.text;
+        assert_eq!(
+            pkey,
+            "ALTER TABLE \"Weird \"\"S\"\"\".parent ADD CONSTRAINT parent_pkey PRIMARY KEY (\"Id\");\n\nCOMMENT ON INDEX \"Weird \"\"S\"\"\".parent_pkey IS 'pkey comment';\n\nCOMMENT ON CONSTRAINT parent_pkey ON \"Weird \"\"S\"\"\".parent IS 'pkey constraint comment';\n"
+        );
+    }))
+    .await;
+    drop((original, replay));
+    for name in [&source, &target] {
+        drop_database(&shop, name).await;
+    }
+    if let Err(panic) = outcome {
+        std::panic::resume_unwind(panic);
+    }
+}
