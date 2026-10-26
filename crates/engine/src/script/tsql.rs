@@ -484,15 +484,24 @@ fn column(c: &Column, table: &str, warnings: &mut Vec<String>) -> String {
             out.push_str(" NOT FOR REPLICATION");
         }
     }
-    match c.generated {
-        0 => {}
-        1 | 2 => {
-            out.push_str(if c.generated == 1 { " GENERATED ALWAYS AS ROW START" } else { " GENERATED ALWAYS AS ROW END" });
-            if c.hidden {
-                out.push_str(" HIDDEN");
-            }
+    let generated = match c.generated {
+        0 => None,
+        1 => Some("ROW START"),
+        2 => Some("ROW END"),
+        7 => Some("TRANSACTION_ID START"),
+        8 => Some("TRANSACTION_ID END"),
+        9 => Some("SEQUENCE_NUMBER START"),
+        10 => Some("SEQUENCE_NUMBER END"),
+        kind => {
+            warnings.push(format!("GENERATED ALWAYS type {kind} on {path}"));
+            None
         }
-        kind => warnings.push(format!("GENERATED ALWAYS type {kind} on {path}")),
+    };
+    if let Some(generated) = generated {
+        out.push_str(&format!(" GENERATED ALWAYS AS {generated}"));
+        if c.hidden {
+            out.push_str(" HIDDEN");
+        }
     }
     if c.rowguidcol {
         out.push_str(" ROWGUIDCOL");
@@ -900,12 +909,19 @@ GO
     }
 
     #[test]
+    fn transaction_id_and_sequence_number_columns_replay_hidden() {
+        let line = |generated: u8| column(&Column { generated, hidden: true, ..col("g", "bigint") }, "[dbo].[t]", &mut vec![]);
+        assert_eq!(line(7), "[g] bigint GENERATED ALWAYS AS TRANSACTION_ID START HIDDEN NOT NULL");
+        assert_eq!(line(10), "[g] bigint GENERATED ALWAYS AS SEQUENCE_NUMBER END HIDDEN NOT NULL");
+    }
+
+    #[test]
     fn columns_warn_for_ansi_padding_off_filestream_always_encrypted_and_other_generated_kinds() {
         let mut warnings = vec![];
-        column(&Column { ansi_padding_off: true, filestream: true, encrypted: true, generated: 7, ..col("c]x", "varbinary(max)") }, "[dbo].[t]", &mut warnings);
+        column(&Column { ansi_padding_off: true, filestream: true, encrypted: true, generated: 11, ..col("c]x", "varbinary(max)") }, "[dbo].[t]", &mut warnings);
         assert_eq!(
             warnings,
-            ["ANSI_PADDING OFF on [dbo].[t].[c]]x]", "FILESTREAM on [dbo].[t].[c]]x]", "Always Encrypted on [dbo].[t].[c]]x]", "GENERATED ALWAYS type 7 on [dbo].[t].[c]]x]"]
+            ["ANSI_PADDING OFF on [dbo].[t].[c]]x]", "FILESTREAM on [dbo].[t].[c]]x]", "Always Encrypted on [dbo].[t].[c]]x]", "GENERATED ALWAYS type 11 on [dbo].[t].[c]]x]"]
         );
     }
 

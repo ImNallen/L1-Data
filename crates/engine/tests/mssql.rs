@@ -1009,7 +1009,7 @@ impl Harness {
                               (SELECT STRING_AGG(CONCAT(c.name,' ',ic.key_ordinal,' ',ic.is_descending_key,' ',ic.is_included_column,' ',ic.column_store_order_ordinal),',') WITHIN GROUP (ORDER BY ic.is_included_column,ic.key_ordinal,ic.index_column_id)
                                FROM sys.index_columns ic JOIN sys.columns c ON c.object_id=ic.object_id AND c.column_id=ic.column_id
                                WHERE ic.object_id=i.object_id AND ic.index_id=i.index_id AND i.index_id>0 AND (ic.key_ordinal>0 OR ic.is_included_column=1 OR ic.partition_ordinal=0)))
-                FROM sys.indexes i LEFT JOIN sys.stats st ON st.object_id=i.object_id AND st.stats_id=i.index_id WHERE i.object_id=o.object_id AND i.type<>3 AND i.is_hypothetical=0
+                FROM sys.indexes i LEFT JOIN sys.stats st ON st.object_id=i.object_id AND st.stats_id=i.index_id WHERE i.object_id=o.object_id AND i.type NOT IN (3,4) AND i.is_hypothetical=0
                 UNION ALL
                 SELECT CONCAT(N'foreign key ',fk.name,' ',fk.delete_referential_action,' ',fk.update_referential_action,' ',fk.is_disabled,' ',fk.is_not_trusted,' ',fk.is_not_for_replication,' ',
                               (SELECT STRING_AGG(CONCAT(c.name,'>',OBJECT_SCHEMA_NAME(fc.referenced_object_id),'.',OBJECT_NAME(fc.referenced_object_id),'.',rc.name),',') WITHIN GROUP (ORDER BY fc.constraint_column_id)
@@ -1078,6 +1078,7 @@ async fn hostile_object_scripts_replay_every_property_or_warn() {
 
         let warned = |name: &str| -> Vec<&str> {
             match name {
+                "shapes" => vec!["spatial index [SIX] on [dbo].[shapes]"],
                 "warned" => vec![
                     "ANSI_PADDING OFF on [dbo].[warned].[pad]",
                     "XML index [IX x] on [dbo].[warned]",
@@ -1141,7 +1142,7 @@ async fn hostile_object_scripts_replay_every_property_or_warn() {
         scripted.sort();
         assert_eq!(
             scripted,
-            ["Par ent", "as_owner", "bare_in", "bare_moved", "bound t", "cci", "f_scalar", "go_in_comment", "heap_pk", "lob", "moved", "newname", "np", "parted", "qi_off", "refd", "refr", "renamed_t", "sparse_set", "temporal", "temporal_history", "tree", "v_bound", "warned"]
+            ["Par ent", "as_owner", "bare_in", "bare_moved", "bound t", "cci", "f_scalar", "go_in_comment", "heap_pk", "ledgerish", "lob", "moved", "newname", "np", "parted", "qi_off", "refd", "refr", "renamed_t", "shapes", "sparse_set", "temporal", "temporal_history", "tree", "v_bound", "warned"]
         );
 
         dst.replay_in_dependency_order(tables).await;
