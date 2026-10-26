@@ -34,6 +34,7 @@ const RELATIONS: &str = "WITH RECURSIVE tree(oid) AS (
         ARRAY(SELECT sc.relname::text FROM pg_depend dep JOIN pg_class sc ON sc.oid = dep.objid AND sc.relkind = 'S'
               WHERE dep.classid = 'pg_class'::regclass AND dep.refclassid = 'pg_class'::regclass AND dep.refobjid = c.oid AND dep.deptype IN ('a', 'i')
                 AND EXISTS (SELECT 1 FROM pg_seclabel l WHERE l.classoid = 'pg_class'::regclass AND l.objoid = sc.oid) ORDER BY sc.relname),
+        {schema_publications},
         c.oid
      FROM tree JOIN pg_class c ON c.oid = tree.oid JOIN pg_namespace n ON n.oid = c.relnamespace
      LEFT JOIN pg_inherits i ON i.inhrelid = c.oid AND c.relispartition
@@ -43,6 +44,7 @@ const RELATIONS: &str = "WITH RECURSIVE tree(oid) AS (
      LEFT JOIN pg_foreign_table ft ON ft.ftrelid = c.oid LEFT JOIN pg_foreign_server fs ON fs.oid = ft.ftserver";
 
 struct Queries {
+    relations: String,
     columns: String,
     statistics: String,
     sequence_states: String,
@@ -54,7 +56,14 @@ impl Queries {
         let target = if version >= 130000 { "NULLIF(s.stxstattarget, -1)::int4" } else { "NULL::int4" };
         // PostgreSQL 15 added unlogged sequences, and a table's identity and serial sequences take its persistence.
         let unlogged = if version >= 150000 { "CASE WHEN sc.relpersistence = 'u' OR t.relpersistence = 'u' THEN sc.relpersistence = 'u' END" } else { "NULL::bool" };
+        // PostgreSQL 15 added publications of every table in a schema.
+        let schema_publications = if version >= 150000 {
+            "ARRAY(SELECT p.pubname::text FROM pg_publication_namespace pn JOIN pg_publication p ON p.oid = pn.pnpubid WHERE pn.pnnspid = c.relnamespace AND c.relkind IN ('r', 'p') ORDER BY 1)"
+        } else {
+            "'{}'::text[]"
+        };
         Queries {
+            relations: RELATIONS.replace("{schema_publications}", schema_publications),
             columns: format!(
                 "SELECT a.attname, coalesce(serial.name, format_type(a.atttypid, a.atttypmod)), a.attnotnull, a.attidentity::text, a.attgenerated::text,
         CASE WHEN serial.name IS NULL THEN pg_get_expr(d.adbin, d.adrelid) END,
@@ -251,7 +260,7 @@ fn labeled(r: &Row) -> Vec<String> {
 }
 
 fn unscripted(r: &Row, grants: &[Row], role: &str) -> ddl::Unscripted {
-    let mut u = ddl::Unscripted { security_labels: labeled(r), publications: r.get(22), owner: owner(r.get(23), role), ..Default::default() };
+    let mut u = ddl::Unscripted { security_labels: labeled(r), publications: r.get(22), schema_publications: r.get(28), owner: owner(r.get(23), role), ..Default::default() };
     for g in grants {
         match (g.get::<_, Option<String>>(0), g.get::<_, Option<String>>(1)) {
             (Some(schema), Some(name)) => match u.sequence_privileges.last_mut() {
@@ -289,7 +298,7 @@ fn refused(message: &str) -> DetailError {
 }
 
 async fn relation(tx: &Transaction<'_>, queries: &Queries, role: &str, oid: u32) -> Result<ObjectScript, DetailError> {
-    let relations = tx.query(RELATIONS, &[&oid]).await.map_err(failed)?;
+    let relations = tx.query(&queries.relations, &[&oid]).await.map_err(failed)?;
     let r = relations.iter().find(|r| relid(r) == oid).ok_or(DetailError::Gone)?;
     let name: String = r.get(2);
     let ddl = match r.get::<_, &str>(0) {
@@ -657,5 +666,6 @@ mod tests {
         let v14 = Queries::for_version(140000);
         assert!(v14.columns.contains("a.attcompression::text") && v14.columns.contains("pa.attcompression::text"));
         assert!(v14.columns.contains("coalesce(a.attoptions, '{}')"), "{}", v14.columns);
+        assert!(!v14.relations.contains("pg_publication_namespace") && Queries::for_version(150000).relations.contains("pg_publication_namespace"));
     }
 }

@@ -38,6 +38,8 @@ pub struct Unscripted {
     /// The relation, its columns, and its sequences that carry a security label, by name.
     pub security_labels: Vec<String>,
     pub publications: Vec<String>,
+    /// Publications of every table in the relation's schema.
+    pub schema_publications: Vec<String>,
     pub owner: Owner,
 }
 
@@ -405,7 +407,7 @@ fn table_statements(t: &Table, out: &mut Vec<String>, warnings: &mut Vec<String>
     for s in &t.sequence_states {
         out.extend(comment(&format!("SEQUENCE {}", qualified(&s.schema, &s.name)), &s.comment));
     }
-    warnings.extend(unscripted(&t.unscripted, &name, None));
+    warnings.extend(unscripted(&t.unscripted, &t.schema, &name, None));
     for c in t.columns.iter().filter(|c| !partition && !c.declared && generation_override(c).is_some()) {
         warnings.push(format!("the generation expression of {name}.{}, which a replay takes from its parent", ident(&c.name)));
     }
@@ -423,15 +425,17 @@ fn in_replay_order(columns: &[Column]) -> bool {
 }
 
 /// `decides` says why the owner matters even when it is the connecting role.
-fn unscripted(u: &Unscripted, name: &str, decides: Option<&str>) -> Vec<String> {
+fn unscripted(u: &Unscripted, schema: &str, name: &str, decides: Option<&str>) -> Vec<String> {
     let mut out: Vec<String> = owner(&u.owner, name, decides).into_iter().collect();
     out.extend(privileges(name, &u.privileges));
     out.extend(u.sequence_privileges.iter().filter_map(|s| privileges(&qualified(&s.schema, &s.name), &s.privileges)));
     out.extend(u.security_labels.iter().map(|labeled| format!("security labels on {labeled}")));
-    if !u.publications.is_empty() {
-        let list: Vec<String> = u.publications.iter().map(|p| ident(p)).collect();
-        out.push(format!("membership of {name} in {} {}", if list.len() == 1 { "publication" } else { "publications" }, list.join(", ")));
-    }
+    let membership = |publications: &[String], through: &str| {
+        let list: Vec<String> = publications.iter().map(|p| ident(p)).collect();
+        (!list.is_empty()).then(|| format!("membership of {name} in {} {}{through}", if list.len() == 1 { "publication" } else { "publications" }, list.join(", ")))
+    };
+    out.extend(membership(&u.publications, ""));
+    out.extend(membership(&u.schema_publications, &format!(" through schema {}", ident(schema))));
     out
 }
 
@@ -753,7 +757,7 @@ pub fn view(v: &View) -> Ddl {
         statements.extend(column_changes(c, keyword, &name, false, false));
     }
     let decides = if v.materialized { "whose privileges a refresh runs the query with" } else { "whose privileges the view's query is checked against" };
-    let mut warnings = unscripted(&v.unscripted, &name, Some(decides));
+    let mut warnings = unscripted(&v.unscripted, &v.schema, &name, Some(decides));
     indexes(&v.indexes, keyword, &v.schema, &name, &mut statements, &mut warnings);
     for tr in &v.triggers {
         statements.extend(trigger(tr, keyword, &name));
@@ -1525,6 +1529,8 @@ ALTER FOREIGN TABLE public.e2 ALTER COLUMN v OPTIONS (ADD column_name 'vv');
         };
         assert_eq!(table(&t(&["pub"])).warnings, ["membership of app.t in publication pub"]);
         assert_eq!(table(&t(&["a", "B b"])).warnings, ["membership of app.t in publications a, \"B b\""]);
+        let through_schema = Table { unscripted: Unscripted { schema_publications: vec!["all app".into()], ..t(&["pub"]).unscripted }, ..t(&[]) };
+        assert_eq!(table(&through_schema).warnings, ["membership of app.t in publication pub", "membership of app.t in publication \"all app\" through schema app"]);
     }
 
     #[test]
