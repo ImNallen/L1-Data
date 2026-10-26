@@ -643,3 +643,45 @@ pub fn table_count(kind: DatabaseKind, schema: &str, table: &str, relation: Opti
         DatabaseKind::SqlServer => { sql::tsql::validate_expression(&query.r#where,false)?; sql::tsql::count_sql(schema,table,relation.map(|r| r.columns.as_slice()).unwrap_or_default(),query) },
     }
 }
+
+#[cfg(test)]
+mod completion_never_panics {
+    use crate::model::{DatabaseKind, DocOffset};
+
+    const TOKENS: &[&str] = &[
+        "select", "from", "where", "join", "on", "using", "natural", "with", "recursive", "as", "lateral", "apply", "cross", "outer", "insert", "into",
+        "values", "update", "set", "delete", "top", "percent", "merge", "output", "returning", "union", "group", "by", "order", "pivot", "unpivot", "for",
+        "nowait", "go", "begin", "end", "case", "over", "window", "isnull", "interval", "o", "orders", "\"Q\"", "[b]", "[a]]b]", "'s'", "'open", "N'x'",
+        "$$x$$", "$$open", "--c\n", "/*c*/", "/*open", "@v", "#t", "$1", "1", "1e", "0x1", "*", "=", "::", ".", "..", ",", ";", "(", ")", "[", "]", "+",
+        "U&\"x\"", "E'a\\'b'", "😀", "é", "\n", "\nGO\n", "GO 5\n", " ", "\t",
+        "x join y join (a join b) pivot (max(v) for k in ([a])) p", "s(v, i)", "with ordinality", "o(a, b)", "on", "returning",
+    ];
+
+    #[test]
+    fn completion_context_never_panics_on_any_token_sequence_or_cursor() {
+        let mut state: u64 = 0x9E37_79B9_7F4A_7C15;
+        let mut next = move || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            state
+        };
+        for _ in 0..8_000 {
+            let len = (next() % 10) as usize;
+            let mut text = String::from(["", "select ", "select * from t ", "with x as (select "][(next() % 4) as usize]);
+            for _ in 0..len {
+                text.push_str(TOKENS[(next() % TOKENS.len() as u64) as usize]);
+                if next() % 3 != 0 {
+                    text.push(' ');
+                }
+            }
+            let units = text.encode_utf16().count() as u32;
+            for cursor in (0..=units).chain([units + 3]) {
+                for kind in [DatabaseKind::Postgres, DatabaseKind::SqlServer] {
+                    let outcome = std::panic::catch_unwind(|| super::completion_context(&text, DocOffset(cursor), kind));
+                    assert!(outcome.is_ok(), "{kind:?} panicked at {cursor} in {text:?}");
+                }
+            }
+        }
+    }
+}

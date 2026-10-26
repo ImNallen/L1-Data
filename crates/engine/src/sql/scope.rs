@@ -420,7 +420,7 @@ impl<'a> Walk<'a> {
                 let f = self.top();
                 if let Some(start) = f.joined.take() {
                     let (mut columns, mut star, mut known) = (Vec::new(), Vec::new(), true);
-                    for rel in f.rels.drain(start..) {
+                    for rel in f.rels.drain(start.min(f.rels.len())..) {
                         known &= expand(&rel, &mut columns, &mut star);
                     }
                     let source = if known { RelationSource::Derived { columns, star } } else { RelationSource::Derived { columns: Vec::new(), star: Vec::new() } };
@@ -536,6 +536,7 @@ impl<'a> Walk<'a> {
             "LATERAL" | "ONLY" if matches!(clause, Clause::Relation { slot: Slot::Expect, .. }) => return Some(i + 1),
             "PIVOT" | "UNPIVOT" if self.kind == DatabaseKind::SqlServer && (named || matches!(clause, Clause::On { .. })) && next_opens => {
                 let f = self.top();
+                f.joined = None;
                 if !f.sealed && f.rels.len() > f.tree_start {
                     f.rels.truncate(f.tree_start);
                     f.rels.push(Rel { written: None, folded: None, source: RelationSource::Derived { columns: Vec::new(), star: Vec::new() }, role: Role::From, column_aliases: Vec::new() });
@@ -591,7 +592,7 @@ impl<'a> Walk<'a> {
             match l.class {
                 Class::Open => depth += 1,
                 Class::Close => {
-                    depth -= 1;
+                    depth = depth.saturating_sub(1);
                     if depth == 0 {
                         return j;
                     }
@@ -813,8 +814,8 @@ impl<'a> Walk<'a> {
             _ if class(n - 1) == Class::Star && n >= 3 && class(n - 2) == Class::Dot && named(n - 3) => Item::Star(Some(fold(self.kind, self.text, self.sig[item[n - 3]]))),
             _ if named(n - 1) && self.word(item[n - 1]).is_some_and(|w| ["END", "NULL", "TRUE", "FALSE"].contains(&w.as_str())) => Item::Unnamed,
             _ if n % 2 == 1 && (0..n).all(|k| if k % 2 == 0 { named(k) } else { class(k) == Class::Dot }) => name(n - 1),
-            _ if named(n - 1) && self.is_word(item[n - 2], "AS") => name(n - 1),
-            _ if named(n - 1) && !(class(n - 1) == Class::Word && self.never_an_alias(item[n - 1])) && self.simple_operand(&item[..n - 1]) => name(n - 1),
+            _ if n >= 2 && named(n - 1) && self.is_word(item[n - 2], "AS") => name(n - 1),
+            _ if n >= 2 && named(n - 1) && !(class(n - 1) == Class::Word && self.never_an_alias(item[n - 1])) && self.simple_operand(&item[..n - 1]) => name(n - 1),
             _ => Item::Unnamed,
         }
     }
@@ -831,6 +832,7 @@ impl<'a> Walk<'a> {
         }
         let dotted = |m: usize| m % 2 == 1 && (0..m).all(|k| if k % 2 == 0 { matches!(class(k), Class::Word | Class::Name) } else { class(k) == Class::Dot });
         match n {
+            0 => false,
             1 => matches!(class(0), Class::Word | Class::Name | Class::Str | Class::Number) && !(class(0) == Class::Word && self.never_an_alias(toks[0])),
             2 => class(0) == Class::Open && class(1) == Class::Close,
             _ => dotted(n) || class(n - 2) == Class::Open && class(n - 1) == Class::Close && dotted(n - 2),
@@ -911,7 +913,7 @@ impl<'a> Walk<'a> {
             let visible = match (child.map(|c| (c.origin, c.lateral.clone())), clause) {
                 (Some((Origin::Derived, Some(left))), _) => frame_rels.get(left).unwrap_or_default(),
                 (Some((Origin::Derived | Origin::CteBody | Origin::ParenthesizedJoin, None)), _) => &[],
-                (_, Clause::On { tree_start, target, .. }) => &frame_rels[tree_start.min(target)..(target + 1).min(frame_rels.len())],
+                (_, Clause::On { tree_start, target, .. }) => frame_rels.get(tree_start.min(target)..(target + 1).min(frame_rels.len())).unwrap_or_default(),
                 _ => &frame_rels[..],
             };
             let shadowed = |r: &Rel| {
@@ -1895,6 +1897,13 @@ mod tests {
         assert_eq!(refs(&s), [(Some("orders"), &table(None, "orders"))]);
         assert_eq!(refs(&pg("insert into orders (id) select c.| from customers c")), [(Some("c"), &table(None, "customers"))]);
         assert_eq!(refs(&pg("insert into orders (id, |) select 1 from customers")).len(), 1);
+    }
+
+    #[test]
+    fn a_cast_with_no_operand_names_nothing_and_does_not_panic() {
+        let s = pg("with x as (select ::int y from orders) select * from x where |");
+        assert_eq!(refs(&s), [(Some("x"), &RelationSource::Derived { columns: vec![], star: vec![] })]);
+        assert!(at(Postgres, "select ::int x from orders where |").is_some());
     }
 
     #[test]
