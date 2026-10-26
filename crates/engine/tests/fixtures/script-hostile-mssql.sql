@@ -230,4 +230,5 @@ GRANT SELECT ON dbo.v_bound TO public;
 GRANT EXECUTE ON dbo.f_scalar TO app_reader;
 GO
 ALTER AUTHORIZATION ON OBJECT::dbo.refd TO app_reader;
+ALTER AUTHORIZATION ON OBJECT::dbo.refr TO dbo;
 GO

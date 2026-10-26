@@ -292,7 +292,8 @@ fn modules_sql(filter: &str) -> String {
 fn omitted_sql(filter: &str) -> String {
     format!(
         "SELECT o.object_id,x.kind,x.name FROM sys.objects o CROSS APPLY (
-            SELECT 'owner',COALESCE(USER_NAME(o.principal_id),CONVERT(sysname,o.principal_id)) WHERE o.principal_id IS NOT NULL
+            SELECT 'owner',COALESCE(USER_NAME(o.principal_id),CONVERT(sysname,o.principal_id))
+            WHERE o.principal_id IS NOT NULL AND o.principal_id<>(SELECT s.principal_id FROM sys.schemas s WHERE s.schema_id=o.schema_id)
             UNION ALL SELECT 'runs as owner',USER_NAME(OBJECTPROPERTY(o.object_id,'OwnerId')) FROM sys.sql_modules m WHERE m.object_id=o.object_id AND m.execute_as_principal_id=-2
             UNION ALL SELECT 'change data capture',NULL FROM sys.tables t WHERE t.object_id=o.object_id AND t.is_tracked_by_cdc=1
             UNION ALL SELECT 'full-text index',NULL FROM sys.fulltext_indexes fi WHERE fi.object_id=o.object_id
