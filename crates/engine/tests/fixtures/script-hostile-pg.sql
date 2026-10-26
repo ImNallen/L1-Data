@@ -204,3 +204,17 @@ CREATE INDEX ri_k ON app.ri (k);
 ALTER INDEX app.ri_2_k_idx RENAME TO ri_2_swap;
 ALTER INDEX app.ri_2_id_k_idx RENAME TO ri_2_k_idx;
 ALTER INDEX app.ri_2_swap RENAME TO ri_2_id_k_idx;
+-- a partition's own index and own unique constraint hold the names a replay's copies of the parent's indexes would take
+CREATE TABLE app.nat (id int, k int) PARTITION BY RANGE (id);
+CREATE TABLE app.nat_1 PARTITION OF app.nat FOR VALUES FROM (0) TO (10);
+CREATE INDEX ON app.nat_1 (k) WHERE k > 0;
+ALTER TABLE app.nat_1 ADD CONSTRAINT nat_1_id_idx UNIQUE (id);
+CREATE INDEX nat_k ON app.nat (k);
+CREATE INDEX nat_id ON app.nat (id);
+-- attached indexes whose storage parameters differ from their parent index's
+CREATE TABLE app.ats (k int) PARTITION BY LIST (k);
+CREATE INDEX ats_k ON app.ats (k) WITH (fillfactor = 50);
+CREATE TABLE app.ats_1 PARTITION OF app.ats FOR VALUES IN (1);
+CREATE TABLE app.ats_2 PARTITION OF app.ats FOR VALUES IN (2);
+ALTER INDEX app.ats_1_k_idx SET (fillfactor = 33);
+ALTER INDEX app.ats_2_k_idx RESET (fillfactor);

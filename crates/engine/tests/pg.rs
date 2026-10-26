@@ -2797,6 +2797,95 @@ $l1$;
     }
 }
 
+/// Names a replay's copies of the parent's indexes would take are held by the partition's own index
+/// and own unique constraint, and in one target by an index on another table.
+const NAME_CLASHES: &str = "CREATE SCHEMA a;
+CREATE TABLE a.nat (id int, k int) PARTITION BY RANGE (id);
+CREATE TABLE a.nat_1 PARTITION OF a.nat FOR VALUES FROM (0) TO (10);
+CREATE INDEX ON a.nat_1 (k) WHERE k > 0;
+ALTER TABLE a.nat_1 ADD CONSTRAINT nat_1_id_idx UNIQUE (id);
+CREATE INDEX nat_k ON a.nat (k);
+CREATE INDEX nat_id ON a.nat (id) WITH (fillfactor = 50);
+ALTER INDEX a.nat_1_id_idx1 SET (fillfactor = 33);
+COMMENT ON INDEX a.nat_1_k_idx1 IS 'attached';
+ALTER TABLE a.nat_1 CLUSTER ON nat_1_k_idx1;";
+
+#[tokio::test]
+async fn a_partition_tree_replays_its_index_names_without_a_clash_and_leaves_other_tables_alone() {
+    let h = Harness::start().await;
+    h.engine.connect(h.conn).await.unwrap();
+    let (shop, connection) = tokio_postgres::connect(&url(), NoTls).await.unwrap();
+    tokio::spawn(connection);
+    let (source, clean, crowded) = (unique("t_db_clash"), unique("t_db_clash_clean"), unique("t_db_clash_crowded"));
+    for name in [&source, &clean, &crowded] {
+        shop.batch_execute(&format!("create database {name}")).await.unwrap();
+    }
+    h.engine.refresh_connection(h.conn).await.unwrap();
+    h.edit_view(ViewEdit::Database { name: source.clone(), shown: true }).await;
+    let (notices, mut heard) = tokio::sync::mpsc::unbounded_channel::<String>();
+    let connect = async |name: &str| {
+        let mut config: tokio_postgres::Config = url().parse().unwrap();
+        let (client, mut connection) = config.dbname(name).connect(NoTls).await.unwrap();
+        let notices = notices.clone();
+        tokio::spawn(async move {
+            while let Some(Ok(message)) = std::future::poll_fn(|cx| connection.poll_message(cx)).await {
+                if let tokio_postgres::AsyncMessage::Notice(notice) = message {
+                    let _ = notices.send(notice.message().to_owned());
+                }
+            }
+        });
+        client
+    };
+    let (original, replay, beside) = (connect(&source).await, connect(&clean).await, connect(&crowded).await);
+    let schema_a = "n.nspname = 'a' AND c.relkind IN ('r', 'p')";
+    let version: i32 = shop.query_one("select current_setting('server_version_num')::int4", &[]).await.unwrap().get(0);
+    let space = (version >= 150000).then(|| unique("t_ts"));
+    if let Some(space) = &space {
+        shop.batch_execute("set allow_in_place_tablespaces = on").await.unwrap();
+        shop.batch_execute(&format!("create tablespace {space} location ''")).await.unwrap();
+    }
+
+    let outcome = futures_util::FutureExt::catch_unwind(std::panic::AssertUnwindSafe(async {
+        original.batch_execute(NAME_CLASHES).await.unwrap();
+        if let Some(space) = &space {
+            original.batch_execute(&format!("ALTER INDEX a.nat_1_k_idx1 SET TABLESPACE {space}")).await.unwrap();
+        }
+        let nat: u32 = original.query_one("select 'a.nat'::regclass::oid", &[]).await.unwrap().get(0);
+        let script = h.engine.object_script(h.db_named(&source), ScriptTarget::Relation { oid: nat }).await.unwrap();
+        assert!(script.warnings.is_empty(), "{:?}", script.warnings);
+
+        replay.batch_execute(&format!("CREATE SCHEMA a;\n{}", script.text)).await.unwrap_or_else(|e| panic!("{e:?}\n{}", script.text));
+        assert_eq!(catalog_facts(&replay, schema_a).await, catalog_facts(&original, schema_a).await);
+
+        beside.batch_execute("CREATE SCHEMA a; CREATE TABLE a.bystander (v int); CREATE INDEX nat_1_k_idx1 ON a.bystander (v);").await.unwrap();
+        while heard.try_recv().is_ok() {}
+        beside.batch_execute(&script.text).await.unwrap_or_else(|e| panic!("{e:?}\n{}", script.text));
+        let index_of = "SELECT c.relname, i.indisclustered, coalesce(obj_description(c.oid, 'pg_class'), '') FROM pg_index i JOIN pg_class c ON c.oid = i.indexrelid";
+        let bystander = beside.query_one(&format!("{index_of} WHERE i.indrelid = 'a.bystander'::regclass"), &[]).await.unwrap();
+        assert_eq!((bystander.get::<_, &str>(0), bystander.get::<_, bool>(1), bystander.get::<_, &str>(2)), ("nat_1_k_idx1", false, ""), "the index on another table keeps its name and gets nothing");
+        let copy = beside.query_one(&format!("{index_of} JOIN pg_inherits h ON h.inhrelid = i.indexrelid WHERE i.indrelid = 'a.nat_1'::regclass AND h.inhparent = 'a.nat_k'::regclass"), &[]).await.unwrap();
+        let copy_name: String = copy.get(0);
+        assert_ne!(copy_name, "nat_1_k_idx1");
+        assert_eq!((copy.get::<_, bool>(1), copy.get::<_, &str>(2)), (true, "attached"), "the copy keeps its PostgreSQL name and still gets its properties");
+        let mut warnings = vec![];
+        while let Ok(notice) = heard.try_recv() {
+            warnings.push(notice);
+        }
+        assert_eq!(warnings, [format!("L1 Data left index a.{copy_name} unrenamed, because a.nat_1_k_idx1, which this script did not create, has the name nat_1_k_idx1")]);
+    }))
+    .await;
+    drop((original, replay, beside));
+    for name in [&source, &clean, &crowded] {
+        drop_database(&shop, name).await;
+    }
+    if let Some(space) = &space {
+        shop.batch_execute(&format!("drop tablespace {space}")).await.unwrap();
+    }
+    if let Err(panic) = outcome {
+        std::panic::resume_unwind(panic);
+    }
+}
+
 const HOSTILE: &str = include_str!("fixtures/script-hostile-pg.sql");
 const HOSTILE_PRELUDE: &str = include_str!("fixtures/script-hostile-pg-prelude.sql");
 const HOSTILE_RELATIONS: &str = "n.nspname IN ('Weird \"S\"', 'app', 'order') AND c.relkind IN ('r', 'p', 'v', 'm', 'f')";
