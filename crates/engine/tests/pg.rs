@@ -3020,6 +3020,13 @@ async fn hostile_object_scripts_replay_every_property_or_warn() {
         assert!(tree.ends_with("CREATE UNIQUE INDEX tree_id ON app.tree USING btree (id);\n\nALTER TABLE app.tree ADD CONSTRAINT tree_parent FOREIGN KEY (parent) REFERENCES app.tree(id);\n"), "{tree}");
         let child = script(ScriptTarget::Relation { oid: oid("app.child").await }).await.text;
         assert!(child.contains(") INHERITS (app.base);\n"), "{child}");
+        let attached = script(ScriptTarget::Index { relation_oid: oid("app.nat_1").await, name: "nat_1_k_idx1".into() }).await.text;
+        assert_eq!(attached, "CREATE INDEX nat_1_k_idx1 ON app.nat_1 USING btree (k);\n\nALTER INDEX app.nat_k ATTACH PARTITION app.nat_1_k_idx1;\n");
+        let attached_key = script(ScriptTarget::Index { relation_oid: oid("app.ffp_1").await, name: "ffp one key".into() }).await.text;
+        assert_eq!(
+            attached_key,
+            "ALTER TABLE app.ffp_1 ADD CONSTRAINT \"ffp one key\" PRIMARY KEY (id, k) WITH (fillfactor='60');\n\nALTER INDEX app.ffp_pkey ATTACH PARTITION app.\"ffp one key\";\n\nCOMMENT ON CONSTRAINT \"ffp one key\" ON app.ffp_1 IS 'cloned key';\n"
+        );
         let pkey = script(ScriptTarget::Index { relation_oid: oid("\"Weird \"\"S\"\"\".parent").await, name: "parent_pkey".into() }).await.text;
         assert_eq!(
             pkey,
