@@ -193,3 +193,10 @@ CREATE FUNCTION app.ext_dep() RETURNS int LANGUAGE sql AS 'SELECT 1';
 ALTER FUNCTION app.ext_dep() DEPENDS ON EXTENSION plpgsql;
 ALTER FUNCTION app.f_out(int) OWNER TO pg_database_owner;
 ALTER TABLE app.ri_2 OWNER TO pg_database_owner;
+-- attached index names two levels down, the lower one found through the upper one's restored name
+CREATE TABLE app.deep (id int, k int, d int) PARTITION BY LIST (k);
+CREATE INDEX deep_id ON app.deep (id);
+CREATE TABLE app.deep_1 PARTITION OF app.deep FOR VALUES IN (1) PARTITION BY LIST (d);
+CREATE TABLE app.deep_1_1 PARTITION OF app.deep_1 FOR VALUES IN (1);
+ALTER INDEX app.deep_1_id_idx RENAME TO "deep mid";
+ALTER INDEX app.deep_1_1_id_idx RENAME TO "deep leaf";

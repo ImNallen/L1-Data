@@ -2753,17 +2753,17 @@ async fn object_scripts_replay_into_an_empty_database_with_the_same_catalog() {
 
 DO $l1$
 DECLARE
-    pair text[];
-    attached name;
+    entry text[];
+    attached regclass;
 BEGIN
-    FOREACH pair SLICE 1 IN ARRAY ARRAY[
-        ['public.order_events_kind_idx', 'order_events_2026_h1_kind_idx'],
-        ['public.order_events_pkey', 'order_events_2026_h1_pkey']
+    FOREACH entry SLICE 1 IN ARRAY ARRAY[
+        ['public.order_events_2026_h1', 'public.order_events_kind_idx', 'order_events_2026_h1_kind_idx'],
+        ['public.order_events_2026_h1', 'public.order_events_pkey', 'order_events_2026_h1_pkey']
     ] LOOP
-        attached := (SELECT c.relname FROM pg_catalog.pg_inherits h JOIN pg_catalog.pg_index i ON i.indexrelid = h.inhrelid JOIN pg_catalog.pg_class c ON c.oid = h.inhrelid
-                     WHERE h.inhparent = pair[1]::regclass AND i.indrelid = 'public.order_events_2026_h1'::regclass);
-        IF attached <> pair[2] THEN
-            EXECUTE format('ALTER INDEX %I.%I RENAME TO %I', 'public', attached, pair[2]);
+        attached := (SELECT h.inhrelid FROM pg_catalog.pg_inherits h JOIN pg_catalog.pg_index i ON i.indexrelid = h.inhrelid
+                     WHERE h.inhparent = entry[2]::regclass AND i.indrelid = entry[1]::regclass);
+        IF (SELECT c.relname FROM pg_catalog.pg_class c WHERE c.oid = attached) <> entry[3] THEN
+            EXECUTE format('ALTER INDEX %s RENAME TO %I', attached, entry[3]);
         END IF;
     END LOOP;
 END

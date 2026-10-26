@@ -266,11 +266,25 @@ pub fn qualified(schema: &str, name: &str) -> String {
     format!("{}.{}", ident(schema), ident(name))
 }
 
+/// Every attached index gets its name back in one block after the whole tree, so the statements
+/// that name an attached index or a constraint it backs come after that block.
 pub fn table(t: &Table) -> Ddl {
     let mut statements = vec![];
     let mut warnings = vec![];
     table_statements(t, &mut statements, &mut warnings);
+    let tree = preorder(t);
+    let attached: Vec<(String, &AttachedIndex)> = tree.iter().flat_map(|p| p.attached_indexes.iter().map(|a| (qualified(&p.schema, &p.name), a))).collect();
+    if !attached.is_empty() {
+        statements.push(restore_attached_names(&attached));
+    }
+    for p in tree {
+        after_attached_names(p, &mut statements);
+    }
     Ddl { text: script(statements), warnings }
+}
+
+fn preorder(t: &Table) -> Vec<&Table> {
+    std::iter::once(t).chain(t.partitions.iter().flat_map(preorder)).collect()
 }
 
 fn table_statements(t: &Table, out: &mut Vec<String>, warnings: &mut Vec<String>) {
@@ -349,7 +363,6 @@ fn table_statements(t: &Table, out: &mut Vec<String>, warnings: &mut Vec<String>
         out.extend(column_changes(c, keyword, &name, !partition && c.declared && c.inherited.is_none(), !partition && merged_default(c).is_some()));
     }
     indexes(&t.indexes, keyword, &t.schema, &name, out, warnings);
-    attached_indexes(&t.attached_indexes, &t.schema, &name, out);
     out.extend(late.iter().map(add));
     match &t.replica_identity {
         _ if t.foreign.is_some() => {}
@@ -382,7 +395,7 @@ fn table_statements(t: &Table, out: &mut Vec<String>, warnings: &mut Vec<String>
         out.extend(comment(&format!("STATISTICS {stat}"), &s.comment));
     }
     out.extend(comment(&format!("{keyword} {name}"), &t.comment));
-    for k in &t.constraints {
+    for k in t.constraints.iter().filter(|k| !k.inherited) {
         out.extend(comment(&format!("CONSTRAINT {} ON {name}", ident(&k.name)), &k.comment));
     }
     for c in &t.columns {
@@ -460,11 +473,9 @@ fn column_options(c: &Column, schema: &str, table: &str) -> String {
     out
 }
 
-fn attached_indexes(list: &[AttachedIndex], schema: &str, relation: &str, out: &mut Vec<String>) {
-    if !list.is_empty() {
-        out.push(restore_attached_names(schema, relation, list));
-    }
-    for a in list {
+fn after_attached_names(t: &Table, out: &mut Vec<String>) {
+    let relation = qualified(&t.schema, &t.name);
+    for a in &t.attached_indexes {
         let name = ident(&a.name);
         if a.clustered {
             out.push(format!("ALTER TABLE {relation} CLUSTER ON {name}"));
@@ -472,29 +483,33 @@ fn attached_indexes(list: &[AttachedIndex], schema: &str, relation: &str, out: &
         if a.replica_identity {
             out.push(format!("ALTER TABLE {relation} REPLICA IDENTITY USING INDEX {name}"));
         }
-        out.extend(comment(&format!("INDEX {}", qualified(schema, &a.name)), &a.comment));
+        out.extend(comment(&format!("INDEX {}", qualified(&t.schema, &a.name)), &a.comment));
+    }
+    for k in t.constraints.iter().filter(|k| k.inherited) {
+        out.extend(comment(&format!("CONSTRAINT {} ON {relation}", ident(&k.name)), &k.comment));
     }
 }
 
-fn restore_attached_names(schema: &str, table: &str, list: &[AttachedIndex]) -> String {
-    let (schema, table) = (quote_literal(schema), quote_literal(table));
-    let pairs: Vec<String> = list.iter().map(|a| format!("[{}, {}]", quote_literal(&a.parent), quote_literal(&a.name))).collect();
+/// Runs in tree order, so a partition's index has its name back before its own partitions' indexes
+/// look it up by that name.
+fn restore_attached_names(attached: &[(String, &AttachedIndex)]) -> String {
+    let entries: Vec<String> = attached.iter().map(|(table, a)| format!("[{}, {}, {}]", quote_literal(table), quote_literal(&a.parent), quote_literal(&a.name))).collect();
     let body = format!(
         "DECLARE
-    pair text[];
-    attached name;
+    entry text[];
+    attached regclass;
 BEGIN
-    FOREACH pair SLICE 1 IN ARRAY ARRAY[
+    FOREACH entry SLICE 1 IN ARRAY ARRAY[
         {}
     ] LOOP
-        attached := (SELECT c.relname FROM pg_catalog.pg_inherits h JOIN pg_catalog.pg_index i ON i.indexrelid = h.inhrelid JOIN pg_catalog.pg_class c ON c.oid = h.inhrelid
-                     WHERE h.inhparent = pair[1]::regclass AND i.indrelid = {table}::regclass);
-        IF attached <> pair[2] THEN
-            EXECUTE format('ALTER INDEX %I.%I RENAME TO %I', {schema}, attached, pair[2]);
+        attached := (SELECT h.inhrelid FROM pg_catalog.pg_inherits h JOIN pg_catalog.pg_index i ON i.indexrelid = h.inhrelid
+                     WHERE h.inhparent = entry[2]::regclass AND i.indrelid = entry[1]::regclass);
+        IF (SELECT c.relname FROM pg_catalog.pg_class c WHERE c.oid = attached) <> entry[3] THEN
+            EXECUTE format('ALTER INDEX %s RENAME TO %I', attached, entry[3]);
         END IF;
     END LOOP;
 END",
-        pairs.join(",\n        ")
+        entries.join(",\n        ")
     );
     let tag = std::iter::once("$l1$".to_owned()).chain((1..).map(|n| format!("$l1_{n}$"))).find(|tag| !body.contains(tag.as_str())).unwrap_or_default();
     format!("DO {tag}\n{body}\n{tag}")
@@ -1011,32 +1026,92 @@ COMMENT ON COLUMN public.t.status IS 'lifecycle';
     }
 
     #[test]
-    fn a_partition_keeps_its_cloned_triggers_state_and_comment_and_its_attached_replica_index() {
+    fn a_partition_tree_restores_its_attached_index_names_in_one_block_before_what_names_them() {
         let clone = |name: &str, enabled: char, comment: Option<&str>| Trigger { name: name.into(), definition: "CREATE TRIGGER ignored".into(), enabled, comment: comment.map(Into::into), cloned: true };
-        let leaf = Table {
+        let partition = |name: &str| Table {
             schema: "app".into(),
-            name: "ri_1".into(),
-            parent: Parent::Partition { schema: "app".into(), name: "ri".into(), bound: "FOR VALUES IN (1)".into() },
-            replica_identity: ReplicaIdentity::Index,
-            attached_indexes: vec![
-                AttachedIndex { name: "ri_1_custom".into(), parent: "app.ri_id_k".into(), clustered: true, replica_identity: true, comment: Some("leaf index".into()) },
-                AttachedIndex { name: "it's".into(), parent: "app.\"Odd\"".into(), ..Default::default() },
+            name: name.into(),
+            parent: Parent::Partition { schema: "app".into(), name: "ri".into(), bound: format!("FOR VALUES IN ({})", &name[3..]) },
+            ..Default::default()
+        };
+        let t = Table {
+            schema: "app".into(),
+            name: "ri".into(),
+            columns: vec![col("k", "integer")],
+            partition_key: Some("LIST (k)".into()),
+            partitions: vec![
+                Table {
+                    replica_identity: ReplicaIdentity::Index,
+                    attached_indexes: vec![
+                        AttachedIndex { name: "ri_1_custom".into(), parent: "app.ri_id_k".into(), clustered: true, replica_identity: true, comment: Some("leaf index".into()) },
+                        AttachedIndex { name: "it's".into(), parent: "app.\"Odd\"".into(), ..Default::default() },
+                    ],
+                    triggers: vec![clone("off", 'D', None), clone("on", 'O', Some("leaf note"))],
+                    ..partition("ri_1")
+                },
+                Table {
+                    attached_indexes: vec![AttachedIndex { name: "ri_2 key".into(), parent: "app.ri_id_k".into(), ..Default::default() }],
+                    constraints: vec![Constraint { name: "ri_2 key".into(), definition: "UNIQUE (id, k)".into(), comment: Some("cloned".into()), inherited: true, ..Default::default() }],
+                    ..partition("ri_2")
+                },
             ],
-            triggers: vec![clone("off", 'D', None), clone("on", 'O', Some("leaf note"))],
             ..Default::default()
         };
         assert_eq!(
-            table(&leaf).text,
-            "CREATE TABLE app.ri_1 PARTITION OF app.ri\n    FOR VALUES IN (1);\n\nDO $l1$\nDECLARE\n    pair text[];\n    attached name;\nBEGIN\n    FOREACH pair SLICE 1 IN ARRAY ARRAY[\n        ['app.ri_id_k', 'ri_1_custom'],\n        ['app.\"Odd\"', 'it''s']\n    ] LOOP\n        attached := (SELECT c.relname FROM pg_catalog.pg_inherits h JOIN pg_catalog.pg_index i ON i.indexrelid = h.inhrelid JOIN pg_catalog.pg_class c ON c.oid = h.inhrelid\n                     WHERE h.inhparent = pair[1]::regclass AND i.indrelid = 'app.ri_1'::regclass);\n        IF attached <> pair[2] THEN\n            EXECUTE format('ALTER INDEX %I.%I RENAME TO %I', 'app', attached, pair[2]);\n        END IF;\n    END LOOP;\nEND\n$l1$;\n\nALTER TABLE app.ri_1 CLUSTER ON ri_1_custom;\n\nALTER TABLE app.ri_1 REPLICA IDENTITY USING INDEX ri_1_custom;\n\nCOMMENT ON INDEX app.ri_1_custom IS 'leaf index';\n\nALTER TABLE app.ri_1 DISABLE TRIGGER off;\n\nALTER TABLE app.ri_1 ENABLE TRIGGER \"on\";\n\nCOMMENT ON TRIGGER \"on\" ON app.ri_1 IS 'leaf note';\n"
+            table(&t).text,
+            "CREATE TABLE app.ri (
+    k integer
+) PARTITION BY LIST (k);
+
+CREATE TABLE app.ri_1 PARTITION OF app.ri
+    FOR VALUES IN (1);
+
+ALTER TABLE app.ri_1 DISABLE TRIGGER off;
+
+ALTER TABLE app.ri_1 ENABLE TRIGGER \"on\";
+
+COMMENT ON TRIGGER \"on\" ON app.ri_1 IS 'leaf note';
+
+CREATE TABLE app.ri_2 PARTITION OF app.ri
+    FOR VALUES IN (2);
+
+DO $l1$
+DECLARE
+    entry text[];
+    attached regclass;
+BEGIN
+    FOREACH entry SLICE 1 IN ARRAY ARRAY[
+        ['app.ri_1', 'app.ri_id_k', 'ri_1_custom'],
+        ['app.ri_1', 'app.\"Odd\"', 'it''s'],
+        ['app.ri_2', 'app.ri_id_k', 'ri_2 key']
+    ] LOOP
+        attached := (SELECT h.inhrelid FROM pg_catalog.pg_inherits h JOIN pg_catalog.pg_index i ON i.indexrelid = h.inhrelid
+                     WHERE h.inhparent = entry[2]::regclass AND i.indrelid = entry[1]::regclass);
+        IF (SELECT c.relname FROM pg_catalog.pg_class c WHERE c.oid = attached) <> entry[3] THEN
+            EXECUTE format('ALTER INDEX %s RENAME TO %I', attached, entry[3]);
+        END IF;
+    END LOOP;
+END
+$l1$;
+
+ALTER TABLE app.ri_1 CLUSTER ON ri_1_custom;
+
+ALTER TABLE app.ri_1 REPLICA IDENTITY USING INDEX ri_1_custom;
+
+COMMENT ON INDEX app.ri_1_custom IS 'leaf index';
+
+COMMENT ON CONSTRAINT \"ri_2 key\" ON app.ri_2 IS 'cloned';
+"
         );
     }
 
     #[test]
     fn an_attached_index_restore_quotes_its_block_with_a_tag_no_name_contains() {
-        let block = restore_attached_names("app", "app.t", &[AttachedIndex { name: "x$l1$y$l1_1$".into(), parent: "app.p".into(), ..Default::default() }]);
+        let index = AttachedIndex { name: "x$l1$y$l1_1$".into(), parent: "app.p".into(), ..Default::default() };
+        let block = restore_attached_names(&[("app.t".into(), &index)]);
         assert!(block.starts_with("DO $l1_2$\n") && block.ends_with("\n$l1_2$"), "{block}");
         assert_eq!(block.matches("$l1_2$").count(), 2, "{block}");
-        assert!(block.contains("['app.p', 'x$l1$y$l1_1$']"), "{block}");
+        assert!(block.contains("['app.t', 'app.p', 'x$l1$y$l1_1$']"), "{block}");
     }
 
     #[test]
@@ -1288,7 +1363,7 @@ ALTER FOREIGN TABLE public.e2 ALTER COLUMN v OPTIONS (ADD column_name 'vv');
         };
         assert_eq!(
             table(&t).text,
-            "CREATE TABLE app.t_1 PARTITION OF app.t\n    FOR VALUES IN (1);\n\nALTER SEQUENCE app.t_1_id_seq SET UNLOGGED;\n\nALTER SEQUENCE app.\"Odd seq\" SET LOGGED;\n\nCOMMENT ON CONSTRAINT t_chk ON app.t_1 IS 'from the parent';\n\nCOMMENT ON SEQUENCE app.t_1_id_seq IS 'ids';\n\nCOMMENT ON SEQUENCE app.noted IS 'it''s';\n"
+            "CREATE TABLE app.t_1 PARTITION OF app.t\n    FOR VALUES IN (1);\n\nALTER SEQUENCE app.t_1_id_seq SET UNLOGGED;\n\nALTER SEQUENCE app.\"Odd seq\" SET LOGGED;\n\nCOMMENT ON SEQUENCE app.t_1_id_seq IS 'ids';\n\nCOMMENT ON SEQUENCE app.noted IS 'it''s';\n\nCOMMENT ON CONSTRAINT t_chk ON app.t_1 IS 'from the parent';\n"
         );
     }
 
