@@ -331,7 +331,11 @@ pub fn table(t: &Table) -> Ddl {
         settings.push(format!("EXEC sys.sp_tableoption @TableNamePattern = {}, @OptionName = N'large value types out of row', @OptionValue = N'1';", quote_literal(&name)));
     }
     if let Some(columns) = t.change_tracking {
-        settings.push(format!("ALTER TABLE {name} ENABLE CHANGE_TRACKING{};", if columns { " WITH (TRACK_COLUMNS_UPDATED = ON)" } else { "" }));
+        let columns = if columns { " WITH (TRACK_COLUMNS_UPDATED = ON)" } else { "" };
+        settings.push(format!(
+            "IF EXISTS (SELECT 1 FROM sys.change_tracking_databases WHERE database_id = DB_ID())\n    ALTER TABLE {name} ENABLE CHANGE_TRACKING{columns};\nELSE\n    PRINT {};",
+            quote_literal(&format!("Change tracking on {name} was not enabled, because the database has change tracking off."))
+        ));
     }
     if t.lock_escalation != "TABLE" {
         settings.push(format!("ALTER TABLE {name} SET (LOCK_ESCALATION = {});", t.lock_escalation));
@@ -1134,7 +1138,10 @@ GO
 
 EXEC sys.sp_tableoption @TableNamePattern = N'[dbo].[o]]x]', @OptionName = N'text in row', @OptionValue = N'500';
 EXEC sys.sp_tableoption @TableNamePattern = N'[dbo].[o]]x]', @OptionName = N'large value types out of row', @OptionValue = N'1';
-ALTER TABLE [dbo].[o]]x] ENABLE CHANGE_TRACKING WITH (TRACK_COLUMNS_UPDATED = ON);
+IF EXISTS (SELECT 1 FROM sys.change_tracking_databases WHERE database_id = DB_ID())
+    ALTER TABLE [dbo].[o]]x] ENABLE CHANGE_TRACKING WITH (TRACK_COLUMNS_UPDATED = ON);
+ELSE
+    PRINT N'Change tracking on [dbo].[o]]x] was not enabled, because the database has change tracking off.';
 ALTER TABLE [dbo].[o]]x] SET (LOCK_ESCALATION = AUTO);
 GO
 "
@@ -1143,7 +1150,13 @@ GO
             table(&t).text
         );
         let plain = Table { change_tracking: Some(false), ..table_named("p") };
-        assert!(table(&plain).text.ends_with("GO\n\nALTER TABLE [dbo].[p] ENABLE CHANGE_TRACKING;\nGO\n"), "{}", table(&plain).text);
+        assert!(
+            table(&plain).text.ends_with(
+                "GO\n\nIF EXISTS (SELECT 1 FROM sys.change_tracking_databases WHERE database_id = DB_ID())\n    ALTER TABLE [dbo].[p] ENABLE CHANGE_TRACKING;\nELSE\n    PRINT N'Change tracking on [dbo].[p] was not enabled, because the database has change tracking off.';\nGO\n"
+            ),
+            "{}",
+            table(&plain).text
+        );
     }
 
     #[test]
