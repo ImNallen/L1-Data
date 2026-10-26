@@ -25,7 +25,16 @@ const RELATIONS: &str = "WITH RECURSIVE tree(oid) AS (
               WHERE h.inhrelid = c.oid AND NOT c.relispartition ORDER BY h.inhseqno),
         CASE WHEN c.reloftype <> 0 THEN format_type(c.reloftype, NULL) END,
         ARRAY(SELECT p.pubname::text FROM pg_publication_rel pr JOIN pg_publication p ON p.oid = pr.prpubid WHERE pr.prrelid = c.oid ORDER BY 1),
-        pg_get_userbyid(c.relowner)::text, i.inhparent, c.oid
+        pg_get_userbyid(c.relowner)::text, i.inhparent,
+        ARRAY(SELECT a.attname::text FROM pg_attribute a WHERE a.attrelid = c.oid AND a.attnum > 0
+              AND EXISTS (SELECT 1 FROM pg_seclabel l WHERE l.classoid = 'pg_class'::regclass AND l.objoid = c.oid AND l.objsubid = a.attnum) ORDER BY a.attnum),
+        ARRAY(SELECT sn.nspname::text FROM pg_depend dep JOIN pg_class sc ON sc.oid = dep.objid AND sc.relkind = 'S' JOIN pg_namespace sn ON sn.oid = sc.relnamespace
+              WHERE dep.classid = 'pg_class'::regclass AND dep.refclassid = 'pg_class'::regclass AND dep.refobjid = c.oid AND dep.deptype IN ('a', 'i')
+                AND EXISTS (SELECT 1 FROM pg_seclabel l WHERE l.classoid = 'pg_class'::regclass AND l.objoid = sc.oid) ORDER BY sc.relname),
+        ARRAY(SELECT sc.relname::text FROM pg_depend dep JOIN pg_class sc ON sc.oid = dep.objid AND sc.relkind = 'S'
+              WHERE dep.classid = 'pg_class'::regclass AND dep.refclassid = 'pg_class'::regclass AND dep.refobjid = c.oid AND dep.deptype IN ('a', 'i')
+                AND EXISTS (SELECT 1 FROM pg_seclabel l WHERE l.classoid = 'pg_class'::regclass AND l.objoid = sc.oid) ORDER BY sc.relname),
+        c.oid
      FROM tree JOIN pg_class c ON c.oid = tree.oid JOIN pg_namespace n ON n.oid = c.relnamespace
      LEFT JOIN pg_inherits i ON i.inhrelid = c.oid AND c.relispartition
      LEFT JOIN pg_class p ON p.oid = i.inhparent LEFT JOIN pg_namespace pn ON pn.oid = p.relnamespace
@@ -175,7 +184,8 @@ const POLICIES: &str = "SELECT p.polname, p.polpermissive, p.polcmd::text,
 const ROUTINE: &str = "SELECT p.prokind::text, p.proname, CASE WHEN p.prokind <> 'a' THEN pg_get_functiondef(p.oid) END,
         obj_description(p.oid, 'pg_proc'), n.nspname, pg_get_function_identity_arguments(p.oid), pg_get_userbyid(p.proowner)::text, p.prosecdef,
         ARRAY(SELECT e.extname::text FROM pg_depend d JOIN pg_extension e ON e.oid = d.refobjid
-              WHERE d.classid = 'pg_proc'::regclass AND d.objid = p.oid AND d.refclassid = 'pg_extension'::regclass AND d.deptype = 'x' ORDER BY 1)
+              WHERE d.classid = 'pg_proc'::regclass AND d.objid = p.oid AND d.refclassid = 'pg_extension'::regclass AND d.deptype = 'x' ORDER BY 1),
+        EXISTS (SELECT 1 FROM pg_seclabel l WHERE l.classoid = 'pg_proc'::regclass AND l.objoid = p.oid)
      FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace WHERE p.oid = $1";
 
 fn acl_changes(from: &str, acl: &str, default: &str, filter: &str, keys: &str) -> String {
@@ -231,8 +241,17 @@ fn owner(name: String, role: &str) -> ddl::Owner {
     ddl::Owner { connecting_role: name == role, name }
 }
 
+/// The relation itself, its columns, and the sequences it owns that carry a security label.
+fn labeled(r: &Row) -> Vec<String> {
+    let relation = ddl::qualified(r.get(1), r.get(2));
+    let (columns, schemas, sequences): (Vec<String>, Vec<String>, Vec<String>) = (r.get(25), r.get(26), r.get(27));
+    let itself = r.get::<_, bool>(16).then(|| relation.clone());
+    let columns = columns.iter().map(|c| format!("{relation}.{}", ident(c)));
+    itself.into_iter().chain(columns).chain(schemas.iter().zip(&sequences).map(|(s, n)| ddl::qualified(s, n))).collect()
+}
+
 fn unscripted(r: &Row, grants: &[Row], role: &str) -> ddl::Unscripted {
-    let mut u = ddl::Unscripted { security_labels: r.get(16), publications: r.get(22), owner: owner(r.get(23), role), ..Default::default() };
+    let mut u = ddl::Unscripted { security_labels: labeled(r), publications: r.get(22), owner: owner(r.get(23), role), ..Default::default() };
     for g in grants {
         match (g.get::<_, Option<String>>(0), g.get::<_, Option<String>>(1)) {
             (Some(schema), Some(name)) => match u.sequence_privileges.last_mut() {
@@ -591,6 +610,7 @@ async fn routine(tx: &Transaction<'_>, role: &str, oid: u32) -> Result<ObjectScr
         owner: owner(r.get(6), role),
         security_definer: r.get(7),
         extensions: r.get(8),
+        security_labels: r.get(9),
     };
     Ok(script::object_script(&name, ddl::routine(&routine)))
 }

@@ -35,7 +35,8 @@ pub struct Table {
 pub struct Unscripted {
     pub privileges: Vec<Privilege>,
     pub sequence_privileges: Vec<SequencePrivileges>,
-    pub security_labels: bool,
+    /// The relation, its columns, and its sequences that carry a security label, by name.
+    pub security_labels: Vec<String>,
     pub publications: Vec<String>,
     pub owner: Owner,
 }
@@ -265,6 +266,7 @@ pub struct Routine {
     pub owner: Owner,
     pub security_definer: bool,
     pub extensions: Vec<String>,
+    pub security_labels: bool,
 }
 
 pub fn qualified(schema: &str, name: &str) -> String {
@@ -425,9 +427,7 @@ fn unscripted(u: &Unscripted, name: &str, decides: Option<&str>) -> Vec<String> 
     let mut out: Vec<String> = owner(&u.owner, name, decides).into_iter().collect();
     out.extend(privileges(name, &u.privileges));
     out.extend(u.sequence_privileges.iter().filter_map(|s| privileges(&qualified(&s.schema, &s.name), &s.privileges)));
-    if u.security_labels {
-        out.push(format!("security labels on {name}"));
-    }
+    out.extend(u.security_labels.iter().map(|labeled| format!("security labels on {labeled}")));
     if !u.publications.is_empty() {
         let list: Vec<String> = u.publications.iter().map(|p| ident(p)).collect();
         out.push(format!("membership of {name} in {} {}", if list.len() == 1 { "publication" } else { "publications" }, list.join(", ")));
@@ -775,6 +775,9 @@ pub fn routine(r: &Routine) -> Ddl {
     statements.extend(comment(&target, &r.comment));
     let mut warnings: Vec<String> = owner(&r.owner, &r.signature, r.security_definer.then_some("whose privileges the SECURITY DEFINER function runs with")).into_iter().collect();
     warnings.extend(privileges(&r.signature, &r.privileges));
+    if r.security_labels {
+        warnings.push(format!("security labels on {}", r.signature));
+    }
     Ddl { text: script(statements), warnings }
 }
 
@@ -1312,7 +1315,7 @@ ALTER FOREIGN TABLE public.e2 ALTER COLUMN v OPTIONS (ADD column_name 'vv');
             unscripted: Unscripted {
                 privileges: vec![grant("SELECT", None, "app", Change::Granted), grant("UPDATE", Some("\"Mixed\""), "PUBLIC", Change::GrantedWithGrantOption)],
                 sequence_privileges: vec![SequencePrivileges { schema: "app".into(), name: "child_id_seq".into(), privileges: vec![grant("USAGE", None, "app", Change::Granted)] }],
-                security_labels: true,
+                security_labels: vec!["app.child".into(), "app.child.\"Mixed\"".into(), "app.child_id_seq".into()],
                 ..Default::default()
             },
             ..Default::default()
@@ -1325,6 +1328,8 @@ ALTER FOREIGN TABLE public.e2 ALTER COLUMN v OPTIONS (ADD column_name 'vv');
                 "privileges on app.child (SELECT granted to app, UPDATE (\"Mixed\") granted with grant option to PUBLIC)",
                 "privileges on app.child_id_seq (USAGE granted to app)",
                 "security labels on app.child",
+                "security labels on app.child.\"Mixed\"",
+                "security labels on app.child_id_seq",
                 "the column order of app.child, because a replay puts inherited columns first",
             ]
         );
@@ -1413,6 +1418,8 @@ ALTER FOREIGN TABLE public.e2 ALTER COLUMN v OPTIONS (ADD column_name 'vv');
         );
         let revoked = Routine { privileges: vec![grant("EXECUTE", None, "PUBLIC", Change::Revoked)], signature: "public.p(integer)".into(), ..p.clone() };
         assert_eq!(routine(&revoked).warnings, ["privileges on public.p(integer) (EXECUTE revoked from PUBLIC)"]);
+        let labeled = Routine { security_labels: true, ..revoked };
+        assert_eq!(routine(&labeled).warnings, ["privileges on public.p(integer) (EXECUTE revoked from PUBLIC)", "security labels on public.p(integer)"]);
     }
 
     #[test]
