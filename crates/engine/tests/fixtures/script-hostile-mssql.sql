@@ -201,6 +201,24 @@ INSERT dbo.lob (id) SELECT TOP 5000 ROW_NUMBER() OVER (ORDER BY (SELECT 1)) FROM
 GO
 CREATE STATISTICS st_sampled ON dbo.lob (id) WITH SAMPLE 50 PERCENT, PERSIST_SAMPLE_PERCENT = ON;
 GO
+ALTER TABLE dbo.parted REBUILD PARTITION = 1 WITH (DATA_COMPRESSION = PAGE);
+GO
+CREATE INDEX hx ON dbo.heap_pk (c) WITH STATISTICS_ONLY = -1;
+GO
+CREATE PROCEDURE dbo.as_owner WITH EXECUTE AS OWNER AS SELECT 1
+GO
+CREATE CERTIFICATE cert_hostile ENCRYPTION BY PASSWORD = 'L1Data_cert_Str0ng' WITH SUBJECT = 'hostile';
+GO
+ADD SIGNATURE TO dbo.as_owner BY CERTIFICATE cert_hostile WITH PASSWORD = 'L1Data_cert_Str0ng';
+GO
+CREATE PROCEDURE dbo.np AS SELECT 1
+GO
+CREATE PROCEDURE dbo.np;2 AS SELECT 2
+GO
+EXEC sys.sp_cdc_enable_db;
+GO
+EXEC sys.sp_cdc_enable_table @source_schema = N'dbo', @source_name = N'tree', @role_name = NULL;
+GO
 CREATE TABLE dbo.node_t (id int) AS NODE;
 GO
 CREATE USER app_reader WITHOUT LOGIN;
@@ -210,4 +228,6 @@ DENY DELETE ON [we]]ird s].[Par ent] TO app_reader;
 GRANT UPDATE ([select]) ON [we]]ird s].[Par ent] TO app_reader WITH GRANT OPTION;
 GRANT SELECT ON dbo.v_bound TO public;
 GRANT EXECUTE ON dbo.f_scalar TO app_reader;
+GO
+ALTER AUTHORIZATION ON OBJECT::dbo.refd TO app_reader;
 GO

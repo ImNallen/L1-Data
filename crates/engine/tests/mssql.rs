@@ -1009,7 +1009,7 @@ impl Harness {
                               (SELECT STRING_AGG(CONCAT(c.name,' ',ic.key_ordinal,' ',ic.is_descending_key,' ',ic.is_included_column,' ',ic.column_store_order_ordinal),',') WITHIN GROUP (ORDER BY ic.is_included_column,ic.key_ordinal,ic.index_column_id)
                                FROM sys.index_columns ic JOIN sys.columns c ON c.object_id=ic.object_id AND c.column_id=ic.column_id
                                WHERE ic.object_id=i.object_id AND ic.index_id=i.index_id AND i.index_id>0 AND (ic.key_ordinal>0 OR ic.is_included_column=1 OR ic.partition_ordinal=0)))
-                FROM sys.indexes i LEFT JOIN sys.stats st ON st.object_id=i.object_id AND st.stats_id=i.index_id WHERE i.object_id=o.object_id AND i.type<>3
+                FROM sys.indexes i LEFT JOIN sys.stats st ON st.object_id=i.object_id AND st.stats_id=i.index_id WHERE i.object_id=o.object_id AND i.type<>3 AND i.is_hypothetical=0
                 UNION ALL
                 SELECT CONCAT(N'foreign key ',fk.name,' ',fk.delete_referential_action,' ',fk.update_referential_action,' ',fk.is_disabled,' ',fk.is_not_trusted,' ',fk.is_not_for_replication,' ',
                               (SELECT STRING_AGG(CONCAT(c.name,'>',OBJECT_SCHEMA_NAME(fc.referenced_object_id),'.',OBJECT_NAME(fc.referenced_object_id),'.',rc.name),',') WITHIN GROUP (ORDER BY fc.constraint_column_id)
@@ -1039,7 +1039,7 @@ impl Harness {
                 SELECT CONCAT(N'classification ',COL_NAME(sc.major_id,sc.minor_id),' ',sc.label,' ',sc.label_id,' ',sc.information_type,' ',sc.information_type_id,' ',sc.rank)
                 FROM sys.sensitivity_classifications sc WHERE sc.class=1 AND sc.major_id=o.object_id
              ) f(fact)
-             WHERE o.is_ms_shipped=0 AND o.type IN ('U','V','P','FN','IF','TF','TR','C','F','PK','UQ','D') AND o.name NOT IN ('enc','node_t','enc_trg')
+             WHERE o.is_ms_shipped=0 AND s.name<>'cdc' AND o.type IN ('U','V','P','FN','IF','TF','TR','C','F','PK','UQ','D') AND o.name NOT IN ('enc','node_t','enc_trg')
              ORDER BY 1",
         )
         .await
@@ -1086,12 +1086,18 @@ async fn hostile_object_scripts_replay_every_property_or_warn() {
                 ],
                 "parted" => vec![
                     "partition scheme [ps_hostile] on [dbo].[parted]",
+                    "data compression that differs by partition on [dbo].[parted]",
                     "partition scheme [ps_hostile] for index [IX_parted] on [dbo].[parted]",
                     "STATISTICS_INCREMENTAL for index [IX_parted] on [dbo].[parted]",
                     "partition scheme [ps_hostile] for index [IX_parted_kind] on [dbo].[parted]",
                     "INCREMENTAL for statistics [st_parted] on [dbo].[parted]",
                 ],
                 "lob" => vec!["PERSIST_SAMPLE_PERCENT for statistics [st_sampled] on [dbo].[lob]"],
+                "refd" => vec!["owner [app_reader] of [dbo].[refd], set by ALTER AUTHORIZATION"],
+                "as_owner" => vec!["the owner [dbo] that EXECUTE AS OWNER on [dbo].[as_owner] runs as", "signature by certificate [cert_hostile] on [dbo].[as_owner]"],
+                "np" => vec!["numbered procedure [dbo].[np];2"],
+                "tree" => vec!["change data capture on [dbo].[tree]"],
+                "heap_pk" => vec!["hypothetical index [hx] on [dbo].[heap_pk]"],
                 "temporal_history" => vec!["history table role for [dbo].[temporal] on [dbo].[temporal_history]"],
                 "Par ent" => vec!["privileges on [we]]ird s].[Par ent] (DELETE denied to [app_reader], SELECT granted to [app_reader], UPDATE ([select]) granted with grant option to [app_reader])"],
                 "v_bound" => vec!["privileges on [dbo].[v_bound] (SELECT granted to [public])"],
@@ -1102,7 +1108,7 @@ async fn hostile_object_scripts_replay_every_property_or_warn() {
         let mut tables = vec![];
         let mut modules = vec![];
         let mut scripted = vec![];
-        for schema in &catalog.schemas {
+        for schema in catalog.schemas.iter().filter(|s| s.name != "cdc") {
             for rel in &schema.relations {
                 let result = src.script(&db, ScriptTarget::Relation { oid: rel.oid }).await;
                 if rel.name == "node_t" {
@@ -1134,7 +1140,7 @@ async fn hostile_object_scripts_replay_every_property_or_warn() {
         scripted.sort();
         assert_eq!(
             scripted,
-            ["Par ent", "bare_in", "bare_moved", "bound t", "cci", "f_scalar", "go_in_comment", "heap_pk", "lob", "moved", "newname", "parted", "qi_off", "refd", "refr", "renamed_t", "sparse_set", "temporal", "temporal_history", "tree", "v_bound", "warned"]
+            ["Par ent", "as_owner", "bare_in", "bare_moved", "bound t", "cci", "f_scalar", "go_in_comment", "heap_pk", "lob", "moved", "newname", "np", "parted", "qi_off", "refd", "refr", "renamed_t", "sparse_set", "temporal", "temporal_history", "tree", "v_bound", "warned"]
         );
 
         dst.replay_in_dependency_order(tables).await;
