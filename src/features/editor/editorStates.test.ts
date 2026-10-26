@@ -419,6 +419,29 @@ it("waits for a pause in typing before it sends a large document", async () => {
   }
 });
 
+it.each([
+  ["Postgres", "lab", '"a(b"', '"a(b"()'],
+  ["SqlServer", "a(b", "f", "[a(b].[f](NULL)"],
+] as const)("puts the cursor in a %s call's argument list, past a ( in its name", async (kind, schema, quoted, insertText) => {
+  const catalog = shopCatalog("c1", 1);
+  catalog.databaseKind = kind;
+  const lab = catalog.schemas[0]!;
+  Object.assign(lab, { name: schema, quoted: kind === "Postgres" ? schema : `[${schema}]` });
+  lab.functions = [{ oid: 9, name: kind === "Postgres" ? "a(b" : "f", quoted, insertText, args: "x int", returns: "int", kind: "Function" }];
+  const options = await completionOptions(buildCatalogView(catalog), reply({ kind: "Expression" }, [], { from: 7 }));
+  const call = options.find((o) => o.type === "function" && typeof o.apply === "function" && String(o.label).startsWith(schema))!;
+  const view = new EditorView({ doc: "select ", parent: document.body });
+  try {
+    (call.apply as (v: EditorView, c: typeof call, from: number, to: number) => void)(view, call, 7, 7);
+    const text = view.state.doc.toString();
+    const head = view.state.selection.main.head;
+    expect(text.slice(head - 1, head + 1)).toBe(kind === "Postgres" ? "()" : "(N");
+    expect(text.lastIndexOf("(") + 1).toBe(head);
+  } finally {
+    view.destroy();
+  }
+});
+
 it("keeps one completion request in flight and sends only the newest one that waited", async () => {
   const sent: string[] = [];
   const pending: (() => void)[] = [];

@@ -26,9 +26,13 @@ const JOIN_DETAIL_WAIT_MS = 250;
 const LARGE_DOC_CHARS = 1_000_000;
 const LARGE_DOC_PAUSE_MS = 150;
 
+/**
+ * A call's text ends with its argument list, and the engine's argument templates hold no parentheses, so the list opens at
+ * the last `(`. The first one could sit inside a quoted name such as `"a(b"`.
+ */
 function insertCallWithCursorInside(text: string) {
   return (view: EditorView, _c: Completion, from: number, to: number) => {
-    const open = text.indexOf("(");
+    const open = text.lastIndexOf("(");
     const anchor = open >= 0 && text.endsWith(")") ? from + open + 1 : from + text.length;
     view.dispatch({ changes: { from, to, insert: text }, selection: { anchor }, userEvent: "input.complete" });
   };
