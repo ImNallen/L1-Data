@@ -150,6 +150,14 @@ CREATE TABLE dbo.shapes (id int PRIMARY KEY, shape geometry);
 GO
 CREATE SPATIAL INDEX SIX ON dbo.shapes (shape) WITH (BOUNDING_BOX = (0, 0, 10, 10));
 GO
+ALTER DATABASE CURRENT ADD FILEGROUP l1_fg;
+GO
+DECLARE @add nvarchar(max) = N'ALTER DATABASE CURRENT ADD FILE (NAME = ' + QUOTENAME(DB_NAME() + N'_fg', '''') + N', FILENAME = '
+    + QUOTENAME(N'/var/opt/mssql/data/' + DB_NAME() + N'_fg.ndf', '''') + N') TO FILEGROUP l1_fg';
+EXEC (@add);
+GO
+CREATE TABLE dbo.on_fg (id int NOT NULL, doc nvarchar(max) NULL) ON l1_fg TEXTIMAGE_ON l1_fg;
+GO
 CREATE TABLE dbo.sparse_set (id int PRIMARY KEY, s1 int SPARSE NULL, s2 varchar(10) SPARSE NULL, cs xml COLUMN_SET FOR ALL_SPARSE_COLUMNS);
 GO
 ALTER DATABASE CURRENT SET CHANGE_TRACKING = ON;

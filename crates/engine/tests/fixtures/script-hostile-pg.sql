@@ -229,3 +229,4 @@ INSERT INTO pg_seclabel VALUES
   ('app.labeled_fn()'::regprocedure, 'pg_proc'::regclass, 0, 'dummy', 'classified');
 -- publication membership that comes from the schema
 CREATE PUBLICATION hostile_schema_pub FOR TABLES IN SCHEMA "order";
+CREATE TABLE app.excl (id int, b box, EXCLUDE USING gist (b WITH &&));

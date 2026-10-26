@@ -1079,6 +1079,7 @@ async fn hostile_object_scripts_replay_every_property_or_warn() {
         let warned = |name: &str| -> Vec<&str> {
             match name {
                 "shapes" => vec!["spatial index [SIX] on [dbo].[shapes]"],
+                "on_fg" => vec!["filegroup [l1_fg] for large values on [dbo].[on_fg]", "filegroup [l1_fg] on [dbo].[on_fg]"],
                 "warned" => vec![
                     "ANSI_PADDING OFF on [dbo].[warned].[pad]",
                     "XML index [IX x] on [dbo].[warned]",
@@ -1142,7 +1143,7 @@ async fn hostile_object_scripts_replay_every_property_or_warn() {
         scripted.sort();
         assert_eq!(
             scripted,
-            ["Par ent", "as_owner", "bare_in", "bare_moved", "bound t", "cci", "f_scalar", "go_in_comment", "heap_pk", "ledgerish", "lob", "moved", "newname", "np", "parted", "qi_off", "refd", "refr", "renamed_t", "shapes", "sparse_set", "temporal", "temporal_history", "tree", "v_bound", "warned"]
+            ["Par ent", "as_owner", "bare_in", "bare_moved", "bound t", "cci", "f_scalar", "go_in_comment", "heap_pk", "ledgerish", "lob", "moved", "newname", "np", "on_fg", "parted", "qi_off", "refd", "refr", "renamed_t", "shapes", "sparse_set", "temporal", "temporal_history", "tree", "v_bound", "warned"]
         );
 
         dst.replay_in_dependency_order(tables).await;
