@@ -214,6 +214,8 @@ struct Frame {
     merge: bool,
     /// The FROM items are a `DELETE`'s target, which T-SQL cannot alias there.
     delete_target: bool,
+    /// A T-SQL `DELETE` named its target before `FROM`, as in `DELETE o FROM orders o`, so the FROM items take aliases.
+    delete_named: bool,
     /// A `USING` or `NATURAL` join merges columns, so a `*` lists them in an order the reply cannot say. An unnamed
     /// column in front of the `*` keeps a column alias list from renaming by position.
     merged_join: bool,
@@ -245,6 +247,7 @@ impl Frame {
             joined: None,
             merge: false,
             delete_target: false,
+            delete_named: false,
             merged_join: false,
             select_into: false,
         }
@@ -435,6 +438,7 @@ impl<'a> Walk<'a> {
                 f.clause = Clause::Relation { role, slot: Slot::Aliased };
             }
             (Clause::Cte, Class::Word) if self.is_word(i, "RECURSIVE") => self.top().recursive = true,
+            (Clause::Next(&["FROM"]), Class::Word | Class::Name) => self.top().delete_named = true,
             (Clause::Cte, Class::Word | Class::Name) if !self.word(i).is_some_and(|w| ["AS", "NOT", "MATERIALIZED"].contains(&w.as_str())) => {
                 let written = self.text[self.sig[i].span.clone()].to_owned();
                 let key = fold(self.kind, self.text, self.sig[i]);
@@ -461,7 +465,8 @@ impl<'a> Walk<'a> {
             _ if clause == Clause::Select && prev.as_deref() == Some("AS") => return None,
             "FROM" if prev.as_deref() == Some("DISTINCT") => return Some(i + 1),
             "FROM" => {
-                self.top().delete_target = clause == Clause::Next(&["FROM"]) && prev.as_deref() == Some("DELETE");
+                let f = self.top();
+                f.delete_target = clause == Clause::Next(&["FROM"]) && !f.delete_named;
                 Clause::Relation { role: Role::From, slot: Slot::Expect }
             }
             "JOIN" | "APPLY" => Clause::Relation { role: Role::Join, slot: Slot::Expect },
@@ -515,7 +520,14 @@ impl<'a> Walk<'a> {
                 self.top().merge = true;
                 if self.is_word(i + 1, "INTO") { Clause::Next(&["INTO"]) } else { Clause::Relation { role: Role::Into, slot: Slot::Expect } }
             }
-            "DELETE" => Clause::Next(&["FROM"]),
+            "DELETE" => {
+                self.top().delete_named = false;
+                Clause::Next(&["FROM"])
+            }
+            "TOP" if matches!(clause, Clause::Relation { role: Role::Update, slot: Slot::Expect } | Clause::Next(&["FROM"])) && next_opens => {
+                let close = self.matching_close(i + 1);
+                return Some(if self.is_word(close + 1, "PERCENT") { close + 2 } else { close + 1 });
+            }
             "WITH" if clause == Clause::Start => Clause::Cte,
             "WITH" if named && self.is_word(i + 1, "ORDINALITY") => return Some(i + 2),
             "WITH" if matches!(clause, Clause::Relation { role: Role::Into, .. }) && !next_opens => {
@@ -998,7 +1010,10 @@ impl<'a> Walk<'a> {
                 ctes.push(c.written);
             }
         }
-        let qualifier = (!self.parts.is_empty()).then(|| self.qualifier(&rels));
+        let (relations, qualifier) = match self.output_tables(snap) {
+            Some(tables) => self.output_scope(tables),
+            None => (relations, (!self.parts.is_empty()).then(|| self.qualifier(&rels))),
+        };
         let frame = &self.frames[snap.frame];
         let (mut expect, mut keywords) = if frame.query { self.expect(snap, frame) } else { self.expect_in_group(snap, frame) };
         if let (Expect::JoinCondition { target }, Clause::On { tree_start, .. }) = (&mut expect, snap.clause) {
@@ -1018,6 +1033,42 @@ impl<'a> Walk<'a> {
         let mut seen = std::collections::HashSet::new();
         keywords.retain(|k| seen.insert(*k));
         Scope { from_byte: self.from, expect, qualifier, relations, ctes, keywords, functions }
+    }
+
+    /// In a T-SQL `OUTPUT`, the pseudo-tables it may name, `inserted` and `deleted`, with the table they mirror.
+    fn output_tables(&self, snap: &Snapshot) -> Option<Vec<(&'static str, RelationSource)>> {
+        let here = &self.frames[snap.frame];
+        let (id, clause) = if here.query { (snap.frame, snap.clause) } else { (here.parent?, here.outer) };
+        if self.kind != DatabaseKind::SqlServer || clause != Clause::Returning {
+            return None;
+        }
+        let f = &self.frames[id];
+        let target = f.rels.iter().find(|r| matches!(r.role, Role::Into | Role::Update) || r.role == Role::From && f.delete_target);
+        let source = target.map(|t| {
+            let stands_for = f.rels.iter().find(|o| t.role == Role::Update && o.role != Role::Update && o.folded.is_some() && o.folded == t.folded);
+            stands_for.unwrap_or(t).source.clone()
+        });
+        let names: &[&'static str] = match target.map(|t| t.role) {
+            Some(Role::Into) if !f.merge => &["inserted"],
+            Some(Role::From) => &["deleted"],
+            _ => &["inserted", "deleted"],
+        };
+        let empty = RelationSource::Derived { columns: Vec::new(), star: Vec::new() };
+        Some(names.iter().map(|&n| (n, source.clone().unwrap_or_else(|| empty.clone()))).collect())
+    }
+
+    /// `inserted.` and `deleted.` list the target's columns; elsewhere `OUTPUT` offers the two names and no bare column.
+    fn output_scope(&self, tables: Vec<(&'static str, RelationSource)>) -> (Vec<ScopeRelation>, Option<Qualifier>) {
+        let empty = RelationSource::Derived { columns: Vec::new(), star: Vec::new() };
+        let relation = |name: &str, source: RelationSource| ScopeRelation { reference: Some(name.to_owned()), source, column_aliases: Vec::new() };
+        match self.parts.as_slice() {
+            [] => (tables.iter().map(|(n, _)| relation(n, empty.clone())).collect(), None),
+            [one] => match tables.into_iter().find(|(n, _)| n.eq_ignore_ascii_case(one)) {
+                Some((n, source)) => (vec![relation(n, source)], Some(Qualifier::Relation { index: 0 })),
+                None => (Vec::new(), Some(Qualifier::Name { parts: self.parts.clone() })),
+            },
+            _ => (Vec::new(), Some(Qualifier::Name { parts: self.parts.clone() })),
+        }
     }
 
     /// A relation the statement names that the cursor's clause cannot refer to: an `INSERT`, `SELECT INTO`, or
@@ -1904,6 +1955,31 @@ mod tests {
         let s = pg("with x as (select ::int y from orders) select * from x where |");
         assert_eq!(refs(&s), [(Some("x"), &RelationSource::Derived { columns: vec![], star: vec![] })]);
         assert!(at(Postgres, "select ::int x from orders where |").is_some());
+    }
+
+    #[test]
+    fn a_tsql_top_before_the_bare_target_keeps_it_unaliased() {
+        for s in [ms("DELETE TOP (1) FROM orders wh|"), ms("DELETE TOP (1) PERCENT FROM orders wh|"), ms("UPDATE TOP (1) orders se|"), ms("UPDATE TOP (10) PERCENT orders se|")] {
+            assert_eq!(s.expect, Expect::Keyword);
+        }
+        assert_eq!(ms("UPDATE TOP (1) orders se|").keywords, ["SET"]);
+        assert_eq!(refs(&ms("UPDATE TOP (1) orders SET total = 0 WHERE |")), [(Some("orders"), &table(None, "orders"))]);
+        assert_eq!(ms("DELETE TOP (1) o FROM orders o|").expect, Expect::Alias);
+    }
+
+    #[test]
+    fn a_tsql_output_offers_only_inserted_and_deleted() {
+        let names = |s: &Scope| s.relations.iter().map(|r| r.reference.clone().unwrap_or_default()).collect::<Vec<_>>();
+        let s = ms("INSERT INTO tickets (code) OUTPUT | VALUES ('x')");
+        assert_eq!((names(&s), &s.relations[0].source), (vec!["inserted".to_owned()], &RelationSource::Derived { columns: vec![], star: vec![] }));
+        let s = ms("INSERT INTO tickets (code) OUTPUT inserted.| VALUES ('x')");
+        assert_eq!((refs(&s), s.qualifier.clone()), (vec![(Some("inserted"), &table(None, "tickets"))], Some(Qualifier::Relation { index: 0 })));
+        assert_eq!(names(&ms("DELETE FROM tickets OUTPUT | WHERE id = 1")), ["deleted"]);
+        assert_eq!(names(&ms("UPDATE tickets SET code = 'y' OUTPUT |")), ["inserted", "deleted"]);
+        let s = ms("UPDATE t SET code = 'y' OUTPUT deleted.| FROM tickets t");
+        assert_eq!(refs(&s), [(Some("deleted"), &table(None, "tickets"))]);
+        assert!(ms("INSERT INTO tickets (code) OUTPUT tickets.| VALUES ('x')").relations.is_empty());
+        assert_eq!(refs(&pg("insert into orders (id) values (1) returning |")), [(Some("orders"), &table(None, "orders"))]);
     }
 
     #[test]
