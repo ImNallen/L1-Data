@@ -491,13 +491,15 @@ fn after_attached_names(t: &Table, out: &mut Vec<String>) {
 }
 
 /// Runs in tree order, so a partition's index has its name back before its own partitions' indexes
-/// look it up by that name.
+/// look it up by that name. An index that already holds a wanted name is one whose own entry comes
+/// later, because source names are unique, so it moves aside under a name made from its OID.
 fn restore_attached_names(attached: &[(String, &AttachedIndex)]) -> String {
     let entries: Vec<String> = attached.iter().map(|(table, a)| format!("[{}, {}, {}]", quote_literal(table), quote_literal(&a.parent), quote_literal(&a.name))).collect();
     let body = format!(
         "DECLARE
     entry text[];
     attached regclass;
+    occupant regclass;
 BEGIN
     FOREACH entry SLICE 1 IN ARRAY ARRAY[
         {}
@@ -505,6 +507,11 @@ BEGIN
         attached := (SELECT h.inhrelid FROM pg_catalog.pg_inherits h JOIN pg_catalog.pg_index i ON i.indexrelid = h.inhrelid
                      WHERE h.inhparent = entry[2]::regclass AND i.indrelid = entry[1]::regclass);
         IF (SELECT c.relname FROM pg_catalog.pg_class c WHERE c.oid = attached) <> entry[3] THEN
+            occupant := (SELECT c.oid FROM pg_catalog.pg_class c WHERE c.relname = entry[3] AND c.relkind IN ('i', 'I')
+                         AND c.relnamespace = (SELECT a.relnamespace FROM pg_catalog.pg_class a WHERE a.oid = attached));
+            IF occupant IS NOT NULL THEN
+                EXECUTE format('ALTER INDEX %s RENAME TO %I', occupant, 'l1_' || occupant::oid);
+            END IF;
             EXECUTE format('ALTER INDEX %s RENAME TO %I', attached, entry[3]);
         END IF;
     END LOOP;
@@ -1079,6 +1086,7 @@ DO $l1$
 DECLARE
     entry text[];
     attached regclass;
+    occupant regclass;
 BEGIN
     FOREACH entry SLICE 1 IN ARRAY ARRAY[
         ['app.ri_1', 'app.ri_id_k', 'ri_1_custom'],
@@ -1088,6 +1096,11 @@ BEGIN
         attached := (SELECT h.inhrelid FROM pg_catalog.pg_inherits h JOIN pg_catalog.pg_index i ON i.indexrelid = h.inhrelid
                      WHERE h.inhparent = entry[2]::regclass AND i.indrelid = entry[1]::regclass);
         IF (SELECT c.relname FROM pg_catalog.pg_class c WHERE c.oid = attached) <> entry[3] THEN
+            occupant := (SELECT c.oid FROM pg_catalog.pg_class c WHERE c.relname = entry[3] AND c.relkind IN ('i', 'I')
+                         AND c.relnamespace = (SELECT a.relnamespace FROM pg_catalog.pg_class a WHERE a.oid = attached));
+            IF occupant IS NOT NULL THEN
+                EXECUTE format('ALTER INDEX %s RENAME TO %I', occupant, 'l1_' || occupant::oid);
+            END IF;
             EXECUTE format('ALTER INDEX %s RENAME TO %I', attached, entry[3]);
         END IF;
     END LOOP;

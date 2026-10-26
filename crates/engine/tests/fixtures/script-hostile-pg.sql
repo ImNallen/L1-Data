@@ -200,3 +200,7 @@ CREATE TABLE app.deep_1 PARTITION OF app.deep FOR VALUES IN (1) PARTITION BY LIS
 CREATE TABLE app.deep_1_1 PARTITION OF app.deep_1 FOR VALUES IN (1);
 ALTER INDEX app.deep_1_id_idx RENAME TO "deep mid";
 ALTER INDEX app.deep_1_1_id_idx RENAME TO "deep leaf";
+CREATE INDEX ri_k ON app.ri (k);
+ALTER INDEX app.ri_2_k_idx RENAME TO ri_2_swap;
+ALTER INDEX app.ri_2_id_k_idx RENAME TO ri_2_k_idx;
+ALTER INDEX app.ri_2_swap RENAME TO ri_2_id_k_idx;

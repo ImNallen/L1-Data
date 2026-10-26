@@ -2755,6 +2755,7 @@ DO $l1$
 DECLARE
     entry text[];
     attached regclass;
+    occupant regclass;
 BEGIN
     FOREACH entry SLICE 1 IN ARRAY ARRAY[
         ['public.order_events_2026_h1', 'public.order_events_kind_idx', 'order_events_2026_h1_kind_idx'],
@@ -2763,6 +2764,11 @@ BEGIN
         attached := (SELECT h.inhrelid FROM pg_catalog.pg_inherits h JOIN pg_catalog.pg_index i ON i.indexrelid = h.inhrelid
                      WHERE h.inhparent = entry[2]::regclass AND i.indrelid = entry[1]::regclass);
         IF (SELECT c.relname FROM pg_catalog.pg_class c WHERE c.oid = attached) <> entry[3] THEN
+            occupant := (SELECT c.oid FROM pg_catalog.pg_class c WHERE c.relname = entry[3] AND c.relkind IN ('i', 'I')
+                         AND c.relnamespace = (SELECT a.relnamespace FROM pg_catalog.pg_class a WHERE a.oid = attached));
+            IF occupant IS NOT NULL THEN
+                EXECUTE format('ALTER INDEX %s RENAME TO %I', occupant, 'l1_' || occupant::oid);
+            END IF;
             EXECUTE format('ALTER INDEX %s RENAME TO %I', attached, entry[3]);
         END IF;
     END LOOP;
