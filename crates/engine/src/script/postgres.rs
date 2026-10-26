@@ -37,6 +37,19 @@ pub struct Unscripted {
     pub sequence_privileges: Vec<SequencePrivileges>,
     pub security_labels: bool,
     pub publications: Vec<String>,
+    pub owner: Owner,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Owner {
+    pub name: String,
+    pub connecting_role: bool,
+}
+
+impl Default for Owner {
+    fn default() -> Owner {
+        Owner { name: String::new(), connecting_role: true }
+    }
 }
 
 /// What a sequence the table owns carries that creating it does not give it.
@@ -244,6 +257,8 @@ pub struct Routine {
     pub signature: String,
     pub comment: Option<String>,
     pub privileges: Vec<Privilege>,
+    pub owner: Owner,
+    pub security_definer: bool,
     pub extensions: Vec<String>,
 }
 
@@ -376,7 +391,7 @@ fn table_statements(t: &Table, out: &mut Vec<String>, warnings: &mut Vec<String>
     for s in &t.sequence_states {
         out.extend(comment(&format!("SEQUENCE {}", qualified(&s.schema, &s.name)), &s.comment));
     }
-    warnings.extend(unscripted(&t.unscripted, &name));
+    warnings.extend(unscripted(&t.unscripted, &name, None));
     let inherits = !matches!(t.parent, Parent::Partition { .. });
     for c in t.columns.iter().filter(|c| inherits && !c.declared && generation_override(c).is_some()) {
         warnings.push(format!("the generation expression of {name}.{}, which a replay takes from its parent", ident(&c.name)));
@@ -394,8 +409,10 @@ fn in_replay_order(columns: &[Column]) -> bool {
     positions.windows(2).all(|w| w[0] <= w[1])
 }
 
-fn unscripted(u: &Unscripted, name: &str) -> Vec<String> {
-    let mut out: Vec<String> = privileges(name, &u.privileges).into_iter().collect();
+/// `decides` says why the owner matters even when it is the connecting role.
+fn unscripted(u: &Unscripted, name: &str, decides: Option<&str>) -> Vec<String> {
+    let mut out: Vec<String> = owner(&u.owner, name, decides).into_iter().collect();
+    out.extend(privileges(name, &u.privileges));
     out.extend(u.sequence_privileges.iter().filter_map(|s| privileges(&qualified(&s.schema, &s.name), &s.privileges)));
     if u.security_labels {
         out.push(format!("security labels on {name}"));
@@ -405,6 +422,13 @@ fn unscripted(u: &Unscripted, name: &str) -> Vec<String> {
         out.push(format!("membership of {name} in {} {}", if list.len() == 1 { "publication" } else { "publications" }, list.join(", ")));
     }
     out
+}
+
+fn owner(o: &Owner, object: &str, decides: Option<&str>) -> Option<String> {
+    match decides {
+        Some(why) => Some(format!("owner {} of {object}, {why}", ident(&o.name))),
+        None => (!o.connecting_role).then(|| format!("owner {} of {object}", ident(&o.name))),
+    }
 }
 
 /// The index parameters go before an exclusion constraint's `WHERE` and before `DEFERRABLE`.
@@ -657,7 +681,8 @@ pub fn view(v: &View) -> Ddl {
     for c in &v.columns {
         statements.extend(column_changes(c, keyword, &name, false, false));
     }
-    let mut warnings = unscripted(&v.unscripted, &name);
+    let decides = if v.materialized { "whose privileges a refresh runs the query with" } else { "whose privileges the view's query is checked against" };
+    let mut warnings = unscripted(&v.unscripted, &name, Some(decides));
     indexes(&v.indexes, keyword, &v.schema, &name, &mut statements, &mut warnings);
     for tr in &v.triggers {
         statements.extend(trigger(tr, keyword, &name));
@@ -677,7 +702,9 @@ pub fn routine(r: &Routine) -> Ddl {
     let mut statements = vec![r.definition.trim_end().to_owned()];
     statements.extend(r.extensions.iter().map(|e| format!("ALTER {target} DEPENDS ON EXTENSION {}", ident(e))));
     statements.extend(comment(&target, &r.comment));
-    Ddl { text: script(statements), warnings: privileges(&r.signature, &r.privileges).into_iter().collect() }
+    let mut warnings: Vec<String> = owner(&r.owner, &r.signature, r.security_definer.then_some("whose privileges the SECURITY DEFINER function runs with")).into_iter().collect();
+    warnings.extend(privileges(&r.signature, &r.privileges));
+    Ddl { text: script(statements), warnings }
 }
 
 pub fn index_script(i: &Index, constraint: Option<&Constraint>, keyword: &str, schema: &str, relation: &str) -> Ddl {
@@ -1149,14 +1176,14 @@ ALTER FOREIGN TABLE public.e2 ALTER COLUMN v OPTIONS (ADD column_name 'vv');
             comment: Some("paid only".into()),
             columns: vec![Column { default: Some("42".into()), comment: Some("the id".into()), ..col("id", "integer") }],
             rules: vec![Rule { name: "ins".into(), definition: "CREATE RULE ins AS\n    ON INSERT TO public.paid DO INSTEAD NOTHING;".into(), enabled: 'O', comment: None }],
-            unscripted: Unscripted { privileges: vec![grant("SELECT", None, "PUBLIC", Change::Revoked)], ..Default::default() },
+            unscripted: Unscripted { privileges: vec![grant("SELECT", None, "PUBLIC", Change::Revoked)], owner: Owner { name: "app".into(), connecting_role: true }, ..Default::default() },
             ..Default::default()
         };
         assert_eq!(
             view(&v),
             Ddl {
                 text: "CREATE VIEW public.paid WITH (security_barrier=true) AS\n SELECT orders.id\n   FROM public.orders\n  WITH CASCADED CHECK OPTION;\n\nALTER VIEW public.paid ALTER COLUMN id SET DEFAULT 42;\n\nCREATE RULE ins AS\n    ON INSERT TO public.paid DO INSTEAD NOTHING;\n\nCOMMENT ON VIEW public.paid IS 'paid only';\n\nCOMMENT ON COLUMN public.paid.id IS 'the id';\n".into(),
-                warnings: vec!["privileges on public.paid (SELECT revoked from PUBLIC)".into()],
+                warnings: vec!["owner app of public.paid, whose privileges the view's query is checked against".into(), "privileges on public.paid (SELECT revoked from PUBLIC)".into()],
             }
         );
         let m = View {
@@ -1168,6 +1195,8 @@ ALTER FOREIGN TABLE public.e2 ALTER COLUMN v OPTIONS (ADD column_name 'vv');
             indexes: vec![Index { name: "m_day".into(), definition: Some("CREATE UNIQUE INDEX m_day ON public.m USING btree (day)".into()), clustered: true, ..Default::default() }],
             ..Default::default()
         };
+        let owned = View { unscripted: Unscripted { owner: Owner { name: "Bob".into(), connecting_role: false }, ..Default::default() }, ..m.clone() };
+        assert_eq!(view(&owned).warnings, ["owner \"Bob\" of public.m, whose privileges a refresh runs the query with"]);
         assert_eq!(
             view(&m).text,
             "CREATE MATERIALIZED VIEW public.m AS\n SELECT 1 AS day\nWITH NO DATA;\n\nALTER MATERIALIZED VIEW public.m ALTER COLUMN day SET STATISTICS 200;\n\nCREATE UNIQUE INDEX m_day ON public.m USING btree (day);\n\nALTER MATERIALIZED VIEW public.m CLUSTER ON m_day;\n"
@@ -1192,6 +1221,29 @@ ALTER FOREIGN TABLE public.e2 ALTER COLUMN v OPTIONS (ADD column_name 'vv');
         );
         let revoked = Routine { privileges: vec![grant("EXECUTE", None, "PUBLIC", Change::Revoked)], signature: "public.p(integer)".into(), ..p.clone() };
         assert_eq!(routine(&revoked).warnings, ["privileges on public.p(integer) (EXECUTE revoked from PUBLIC)"]);
+    }
+
+    #[test]
+    fn a_routine_warns_about_an_owner_other_than_the_connecting_role_and_always_for_security_definer() {
+        let f = |owner: &str, connecting_role: bool, security_definer: bool| {
+            routine(&Routine { definition: "CREATE FUNCTION app.f() ...".into(), signature: "app.f()".into(), owner: Owner { name: owner.into(), connecting_role }, security_definer, ..Default::default() }).warnings
+        };
+        assert!(f("me", true, false).is_empty());
+        assert_eq!(f("Bob", false, false), ["owner \"Bob\" of app.f()"]);
+        assert_eq!(f("me", true, true), ["owner me of app.f(), whose privileges the SECURITY DEFINER function runs with"]);
+    }
+
+    #[test]
+    fn a_table_warns_about_an_owner_other_than_the_connecting_role_on_itself_and_each_partition() {
+        let leaf = Table {
+            schema: "app".into(),
+            name: "p_1".into(),
+            parent: Parent::Partition { schema: "app".into(), name: "p".into(), bound: "FOR VALUES IN (1)".into() },
+            unscripted: Unscripted { owner: Owner { name: "bob".into(), connecting_role: false }, ..Default::default() },
+            ..Default::default()
+        };
+        let t = Table { schema: "app".into(), name: "p".into(), columns: vec![col("k", "integer")], partition_key: Some("LIST (k)".into()), partitions: vec![leaf], ..Default::default() };
+        assert_eq!(table(&t).warnings, ["owner bob of app.p_1"]);
     }
 
     #[test]

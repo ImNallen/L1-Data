@@ -188,6 +188,8 @@ COMMENT ON CONSTRAINT base_pos ON app.twice IS 'inherited check';
 CREATE TABLE app.fkp (id int, k int, ref int REFERENCES app.refd) PARTITION BY LIST (k);
 CREATE TABLE app.fkp_1 PARTITION OF app.fkp FOR VALUES IN (1);
 COMMENT ON CONSTRAINT fkp_ref_fkey ON app.fkp_1 IS 'cloned foreign key';
--- a routine that depends on an extension
+-- a routine that depends on an extension, and owners other than the connecting role
 CREATE FUNCTION app.ext_dep() RETURNS int LANGUAGE sql AS 'SELECT 1';
 ALTER FUNCTION app.ext_dep() DEPENDS ON EXTENSION plpgsql;
+ALTER FUNCTION app.f_out(int) OWNER TO pg_database_owner;
+ALTER TABLE app.ri_2 OWNER TO pg_database_owner;

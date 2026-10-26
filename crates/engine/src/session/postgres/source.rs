@@ -25,7 +25,7 @@ const RELATIONS: &str = "WITH RECURSIVE tree(oid) AS (
               WHERE h.inhrelid = c.oid AND NOT c.relispartition ORDER BY h.inhseqno),
         CASE WHEN c.reloftype <> 0 THEN format_type(c.reloftype, NULL) END,
         ARRAY(SELECT p.pubname::text FROM pg_publication_rel pr JOIN pg_publication p ON p.oid = pr.prpubid WHERE pr.prrelid = c.oid ORDER BY 1),
-        i.inhparent, c.oid
+        pg_get_userbyid(c.relowner)::text, i.inhparent, c.oid
      FROM tree JOIN pg_class c ON c.oid = tree.oid JOIN pg_namespace n ON n.oid = c.relnamespace
      LEFT JOIN pg_inherits i ON i.inhrelid = c.oid AND c.relispartition
      LEFT JOIN pg_class p ON p.oid = i.inhparent LEFT JOIN pg_namespace pn ON pn.oid = p.relnamespace
@@ -166,7 +166,7 @@ const POLICIES: &str = "SELECT p.polname, p.polpermissive, p.polcmd::text,
      FROM pg_policy p WHERE p.polrelid = ANY ($1) ORDER BY p.polname";
 
 const ROUTINE: &str = "SELECT p.prokind::text, p.proname, CASE WHEN p.prokind <> 'a' THEN pg_get_functiondef(p.oid) END,
-        obj_description(p.oid, 'pg_proc'), n.nspname, pg_get_function_identity_arguments(p.oid),
+        obj_description(p.oid, 'pg_proc'), n.nspname, pg_get_function_identity_arguments(p.oid), pg_get_userbyid(p.proowner)::text, p.prosecdef,
         ARRAY(SELECT e.extname::text FROM pg_depend d JOIN pg_extension e ON e.oid = d.refobjid
               WHERE d.classid = 'pg_proc'::regclass AND d.objid = p.oid AND d.refclassid = 'pg_extension'::regclass AND d.deptype = 'x' ORDER BY 1)
      FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace WHERE p.oid = $1";
@@ -220,8 +220,12 @@ fn grant_row(r: &Row) -> Privilege {
     Privilege { name: r.get(3), column: r.get::<_, Option<&str>>(2).map(ident), grantee: r.get::<_, Option<&str>>(4).map_or("PUBLIC".into(), ident), change }
 }
 
-fn unscripted(r: &Row, grants: &[Row]) -> ddl::Unscripted {
-    let mut u = ddl::Unscripted { security_labels: r.get(16), publications: r.get(22), ..Default::default() };
+fn owner(name: String, role: &str) -> ddl::Owner {
+    ddl::Owner { connecting_role: name == role, name }
+}
+
+fn unscripted(r: &Row, grants: &[Row], role: &str) -> ddl::Unscripted {
+    let mut u = ddl::Unscripted { security_labels: r.get(16), publications: r.get(22), owner: owner(r.get(23), role), ..Default::default() };
     for g in grants {
         match (g.get::<_, Option<String>>(0), g.get::<_, Option<String>>(1)) {
             (Some(schema), Some(name)) => match u.sequence_privileges.last_mut() {
@@ -238,11 +242,11 @@ fn unscripted(r: &Row, grants: &[Row]) -> ddl::Unscripted {
 /// expression or a view, index, constraint, or trigger definition. Routine bodies stay as written.
 pub async fn load(client: &mut Client, target: &ScriptTarget) -> Result<ObjectScript, DetailError> {
     let tx = client.build_transaction().read_only(true).start().await.map_err(failed)?;
-    let version: i32 = tx.query_one("SELECT current_setting('server_version_num')::int4, set_config('search_path', 'pg_catalog', true)", &[]).await.map_err(failed)?.get(0);
-    let queries = Queries::for_version(version);
+    let session = tx.query_one("SELECT current_setting('server_version_num')::int4, current_user::text, set_config('search_path', 'pg_catalog', true)", &[]).await.map_err(failed)?;
+    let (queries, role) = (Queries::for_version(session.get(0)), session.get::<_, String>(1));
     let script = match target {
-        ScriptTarget::Relation { oid } => relation(&tx, &queries, *oid).await,
-        ScriptTarget::Routine { oid } => routine(&tx, *oid).await,
+        ScriptTarget::Relation { oid } => relation(&tx, &queries, &role, *oid).await,
+        ScriptTarget::Routine { oid } => routine(&tx, &role, *oid).await,
         ScriptTarget::Index { relation_oid, name } => index(&tx, *relation_oid, name).await,
         ScriptTarget::Trigger { relation_oid, name } => trigger(&tx, *relation_oid, name).await,
     };
@@ -258,12 +262,12 @@ fn refused(message: &str) -> DetailError {
     DetailError::Failed { message: message.into() }
 }
 
-async fn relation(tx: &Transaction<'_>, queries: &Queries, oid: u32) -> Result<ObjectScript, DetailError> {
+async fn relation(tx: &Transaction<'_>, queries: &Queries, role: &str, oid: u32) -> Result<ObjectScript, DetailError> {
     let relations = tx.query(RELATIONS, &[&oid]).await.map_err(failed)?;
     let r = relations.iter().find(|r| relid(r) == oid).ok_or(DetailError::Gone)?;
     let name: String = r.get(2);
     let ddl = match r.get::<_, &str>(0) {
-        "r" | "p" | "f" => ddl::table(&table(oid, &Tree::load(tx, queries, &relations).await?)?),
+        "r" | "p" | "f" => ddl::table(&table(oid, &Tree::load(tx, queries, role, &relations).await?)?),
         kind @ ("v" | "m") => {
             let oids = vec![oid];
             let params: &[&(dyn ToSql + Sync)] = &[&oids];
@@ -291,7 +295,7 @@ async fn relation(tx: &Transaction<'_>, queries: &Queries, oid: u32) -> Result<O
                 indexes: indexes.iter().map(index_row).collect(),
                 triggers: triggers.iter().map(cloned_trigger_row).collect(),
                 rules: rules.iter().map(rule_row).collect(),
-                unscripted: unscripted(r, &grants),
+                unscripted: unscripted(r, &grants, role),
             })
         }
         _ => return Err(refused("Only tables and views can be scripted.")),
@@ -306,6 +310,7 @@ fn relid(r: &Row) -> u32 {
 
 /// A table's rows and its partitions', each read once for the whole tree.
 struct Tree<'a> {
+    role: &'a str,
     relations: &'a [Row],
     sequence_states: Rows,
     columns: Rows,
@@ -338,7 +343,7 @@ impl Rows {
 }
 
 impl<'a> Tree<'a> {
-    async fn load(tx: &Transaction<'_>, queries: &Queries, relations: &'a [Row]) -> Result<Tree<'a>, DetailError> {
+    async fn load(tx: &Transaction<'_>, queries: &Queries, role: &'a str, relations: &'a [Row]) -> Result<Tree<'a>, DetailError> {
         let oids: Vec<u32> = relations.iter().map(relid).collect();
         let params: &[&(dyn ToSql + Sync)] = &[&oids];
         let grants = relation_grants_query();
@@ -357,6 +362,7 @@ impl<'a> Tree<'a> {
         )
         .map_err(failed)?;
         Ok(Tree {
+            role,
             relations,
             sequence_states: Rows::new(sequence_states),
             columns: Rows::new(columns),
@@ -374,7 +380,7 @@ impl<'a> Tree<'a> {
 
     /// The partitions directly under `oid`, the default partition last.
     fn partitions(&self, oid: u32) -> Vec<u32> {
-        let mut children: Vec<&Row> = self.relations.iter().filter(|r| r.get::<_, Option<u32>>(23) == Some(oid)).collect();
+        let mut children: Vec<&Row> = self.relations.iter().filter(|r| r.get::<_, Option<u32>>(24) == Some(oid)).collect();
         children.sort_by_key(|r| (r.get::<_, Option<&str>>(7) == Some("DEFAULT"), r.get::<_, &str>(2)));
         children.into_iter().map(relid).collect()
     }
@@ -439,7 +445,7 @@ fn table(oid: u32, tree: &Tree) -> Result<ddl::Table, DetailError> {
             .map(|p| ddl::Policy { name: p.get(0), permissive: p.get(1), command: first(p.get(2)), roles: p.get(3), using: p.get(4), check: p.get(5), comment: p.get(6) })
             .collect(),
         statistics: statistics.iter().map(|s| ddl::Statistics { schema: s.get(0), name: s.get(1), definition: s.get(2), target: s.get(3), comment: s.get(4) }).collect(),
-        unscripted: unscripted(r, grants),
+        unscripted: unscripted(r, grants, tree.role),
         schema,
     })
 }
@@ -549,7 +555,7 @@ fn keyword(relkind: &str) -> &'static str {
     }
 }
 
-async fn routine(tx: &Transaction<'_>, oid: u32) -> Result<ObjectScript, DetailError> {
+async fn routine(tx: &Transaction<'_>, role: &str, oid: u32) -> Result<ObjectScript, DetailError> {
     let grants = routine_grants_query();
     let params: &[&(dyn ToSql + Sync)] = &[&oid];
     let (r, grants) = tokio::try_join!(tx.query_opt(ROUTINE, params), tx.query(&grants, params)).map_err(failed)?;
@@ -566,7 +572,9 @@ async fn routine(tx: &Transaction<'_>, oid: u32) -> Result<ObjectScript, DetailE
         signature,
         comment: r.get(3),
         privileges: grants.iter().map(grant_row).collect(),
-        extensions: r.get(6),
+        owner: owner(r.get(6), role),
+        security_definer: r.get(7),
+        extensions: r.get(8),
     };
     Ok(script::object_script(&name, ddl::routine(&routine)))
 }

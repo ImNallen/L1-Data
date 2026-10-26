@@ -2833,7 +2833,19 @@ async fn hostile_object_scripts_replay_every_property_or_warn() {
             }
             texts.push(s.text);
         }
-        assert_eq!(warned, std::collections::BTreeMap::from([("sec_def.sql".to_owned(), vec!["privileges on app.sec_def(integer) (EXECUTE revoked from PUBLIC)".to_owned()])]));
+        assert_eq!(
+            warned,
+            std::collections::BTreeMap::from([
+                ("f_out.sql".to_owned(), vec!["owner pg_database_owner of app.f_out(a integer, OUT b integer, OUT c integer)".to_owned()]),
+                (
+                    "sec_def.sql".to_owned(),
+                    vec![
+                        "owner l1data of app.sec_def(integer), whose privileges the SECURITY DEFINER function runs with".to_owned(),
+                        "privileges on app.sec_def(integer) (EXECUTE revoked from PUBLIC)".to_owned()
+                    ]
+                ),
+            ])
+        );
         replay_in_dependency_order(&replay, texts).await;
         assert_eq!(routine_facts(&replay, "app").await, routine_facts(&original, "app").await);
 
@@ -2851,12 +2863,16 @@ async fn hostile_object_scripts_replay_every_property_or_warn() {
         assert_eq!(
             warned,
             std::collections::BTreeMap::from([
+                ("My View.sql".to_owned(), vec!["owner l1data of app.\"My View\", whose privileges the view's query is checked against".to_owned()]),
                 ("child.sql".to_owned(), vec!["the column order of app.child, because a replay puts inherited columns first".to_owned()]),
                 ("dups.sql".to_owned(), vec!["the invalid state of index app.dups_v, which a replay builds valid".to_owned()]),
+                ("mv.sql".to_owned(), vec!["owner l1data of app.mv, whose privileges a refresh runs the query with".to_owned()]),
                 ("pt.sql".to_owned(), vec!["the partial attachment of index app.pt_only, which a replay attaches to every partition".to_owned()]),
                 ("refd.sql".to_owned(), vec!["membership of app.refd in publication hostile_pub".to_owned()]),
                 ("ren.sql".to_owned(), vec!["privileges on app.ren_custom_seq (USAGE granted to pg_read_all_data)".to_owned()]),
+                ("ri.sql".to_owned(), vec!["owner pg_database_owner of app.ri_2".to_owned()]),
                 ("select.sql".to_owned(), vec!["privileges on app.\"select\" (SELECT granted to pg_read_all_data, UPDATE (\"Mixed\") granted to pg_read_all_data)".to_owned()]),
+                ("v_def.sql".to_owned(), vec!["owner l1data of app.v_def, whose privileges the view's query is checked against".to_owned()]),
             ])
         );
         let reordered = |facts: Vec<String>| facts.into_iter().filter(|f| !f.starts_with("app.child column") && !f.starts_with("app.pt1 index")).collect::<Vec<_>>();
