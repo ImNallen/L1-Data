@@ -189,10 +189,6 @@ pub(in crate::sql) fn statement_around(text: &str, at: usize) -> Range<usize> {
                 i = skip_quoted(b, i, b'\'');
                 prev = Prev::Other;
             }
-            b'N' | b'n' if b.get(i + 1) == Some(&b'\'') => {
-                i = skip_quoted(b, i + 1, b'\'');
-                prev = Prev::Other;
-            }
             b'[' | b'"' => {
                 i = skip_quoted(b, i, if c == b'[' { b']' } else { b'"' });
                 prev = Prev::Other;
@@ -249,4 +245,47 @@ pub(in crate::sql) fn statement_around(text: &str, at: usize) -> Range<usize> {
         }
     }
     start..b.len()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::statement_around;
+
+    fn around(marked: &str) -> String {
+        let at = marked.find('|').expect("a | marks the cursor");
+        let text = marked.replacen('|', "", 1);
+        text[statement_around(&text, at)].trim().to_owned()
+    }
+
+    #[test]
+    fn a_verb_starts_a_statement_in_any_case() {
+        assert_eq!(around("select 1\nselect * from orders o where o.|"), "select * from orders o where o.");
+        assert_eq!(around("Update orders Set total = 0\nSelect |"), "Select");
+    }
+
+    #[test]
+    fn a_go_line_ends_the_batch_and_only_a_bare_go_line_does() {
+        assert_eq!(around("SELECT * FROM orders o WHERE o.|\nGO\nSELECT 2"), "SELECT * FROM orders o WHERE o.");
+        assert_eq!(around("SELECT 1\nGO\nSELECT * FROM orders o WHERE o.|"), "SELECT * FROM orders o WHERE o.");
+        assert_eq!(around("SELECT * FROM orders o\nGO -- next\nWHERE o.|"), "WHERE o.");
+        assert_eq!(around("SELECT * FROM orders o\nGO 5\nWHERE o.|"), "SELECT * FROM orders o\nGO 5\nWHERE o.");
+        assert_eq!(around("SELECT * FROM orders o WHERE o.id = 1\n|GO\nSELECT 2"), "SELECT * FROM orders o WHERE o.id = 1");
+    }
+
+    #[test]
+    fn a_semicolon_or_go_inside_a_comment_bracket_string_or_parentheses_ends_nothing() {
+        for marked in [
+            "SELECT * FROM orders o -- ; SELECT\nWHERE o.|",
+            "SELECT * FROM orders o /* ;\nGO\n*/ WHERE o.|",
+            "SELECT * FROM [a;b\nGO\n] o WHERE o.|",
+            "SELECT * FROM \"a;b\" o WHERE o.|",
+            "SELECT * FROM [x]] SELECT y] o WHERE o.|",
+            "SELECT 'it''s; SELECT\nGO\n' AS t, o.| FROM orders o",
+            "SELECT N'x; SELECT' AS t, o.| FROM orders o",
+            "SELECT (SELECT 1; ) AS t, o.| FROM orders o",
+        ] {
+            let text = marked.replacen('|', "", 1);
+            assert_eq!(around(marked), text.trim(), "{marked:?}");
+        }
+    }
 }
