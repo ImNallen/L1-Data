@@ -785,10 +785,12 @@ pub fn routine(r: &Routine) -> Ddl {
     Ddl { text: script(statements), warnings }
 }
 
-pub fn index_script(i: &Index, constraint: Option<&Constraint>, keyword: &str, schema: &str, relation: &str) -> Ddl {
+/// An index attached to `attached_to`, its parent table's index, is attached again, as `pg_dump` does.
+pub fn index_script(i: &Index, constraint: Option<&Constraint>, attached_to: Option<&str>, keyword: &str, schema: &str, relation: &str) -> Ddl {
     let mut statements: Vec<String> = constraint.map(|k| format!("ALTER {keyword} {relation} ADD CONSTRAINT {} {}", ident(&k.name), constraint_definition(k))).into_iter().collect();
     let mut warnings = vec![];
     indexes(std::slice::from_ref(i), keyword, schema, relation, &mut statements, &mut warnings);
+    statements.extend(attached_to.map(|parent| format!("ALTER INDEX {parent} ATTACH PARTITION {}", qualified(schema, &i.name))));
     if let Some(k) = constraint {
         statements.extend(comment(&format!("CONSTRAINT {} ON {relation}", ident(&k.name)), &k.comment));
     }
@@ -1500,19 +1502,24 @@ ALTER FOREIGN TABLE public.e2 ALTER COLUMN v OPTIONS (ADD column_name 'vv');
         let pkey = Index { name: "orders_pkey".into(), comment: Some("pk".into()), ..Default::default() };
         let constraint = Constraint { name: "orders_pkey".into(), definition: "PRIMARY KEY (id)".into(), comment: Some("the key".into()), ..Default::default() };
         assert_eq!(
-            index_script(&pkey, Some(&constraint), "TABLE", "public", "public.orders").text,
+            index_script(&pkey, Some(&constraint), None, "TABLE", "public", "public.orders").text,
             "ALTER TABLE public.orders ADD CONSTRAINT orders_pkey PRIMARY KEY (id);\n\nCOMMENT ON INDEX public.orders_pkey IS 'pk';\n\nCOMMENT ON CONSTRAINT orders_pkey ON public.orders IS 'the key';\n"
         );
         let plain = Index { name: "i".into(), definition: Some("CREATE INDEX i ON ONLY public.t USING btree (a)".into()), tablespace: Some("fast".into()), ..Default::default() };
-        assert_eq!(index_script(&plain, None, "TABLE", "public", "public.t").text, "CREATE INDEX i ON public.t USING btree (a);\n\nALTER INDEX public.i SET TABLESPACE fast;\n");
+        assert_eq!(index_script(&plain, None, None, "TABLE", "public", "public.t").text, "CREATE INDEX i ON public.t USING btree (a);\n\nALTER INDEX public.i SET TABLESPACE fast;\n");
+        let copy = Index { name: "t_1_a_idx".into(), definition: Some("CREATE INDEX t_1_a_idx ON public.t_1 USING btree (a)".into()), ..Default::default() };
+        assert_eq!(
+            index_script(&copy, None, Some("public.t_a"), "TABLE", "public", "public.t_1").text,
+            "CREATE INDEX t_1_a_idx ON public.t_1 USING btree (a);\n\nALTER INDEX public.t_a ATTACH PARTITION public.t_1_a_idx;\n"
+        );
     }
 
     #[test]
     fn an_index_keeps_its_column_statistics_and_warns_when_invalid_or_partly_attached() {
         let expr = Index { name: "Lower".into(), definition: Some("CREATE INDEX \"Lower\" ON app.t USING btree (lower(a))".into()), statistics: vec![ColumnStatistics { column: 1, target: 300 }], ..Default::default() };
-        assert_eq!(index_script(&expr, None, "TABLE", "app", "app.t"), Ddl::complete("CREATE INDEX \"Lower\" ON app.t USING btree (lower(a));\n\nALTER INDEX app.\"Lower\" ALTER COLUMN 1 SET STATISTICS 300;\n".into()));
+        assert_eq!(index_script(&expr, None, None, "TABLE", "app", "app.t"), Ddl::complete("CREATE INDEX \"Lower\" ON app.t USING btree (lower(a));\n\nALTER INDEX app.\"Lower\" ALTER COLUMN 1 SET STATISTICS 300;\n".into()));
         let broken = Index { name: "dup".into(), definition: Some("CREATE UNIQUE INDEX dup ON app.t USING btree (a)".into()), invalid: true, ..Default::default() };
-        assert_eq!(index_script(&broken, None, "TABLE", "app", "app.t").warnings, ["the invalid state of index app.dup, which a replay builds valid"]);
+        assert_eq!(index_script(&broken, None, None, "TABLE", "app", "app.t").warnings, ["the invalid state of index app.dup, which a replay builds valid"]);
         let only = Index { name: "p_k".into(), definition: Some("CREATE INDEX p_k ON ONLY app.p USING btree (k)".into()), invalid: true, partitioned: true, ..Default::default() };
         let t = Table { schema: "app".into(), name: "p".into(), columns: vec![col("k", "integer")], partition_key: Some("LIST (k)".into()), indexes: vec![only], ..Default::default() };
         assert_eq!(table(&t).warnings, ["the partial attachment of index app.p_k, which a replay attaches to every partition"]);

@@ -632,7 +632,8 @@ async fn index(tx: &Transaction<'_>, relation: u32, name: &str) -> Result<Object
                       ARRAY(SELECT NULLIF(a.attstattarget, -1)::int4 FROM pg_attribute a WHERE a.attrelid = i.indexrelid AND NULLIF(a.attstattarget, -1) IS NOT NULL ORDER BY a.attnum),
                       NOT i.indisvalid, ic.relkind = 'I',
                       k.conname, pg_get_constraintdef(k.oid), n.nspname, c.relname, c.relkind::text, obj_description(k.oid, 'pg_constraint'),
-                      CASE WHEN k.contype IN ('p', 'u') THEN coalesce(ic.reloptions, '{}') ELSE '{}' END
+                      CASE WHEN k.contype IN ('p', 'u') THEN coalesce(ic.reloptions, '{}') ELSE '{}' END,
+                      (SELECT h.inhparent::regclass::text FROM pg_inherits h WHERE h.inhrelid = i.indexrelid)
                FROM pg_index i JOIN pg_class ic ON ic.oid = i.indexrelid JOIN pg_class c ON c.oid = i.indrelid JOIN pg_namespace n ON n.oid = c.relnamespace
                LEFT JOIN pg_tablespace ts ON ts.oid = ic.reltablespace
                LEFT JOIN pg_constraint k ON k.conindid = i.indexrelid AND k.conrelid = i.indrelid AND k.contype IN ('p', 'u', 'x')
@@ -640,7 +641,7 @@ async fn index(tx: &Transaction<'_>, relation: u32, name: &str) -> Result<Object
     let r = tx.query_opt(sql, &[&relation, &name]).await.map_err(failed)?.ok_or(DetailError::Gone)?;
     let constraint = r.get::<_, Option<String>>(10).map(|name| ddl::Constraint { name, definition: r.get(11), comment: r.get(15), index_options: r.get(16), index_tablespace: r.get(5), ..Default::default() });
     let (schema, table): (&str, &str) = (r.get(12), r.get(13));
-    let ddl = ddl::index_script(&index_row(&r), constraint.as_ref(), keyword(r.get(14)), schema, &ddl::qualified(schema, table));
+    let ddl = ddl::index_script(&index_row(&r), constraint.as_ref(), r.get(17), keyword(r.get(14)), schema, &ddl::qualified(schema, table));
     Ok(script::object_script(name, ddl))
 }
 

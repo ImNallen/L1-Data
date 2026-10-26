@@ -3025,7 +3025,7 @@ async fn hostile_object_scripts_replay_every_property_or_warn() {
         let attached_key = script(ScriptTarget::Index { relation_oid: oid("app.ffp_1").await, name: "ffp one key".into() }).await.text;
         assert_eq!(
             attached_key,
-            "ALTER TABLE app.ffp_1 ADD CONSTRAINT \"ffp one key\" PRIMARY KEY (id, k) WITH (fillfactor='60');\n\nALTER INDEX app.ffp_pkey ATTACH PARTITION app.\"ffp one key\";\n\nCOMMENT ON CONSTRAINT \"ffp one key\" ON app.ffp_1 IS 'cloned key';\n"
+            "ALTER TABLE app.ffp_1 ADD CONSTRAINT \"ffp one key\" PRIMARY KEY (id, k) WITH (fillfactor=60);\n\nALTER INDEX app.ffp_pkey ATTACH PARTITION app.\"ffp one key\";\n\nCOMMENT ON CONSTRAINT \"ffp one key\" ON app.ffp_1 IS 'cloned key';\n"
         );
         let pkey = script(ScriptTarget::Index { relation_oid: oid("\"Weird \"\"S\"\"\".parent").await, name: "parent_pkey".into() }).await.text;
         assert_eq!(
