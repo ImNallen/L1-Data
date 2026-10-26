@@ -2633,7 +2633,8 @@ async fn catalog_facts(client: &tokio_postgres::Client, relations: &str) -> Vec<
             FROM pg_attribute a LEFT JOIN pg_attrdef d ON d.adrelid = a.attrelid AND d.adnum = a.attnum
             WHERE a.attrelid = c.oid AND a.attnum > 0 AND NOT a.attisdropped
             UNION ALL
-            SELECT concat_ws(' ', 'sequence', dep.deptype, a.attname, sc.oid::regclass, format_type(s.seqtypid, NULL), s.seqstart, s.seqincrement, s.seqmin, s.seqmax, s.seqcache, s.seqcycle)
+            SELECT concat_ws(' ', 'sequence', dep.deptype, a.attname, sc.oid::regclass, format_type(s.seqtypid, NULL), s.seqstart, s.seqincrement, s.seqmin, s.seqmax, s.seqcache, s.seqcycle,
+                             sc.relpersistence, obj_description(sc.oid, 'pg_class'))
             FROM pg_depend dep JOIN pg_class sc ON sc.oid = dep.objid AND sc.relkind = 'S' JOIN pg_sequence s ON s.seqrelid = sc.oid
             JOIN pg_attribute a ON a.attrelid = dep.refobjid AND a.attnum = dep.refobjsubid
             WHERE dep.classid = 'pg_class'::regclass AND dep.refclassid = 'pg_class'::regclass AND dep.refobjid = c.oid AND dep.deptype IN ('a', 'i')
@@ -2642,7 +2643,8 @@ async fn catalog_facts(client: &tokio_postgres::Client, relations: &str) -> Vec<
             FROM pg_constraint k WHERE k.conrelid = c.oid
             UNION ALL
             SELECT concat_ws(' ', 'index', pg_get_indexdef(i.indexrelid), i.indisclustered, i.indisreplident, obj_description(i.indexrelid, 'pg_class'),
-                             (SELECT string_agg(a.attnum || '=' || a.attstattarget, ',' ORDER BY a.attnum) FROM pg_attribute a WHERE a.attrelid = i.indexrelid))
+                             (SELECT string_agg(a.attnum || '=' || a.attstattarget, ',' ORDER BY a.attnum) FROM pg_attribute a WHERE a.attrelid = i.indexrelid),
+                             (SELECT ic.reltablespace FROM pg_class ic WHERE ic.oid = i.indexrelid))
             FROM pg_index i WHERE i.indrelid = c.oid
             UNION ALL
             SELECT concat_ws(' ', 'trigger', pg_get_triggerdef(t.oid), t.tgenabled, obj_description(t.oid, 'pg_trigger')) FROM pg_trigger t WHERE t.tgrelid = c.oid AND NOT t.tgisinternal
@@ -2673,6 +2675,15 @@ async fn drop_database(client: &tokio_postgres::Client, name: &str) {
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
     panic!("could not drop database {name}");
+}
+
+/// What a routine's script must recreate. Its owner and privileges are only warned about.
+async fn routine_facts(client: &tokio_postgres::Client, schema: &str) -> Vec<String> {
+    let sql = "SELECT concat_ws(' ', p.oid::regprocedure, pg_get_functiondef(p.oid), obj_description(p.oid, 'pg_proc'), p.prosecdef,
+                                (SELECT string_agg(e.extname, ',' ORDER BY e.extname) FROM pg_depend d JOIN pg_extension e ON e.oid = d.refobjid
+                                 WHERE d.classid = 'pg_proc'::regclass AND d.objid = p.oid AND d.refclassid = 'pg_extension'::regclass AND d.deptype = 'x'))
+               FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace WHERE n.nspname = $1 ORDER BY 1";
+    client.query(sql, &[&schema]).await.unwrap().iter().map(|r| r.get(0)).collect()
 }
 
 async fn replay_in_dependency_order(client: &tokio_postgres::Client, mut scripts: Vec<String>) {
@@ -2735,7 +2746,30 @@ async fn object_scripts_replay_into_an_empty_database_with_the_same_catalog() {
             assert!(orders.text.contains(line), "{line} missing from {}", orders.text);
         }
         let partition = script(ScriptTarget::Relation { oid: oid("public.order_events_2026_h1").await }).await.unwrap();
-        assert_eq!(partition.text, "CREATE TABLE public.order_events_2026_h1 PARTITION OF public.order_events\n    FOR VALUES FROM ('2026-01-01') TO ('2026-07-01');\n");
+        assert_eq!(
+            partition.text,
+            "CREATE TABLE public.order_events_2026_h1 PARTITION OF public.order_events
+    FOR VALUES FROM ('2026-01-01') TO ('2026-07-01');
+
+DO $l1$
+DECLARE
+    pair text[];
+    attached name;
+BEGIN
+    FOREACH pair SLICE 1 IN ARRAY ARRAY[
+        ['public.order_events_kind_idx', 'order_events_2026_h1_kind_idx'],
+        ['public.order_events_pkey', 'order_events_2026_h1_pkey']
+    ] LOOP
+        attached := (SELECT c.relname FROM pg_catalog.pg_inherits h JOIN pg_catalog.pg_index i ON i.indexrelid = h.inhrelid JOIN pg_catalog.pg_class c ON c.oid = h.inhrelid
+                     WHERE h.inhparent = pair[1]::regclass AND i.indrelid = 'public.order_events_2026_h1'::regclass);
+        IF attached <> pair[2] THEN
+            EXECUTE format('ALTER INDEX %I.%I RENAME TO %I', 'public', attached, pair[2]);
+        END IF;
+    END LOOP;
+END
+$l1$;
+"
+        );
         let index = script(ScriptTarget::Index { relation_oid: oid("public.orders").await, name: "orders_open_idx".into() }).await.unwrap();
         assert_eq!((index.title.as_str(), index.text.as_str()), ("orders_open_idx.sql", "CREATE INDEX orders_open_idx ON public.orders USING btree (status) WHERE (status <> 'paid'::text);\n"));
         let pkey = script(ScriptTarget::Index { relation_oid: oid("public.orders").await, name: "orders_pkey".into() }).await.unwrap();
@@ -2801,6 +2835,7 @@ async fn hostile_object_scripts_replay_every_property_or_warn() {
         }
         assert_eq!(warned, std::collections::BTreeMap::from([("sec_def.sql".to_owned(), vec!["privileges on app.sec_def(integer) (EXECUTE revoked from PUBLIC)".to_owned()])]));
         replay_in_dependency_order(&replay, texts).await;
+        assert_eq!(routine_facts(&replay, "app").await, routine_facts(&original, "app").await);
 
         let mut texts = vec![];
         let mut warned = std::collections::BTreeMap::new();

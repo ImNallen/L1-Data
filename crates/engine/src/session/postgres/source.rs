@@ -36,12 +36,15 @@ const RELATIONS: &str = "WITH RECURSIVE tree(oid) AS (
 struct Queries {
     columns: String,
     statistics: String,
+    sequence_states: String,
 }
 
 impl Queries {
     fn for_version(version: i32) -> Queries {
         let compression = |alias: &str| if version >= 140000 { format!("{alias}.attcompression::text") } else { "''".into() };
         let target = if version >= 130000 { "NULLIF(s.stxstattarget, -1)::int4" } else { "NULL::int4" };
+        // PostgreSQL 15 added unlogged sequences, and a table's identity and serial sequences take its persistence.
+        let unlogged = if version >= 150000 { "CASE WHEN sc.relpersistence = 'u' OR t.relpersistence = 'u' THEN sc.relpersistence = 'u' END" } else { "NULL::bool" };
         Queries {
             columns: format!(
                 "SELECT a.attname, coalesce(serial.name, format_type(a.atttypid, a.atttypmod)), a.attnotnull, a.attidentity::text, a.attgenerated::text,
@@ -89,6 +92,14 @@ impl Queries {
                 "SELECT n.nspname, s.stxname, pg_get_statisticsobjdef(s.oid), {target}, obj_description(s.oid, 'pg_statistic_ext'), s.stxrelid
                  FROM pg_statistic_ext s JOIN pg_namespace n ON n.oid = s.stxnamespace WHERE s.stxrelid = ANY ($1) ORDER BY s.stxname"
             ),
+            sequence_states: format!(
+                "SELECT * FROM (
+                    SELECT sn.nspname, sc.relname, {unlogged} AS unlogged, obj_description(sc.oid, 'pg_class') AS comment, dep.refobjid
+                    FROM pg_depend dep JOIN pg_class sc ON sc.oid = dep.objid AND sc.relkind = 'S' JOIN pg_namespace sn ON sn.oid = sc.relnamespace
+                    JOIN pg_class t ON t.oid = dep.refobjid
+                    WHERE dep.classid = 'pg_class'::regclass AND dep.refclassid = 'pg_class'::regclass AND dep.refobjid = ANY ($1) AND dep.deptype IN ('a', 'i')
+                 ) s WHERE s.unlogged IS NOT NULL OR s.comment IS NOT NULL ORDER BY s.relname"
+            ),
         }
     }
 }
@@ -100,14 +111,20 @@ const OWNED_SEQUENCES: &str = "SELECT sn.nspname, sc.relname, a.attname, format_
      WHERE dep.classid = 'pg_class'::regclass AND dep.refclassid = 'pg_class'::regclass AND dep.refobjid = ANY ($1) AND dep.deptype = 'a'
      ORDER BY sc.relname";
 
-/// A partition's copies of its parent's constraints, and a foreign key's clones for the
-/// partitions it references, come with the parent.
+/// A partition's copies of its parent's constraints, an inheritance child's inherited checks, and a
+/// foreign key's clones for the partitions it references come with the parent, so only their
+/// comments are read. `pg_get_constraintdef` prints an exclusion constraint's storage parameters
+/// but no constraint's tablespace.
 const CONSTRAINTS: &str = "SELECT k.conname, pg_get_constraintdef(k.oid), obj_description(k.oid, 'pg_constraint'),
         k.contype = 'f' AND k.confrelid = k.conrelid
           AND NOT EXISTS (SELECT 1 FROM pg_constraint u WHERE u.conindid = k.conindid AND u.conrelid = k.conrelid AND u.contype IN ('p', 'u')),
+        CASE WHEN k.contype IN ('p', 'u') THEN coalesce(ic.reloptions, '{}') ELSE '{}' END, ts.spcname,
+        NOT (k.conislocal AND k.conparentid = 0),
         k.conrelid
      FROM pg_constraint k
-     WHERE k.conrelid = ANY ($1) AND k.contype IN ('p', 'u', 'f', 'c', 'x') AND k.conislocal AND k.conparentid = 0
+     LEFT JOIN pg_class ic ON ic.oid = k.conindid AND k.contype IN ('p', 'u', 'x') LEFT JOIN pg_tablespace ts ON ts.oid = ic.reltablespace
+     WHERE k.conrelid = ANY ($1) AND k.contype IN ('p', 'u', 'f', 'c', 'x')
+       AND (k.conislocal AND k.conparentid = 0 OR obj_description(k.oid, 'pg_constraint') IS NOT NULL)
      ORDER BY position(k.contype IN 'pufcx'), k.conname";
 
 /// A partition's copy of its parent's index comes with the parent.
@@ -133,11 +150,11 @@ const TRIGGERS: &str = "SELECT t.tgname, pg_get_triggerdef(t.oid), t.tgenabled::
             OR p.oid IS NOT NULL AND (t.tgenabled <> 'O' OR t.tgenabled <> p.tgenabled OR obj_description(t.oid, 'pg_trigger') IS NOT NULL))
      ORDER BY t.tgname";
 
-/// A partition's copy of its parent's index comes with the parent under a name PostgreSQL
-/// chooses, so only a copy with its own clustering, replica identity, or comment is read.
+/// A partition's copy of its parent's index comes with the parent under a name PostgreSQL chooses,
+/// which depends on the names the schema already holds, so every copy's name is restored.
 const ATTACHED_INDEXES: &str = "SELECT ic.relname, h.inhparent::regclass::text, i.indisclustered, i.indisreplident, obj_description(i.indexrelid, 'pg_class'), i.indrelid
      FROM pg_index i JOIN pg_class ic ON ic.oid = i.indexrelid JOIN pg_inherits h ON h.inhrelid = i.indexrelid
-     WHERE i.indrelid = ANY ($1) AND (i.indisclustered OR i.indisreplident OR obj_description(i.indexrelid, 'pg_class') IS NOT NULL)
+     WHERE i.indrelid = ANY ($1)
      ORDER BY ic.relname";
 
 const RULES: &str = "SELECT r.rulename, pg_get_ruledef(r.oid), r.ev_enabled::text, obj_description(r.oid, 'pg_rewrite'), r.ev_class FROM pg_rewrite r
@@ -149,7 +166,9 @@ const POLICIES: &str = "SELECT p.polname, p.polpermissive, p.polcmd::text,
      FROM pg_policy p WHERE p.polrelid = ANY ($1) ORDER BY p.polname";
 
 const ROUTINE: &str = "SELECT p.prokind::text, p.proname, CASE WHEN p.prokind <> 'a' THEN pg_get_functiondef(p.oid) END,
-        obj_description(p.oid, 'pg_proc'), n.nspname, pg_get_function_identity_arguments(p.oid)
+        obj_description(p.oid, 'pg_proc'), n.nspname, pg_get_function_identity_arguments(p.oid),
+        ARRAY(SELECT e.extname::text FROM pg_depend d JOIN pg_extension e ON e.oid = d.refobjid
+              WHERE d.classid = 'pg_proc'::regclass AND d.objid = p.oid AND d.refclassid = 'pg_extension'::regclass AND d.deptype = 'x' ORDER BY 1)
      FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace WHERE p.oid = $1";
 
 fn acl_changes(from: &str, acl: &str, default: &str, filter: &str, keys: &str) -> String {
@@ -288,6 +307,7 @@ fn relid(r: &Row) -> u32 {
 /// A table's rows and its partitions', each read once for the whole tree.
 struct Tree<'a> {
     relations: &'a [Row],
+    sequence_states: Rows,
     columns: Rows,
     sequences: Rows,
     constraints: Rows,
@@ -322,9 +342,10 @@ impl<'a> Tree<'a> {
         let oids: Vec<u32> = relations.iter().map(relid).collect();
         let params: &[&(dyn ToSql + Sync)] = &[&oids];
         let grants = relation_grants_query();
-        let (columns, sequences, constraints, indexes, attached, triggers, rules, policies, statistics, grants) = tokio::try_join!(
+        let (columns, sequences, sequence_states, constraints, indexes, attached, triggers, rules, policies, statistics, grants) = tokio::try_join!(
             tx.query(&queries.columns, params),
             tx.query(OWNED_SEQUENCES, params),
+            tx.query(&queries.sequence_states, params),
             tx.query(CONSTRAINTS, params),
             tx.query(INDEXES, params),
             tx.query(ATTACHED_INDEXES, params),
@@ -337,6 +358,7 @@ impl<'a> Tree<'a> {
         .map_err(failed)?;
         Ok(Tree {
             relations,
+            sequence_states: Rows::new(sequence_states),
             columns: Rows::new(columns),
             sequences: Rows::new(sequences),
             constraints: Rows::new(constraints),
@@ -386,6 +408,12 @@ fn table(oid: u32, tree: &Tree) -> Result<ddl::Table, DetailError> {
             .iter()
             .filter(|s| !(s.get::<_, &str>(0) == schema && serials.iter().any(|n| n == s.get::<_, &str>(1))))
             .map(owned_sequence)
+            .collect(),
+        sequence_states: tree
+            .sequence_states
+            .of(oid)
+            .iter()
+            .map(|s| ddl::SequenceState { schema: s.get(0), name: s.get(1), unlogged: s.get(2), comment: s.get(3) })
             .collect(),
         constraints: constraints.iter().map(constraint_row).collect(),
         parent,
@@ -483,7 +511,7 @@ fn column(r: &Row) -> ddl::Column {
 }
 
 fn constraint_row(r: &Row) -> ddl::Constraint {
-    ddl::Constraint { name: r.get(0), definition: r.get(1), comment: r.get(2), after_indexes: r.get(3) }
+    ddl::Constraint { name: r.get(0), definition: r.get(1), comment: r.get(2), after_indexes: r.get(3), index_options: r.get(4), index_tablespace: r.get(5), inherited: r.get(6) }
 }
 
 fn index_row(r: &Row) -> ddl::Index {
@@ -532,7 +560,15 @@ async fn routine(tx: &Transaction<'_>, oid: u32) -> Result<ObjectScript, DetailE
         return Err(refused("Aggregates cannot be scripted yet."));
     };
     let signature = format!("{}({})", ddl::qualified(r.get(4), &name), r.get::<_, &str>(5));
-    Ok(script::object_script(&name, ddl::routine(&definition, kind == "p", &signature, &r.get(3), &grants.iter().map(grant_row).collect::<Vec<_>>())))
+    let routine = ddl::Routine {
+        definition,
+        procedure: kind == "p",
+        signature,
+        comment: r.get(3),
+        privileges: grants.iter().map(grant_row).collect(),
+        extensions: r.get(6),
+    };
+    Ok(script::object_script(&name, ddl::routine(&routine)))
 }
 
 async fn index(tx: &Transaction<'_>, relation: u32, name: &str) -> Result<ObjectScript, DetailError> {
@@ -542,13 +578,14 @@ async fn index(tx: &Transaction<'_>, relation: u32, name: &str) -> Result<Object
                       ARRAY(SELECT a.attnum::int4 FROM pg_attribute a WHERE a.attrelid = i.indexrelid AND NULLIF(a.attstattarget, -1) IS NOT NULL ORDER BY a.attnum),
                       ARRAY(SELECT NULLIF(a.attstattarget, -1)::int4 FROM pg_attribute a WHERE a.attrelid = i.indexrelid AND NULLIF(a.attstattarget, -1) IS NOT NULL ORDER BY a.attnum),
                       NOT i.indisvalid, ic.relkind = 'I',
-                      k.conname, pg_get_constraintdef(k.oid), n.nspname, c.relname, c.relkind::text, obj_description(k.oid, 'pg_constraint')
+                      k.conname, pg_get_constraintdef(k.oid), n.nspname, c.relname, c.relkind::text, obj_description(k.oid, 'pg_constraint'),
+                      CASE WHEN k.contype IN ('p', 'u') THEN coalesce(ic.reloptions, '{}') ELSE '{}' END
                FROM pg_index i JOIN pg_class ic ON ic.oid = i.indexrelid JOIN pg_class c ON c.oid = i.indrelid JOIN pg_namespace n ON n.oid = c.relnamespace
                LEFT JOIN pg_tablespace ts ON ts.oid = ic.reltablespace
                LEFT JOIN pg_constraint k ON k.conindid = i.indexrelid AND k.conrelid = i.indrelid AND k.contype IN ('p', 'u', 'x')
                WHERE i.indrelid = $1 AND ic.relname = $2";
     let r = tx.query_opt(sql, &[&relation, &name]).await.map_err(failed)?.ok_or(DetailError::Gone)?;
-    let constraint = r.get::<_, Option<String>>(10).map(|name| ddl::Constraint { name, definition: r.get(11), comment: r.get(15), after_indexes: false });
+    let constraint = r.get::<_, Option<String>>(10).map(|name| ddl::Constraint { name, definition: r.get(11), comment: r.get(15), index_options: r.get(16), index_tablespace: r.get(5), ..Default::default() });
     let (schema, table): (&str, &str) = (r.get(12), r.get(13));
     let ddl = ddl::index_script(&index_row(&r), constraint.as_ref(), keyword(r.get(14)), schema, &ddl::qualified(schema, table));
     Ok(script::object_script(name, ddl))
