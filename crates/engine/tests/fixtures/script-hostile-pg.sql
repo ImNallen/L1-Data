@@ -230,3 +230,8 @@ INSERT INTO pg_seclabel VALUES
 -- publication membership that comes from the schema
 CREATE PUBLICATION hostile_schema_pub FOR TABLES IN SCHEMA "order";
 CREATE TABLE app.excl (id int, b box, EXCLUDE USING gist (b WITH &&));
+CREATE TABLE app.fkt (id int NOT NULL, ref_id int, PRIMARY KEY (id)) PARTITION BY RANGE (id);
+CREATE TABLE app.fkt_a PARTITION OF app.fkt FOR VALUES FROM (0) TO (10);
+CREATE TABLE app.fkt_b PARTITION OF app.fkt FOR VALUES FROM (10) TO (20);
+ALTER TABLE app.fkt_a ADD CONSTRAINT fkt_a_ref FOREIGN KEY (ref_id) REFERENCES app.fkt_b (id);
+COMMENT ON CONSTRAINT fkt_a_ref ON app.fkt_a IS 'to a later sibling';

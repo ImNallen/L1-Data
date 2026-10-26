@@ -138,6 +138,7 @@ const CONSTRAINTS: &str = "SELECT k.conname, pg_get_constraintdef(k.oid), obj_de
           AND NOT EXISTS (SELECT 1 FROM pg_constraint u WHERE u.conindid = k.conindid AND u.conrelid = k.conrelid AND u.contype IN ('p', 'u')),
         CASE WHEN k.contype IN ('p', 'u') THEN coalesce(ic.reloptions, '{}') ELSE '{}' END, ts.spcname,
         NOT (k.conislocal AND k.conparentid = 0),
+        k.contype = 'f' AND k.confrelid <> k.conrelid AND k.confrelid = ANY ($1),
         k.conrelid
      FROM pg_constraint k
      LEFT JOIN pg_class ic ON ic.oid = k.conindid AND k.contype IN ('p', 'u', 'x') LEFT JOIN pg_tablespace ts ON ts.oid = ic.reltablespace
@@ -561,7 +562,7 @@ fn column(r: &Row) -> ddl::Column {
 }
 
 fn constraint_row(r: &Row) -> ddl::Constraint {
-    ddl::Constraint { name: r.get(0), definition: r.get(1), comment: r.get(2), after_indexes: r.get(3), index_options: r.get(4), index_tablespace: r.get(5), inherited: r.get(6) }
+    ddl::Constraint { name: r.get(0), definition: r.get(1), comment: r.get(2), after_indexes: r.get(3), index_options: r.get(4), index_tablespace: r.get(5), inherited: r.get(6), after_tree: r.get(7) }
 }
 
 fn index_row(r: &Row) -> ddl::Index {
