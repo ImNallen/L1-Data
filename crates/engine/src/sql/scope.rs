@@ -215,7 +215,9 @@ struct Frame {
     /// The FROM items are a `DELETE`'s target, which T-SQL cannot alias there.
     delete_target: bool,
     /// A T-SQL `DELETE` named its target before `FROM`, as in `DELETE o FROM orders o`, so the FROM items take aliases.
-    delete_named: bool,
+    delete_named: Option<String>,
+    /// The statement is a `DELETE`, whose `OUTPUT` sees only `deleted`.
+    deleting: bool,
     /// A `USING` or `NATURAL` join merges columns, so a `*` lists them in an order the reply cannot say. An unnamed
     /// column in front of the `*` keeps a column alias list from renaming by position.
     merged_join: bool,
@@ -247,7 +249,8 @@ impl Frame {
             joined: None,
             merge: false,
             delete_target: false,
-            delete_named: false,
+            delete_named: None,
+            deleting: false,
             merged_join: false,
             select_into: false,
         }
@@ -438,7 +441,10 @@ impl<'a> Walk<'a> {
                 f.clause = Clause::Relation { role, slot: Slot::Aliased };
             }
             (Clause::Cte, Class::Word) if self.is_word(i, "RECURSIVE") => self.top().recursive = true,
-            (Clause::Next(&["FROM"]), Class::Word | Class::Name) => self.top().delete_named = true,
+            (Clause::Next(&["FROM"]), Class::Word | Class::Name) => {
+                let name = fold(self.kind, self.text, self.sig[i]);
+                self.top().delete_named = Some(name);
+            }
             (Clause::Cte, Class::Word | Class::Name) if !self.word(i).is_some_and(|w| ["AS", "NOT", "MATERIALIZED"].contains(&w.as_str())) => {
                 let written = self.text[self.sig[i].span.clone()].to_owned();
                 let key = fold(self.kind, self.text, self.sig[i]);
@@ -466,7 +472,7 @@ impl<'a> Walk<'a> {
             "FROM" if prev.as_deref() == Some("DISTINCT") => return Some(i + 1),
             "FROM" => {
                 let f = self.top();
-                f.delete_target = clause == Clause::Next(&["FROM"]) && !f.delete_named;
+                f.delete_target = clause == Clause::Next(&["FROM"]) && f.delete_named.is_none();
                 Clause::Relation { role: Role::From, slot: Slot::Expect }
             }
             "JOIN" | "APPLY" => Clause::Relation { role: Role::Join, slot: Slot::Expect },
@@ -521,7 +527,9 @@ impl<'a> Walk<'a> {
                 if self.is_word(i + 1, "INTO") { Clause::Next(&["INTO"]) } else { Clause::Relation { role: Role::Into, slot: Slot::Expect } }
             }
             "DELETE" => {
-                self.top().delete_named = false;
+                let f = self.top();
+                f.delete_named = None;
+                f.deleting = true;
                 Clause::Next(&["FROM"])
             }
             "TOP" if matches!(clause, Clause::Relation { role: Role::Update, slot: Slot::Expect } | Clause::Next(&["FROM"])) && next_opens => {
@@ -1043,14 +1051,21 @@ impl<'a> Walk<'a> {
             return None;
         }
         let f = &self.frames[id];
-        let target = f.rels.iter().find(|r| matches!(r.role, Role::Into | Role::Update) || r.role == Role::From && f.delete_target);
+        let named = |r: &&Rel| {
+            let table = matches!(&r.source, RelationSource::Table { name, .. } if f.delete_named.as_deref().is_some_and(|n| same(self.kind, n, name)));
+            r.role != Role::Update && (table || r.folded.as_deref().zip(f.delete_named.as_deref()).is_some_and(|(a, b)| same(self.kind, a, b)))
+        };
+        let target = match &f.delete_named {
+            Some(_) => f.rels.iter().find(|r| named(r)),
+            None => f.rels.iter().find(|r| matches!(r.role, Role::Into | Role::Update) || r.role == Role::From && f.delete_target),
+        };
         let source = target.map(|t| {
             let stands_for = f.rels.iter().find(|o| t.role == Role::Update && o.role != Role::Update && o.folded.is_some() && o.folded == t.folded);
             stands_for.unwrap_or(t).source.clone()
         });
         let names: &[&'static str] = match target.map(|t| t.role) {
+            _ if f.deleting => &["deleted"],
             Some(Role::Into) if !f.merge => &["inserted"],
-            Some(Role::From) => &["deleted"],
             _ => &["inserted", "deleted"],
         };
         let empty = RelationSource::Derived { columns: Vec::new(), star: Vec::new() };
@@ -1965,6 +1980,23 @@ mod tests {
         assert_eq!(ms("UPDATE TOP (1) orders se|").keywords, ["SET"]);
         assert_eq!(refs(&ms("UPDATE TOP (1) orders SET total = 0 WHERE |")), [(Some("orders"), &table(None, "orders"))]);
         assert_eq!(ms("DELETE TOP (1) o FROM orders o|").expect, Expect::Alias);
+    }
+
+    #[test]
+    fn a_tsql_delete_output_offers_deleted_with_the_named_target() {
+        let orders = table(None, "orders");
+        for marked in [
+            "DELETE o OUTPUT deleted.| FROM orders o",
+            "DELETE FROM orders OUTPUT deleted.| WHERE id = 1",
+            "DELETE TOP (1) o OUTPUT deleted.| FROM orders o",
+            "DELETE orders OUTPUT deleted.| FROM orders",
+        ] {
+            let s = ms(marked);
+            assert_eq!((refs(&s), s.qualifier.clone()), (vec![(Some("deleted"), &orders)], Some(Qualifier::Relation { index: 0 })), "{marked:?}");
+        }
+        let names = ms("DELETE o OUTPUT | FROM orders o").relations.into_iter().map(|r| r.reference).collect::<Vec<_>>();
+        assert_eq!(names, [Some("deleted".to_owned())]);
+        assert!(ms("DELETE o OUTPUT inserted.| FROM orders o").relations.is_empty());
     }
 
     #[test]
