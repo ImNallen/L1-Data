@@ -104,6 +104,8 @@ pub enum ReplicaIdentity {
 
 /// A partition's copy of its parent's index, which the replay creates under a name PostgreSQL
 /// chooses, so the script finds it by `parent`, the parent's index, and gives it back `name`.
+/// The copy takes the parent index's storage parameters and tablespace, so `tablespace` is set
+/// only when the copy's differs.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct AttachedIndex {
     pub name: String,
@@ -111,6 +113,9 @@ pub struct AttachedIndex {
     pub clustered: bool,
     pub replica_identity: bool,
     pub comment: Option<String>,
+    pub options: Vec<String>,
+    pub parent_options: Vec<String>,
+    pub tablespace: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -266,32 +271,26 @@ pub fn qualified(schema: &str, name: &str) -> String {
     format!("{}.{}", ident(schema), ident(name))
 }
 
-/// Every attached index gets its name back in one block after the whole tree, so the statements
-/// that name an attached index or a constraint it backs come after that block.
 pub fn table(t: &Table) -> Ddl {
     let mut statements = vec![];
     let mut warnings = vec![];
     table_statements(t, &mut statements, &mut warnings);
-    let tree = preorder(t);
-    let attached: Vec<(String, &AttachedIndex)> = tree.iter().flat_map(|p| p.attached_indexes.iter().map(|a| (qualified(&p.schema, &p.name), a))).collect();
-    if !attached.is_empty() {
-        statements.push(restore_attached_names(&attached));
-    }
-    for p in tree {
-        after_attached_names(p, &mut statements);
-    }
     Ddl { text: script(statements), warnings }
 }
 
-fn preorder(t: &Table) -> Vec<&Table> {
-    std::iter::once(t).chain(t.partitions.iter().flat_map(preorder)).collect()
+fn makes_index(k: &Constraint) -> bool {
+    ["PRIMARY KEY", "UNIQUE", "EXCLUDE"].iter().any(|kind| k.definition.starts_with(kind))
 }
 
+/// A partition's constraint that backs an index is added after the partition's attached indexes
+/// have their names back, because `CREATE TABLE ... PARTITION OF` creates the copies of the
+/// parent's indexes first, and one of them may take the constraint's name.
 fn table_statements(t: &Table, out: &mut Vec<String>, warnings: &mut Vec<String>) {
     let name = qualified(&t.schema, &t.name);
     let keyword = if t.foreign.is_some() { "FOREIGN TABLE" } else { "TABLE" };
+    let partition = matches!(t.parent, Parent::Partition { .. });
     let (late, early): (Vec<_>, Vec<_>) = t.constraints.iter().filter(|k| !k.inherited).partition(|k| k.after_indexes);
-    let (deferred, inline): (Vec<_>, Vec<_>) = early.into_iter().partition(|k| k.definition.ends_with(" NOT VALID"));
+    let (deferred, inline): (Vec<_>, Vec<_>) = early.into_iter().partition(|k| k.definition.ends_with(" NOT VALID") || partition && makes_index(k));
     let constraints = inline.iter().map(|k| format!("CONSTRAINT {} {}", ident(&k.name), constraint_definition(k)));
     out.extend(t.owned_sequences.iter().map(create_sequence));
 
@@ -351,6 +350,7 @@ fn table_statements(t: &Table, out: &mut Vec<String>, warnings: &mut Vec<String>
         head.push_str(&format!(" TABLESPACE {}", ident(space)));
     }
     out.push(head);
+    out.extend(restore_attached_names(t));
 
     out.extend(t.owned_sequences.iter().map(|s| format!("ALTER SEQUENCE {} OWNED BY {name}.{}", qualified(&s.schema, &s.name), ident(&s.column))));
     out.extend(t.sequence_states.iter().filter_map(|s| {
@@ -359,7 +359,6 @@ fn table_statements(t: &Table, out: &mut Vec<String>, warnings: &mut Vec<String>
     let add = |k: &&Constraint| format!("ALTER TABLE {name} ADD CONSTRAINT {} {}", ident(&k.name), constraint_definition(k));
     out.extend(deferred.iter().map(add));
     for c in &t.columns {
-        let partition = matches!(t.parent, Parent::Partition { .. });
         out.extend(column_changes(c, keyword, &name, !partition && c.declared && c.inherited.is_none(), !partition && merged_default(c).is_some()));
     }
     indexes(&t.indexes, keyword, &t.schema, &name, out, warnings);
@@ -395,7 +394,7 @@ fn table_statements(t: &Table, out: &mut Vec<String>, warnings: &mut Vec<String>
         out.extend(comment(&format!("STATISTICS {stat}"), &s.comment));
     }
     out.extend(comment(&format!("{keyword} {name}"), &t.comment));
-    for k in t.constraints.iter().filter(|k| !k.inherited) {
+    for k in t.constraints.iter().filter(|k| backing_index(t, k).is_none()) {
         out.extend(comment(&format!("CONSTRAINT {} ON {name}", ident(&k.name)), &k.comment));
     }
     for c in &t.columns {
@@ -405,8 +404,7 @@ fn table_statements(t: &Table, out: &mut Vec<String>, warnings: &mut Vec<String>
         out.extend(comment(&format!("SEQUENCE {}", qualified(&s.schema, &s.name)), &s.comment));
     }
     warnings.extend(unscripted(&t.unscripted, &name, None));
-    let inherits = !matches!(t.parent, Parent::Partition { .. });
-    for c in t.columns.iter().filter(|c| inherits && !c.declared && generation_override(c).is_some()) {
+    for c in t.columns.iter().filter(|c| !partition && !c.declared && generation_override(c).is_some()) {
         warnings.push(format!("the generation expression of {name}.{}, which a replay takes from its parent", ident(&c.name)));
     }
     if !in_replay_order(&t.columns) {
@@ -473,53 +471,104 @@ fn column_options(c: &Column, schema: &str, table: &str) -> String {
     out
 }
 
-fn after_attached_names(t: &Table, out: &mut Vec<String>) {
-    let relation = qualified(&t.schema, &t.name);
-    for a in &t.attached_indexes {
-        let name = ident(&a.name);
-        if a.clustered {
-            out.push(format!("ALTER TABLE {relation} CLUSTER ON {name}"));
-        }
-        if a.replica_identity {
-            out.push(format!("ALTER TABLE {relation} REPLICA IDENTITY USING INDEX {name}"));
-        }
-        out.extend(comment(&format!("INDEX {}", qualified(&t.schema, &a.name)), &a.comment));
-    }
-    for k in t.constraints.iter().filter(|k| k.inherited) {
-        out.extend(comment(&format!("CONSTRAINT {} ON {relation}", ident(&k.name)), &k.comment));
-    }
+/// The inherited constraint that an attached index of `t` backs, which has the index's name.
+fn backing_index<'a>(t: &'a Table, k: &Constraint) -> Option<&'a AttachedIndex> {
+    t.attached_indexes.iter().find(|a| k.inherited && makes_index(k) && a.name == k.name)
 }
 
-/// Runs in tree order, so a partition's index has its name back before its own partitions' indexes
-/// look it up by that name. An index that already holds a wanted name is one whose own entry comes
-/// later, because source names are unique, so it moves aside under a name made from its OID.
-fn restore_attached_names(attached: &[(String, &AttachedIndex)]) -> String {
-    let entries: Vec<String> = attached.iter().map(|(table, a)| format!("[{}, {}, {}]", quote_literal(table), quote_literal(&a.parent), quote_literal(&a.name))).collect();
-    let body = format!(
+/// Runs right after the partition is created. Every index of the tree that exists then holds its
+/// source name, which no other index wants, or is one of this partition's new copies. So a copy
+/// that holds a wanted name moves aside under a name made from its OID until its own entry. When
+/// something the script did not create holds a wanted name, it keeps it, and the copy takes the
+/// OID name with a warning, because the name PostgreSQL chose may be one the script creates next.
+/// The statements that name a copy run on the copy the block found, so they never reach the other.
+fn restore_attached_names(t: &Table) -> Option<String> {
+    if t.attached_indexes.is_empty() {
+        return None;
+    }
+    let relation = qualified(&t.schema, &t.name);
+    let row = |a: &AttachedIndex, last: &str| format!("        [{}, {}, {}]", quote_literal(&relation), quote_literal(&a.parent), quote_literal(last));
+    let names: Vec<String> = t.attached_indexes.iter().map(|a| row(a, &a.name)).collect();
+    let then: Vec<String> = t.attached_indexes.iter().flat_map(|a| attached_changes(t, a, &relation).into_iter().map(move |s| (a, s))).map(|(a, s)| row(a, &s)).collect();
+    let find = "        attached := (SELECT h.inhrelid FROM pg_catalog.pg_inherits h JOIN pg_catalog.pg_index i ON i.indexrelid = h.inhrelid
+                     WHERE h.inhparent = pg_catalog.to_regclass(entry[2]) AND i.indrelid = entry[1]::regclass);";
+    let mut body = format!(
         "DECLARE
     entry text[];
     attached regclass;
     occupant regclass;
 BEGIN
     FOREACH entry SLICE 1 IN ARRAY ARRAY[
-        {}
+{}
     ] LOOP
-        attached := (SELECT h.inhrelid FROM pg_catalog.pg_inherits h JOIN pg_catalog.pg_index i ON i.indexrelid = h.inhrelid
-                     WHERE h.inhparent = entry[2]::regclass AND i.indrelid = entry[1]::regclass);
-        IF (SELECT c.relname FROM pg_catalog.pg_class c WHERE c.oid = attached) <> entry[3] THEN
-            occupant := (SELECT c.oid FROM pg_catalog.pg_class c WHERE c.relname = entry[3] AND c.relkind IN ('i', 'I')
-                         AND c.relnamespace = (SELECT a.relnamespace FROM pg_catalog.pg_class a WHERE a.oid = attached));
-            IF occupant IS NOT NULL THEN
-                EXECUTE format('ALTER INDEX %s RENAME TO %I', occupant, 'l1_' || occupant::oid);
+{find}
+        occupant := (SELECT c.oid FROM pg_catalog.pg_class c WHERE c.relname = entry[3]
+                     AND c.relnamespace = (SELECT a.relnamespace FROM pg_catalog.pg_class a WHERE a.oid = attached));
+        IF attached IS NULL THEN
+            RAISE WARNING 'L1 Data found no index on % attached to %, so it could not name it %', entry[1], entry[2], entry[3];
+        ELSIF occupant IS NULL THEN
+            EXECUTE pg_catalog.format('ALTER INDEX %s RENAME TO %I', attached, entry[3]);
+        ELSIF occupant <> attached AND EXISTS (SELECT FROM pg_catalog.pg_inherits h JOIN pg_catalog.pg_index i ON i.indexrelid = h.inhrelid
+                                               WHERE h.inhrelid = occupant AND i.indrelid = entry[1]::regclass) THEN
+            EXECUTE pg_catalog.format('ALTER INDEX %s RENAME TO %I', occupant, 'l1_' || occupant::oid);
+            EXECUTE pg_catalog.format('ALTER INDEX %s RENAME TO %I', attached, entry[3]);
+        ELSIF occupant <> attached THEN
+            IF (SELECT c.relname FROM pg_catalog.pg_class c WHERE c.oid = attached) <> 'l1_' || attached::oid THEN
+                EXECUTE pg_catalog.format('ALTER INDEX %s RENAME TO %I', attached, 'l1_' || attached::oid);
             END IF;
-            EXECUTE format('ALTER INDEX %s RENAME TO %I', attached, entry[3]);
+            RAISE WARNING 'L1 Data named index % instead of %, because %, which this script did not create, has that name', attached, entry[3], occupant;
         END IF;
     END LOOP;
-END",
-        entries.join(",\n        ")
+",
+        names.join(",\n")
     );
+    if !then.is_empty() {
+        body.push_str(&format!(
+            "    FOREACH entry SLICE 1 IN ARRAY ARRAY[
+{}
+    ] LOOP
+{find}
+        IF attached IS NOT NULL THEN
+            EXECUTE pg_catalog.format(entry[3], (SELECT c.relname FROM pg_catalog.pg_class c WHERE c.oid = attached), attached);
+        END IF;
+    END LOOP;
+",
+            then.join(",\n")
+        ));
+    }
+    body.push_str("END");
     let tag = std::iter::once("$l1$".to_owned()).chain((1..).map(|n| format!("$l1_{n}$"))).find(|tag| !body.contains(tag.as_str())).unwrap_or_default();
-    format!("DO {tag}\n{body}\n{tag}")
+    Some(format!("DO {tag}\n{body}\n{tag}"))
+}
+
+/// `format` templates the restore block runs on a copy, with `%1$I` its name and `%2$s` the copy.
+fn attached_changes(t: &Table, a: &AttachedIndex, relation: &str) -> Vec<String> {
+    let escape = |s: &str| s.replace('%', "%%");
+    let key = |o: &str| o.split_once('=').map_or(o, |(k, _)| k).to_owned();
+    let mut out = vec![];
+    let reset: Vec<String> = a.parent_options.iter().map(|o| key(o)).filter(|k| !a.options.iter().any(|o| key(o) == *k)).collect();
+    if !reset.is_empty() {
+        out.push(format!("ALTER INDEX %2$s RESET ({})", escape(&reset.join(", "))));
+    }
+    let set: Vec<&str> = a.options.iter().filter(|o| !a.parent_options.contains(o)).map(String::as_str).collect();
+    if !set.is_empty() {
+        out.push(format!("ALTER INDEX %2$s SET ({})", escape(&set.join(", "))));
+    }
+    if let Some(space) = &a.tablespace {
+        out.push(format!("ALTER INDEX %2$s SET TABLESPACE {}", escape(&ident(space))));
+    }
+    let relation = escape(relation);
+    if a.clustered {
+        out.push(format!("ALTER TABLE {relation} CLUSTER ON %1$I"));
+    }
+    if a.replica_identity {
+        out.push(format!("ALTER TABLE {relation} REPLICA IDENTITY USING INDEX %1$I"));
+    }
+    out.extend(a.comment.as_ref().map(|c| format!("COMMENT ON INDEX %2$s IS {}", escape(&quote_literal(c)))));
+    for k in t.constraints.iter().filter(|k| backing_index(t, k) == Some(a)) {
+        out.extend(k.comment.as_ref().map(|c| format!("COMMENT ON CONSTRAINT %1$I ON {relation} IS {}", escape(&quote_literal(c)))));
+    }
+    out
 }
 
 fn generation(kind: Generated, expr: &str) -> String {
@@ -1032,8 +1081,52 @@ COMMENT ON COLUMN public.t.status IS 'lifecycle';
         assert_eq!(table(&child(false)).warnings, ["the generation expression of app.c.b, which a replay takes from its parent"]);
     }
 
+    const RESTORE_HEAD: &str = "DECLARE
+    entry text[];
+    attached regclass;
+    occupant regclass;
+BEGIN
+    FOREACH entry SLICE 1 IN ARRAY ARRAY[
+";
+
+    const RESTORE_NAMES: &str = "    ] LOOP
+        attached := (SELECT h.inhrelid FROM pg_catalog.pg_inherits h JOIN pg_catalog.pg_index i ON i.indexrelid = h.inhrelid
+                     WHERE h.inhparent = pg_catalog.to_regclass(entry[2]) AND i.indrelid = entry[1]::regclass);
+        occupant := (SELECT c.oid FROM pg_catalog.pg_class c WHERE c.relname = entry[3]
+                     AND c.relnamespace = (SELECT a.relnamespace FROM pg_catalog.pg_class a WHERE a.oid = attached));
+        IF attached IS NULL THEN
+            RAISE WARNING 'L1 Data found no index on % attached to %, so it could not name it %', entry[1], entry[2], entry[3];
+        ELSIF occupant IS NULL THEN
+            EXECUTE pg_catalog.format('ALTER INDEX %s RENAME TO %I', attached, entry[3]);
+        ELSIF occupant <> attached AND EXISTS (SELECT FROM pg_catalog.pg_inherits h JOIN pg_catalog.pg_index i ON i.indexrelid = h.inhrelid
+                                               WHERE h.inhrelid = occupant AND i.indrelid = entry[1]::regclass) THEN
+            EXECUTE pg_catalog.format('ALTER INDEX %s RENAME TO %I', occupant, 'l1_' || occupant::oid);
+            EXECUTE pg_catalog.format('ALTER INDEX %s RENAME TO %I', attached, entry[3]);
+        ELSIF occupant <> attached THEN
+            IF (SELECT c.relname FROM pg_catalog.pg_class c WHERE c.oid = attached) <> 'l1_' || attached::oid THEN
+                EXECUTE pg_catalog.format('ALTER INDEX %s RENAME TO %I', attached, 'l1_' || attached::oid);
+            END IF;
+            RAISE WARNING 'L1 Data named index % instead of %, because %, which this script did not create, has that name', attached, entry[3], occupant;
+        END IF;
+    END LOOP;
+";
+
+    const RESTORE_THEN: &str = "    ] LOOP
+        attached := (SELECT h.inhrelid FROM pg_catalog.pg_inherits h JOIN pg_catalog.pg_index i ON i.indexrelid = h.inhrelid
+                     WHERE h.inhparent = pg_catalog.to_regclass(entry[2]) AND i.indrelid = entry[1]::regclass);
+        IF attached IS NOT NULL THEN
+            EXECUTE pg_catalog.format(entry[3], (SELECT c.relname FROM pg_catalog.pg_class c WHERE c.oid = attached), attached);
+        END IF;
+    END LOOP;
+";
+
+    fn restore(names: &str, then: Option<&str>) -> String {
+        let then = then.map(|t| format!("    FOREACH entry SLICE 1 IN ARRAY ARRAY[\n{t}\n{RESTORE_THEN}")).unwrap_or_default();
+        format!("DO $l1$\n{RESTORE_HEAD}{names}\n{RESTORE_NAMES}{then}END\n$l1$;\n")
+    }
+
     #[test]
-    fn a_partition_tree_restores_its_attached_index_names_in_one_block_before_what_names_them() {
+    fn each_partition_restores_its_attached_index_names_right_after_it_is_created() {
         let clone = |name: &str, enabled: char, comment: Option<&str>| Trigger { name: name.into(), definition: "CREATE TRIGGER ignored".into(), enabled, comment: comment.map(Into::into), cloned: true };
         let partition = |name: &str| Table {
             schema: "app".into(),
@@ -1050,28 +1143,50 @@ COMMENT ON COLUMN public.t.status IS 'lifecycle';
                 Table {
                     replica_identity: ReplicaIdentity::Index,
                     attached_indexes: vec![
-                        AttachedIndex { name: "ri_1_custom".into(), parent: "app.ri_id_k".into(), clustered: true, replica_identity: true, comment: Some("leaf index".into()) },
+                        AttachedIndex { name: "ri_1_custom".into(), parent: "app.ri_id_k".into(), clustered: true, replica_identity: true, comment: Some("leaf 100%".into()), ..Default::default() },
                         AttachedIndex { name: "it's".into(), parent: "app.\"Odd\"".into(), ..Default::default() },
                     ],
                     triggers: vec![clone("off", 'D', None), clone("on", 'O', Some("leaf note"))],
+                    indexes: vec![Index { name: "ri_1_k_idx".into(), definition: Some("CREATE INDEX ri_1_k_idx ON app.ri_1 USING btree (k) WHERE (k > 0)".into()), ..Default::default() }],
+                    constraints: vec![Constraint { name: "ri_1_own".into(), definition: "UNIQUE (k)".into(), ..Default::default() }, Constraint { name: "ri_1_chk".into(), definition: "CHECK ((k > 0))".into(), ..Default::default() }],
                     ..partition("ri_1")
                 },
                 Table {
                     attached_indexes: vec![AttachedIndex { name: "ri_2 key".into(), parent: "app.ri_id_k".into(), ..Default::default() }],
-                    constraints: vec![Constraint { name: "ri_2 key".into(), definition: "UNIQUE (id, k)".into(), comment: Some("cloned".into()), inherited: true, ..Default::default() }],
+                    constraints: vec![
+                        Constraint { name: "ri_2 key".into(), definition: "UNIQUE (id, k)".into(), comment: Some("cloned".into()), inherited: true, ..Default::default() },
+                        Constraint { name: "ri_chk".into(), definition: "CHECK ((k > 0))".into(), comment: Some("inherited check".into()), inherited: true, ..Default::default() },
+                    ],
                     ..partition("ri_2")
                 },
             ],
             ..Default::default()
         };
+        let ri_1 = restore(
+            "        ['app.ri_1', 'app.ri_id_k', 'ri_1_custom'],\n        ['app.ri_1', 'app.\"Odd\"', 'it''s']",
+            Some(
+                "        ['app.ri_1', 'app.ri_id_k', 'ALTER TABLE app.ri_1 CLUSTER ON %1$I'],
+        ['app.ri_1', 'app.ri_id_k', 'ALTER TABLE app.ri_1 REPLICA IDENTITY USING INDEX %1$I'],
+        ['app.ri_1', 'app.ri_id_k', 'COMMENT ON INDEX %2$s IS ''leaf 100%%''']",
+            ),
+        );
+        let ri_2 = restore("        ['app.ri_2', 'app.ri_id_k', 'ri_2 key']", Some("        ['app.ri_2', 'app.ri_id_k', 'COMMENT ON CONSTRAINT %1$I ON app.ri_2 IS ''cloned''']"));
         assert_eq!(
             table(&t).text,
-            "CREATE TABLE app.ri (
+            format!(
+                "CREATE TABLE app.ri (
     k integer
 ) PARTITION BY LIST (k);
 
-CREATE TABLE app.ri_1 PARTITION OF app.ri
+CREATE TABLE app.ri_1 PARTITION OF app.ri (
+    CONSTRAINT ri_1_chk CHECK ((k > 0))
+)
     FOR VALUES IN (1);
+
+{ri_1}
+ALTER TABLE app.ri_1 ADD CONSTRAINT ri_1_own UNIQUE (k);
+
+CREATE INDEX ri_1_k_idx ON app.ri_1 USING btree (k) WHERE (k > 0);
 
 ALTER TABLE app.ri_1 DISABLE TRIGGER off;
 
@@ -1082,46 +1197,35 @@ COMMENT ON TRIGGER \"on\" ON app.ri_1 IS 'leaf note';
 CREATE TABLE app.ri_2 PARTITION OF app.ri
     FOR VALUES IN (2);
 
-DO $l1$
-DECLARE
-    entry text[];
-    attached regclass;
-    occupant regclass;
-BEGIN
-    FOREACH entry SLICE 1 IN ARRAY ARRAY[
-        ['app.ri_1', 'app.ri_id_k', 'ri_1_custom'],
-        ['app.ri_1', 'app.\"Odd\"', 'it''s'],
-        ['app.ri_2', 'app.ri_id_k', 'ri_2 key']
-    ] LOOP
-        attached := (SELECT h.inhrelid FROM pg_catalog.pg_inherits h JOIN pg_catalog.pg_index i ON i.indexrelid = h.inhrelid
-                     WHERE h.inhparent = entry[2]::regclass AND i.indrelid = entry[1]::regclass);
-        IF (SELECT c.relname FROM pg_catalog.pg_class c WHERE c.oid = attached) <> entry[3] THEN
-            occupant := (SELECT c.oid FROM pg_catalog.pg_class c WHERE c.relname = entry[3] AND c.relkind IN ('i', 'I')
-                         AND c.relnamespace = (SELECT a.relnamespace FROM pg_catalog.pg_class a WHERE a.oid = attached));
-            IF occupant IS NOT NULL THEN
-                EXECUTE format('ALTER INDEX %s RENAME TO %I', occupant, 'l1_' || occupant::oid);
-            END IF;
-            EXECUTE format('ALTER INDEX %s RENAME TO %I', attached, entry[3]);
-        END IF;
-    END LOOP;
-END
-$l1$;
-
-ALTER TABLE app.ri_1 CLUSTER ON ri_1_custom;
-
-ALTER TABLE app.ri_1 REPLICA IDENTITY USING INDEX ri_1_custom;
-
-COMMENT ON INDEX app.ri_1_custom IS 'leaf index';
-
-COMMENT ON CONSTRAINT \"ri_2 key\" ON app.ri_2 IS 'cloned';
+{ri_2}
+COMMENT ON CONSTRAINT ri_chk ON app.ri_2 IS 'inherited check';
 "
+            )
         );
+    }
+
+    #[test]
+    fn an_attached_index_sets_the_options_and_tablespace_that_differ_from_its_parent_index() {
+        let index = AttachedIndex {
+            name: "p_1_k_idx".into(),
+            parent: "app.p_k".into(),
+            options: vec!["fillfactor=33".into(), "deduplicate_items=off".into()],
+            parent_options: vec!["fillfactor=50".into(), "deduplicate_items=off".into(), "autosummarize=on".into()],
+            tablespace: Some("Fast".into()),
+            ..Default::default()
+        };
+        let t = Table { schema: "app".into(), name: "p_1".into(), attached_indexes: vec![index], parent: Parent::Partition { schema: "app".into(), name: "p".into(), bound: "FOR VALUES IN (1)".into() }, ..Default::default() };
+        let then = "        ['app.p_1', 'app.p_k', 'ALTER INDEX %2$s RESET (autosummarize)'],
+        ['app.p_1', 'app.p_k', 'ALTER INDEX %2$s SET (fillfactor=33)'],
+        ['app.p_1', 'app.p_k', 'ALTER INDEX %2$s SET TABLESPACE \"Fast\"']";
+        assert_eq!(table(&t).text, format!("CREATE TABLE app.p_1 PARTITION OF app.p\n    FOR VALUES IN (1);\n\n{}", restore("        ['app.p_1', 'app.p_k', 'p_1_k_idx']", Some(then))));
     }
 
     #[test]
     fn an_attached_index_restore_quotes_its_block_with_a_tag_no_name_contains() {
         let index = AttachedIndex { name: "x$l1$y$l1_1$".into(), parent: "app.p".into(), ..Default::default() };
-        let block = restore_attached_names(&[("app.t".into(), &index)]);
+        let t = Table { schema: "app".into(), name: "t".into(), attached_indexes: vec![index], ..Default::default() };
+        let block = restore_attached_names(&t).unwrap();
         assert!(block.starts_with("DO $l1_2$\n") && block.ends_with("\n$l1_2$"), "{block}");
         assert_eq!(block.matches("$l1_2$").count(), 2, "{block}");
         assert!(block.contains("['app.t', 'app.p', 'x$l1$y$l1_1$']"), "{block}");
@@ -1376,7 +1480,7 @@ ALTER FOREIGN TABLE public.e2 ALTER COLUMN v OPTIONS (ADD column_name 'vv');
         };
         assert_eq!(
             table(&t).text,
-            "CREATE TABLE app.t_1 PARTITION OF app.t\n    FOR VALUES IN (1);\n\nALTER SEQUENCE app.t_1_id_seq SET UNLOGGED;\n\nALTER SEQUENCE app.\"Odd seq\" SET LOGGED;\n\nCOMMENT ON SEQUENCE app.t_1_id_seq IS 'ids';\n\nCOMMENT ON SEQUENCE app.noted IS 'it''s';\n\nCOMMENT ON CONSTRAINT t_chk ON app.t_1 IS 'from the parent';\n"
+            "CREATE TABLE app.t_1 PARTITION OF app.t\n    FOR VALUES IN (1);\n\nALTER SEQUENCE app.t_1_id_seq SET UNLOGGED;\n\nALTER SEQUENCE app.\"Odd seq\" SET LOGGED;\n\nCOMMENT ON CONSTRAINT t_chk ON app.t_1 IS 'from the parent';\n\nCOMMENT ON SEQUENCE app.t_1_id_seq IS 'ids';\n\nCOMMENT ON SEQUENCE app.noted IS 'it''s';\n"
         );
     }
 

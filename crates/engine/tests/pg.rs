@@ -2762,14 +2762,22 @@ BEGIN
         ['public.order_events_2026_h1', 'public.order_events_pkey', 'order_events_2026_h1_pkey']
     ] LOOP
         attached := (SELECT h.inhrelid FROM pg_catalog.pg_inherits h JOIN pg_catalog.pg_index i ON i.indexrelid = h.inhrelid
-                     WHERE h.inhparent = entry[2]::regclass AND i.indrelid = entry[1]::regclass);
-        IF (SELECT c.relname FROM pg_catalog.pg_class c WHERE c.oid = attached) <> entry[3] THEN
-            occupant := (SELECT c.oid FROM pg_catalog.pg_class c WHERE c.relname = entry[3] AND c.relkind IN ('i', 'I')
-                         AND c.relnamespace = (SELECT a.relnamespace FROM pg_catalog.pg_class a WHERE a.oid = attached));
-            IF occupant IS NOT NULL THEN
-                EXECUTE format('ALTER INDEX %s RENAME TO %I', occupant, 'l1_' || occupant::oid);
+                     WHERE h.inhparent = pg_catalog.to_regclass(entry[2]) AND i.indrelid = entry[1]::regclass);
+        occupant := (SELECT c.oid FROM pg_catalog.pg_class c WHERE c.relname = entry[3]
+                     AND c.relnamespace = (SELECT a.relnamespace FROM pg_catalog.pg_class a WHERE a.oid = attached));
+        IF attached IS NULL THEN
+            RAISE WARNING 'L1 Data found no index on % attached to %, so it could not name it %', entry[1], entry[2], entry[3];
+        ELSIF occupant IS NULL THEN
+            EXECUTE pg_catalog.format('ALTER INDEX %s RENAME TO %I', attached, entry[3]);
+        ELSIF occupant <> attached AND EXISTS (SELECT FROM pg_catalog.pg_inherits h JOIN pg_catalog.pg_index i ON i.indexrelid = h.inhrelid
+                                               WHERE h.inhrelid = occupant AND i.indrelid = entry[1]::regclass) THEN
+            EXECUTE pg_catalog.format('ALTER INDEX %s RENAME TO %I', occupant, 'l1_' || occupant::oid);
+            EXECUTE pg_catalog.format('ALTER INDEX %s RENAME TO %I', attached, entry[3]);
+        ELSIF occupant <> attached THEN
+            IF (SELECT c.relname FROM pg_catalog.pg_class c WHERE c.oid = attached) <> 'l1_' || attached::oid THEN
+                EXECUTE pg_catalog.format('ALTER INDEX %s RENAME TO %I', attached, 'l1_' || attached::oid);
             END IF;
-            EXECUTE format('ALTER INDEX %s RENAME TO %I', attached, entry[3]);
+            RAISE WARNING 'L1 Data named index % instead of %, because %, which this script did not create, has that name', attached, entry[3], occupant;
         END IF;
     END LOOP;
 END
@@ -2865,13 +2873,13 @@ async fn a_partition_tree_replays_its_index_names_without_a_clash_and_leaves_oth
         assert_eq!((bystander.get::<_, &str>(0), bystander.get::<_, bool>(1), bystander.get::<_, &str>(2)), ("nat_1_k_idx1", false, ""), "the index on another table keeps its name and gets nothing");
         let copy = beside.query_one(&format!("{index_of} JOIN pg_inherits h ON h.inhrelid = i.indexrelid WHERE i.indrelid = 'a.nat_1'::regclass AND h.inhparent = 'a.nat_k'::regclass"), &[]).await.unwrap();
         let copy_name: String = copy.get(0);
-        assert_ne!(copy_name, "nat_1_k_idx1");
-        assert_eq!((copy.get::<_, bool>(1), copy.get::<_, &str>(2)), (true, "attached"), "the copy keeps its PostgreSQL name and still gets its properties");
+        assert!(copy_name.starts_with("l1_"), "{copy_name}");
+        assert_eq!((copy.get::<_, bool>(1), copy.get::<_, &str>(2)), (true, "attached"), "the copy moves out of the way of the partition's own index and still gets its properties");
         let mut warnings = vec![];
         while let Ok(notice) = heard.try_recv() {
             warnings.push(notice);
         }
-        assert_eq!(warnings, [format!("L1 Data left index a.{copy_name} unrenamed, because a.nat_1_k_idx1, which this script did not create, has the name nat_1_k_idx1")]);
+        assert_eq!(warnings, [format!("L1 Data named index a.{copy_name} instead of nat_1_k_idx1, because a.nat_1_k_idx1, which this script did not create, has that name")]);
     }))
     .await;
     drop((original, replay, beside));

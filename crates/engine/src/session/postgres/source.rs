@@ -151,9 +151,16 @@ const TRIGGERS: &str = "SELECT t.tgname, pg_get_triggerdef(t.oid), t.tgenabled::
      ORDER BY t.tgname";
 
 /// A partition's copy of its parent's index comes with the parent under a name PostgreSQL chooses,
-/// which depends on the names the schema already holds, so every copy's name is restored.
-const ATTACHED_INDEXES: &str = "SELECT ic.relname, h.inhparent::regclass::text, i.indisclustered, i.indisreplident, obj_description(i.indexrelid, 'pg_class'), i.indrelid
-     FROM pg_index i JOIN pg_class ic ON ic.oid = i.indexrelid JOIN pg_inherits h ON h.inhrelid = i.indexrelid
+/// which depends on the names the schema already holds, so every copy's name is restored. The copy
+/// takes its parent index's storage parameters and tablespace, an unset tablespace being the
+/// database's.
+const ATTACHED_INDEXES: &str = "SELECT ic.relname, h.inhparent::regclass::text, i.indisclustered, i.indisreplident, obj_description(i.indexrelid, 'pg_class'),
+        coalesce(ic.reloptions, '{}'), coalesce(pc.reloptions, '{}'),
+        CASE WHEN ic.reltablespace <> pc.reltablespace
+             THEN coalesce(ts.spcname, (SELECT dt.spcname FROM pg_database d JOIN pg_tablespace dt ON dt.oid = d.dattablespace WHERE d.datname = current_database())) END,
+        i.indrelid
+     FROM pg_index i JOIN pg_class ic ON ic.oid = i.indexrelid JOIN pg_inherits h ON h.inhrelid = i.indexrelid JOIN pg_class pc ON pc.oid = h.inhparent
+     LEFT JOIN pg_tablespace ts ON ts.oid = ic.reltablespace
      WHERE i.indrelid = ANY ($1)
      ORDER BY ic.relname";
 
@@ -428,7 +435,16 @@ fn table(oid: u32, tree: &Tree) -> Result<ddl::Table, DetailError> {
         indexes: indexes.iter().map(index_row).collect(),
         attached_indexes: attached
             .iter()
-            .map(|a| ddl::AttachedIndex { name: a.get(0), parent: a.get(1), clustered: a.get(2), replica_identity: a.get(3), comment: a.get(4) })
+            .map(|a| ddl::AttachedIndex {
+                name: a.get(0),
+                parent: a.get(1),
+                clustered: a.get(2),
+                replica_identity: a.get(3),
+                comment: a.get(4),
+                options: a.get(5),
+                parent_options: a.get(6),
+                tablespace: a.get(7),
+            })
             .collect(),
         replica_identity: match r.get::<_, &str>(13) {
             "n" => ddl::ReplicaIdentity::Nothing,
