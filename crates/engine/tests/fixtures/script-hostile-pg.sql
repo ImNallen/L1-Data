@@ -218,3 +218,12 @@ CREATE TABLE app.ats_1 PARTITION OF app.ats FOR VALUES IN (1);
 CREATE TABLE app.ats_2 PARTITION OF app.ats FOR VALUES IN (2);
 ALTER INDEX app.ats_1_k_idx SET (fillfactor = 33);
 ALTER INDEX app.ats_2_k_idx RESET (fillfactor);
+-- security labels, written straight into pg_seclabel because the image loads no label provider
+CREATE TABLE app.labeled (s serial, id int GENERATED ALWAYS AS IDENTITY, note text);
+CREATE FUNCTION app.labeled_fn() RETURNS int LANGUAGE sql AS 'SELECT 1';
+INSERT INTO pg_seclabel VALUES
+  ('app.labeled'::regclass, 'pg_class'::regclass, 0, 'dummy', 'classified'),
+  ('app.labeled'::regclass, 'pg_class'::regclass, 3, 'dummy', 'classified'),
+  ('app.labeled_s_seq'::regclass, 'pg_class'::regclass, 0, 'dummy', 'classified'),
+  ('app.labeled_id_seq'::regclass, 'pg_class'::regclass, 0, 'dummy', 'classified'),
+  ('app.labeled_fn()'::regprocedure, 'pg_proc'::regclass, 0, 'dummy', 'classified');

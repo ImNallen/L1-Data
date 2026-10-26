@@ -2940,6 +2940,7 @@ async fn hostile_object_scripts_replay_every_property_or_warn() {
             warned,
             std::collections::BTreeMap::from([
                 ("f_out.sql".to_owned(), vec!["owner pg_database_owner of app.f_out(a integer, OUT b integer, OUT c integer)".to_owned()]),
+                ("labeled_fn.sql".to_owned(), vec!["security labels on app.labeled_fn()".to_owned()]),
                 (
                     "sec_def.sql".to_owned(),
                     vec![
@@ -2969,6 +2970,15 @@ async fn hostile_object_scripts_replay_every_property_or_warn() {
                 ("My View.sql".to_owned(), vec!["owner l1data of app.\"My View\", whose privileges the view's query is checked against".to_owned()]),
                 ("child.sql".to_owned(), vec!["the column order of app.child, because a replay puts inherited columns first".to_owned()]),
                 ("dups.sql".to_owned(), vec!["the invalid state of index app.dups_v, which a replay builds valid".to_owned()]),
+                (
+                    "labeled.sql".to_owned(),
+                    vec![
+                        "security labels on app.labeled".to_owned(),
+                        "security labels on app.labeled.note".to_owned(),
+                        "security labels on app.labeled_id_seq".to_owned(),
+                        "security labels on app.labeled_s_seq".to_owned(),
+                    ]
+                ),
                 ("mv.sql".to_owned(), vec!["owner l1data of app.mv, whose privileges a refresh runs the query with".to_owned()]),
                 ("pt.sql".to_owned(), vec!["the partial attachment of index app.pt_only, which a replay attaches to every partition".to_owned()]),
                 ("refd.sql".to_owned(), vec!["membership of app.refd in publication hostile_pub".to_owned()]),
