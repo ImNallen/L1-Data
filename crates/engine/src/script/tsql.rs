@@ -36,6 +36,17 @@ pub enum Omitted {
     /// SQL Server hides grants to principals a login without VIEW DEFINITION on the database cannot see.
     UnseenPrivileges,
     UnseenClassifications,
+    /// An owner set by `ALTER AUTHORIZATION`. The replayed object belongs to its schema's owner.
+    Owner(String),
+    /// The owner an `EXECUTE AS OWNER` module runs as, which the replayed module may not share.
+    RunsAsOwner(String),
+    ChangeDataCapture,
+    FullTextIndex,
+    HypotheticalIndex(String),
+    /// A numbered procedure after the first, such as `;2`, which `OBJECT_DEFINITION` leaves out.
+    NumberedProcedure(String),
+    /// A signature or counter signature, such as `signature by certificate`, by the named key.
+    Signature { kind: String, by: String },
 }
 
 impl Omitted {
@@ -43,6 +54,13 @@ impl Omitted {
         match self {
             Omitted::UnseenPrivileges => format!("a complete privilege list for {object}, because this login lacks VIEW DEFINITION on the database"),
             Omitted::UnseenClassifications => format!("every sensitivity classification on {object}, because this login lacks VIEW ANY SENSITIVITY CLASSIFICATION"),
+            Omitted::Owner(owner) => format!("owner {} of {object}, set by ALTER AUTHORIZATION", ident(owner)),
+            Omitted::RunsAsOwner(owner) => format!("the owner {} that EXECUTE AS OWNER on {object} runs as", ident(owner)),
+            Omitted::ChangeDataCapture => format!("change data capture on {object}"),
+            Omitted::FullTextIndex => format!("full-text index on {object}"),
+            Omitted::HypotheticalIndex(index) => format!("hypothetical index {} on {object}", ident(index)),
+            Omitted::NumberedProcedure(number) => format!("numbered procedure {object};{number}"),
+            Omitted::Signature { kind, by } => format!("{kind} {} on {object}", ident(by)),
         }
     }
 }
@@ -192,6 +210,8 @@ pub struct Storage {
 pub struct Unscripted {
     pub incremental: bool,
     pub suppress_dup_key_messages: bool,
+    /// The script writes the first partition's compression for the whole index or heap.
+    pub mixed_compression: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -561,7 +581,11 @@ fn storage_warnings(s: &Storage, index: &str, table: &str, warnings: &mut Vec<St
     if let Some(place) = &s.place {
         warnings.push(format!("{}{of} on {table}", place.describe()));
     }
-    for (on, option) in [(s.unscripted.incremental, "STATISTICS_INCREMENTAL"), (s.unscripted.suppress_dup_key_messages, "SUPPRESS_DUP_KEY_MESSAGES")] {
+    for (on, option) in [
+        (s.unscripted.mixed_compression, "data compression that differs by partition"),
+        (s.unscripted.incremental, "STATISTICS_INCREMENTAL"),
+        (s.unscripted.suppress_dup_key_messages, "SUPPRESS_DUP_KEY_MESSAGES"),
+    ] {
         if on {
             warnings.push(format!("{option}{of} on {table}"));
         }
@@ -1179,6 +1203,33 @@ GO
         assert_eq!(ddl.warnings, ["STATISTICS_INCREMENTAL for index [PK_i] on [dbo].[i]", "SUPPRESS_DUP_KEY_MESSAGES for index [UX_i] on [dbo].[i]"]);
         assert!(!ddl.text.contains("STATISTICS_INCREMENTAL") && !ddl.text.contains("SUPPRESS_DUP_KEY_MESSAGES"), "{}", ddl.text);
         assert!(ddl.text.contains("CREATE UNIQUE NONCLUSTERED INDEX [UX_i] ON [dbo].[i] ([id] ASC) WITH (IGNORE_DUP_KEY = ON);"), "{}", ddl.text);
+    }
+
+    #[test]
+    fn owners_cdc_full_text_hypothetical_indexes_numbered_procedures_signatures_and_mixed_compression_warn() {
+        let t = Table {
+            heap: Some(Storage { unscripted: Unscripted { mixed_compression: true, ..Unscripted::default() }, ..Storage::default() }),
+            omitted: vec![Omitted::Owner("app]r".into()), Omitted::ChangeDataCapture, Omitted::FullTextIndex, Omitted::HypotheticalIndex("hx".into())],
+            ..table_named("t")
+        };
+        assert_eq!(
+            table(&t).warnings,
+            [
+                "data compression that differs by partition on [dbo].[t]",
+                "owner [app]]r] of [dbo].[t], set by ALTER AUTHORIZATION",
+                "change data capture on [dbo].[t]",
+                "full-text index on [dbo].[t]",
+                "hypothetical index [hx] on [dbo].[t]",
+            ]
+        );
+        let m = Module {
+            omitted: vec![Omitted::RunsAsOwner("dbo".into()), Omitted::NumberedProcedure("2".into()), Omitted::Signature { kind: "counter signature by certificate".into(), by: "c".into() }],
+            ..procedure("CREATE PROCEDURE dbo.newname WITH EXECUTE AS OWNER AS SELECT 1")
+        };
+        assert_eq!(
+            module(&m).warnings,
+            ["the owner [dbo] that EXECUTE AS OWNER on [dbo].[newname] runs as", "numbered procedure [dbo].[newname];2", "counter signature by certificate [c] on [dbo].[newname]"]
+        );
     }
 
     #[test]

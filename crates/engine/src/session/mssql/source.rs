@@ -37,6 +37,7 @@ pub(super) struct Features {
     classifications: Option<&'static str>,
     auto_drop: &'static str,
     persisted_sample: &'static str,
+    partition_xml_compression: &'static str,
 }
 
 impl Features {
@@ -54,6 +55,7 @@ impl Features {
             classifications: has(7).then(|| pick(8, "sc.rank_desc", "NULL")),
             auto_drop: pick(9, "st.auto_drop", "0"),
             persisted_sample: pick(10, "st.has_persisted_sample", "0"),
+            partition_xml_compression: pick(2, "pp.xml_compression", "0"),
         }
     }
 }
@@ -79,8 +81,9 @@ fn relation_query(oid: i32, f: &Features) -> String {
 
 fn storage_columns(f: &Features) -> String {
     format!(
-        "i.fill_factor,i.is_padded,i.ignore_dup_key,COALESCE(st.no_recompute,0),i.allow_row_locks,i.allow_page_locks,{},NULLIF(NULLIF(p.data_compression_desc,'NONE'),'COLUMNSTORE'),{},i.compression_delay,i.is_disabled,ds.type,ds.name,COALESCE(st.is_incremental,0),{}",
-        f.sequential_key, f.xml_compression, f.suppress_dup_key
+        "i.fill_factor,i.is_padded,i.ignore_dup_key,COALESCE(st.no_recompute,0),i.allow_row_locks,i.allow_page_locks,{},NULLIF(NULLIF(p.data_compression_desc,'NONE'),'COLUMNSTORE'),{},i.compression_delay,i.is_disabled,ds.type,ds.name,COALESCE(st.is_incremental,0),{},
+            CASE WHEN (SELECT COUNT(DISTINCT CONCAT(pp.data_compression,'/',{})) FROM sys.partitions pp WHERE pp.object_id=i.object_id AND pp.index_id=i.index_id)>1 THEN 1 ELSE 0 END",
+        f.sequential_key, f.xml_compression, f.suppress_dup_key, f.partition_xml_compression
     )
 }
 
@@ -110,7 +113,7 @@ fn storage(r: &[Option<String>], at: usize) -> Result<ddl::Storage, DetailError>
         compression_delay: r[at + 9].as_deref().and_then(|d| d.parse().ok()),
         disabled: bit(r, at + 10)?,
         place: place(r, at + 11),
-        unscripted: ddl::Unscripted { incremental: bit(r, at + 13)?, suppress_dup_key_messages: bit(r, at + 14)? },
+        unscripted: ddl::Unscripted { incremental: bit(r, at + 13)?, suppress_dup_key_messages: bit(r, at + 14)?, mixed_compression: bit(r, at + 15)? },
     })
 }
 
@@ -183,6 +186,7 @@ impl MsSession {
         let mut batch = Batch::default();
         let relation = batch.add(relation_query(oid, f));
         let view = batch.add(modules_sql(&format!("o.object_id={oid}")));
+        let omitted = batch.add(omitted_sql(&format!("o.object_id={oid} OR (o.parent_object_id={oid} AND o.type IN ('TR','TA'))")));
         let heap = batch.add(format!("SELECT {} FROM sys.indexes i {STORAGE_JOINS} WHERE i.object_id={oid} AND i.index_id=0", storage_columns(f)));
         let columns = batch.add(columns_sql(oid));
         let keys = batch.add(keys_sql(oid, "1=1", f));
@@ -196,14 +200,15 @@ impl MsSession {
         let classifications = f.classifications.map(|rank| batch.add(classifications_sql(oid, rank)));
         let visibility = batch.add(visibility_sql(f));
         let sets = self.run_batch(batch).await?;
+        let omitted = omitted_from(&sets[omitted])?;
 
         let r = sets[relation].first().ok_or(DetailError::Gone)?;
         match required(r, 2).map_err(failed)?.trim() {
             "V" => {
-                let (_, module) = modules(&sets[view])?.into_iter().next().ok_or(DetailError::Gone)?;
+                let (_, module) = modules(&sets[view], &omitted)?.into_iter().next().ok_or(DetailError::Gone)?;
                 let mut module = module.text()?;
                 module.omitted.extend(unseen(&sets[visibility], false)?);
-                let view = ddl::View { indexes: indexes_from(&sets[indexes])?, statistics: statistics_from(&sets[statistics])?, triggers: triggers_from(&sets[triggers])?, properties: properties(&sets[props])?, privileges: privileges_from(&sets[privileges])?, module };
+                let view = ddl::View { indexes: indexes_from(&sets[indexes])?, statistics: statistics_from(&sets[statistics])?, triggers: triggers_from(&sets[triggers], &omitted)?, properties: properties(&sets[props])?, privileges: privileges_from(&sets[privileges])?, module };
                 Ok(script::object_script(&view.module.name, ddl::view(&view)))
             }
             "U" => {
@@ -232,7 +237,7 @@ impl MsSession {
                     checks: sets[checks].iter().map(|r| Ok(ddl::Check { name: text(r, 0)?, definition: r[1].clone(), state: state(r, 2)? })).collect::<Result<_, DetailError>>()?,
                     indexes: indexes_from(&sets[indexes])?,
                     statistics: statistics_from(&sets[statistics])?,
-                    triggers: triggers_from(&sets[triggers])?,
+                    triggers: triggers_from(&sets[triggers], &omitted)?,
                     heap: sets[heap].first().map(|r| storage(r, 0)).transpose()?,
                     large_values: place(r, 11),
                     lock_escalation: text(r, 4)?,
@@ -245,7 +250,7 @@ impl MsSession {
                     properties: properties(&sets[props])?,
                     classifications: classifications.map_or(Ok(vec![]), |at| classifications_from(&sets[at]))?,
                     privileges: privileges_from(&sets[privileges])?,
-                    omitted: unseen(&sets[visibility], classifications.is_some())?,
+                    omitted: omitted.into_iter().filter(|(of, _)| *of == oid).map(|(_, o)| o).chain(unseen(&sets[visibility], classifications.is_some())?).collect(),
                 };
                 Ok(script::object_script(&name, ddl::table(&table)))
             }
@@ -256,11 +261,12 @@ impl MsSession {
     async fn module_script(&mut self, filter: &str, f: Features) -> Result<ObjectScript, DetailError> {
         let mut batch = Batch::default();
         let found = batch.add(modules_sql(filter));
+        let omitted = batch.add(omitted_sql(filter));
         let props = batch.add(properties_sql(&format!("ep.class IN (1,2) AND ep.major_id IN (SELECT o.object_id FROM sys.objects o WHERE {filter})")));
         let privileges = batch.add(privileges_sql(filter));
         let visibility = batch.add(visibility_sql(&f));
         let sets = self.run_batch(batch).await?;
-        let (_, module) = modules(&sets[found])?.into_iter().next().ok_or(DetailError::Gone)?;
+        let (_, module) = modules(&sets[found], &omitted_from(&sets[omitted])?)?.into_iter().next().ok_or(DetailError::Gone)?;
         let mut module = module.text()?;
         module.properties = properties(&sets[props])?;
         module.privileges = privileges_from(&sets[privileges])?;
@@ -282,7 +288,43 @@ fn modules_sql(filter: &str) -> String {
     )
 }
 
-fn modules(rows: &[Row]) -> Result<Vec<(i32, Found)>, DetailError> {
+/// The properties of each object in `filter` that the script warns about instead of writing.
+fn omitted_sql(filter: &str) -> String {
+    format!(
+        "SELECT o.object_id,x.kind,x.name FROM sys.objects o CROSS APPLY (
+            SELECT 'owner',COALESCE(USER_NAME(o.principal_id),CONVERT(sysname,o.principal_id)) WHERE o.principal_id IS NOT NULL
+            UNION ALL SELECT 'runs as owner',USER_NAME(OBJECTPROPERTY(o.object_id,'OwnerId')) FROM sys.sql_modules m WHERE m.object_id=o.object_id AND m.execute_as_principal_id=-2
+            UNION ALL SELECT 'change data capture',NULL FROM sys.tables t WHERE t.object_id=o.object_id AND t.is_tracked_by_cdc=1
+            UNION ALL SELECT 'full-text index',NULL FROM sys.fulltext_indexes fi WHERE fi.object_id=o.object_id
+            UNION ALL SELECT 'hypothetical index',i.name FROM sys.indexes i WHERE i.object_id=o.object_id AND i.is_hypothetical=1
+            UNION ALL SELECT 'numbered procedure',CONVERT(sysname,np.procedure_number) FROM sys.numbered_procedures np WHERE np.object_id=o.object_id
+            UNION ALL SELECT LOWER(cp.crypt_type_desc),COALESCE(c.name,ak.name,CONVERT(sysname,cp.thumbprint,1)) FROM sys.crypt_properties cp
+                LEFT JOIN sys.certificates c ON c.thumbprint=cp.thumbprint LEFT JOIN sys.asymmetric_keys ak ON ak.thumbprint=cp.thumbprint
+                WHERE cp.class=1 AND cp.major_id=o.object_id
+         ) x(kind,name)
+         WHERE {filter} ORDER BY o.object_id,x.kind,x.name"
+    )
+}
+
+fn omitted_from(rows: &[Row]) -> Result<Vec<(i32, ddl::Omitted)>, DetailError> {
+    rows.iter()
+        .map(|r| {
+            let name = r[2].clone().unwrap_or_default();
+            let omitted = match required(r, 1).map_err(failed)? {
+                "owner" => ddl::Omitted::Owner(name),
+                "runs as owner" => ddl::Omitted::RunsAsOwner(name),
+                "change data capture" => ddl::Omitted::ChangeDataCapture,
+                "full-text index" => ddl::Omitted::FullTextIndex,
+                "hypothetical index" => ddl::Omitted::HypotheticalIndex(name),
+                "numbered procedure" => ddl::Omitted::NumberedProcedure(name),
+                signature => ddl::Omitted::Signature { kind: signature.to_owned(), by: name },
+            };
+            Ok((number(r, 0).map_err(failed)?, omitted))
+        })
+        .collect()
+}
+
+fn modules(rows: &[Row], omitted: &[(i32, ddl::Omitted)]) -> Result<Vec<(i32, Found)>, DetailError> {
     rows.iter()
         .map(|r| {
             let (schema, name) = (text(r, 0)?, text(r, 1)?);
@@ -299,14 +341,15 @@ fn modules(rows: &[Row]) -> Result<Vec<(i32, Found)>, DetailError> {
             };
             let parent = r[6].clone().zip(r[7].clone()).filter(|_| matches!(required(r, 9).map(str::trim), Ok("TR")));
             let order = r[10].as_deref().map_or(vec![], |o| o.split(',').filter_map(|e| e.split_once(' ')).map(|(when, event)| (when.to_owned(), event.to_owned())).collect());
-            let module = ddl::Module { schema, name, definition, ansi_nulls: bit(r, 3)?, quoted_identifier: bit(r, 4)?, disabled_on, order, parent, properties: vec![], privileges: vec![], omitted: vec![] };
+            let omitted = omitted.iter().filter(|(of, _)| *of == oid).map(|(_, o)| o.clone()).collect();
+            let module = ddl::Module { schema, name, definition, ansi_nulls: bit(r, 3)?, quoted_identifier: bit(r, 4)?, disabled_on, order, parent, properties: vec![], privileges: vec![], omitted };
             Ok((oid, Found::Text(module)))
         })
         .collect()
 }
 
-fn triggers_from(rows: &[Row]) -> Result<Vec<ddl::Trigger>, DetailError> {
-    Ok(modules(rows)?
+fn triggers_from(rows: &[Row], omitted: &[(i32, ddl::Omitted)]) -> Result<Vec<ddl::Trigger>, DetailError> {
+    Ok(modules(rows, omitted)?
         .into_iter()
         .map(|(_, m)| match m {
             Found::Text(module) => ddl::Trigger::Text(module),
@@ -494,7 +537,7 @@ fn keys_from(rows: &[Row]) -> Result<Vec<ddl::Key>, DetailError> {
         match keys.last_mut() {
             Some(k) if k.name == name => {
                 k.columns.push(column);
-                k.computed |= bit(r, 20)?;
+                k.computed |= bit(r, 21)?;
             }
             _ => keys.push(ddl::Key {
                 name,
@@ -502,7 +545,7 @@ fn keys_from(rows: &[Row]) -> Result<Vec<ddl::Key>, DetailError> {
                 clustered: required(r, 2).map_err(failed)? == "1",
                 columns: vec![column],
                 storage: storage(r, 5)?,
-                computed: bit(r, 20)?,
+                computed: bit(r, 21)?,
             }),
         }
     }
@@ -581,7 +624,7 @@ fn indexes_from(rows: &[Row]) -> Result<Vec<ddl::Index>, DetailError> {
                     on_view: required(r, 8).map_err(failed)?.trim() == "V",
                     storage: storage(r, 9)?,
                     computed: false,
-                    unreadable_filter: r[3].is_none() && bit(r, 25)?,
+                    unreadable_filter: r[3].is_none() && bit(r, 26)?,
                 };
                 indexes.push((index, vec![]));
                 let (i, order) = indexes.last_mut().expect("pushed above");
@@ -595,7 +638,7 @@ fn indexes_from(rows: &[Row]) -> Result<Vec<ddl::Index>, DetailError> {
         }
         // SQL Server lists the partitioning column of an aligned index with key ordinal 0, though
         // it is neither a key nor included.
-        let key = number::<u8>(r, 26).map_err(failed)? > 0;
+        let key = number::<u8>(r, 27).map_err(failed)? > 0;
         if bit(r, 6)? {
             index.include.push(column);
         } else if key {
@@ -603,7 +646,7 @@ fn indexes_from(rows: &[Row]) -> Result<Vec<ddl::Index>, DetailError> {
         } else {
             continue;
         }
-        index.computed |= bit(r, 24)?;
+        index.computed |= bit(r, 25)?;
     }
     Ok(indexes
         .into_iter()

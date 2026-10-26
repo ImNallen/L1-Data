@@ -1108,8 +1108,9 @@ async fn hostile_object_scripts_replay_every_property_or_warn() {
         let mut tables = vec![];
         let mut modules = vec![];
         let mut scripted = vec![];
+        // Change data capture adds the cdc schema and the system table dbo.systranschemas.
         for schema in catalog.schemas.iter().filter(|s| s.name != "cdc") {
-            for rel in &schema.relations {
+            for rel in schema.relations.iter().filter(|r| r.name != "systranschemas") {
                 let result = src.script(&db, ScriptTarget::Relation { oid: rel.oid }).await;
                 if rel.name == "node_t" {
                     assert_eq!(refusal(result), "Graph node tables cannot be scripted yet.");
