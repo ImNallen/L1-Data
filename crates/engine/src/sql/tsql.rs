@@ -1,3 +1,4 @@
+mod around;
 mod expression;
 mod format;
 mod table;
@@ -6,6 +7,8 @@ pub(crate) use expression::validate_expression;
 pub(crate) use format::format;
 pub(crate) use table::{browse_sql, count_sql, format_order_by, parse_order_by};
 
+pub(super) use around::statement_around;
+use super::scope::{Class, Lexeme};
 use super::{ByteTarget, DmlVerb, Invalidates, StmtKind, StmtSpan, relations::NameRef};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -76,7 +79,19 @@ fn quoted_end(bytes: &[u8], start: usize, close: u8) -> Result<usize, String> {
 }
 
 fn lex(text: &str) -> Result<Vec<Token<'_>>, String> {
-    if text.contains('\0') {
+    lex_with(text, false)
+}
+
+fn lex_unclosed_to_end(text: &str) -> Vec<Token<'_>> {
+    lex_with(text, true).unwrap_or_default()
+}
+
+fn lex_with(text: &str, unclosed_to_end: bool) -> Result<Vec<Token<'_>>, String> {
+    let quoted_end = |bytes: &[u8], start: usize, close: u8| match quoted_end(bytes, start, close) {
+        Err(_) if unclosed_to_end => Ok(bytes.len()),
+        end => end,
+    };
+    if text.contains('\0') && !unclosed_to_end {
         return Err("NUL is not supported in T-SQL".into());
     }
     let bytes = text.as_bytes();
@@ -111,12 +126,12 @@ fn lex(text: &str) -> Result<Vec<Token<'_>>, String> {
                         i += 1;
                     }
                 }
-                if depth != 0 {
+                if depth != 0 && !unclosed_to_end {
                     return Err(format!("Unclosed T-SQL block comment at byte {start}"));
                 }
                 Kind::BlockComment
             }
-            b'*' if bytes.get(i + 1) == Some(&b'/') => {
+            b'*' if bytes.get(i + 1) == Some(&b'/') && !unclosed_to_end => {
                 return Err(format!("Unexpected comment terminator at byte {i}"));
             }
             b'\'' => {
@@ -157,7 +172,7 @@ fn lex(text: &str) -> Result<Vec<Token<'_>>, String> {
                     while i < bytes.len() && bytes[i].is_ascii_digit() {
                         i += 1;
                     }
-                    if i == digits {
+                    if i == digits && !unclosed_to_end {
                         return Err(format!("Incomplete T-SQL exponent at byte {start}"));
                     }
                 }
@@ -591,6 +606,34 @@ pub(crate) fn module_name(text: &str) -> Option<ModuleName> {
     (parts.len() <= 2).then(|| ModuleName { parts, span: tokens[at + 1].start..tokens[after - 1].end, on })
 }
 
+/// The lexemes of `text[range]`, an unclosed quote or comment running to its end.
+pub(super) fn completion_lexemes(text: &str, range: std::ops::Range<usize>) -> Vec<Lexeme> {
+    let tokens = lex_unclosed_to_end(&text[range.clone()]);
+    let class = |t: &Token<'_>| match t.kind {
+        Kind::Word => Class::Word,
+        Kind::Ident => Class::Name,
+        Kind::String => Class::Str,
+        Kind::Number => Class::Number,
+        Kind::Variable => Class::Param,
+        Kind::LineComment => Class::LineComment,
+        Kind::BlockComment => Class::BlockComment,
+        Kind::Symbol => match t.text {
+            "(" => Class::Open,
+            ")" => Class::Close,
+            "," => Class::Comma,
+            "." => Class::Dot,
+            ";" => Class::Semi,
+            "*" => Class::Star,
+            _ => Class::Other,
+        },
+    };
+    tokens.iter().map(|t| Lexeme { class: class(t), span: range.start + t.start..range.start + t.end }).collect()
+}
+
+pub(super) fn lexeme_closed(lexeme: &str) -> bool {
+    lex_unclosed_to_end(&format!("{lexeme} x")).first().is_some_and(|t| t.end == lexeme.len())
+}
+
 pub(crate) fn quote_ident(name: &str) -> String {
     format!("[{}]", name.replace(']', "]]"))
 }
@@ -598,6 +641,24 @@ pub(crate) fn quote_ident(name: &str) -> String {
 pub(crate) fn quote_literal(value: &str) -> String {
     format!("N'{}'", value.replace('\'', "''"))
 }
+
+/// SQL Server's reserved keywords, which a name must bracket. From "Reserved keywords (Transact-SQL)".
+pub(crate) const RESERVED: &[&str] = &[
+    "ADD", "ALL", "ALTER", "AND", "ANY", "AS", "ASC", "AUTHORIZATION", "BACKUP", "BEGIN", "BETWEEN", "BREAK", "BROWSE", "BULK", "BY", "CASCADE",
+    "CASE", "CHECK", "CHECKPOINT", "CLOSE", "CLUSTERED", "COALESCE", "COLLATE", "COLUMN", "COMMIT", "COMPUTE", "CONSTRAINT", "CONTAINS",
+    "CONTAINSTABLE", "CONTINUE", "CONVERT", "CREATE", "CROSS", "CURRENT", "CURRENT_DATE", "CURRENT_TIME", "CURRENT_TIMESTAMP", "CURRENT_USER",
+    "CURSOR", "DATABASE", "DBCC", "DEALLOCATE", "DECLARE", "DEFAULT", "DELETE", "DENY", "DESC", "DISK", "DISTINCT", "DISTRIBUTED", "DOUBLE", "DROP",
+    "DUMP", "ELSE", "END", "ERRLVL", "ESCAPE", "EXCEPT", "EXEC", "EXECUTE", "EXISTS", "EXIT", "EXTERNAL", "FETCH", "FILE", "FILLFACTOR", "FOR",
+    "FOREIGN", "FREETEXT", "FREETEXTTABLE", "FROM", "FULL", "FUNCTION", "GOTO", "GRANT", "GROUP", "HAVING", "HOLDLOCK", "IDENTITY", "IDENTITYCOL",
+    "IDENTITY_INSERT", "IF", "IN", "INDEX", "INNER", "INSERT", "INTERSECT", "INTO", "IS", "JOIN", "KEY", "KILL", "LEFT", "LIKE", "LINENO", "LOAD",
+    "MERGE", "NATIONAL", "NOCHECK", "NONCLUSTERED", "NOT", "NULL", "NULLIF", "OF", "OFF", "OFFSETS", "ON", "OPEN", "OPENDATASOURCE", "OPENQUERY",
+    "OPENROWSET", "OPENXML", "OPTION", "OR", "ORDER", "OUTER", "OVER", "PERCENT", "PIVOT", "PLAN", "PRECISION", "PRIMARY", "PRINT", "PROC",
+    "PROCEDURE", "PUBLIC", "RAISERROR", "READ", "READTEXT", "RECONFIGURE", "REFERENCES", "REPLICATION", "RESTORE", "RESTRICT", "RETURN", "REVERT",
+    "REVOKE", "RIGHT", "ROLLBACK", "ROWCOUNT", "ROWGUIDCOL", "RULE", "SAVE", "SCHEMA", "SECURITYAUDIT", "SELECT", "SEMANTICKEYPHRASETABLE",
+    "SEMANTICSIMILARITYDETAILSTABLE", "SEMANTICSIMILARITYTABLE", "SESSION_USER", "SET", "SETUSER", "SHUTDOWN", "SOME", "STATISTICS", "SYSTEM_USER",
+    "TABLE", "TABLESAMPLE", "TEXTSIZE", "THEN", "TO", "TOP", "TRAN", "TRANSACTION", "TRIGGER", "TRUNCATE", "TRY_CONVERT", "TSEQUAL", "UNION",
+    "UNIQUE", "UNPIVOT", "UPDATE", "UPDATETEXT", "USE", "USER", "VALUES", "VARYING", "VIEW", "WAITFOR", "WHEN", "WHERE", "WHILE", "WITH", "WRITETEXT",
+];
 
 const STATEMENT_WORDS: &[&str] = &[
     "ALTER",

@@ -31,6 +31,18 @@ describe("useRelationDetail.ensure", () => {
     await useRelationDetail.getState().ensure(shop, 3, 42);
     expect(useRelationDetail.getState().entries[detailKey(shop, 42)]).toEqual({ version: 3, detail: detail(42, 3), error: null });
   });
+
+  it("makes a second caller wait for the fetch the first one started, without fetching again", async () => {
+    let answer: (d: { status: "ok"; data: RelationDetail }) => void = () => {};
+    const fetch = vi.spyOn(commands, "relationDetail").mockReturnValueOnce(new Promise((resolve) => (answer = resolve)));
+    const first = useRelationDetail.getState().ensure(shop, 3, 42);
+    const second = useRelationDetail.getState().ensure(shop, 3, 42);
+    let waited = false;
+    void second.then(() => (waited = useRelationDetail.getState().entries[detailKey(shop, 42)]?.detail !== null));
+    answer({ status: "ok", data: detail(42, 3) });
+    await Promise.all([first, second]);
+    expect([waited, fetch.mock.calls.length]).toEqual([true, 1]);
+  });
 });
 
 describe("useRelationDetail.prune", () => {

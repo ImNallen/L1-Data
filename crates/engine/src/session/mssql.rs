@@ -165,7 +165,8 @@ impl MsSession {
         if let Some(token) = &token {
             cfg.authentication(AuthMethod::aad_token(token));
         }
-        let connection = Client::connect(cfg, stream.compat_write());
+        // The handshake's future is tens of kilobytes in a debug build. On the heap it leaves every caller its stack.
+        let connection = Box::pin(Client::connect(cfg, stream.compat_write()));
         let connected = tokio::time::timeout(CONNECT_TIMEOUT, connection).await.map_err(|_| ConnectError::Network { message: "SQL Server connection timed out".into() })?;
         let client = match connected {
             Ok(client) => client,

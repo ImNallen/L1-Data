@@ -6,18 +6,25 @@ import { dbKey } from "./dbKey";
 const view = buildCatalogView(shopCatalog("conn", 7));
 
 describe("buildCatalogView", () => {
-  it("builds a lang-sql namespace keyed schema -> table -> columns with types", () => {
-    const publicNs = (view.completion as Record<string, Record<string, { self: { label: string }; children: { label: string; detail?: string }[] }>>).public!;
-    expect(Object.keys(publicNs)).toContain("orders");
-    expect(publicNs.orders!.self.label).toBe("orders");
-    expect(publicNs.orders!.children.map((c) => `${c.label}:${c.detail}`)).toEqual([
-      "id:bigint",
-      "customer_id:bigint",
-      "status:text",
-      "total:numeric(12,2)",
-      "created_at:timestamptz",
-    ]);
-    expect(Object.keys(view.completion)).toEqual(["lab", "public"]);
+  it("offers each catalog function with its arguments, bare in the default schema and qualified elsewhere", () => {
+    expect(view.functions.map((f) => `${f.label}${f.detail}=${String(f.apply)}`)).toContain("order_count(cust bigint)=order_count()");
+    const catalog = shopCatalog("conn", 7);
+    catalog.schemas[0]! = { ...catalog.schemas[0]!, name: "Lab", quoted: '"Lab"' };
+    catalog.schemas[0]!.functions = [
+      { oid: 1, name: "mood_of", quoted: "mood_of", insertText: "mood_of()", args: "x int", returns: "lab.mood", kind: "Function" },
+    ];
+    catalog.schemas[1]!.functions.push({
+      oid: 2,
+      name: "refresh_all",
+      quoted: "refresh_all",
+      insertText: "CALL refresh_all()",
+      args: "",
+      returns: "",
+      kind: "Procedure",
+    });
+    const labels = buildCatalogView(catalog).functions.map((f) => [f.label, f.apply]);
+    expect(labels).toContainEqual(["Lab.mood_of", '"Lab".mood_of()']);
+    expect(labels.map(([label]) => label)).not.toContain("refresh_all");
   });
 
   it("indexes relations by oid", () => {

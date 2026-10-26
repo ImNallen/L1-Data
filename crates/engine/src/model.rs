@@ -348,6 +348,8 @@ pub struct Catalog {
 #[serde(rename_all = "camelCase")]
 pub struct SchemaInfo {
     pub name: String,
+    /// `name` as SQL writes it, quoted only when it must be.
+    pub quoted: String,
     /// `information_schema` or a `pg_` prefix, which Postgres reserves for its own schemas.
     pub system: bool,
     /// Tables, partitioned tables, and foreign tables, which the tree lists as tables. Counted by
@@ -372,6 +374,8 @@ pub struct Relation {
     pub qualified_name: String,
     pub oid: u32,
     pub name: String,
+    /// `name` as SQL writes it, quoted only when it must be.
+    pub quoted: String,
     pub kind: RelKind,
     /// `None` when `reltuples = -1` (never analyzed).
     pub row_estimate: Option<i64>,
@@ -385,6 +389,8 @@ pub struct ColumnInfo {
     pub writable: bool,
     pub attnum: i16,
     pub name: String,
+    /// `name` as SQL writes it, quoted only when it must be.
+    pub quoted: String,
     pub type_display: String,
     pub category: TypeCategory,
     pub not_null: bool,
@@ -398,6 +404,8 @@ pub struct ColumnInfo {
 pub struct FunctionInfo {
     pub oid: u32,
     pub name: String,
+    /// `name` as a call writes it, quoted only when it must be.
+    pub quoted: String,
     pub args: String,
     pub returns: String,
     pub kind: FnKind,
@@ -805,6 +813,80 @@ pub struct ScriptOutline {
     pub unit_kind: ExecutionUnitKind,
     pub statements: Vec<DocRange>,
     pub at_cursor: Option<u16>,
+}
+
+/// What the editor may offer at a cursor, read from the statement under it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Type)]
+#[serde(tag = "kind", rename_all_fields = "camelCase")]
+pub enum CompletionContext {
+    /// Inside a string, a comment, a quoted name, a number, or a parameter.
+    None,
+    Complete {
+        /// The start of the word being typed, or the cursor when none is.
+        from: DocOffset,
+        expect: Expect,
+        /// The names before a `.` that ends at `from`.
+        qualifier: Option<Qualifier>,
+        /// The FROM items of the query at the cursor, then those of each enclosing query.
+        relations: Vec<ScopeRelation>,
+        /// The CTE names in scope, as written.
+        ctes: Vec<String>,
+        /// The keywords that can come next, upper case, in the order to show them.
+        keywords: Vec<String>,
+        /// The dialect's built-in functions, when `expect` is `Expression` or `JoinCondition`.
+        functions: Vec<String>,
+    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Type)]
+#[serde(tag = "kind", rename_all_fields = "camelCase")]
+pub enum Expect {
+    /// Only `keywords`, which may be empty, as after a relation's alias.
+    Keyword,
+    /// Right after a relation, where the word typed is most likely its alias, so `keywords` show only on request.
+    Alias,
+    /// A table, view, or CTE: after `FROM`, `JOIN`, `INTO`, or `UPDATE`.
+    Relation,
+    /// Columns and functions: a select list, `WHERE`, `ON` once a condition has begun, `SET`.
+    Expression,
+    /// Right after the `ON` of the join to `relations[target]`.
+    JoinCondition { target: u16 },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Type)]
+#[serde(tag = "kind", rename_all_fields = "camelCase")]
+pub enum Qualifier {
+    /// The alias or name of `relations[index]`.
+    Relation { index: u16 },
+    /// Names that match no relation in scope, such as a schema. Unquoted PostgreSQL names are folded to lower case.
+    Name { parts: Vec<String> },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct ScopeRelation {
+    /// How the statement refers to it, as written: its alias, else its name. `None` for a subquery without an alias.
+    pub reference: Option<String>,
+    pub source: RelationSource,
+    /// The names a column alias list gives the first columns, as in `orders o(a, b)`, as SQL writes them.
+    pub column_aliases: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Type)]
+#[serde(tag = "kind", rename_all_fields = "camelCase")]
+pub enum RelationSource {
+    /// A catalog table or view. Unquoted PostgreSQL names are folded to lower case.
+    Table { schema: Option<String>, name: String },
+    /// A CTE, a subquery, or a table function: the columns its select list names, as SQL writes them, plus every
+    /// column of each `star` table.
+    Derived { columns: Vec<String>, star: Vec<TableName> },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct TableName {
+    pub schema: Option<String>,
+    pub name: String,
 }
 
 /// Replace `from..to` with `insert`: the formatted statements and the original text between them.

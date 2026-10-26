@@ -6,6 +6,7 @@ const column = (typeDisplay: string, notNull: boolean): ColumnInfo => ({
   writable: true,
   attnum: 1,
   name: "c",
+  quoted: "c",
   typeDisplay,
   category: "Temporal",
   notNull,

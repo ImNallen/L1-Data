@@ -48,7 +48,7 @@ const prod = instance([
   db("vault", { schemaCount: { kind: "Unavailable", message: "permission denied for database vault" } }),
 ]);
 
-const schema = (name: string, tableCount: number, system = false): SchemaInfo => ({ name, system, tableCount, relations: [], functions: [] });
+const schema = (name: string, tableCount: number, system = false): SchemaInfo => ({ name, quoted: name, system, tableCount, relations: [], functions: [] });
 
 const shopCatalog: Catalog = {
   databaseKind: "Postgres",

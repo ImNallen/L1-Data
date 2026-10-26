@@ -268,8 +268,8 @@ mod tests {
     }
 
     fn catalog() -> Catalog {
-        let relation = |name: &str| Relation { qualified_name: String::new(), oid: 1, name: name.into(), kind: RelKind::Table, row_estimate: Some(3), columns: vec![ColumnInfo { writable: true, attnum: 1, name: "id".into(), type_display: "bigint".into(), category: TypeCategory::Integer, not_null: true, pk: true, fk: false }] };
-        let schema = |name: &str, system: bool, relations: Vec<Relation>| SchemaInfo { name: name.into(), system, table_count: relations.len() as u32, relations, functions: Vec::new() };
+        let relation = |name: &str| Relation { qualified_name: String::new(), oid: 1, name: name.into(), quoted: name.into(), kind: RelKind::Table, row_estimate: Some(3), columns: vec![ColumnInfo { writable: true, attnum: 1, name: "id".into(), quoted: "id".into(), type_display: "bigint".into(), category: TypeCategory::Integer, not_null: true, pk: true, fk: false }] };
+        let schema = |name: &str, system: bool, relations: Vec<Relation>| SchemaInfo { name: name.into(), quoted: name.into(), system, table_count: relations.len() as u32, relations, functions: Vec::new() };
         Catalog { database_kind: crate::model::DatabaseKind::Postgres,
             db: DatabaseRef { connection_id: ConnectionId(uuid::Uuid::nil()), database: "shop".into() },
             version: 1,

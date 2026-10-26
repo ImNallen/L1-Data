@@ -22,6 +22,7 @@ export const commands = {
 	exactRowCount: (tabId: TabId, db: DatabaseRef, schema: string, table: string, query: TableQuery) => typedError<number, CountError>(__TAURI_INVOKE("exact_row_count", { tabId, db, schema, table, query })),
 	consoleConfigure: (tabId: TabId, config: ConsoleConfig) => typedError<ConsoleState, ConfigureError>(__TAURI_INVOKE("console_configure", { tabId, config })),
 	scriptOutline: (text: string, cursor: DocOffset, databaseKind: DatabaseKind) => __TAURI_INVOKE<ScriptOutline>("script_outline", { text, cursor, databaseKind }),
+	completionContext: (text: string, cursor: DocOffset, databaseKind: DatabaseKind) => __TAURI_INVOKE<CompletionContext>("completion_context", { text, cursor, databaseKind }),
 	editorFormat: (text: string, target: RunTarget, databaseKind: DatabaseKind) => typedError<FormatEdit, FormatError>(__TAURI_INVOKE("editor_format", { text, target, databaseKind })),
 	tableScript: (db: DatabaseRef, schema: string, table: string) => typedError<TableScript, string>(__TAURI_INVOKE("table_script", { db, schema, table })),
 	tableOrder: (db: DatabaseRef, schema: string, table: string, orderBy: string, edit: TableOrderEdit) => typedError<TableOrderView, string>(__TAURI_INVOKE("table_order", { db, schema, table, orderBy, edit })),
@@ -287,6 +288,8 @@ export type ColumnInfo = {
 	writable: boolean,
 	attnum: number,
 	name: string,
+	/**  `name` as SQL writes it, quoted only when it must be. */
+	quoted: string,
 	typeDisplay: string,
 	category: TypeCategory,
 	notNull: boolean,
@@ -305,6 +308,23 @@ export type ColumnSource = {
 	tableOid: number,
 	attnum: number,
 };
+
+/**  What the editor may offer at a cursor, read from the statement under it. */
+export type CompletionContext = 
+/**  Inside a string, a comment, a quoted name, a number, or a parameter. */
+{ kind: "None" } | { kind: "Complete"; 
+/**  The start of the word being typed, or the cursor when none is. */
+from: DocOffset; expect: Expect; 
+/**  The names before a `.` that ends at `from`. */
+qualifier: Qualifier | null; 
+/**  The FROM items of the query at the cursor, then those of each enclosing query. */
+relations: ScopeRelation[]; 
+/**  The CTE names in scope, as written. */
+ctes: string[]; 
+/**  The keywords that can come next, upper case, in the order to show them. */
+keywords: string[]; 
+/**  The dialect's built-in functions, when `expect` is `Expression` or `JoinCondition`. */
+functions: string[] };
 
 export type ConfigureError = 
 /**  Mode or connection change requested while a transaction is open. */
@@ -530,6 +550,18 @@ export type Environment = "Local" | "Staging" | "Production";
 
 export type ExecutionUnitKind = "Statement" | "Batch";
 
+export type Expect = 
+/**  Only `keywords`, which may be empty, as after a relation's alias. */
+{ kind: "Keyword" } | 
+/**  Right after a relation, where the word typed is most likely its alias, so `keywords` show only on request. */
+{ kind: "Alias" } | 
+/**  A table, view, or CTE: after `FROM`, `JOIN`, `INTO`, or `UPDATE`. */
+{ kind: "Relation" } | 
+/**  Columns and functions: a select list, `WHERE`, `ON` once a condition has begun, `SET`. */
+{ kind: "Expression" } | 
+/**  Right after the `ON` of the join to `relations[target]`. */
+{ kind: "JoinCondition"; target: number };
+
 /**  Every variant leaves the file at the chosen path as it was. */
 export type ExportError = 
 /**  A newer run replaced the result, or its tab closed. */
@@ -668,6 +700,8 @@ export type FormatError = { kind: "Unsupported" } |
 export type FunctionInfo = {
 	oid: number,
 	name: string,
+	/**  `name` as a call writes it, quoted only when it must be. */
+	quoted: string,
 	args: string,
 	returns: string,
 	kind: FnKind,
@@ -956,6 +990,12 @@ export type ProviderState = {
 	outcome: ProbeOutcome | null,
 };
 
+export type Qualifier = 
+/**  The alias or name of `relations[index]`. */
+{ kind: "Relation"; index: number } | 
+/**  Names that match no relation in scope, such as a schema. Unquoted PostgreSQL names are folded to lower case. */
+{ kind: "Name"; parts: string[] };
+
 export type QueryError = {
 	severity: string,
 	sqlstate: string | null,
@@ -972,6 +1012,8 @@ export type Relation = {
 	qualifiedName: string,
 	oid: number,
 	name: string,
+	/**  `name` as SQL writes it, quoted only when it must be. */
+	quoted: string,
 	kind: RelKind,
 	/**  `None` when `reltuples = -1` (never analyzed). */
 	rowEstimate: number | null,
@@ -997,6 +1039,15 @@ export type RelationDetail = {
 	/**  By name. */
 	triggers: TriggerInfo[],
 };
+
+export type RelationSource = 
+/**  A catalog table or view. Unquoted PostgreSQL names are folded to lower case. */
+{ kind: "Table"; schema: string | null; name: string } | 
+/**
+ *  A CTE, a subquery, or a table function: the columns its select list names, as SQL writes them, plus every
+ *  column of each `star` table.
+ */
+{ kind: "Derived"; columns: string[]; star: TableName[] };
 
 /**  What one release changed, as the feed lists it. Display only. */
 export type ReleaseChanges = {
@@ -1158,6 +1209,8 @@ export type SchemaCount = { kind: "Unknown" } | { kind: "Probing" } | { kind: "K
 
 export type SchemaInfo = {
 	name: string,
+	/**  `name` as SQL writes it, quoted only when it must be. */
+	quoted: string,
 	/**  `information_schema` or a `pg_` prefix, which Postgres reserves for its own schemas. */
 	system: boolean,
 	/**
@@ -1167,6 +1220,14 @@ export type SchemaInfo = {
 	tableCount: number,
 	relations: Relation[],
 	functions: FunctionInfo[],
+};
+
+export type ScopeRelation = {
+	/**  How the statement refers to it, as written: its alias, else its name. `None` for a subquery without an alias. */
+	reference: string | null,
+	source: RelationSource,
+	/**  The names a column alias list gives the first columns, as in `orders o(a, b)`, as SQL writes them. */
+	columnAliases: string[],
 };
 
 /**  The statements of a script and the one a run at the cursor would pick. */
@@ -1347,6 +1408,11 @@ export type TableChanges = {
 	updates: RowUpdate[],
 	/**  Each entry is the primary key of a row to delete. */
 	deletes: CellWrite[][],
+};
+
+export type TableName = {
+	schema: string | null,
+	name: string,
 };
 
 export type TableOrderEdit = { kind: "Inspect" } | { kind: "Cycle"; column: string; additive: boolean };

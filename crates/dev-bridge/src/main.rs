@@ -8,7 +8,7 @@ use std::time::Instant;
 
 use axum::Router;
 use axum::body::Bytes;
-use axum::extract::{Path, State};
+use axum::extract::{DefaultBodyLimit, Path, State};
 use axum::http::{HeaderValue, Method, StatusCode, header};
 use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::response::{IntoResponse, Json, Response};
@@ -130,6 +130,8 @@ async fn main() {
     let app = Router::new()
         .route("/invoke/{cmd}", post(invoke))
         .route("/events", get(events))
+        // Text commands carry the whole document, and Tauri's IPC has no 2 MB cap like axum's default.
+        .layer(DefaultBodyLimit::max(64 << 20))
         .layer(cors)
         .with_state(engine.clone());
 

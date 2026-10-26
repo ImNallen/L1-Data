@@ -1,14 +1,5 @@
-import {
-  autocompletion,
-  closeBrackets,
-  closeBracketsKeymap,
-  completionKeymap,
-  ifNotIn,
-  type Completion,
-  type CompletionSource,
-} from "@codemirror/autocomplete";
+import { autocompletion, closeBrackets, closeBracketsKeymap, completionKeymap } from "@codemirror/autocomplete";
 import { defaultKeymap, history, historyKeymap, indentWithTab, isolateHistory } from "@codemirror/commands";
-import { sql } from "@codemirror/lang-sql";
 import { bracketMatching, indentOnInput } from "@codemirror/language";
 import { setDiagnostics, type Diagnostic } from "@codemirror/lint";
 import { highlightSelectionMatches, searchKeymap } from "@codemirror/search";
@@ -27,6 +18,7 @@ import {
 } from "@codemirror/view";
 import type { DatabaseKind, DocRange, FormatEdit, TabId } from "../../ipc/bindings";
 import type { CatalogView } from "../../state/catalog";
+import { engineCompletion } from "./completion";
 import { SQL_DIALECT } from "./sqlDialect";
 import { editorHighlighting, editorTheme, functionCallStyle, LINE_PADDING_LEFT } from "./theme";
 
@@ -169,23 +161,9 @@ const runTargetLayer = layer({
 // The selection layer paints behind the text, so the active line's background would hide it.
 const selectingClass = EditorView.editorAttributes.of((v) => (v.state.selection.main.empty ? null : { class: "cm-selecting" }));
 
-function qualifiedTables(tables: readonly Completion[]): CompletionSource {
-  return ifNotIn(["String", "QuotedIdentifier", "LineComment", "BlockComment"], (ctx) => {
-    const word = ctx.matchBefore(/[\w$]+/);
-    if (!word && !ctx.explicit) return null;
-    const from = word?.from ?? ctx.pos;
-    const isMemberAccess = ctx.state.sliceDoc(from - 1, from) === ".";
-    if (isMemberAccess) return null;
-    return { from, options: tables, validFor: /^[\w$]*$/ };
-  });
-}
-
 function sqlLanguage(catalog: CatalogView | undefined, databaseKind: DatabaseKind): Extension {
-  const dialect = SQL_DIALECT[databaseKind];
-  return [
-    sql({ dialect, schema: catalog?.completion, defaultSchema: catalog?.catalog.defaultSchema ?? undefined, upperCaseKeywords: true }),
-    dialect.language.data.of({ autocomplete: qualifiedTables(catalog?.qualifiedTables ?? []) }),
-  ];
+  const { language } = SQL_DIALECT[databaseKind];
+  return [language, language.data.of({ autocomplete: engineCompletion(catalog, databaseKind) })];
 }
 
 export function installEditorBehavior(ext: Extension): void {
@@ -205,7 +183,7 @@ function createState(text: string): EditorState {
       indentOnInput(),
       bracketMatching(),
       closeBrackets(),
-      autocompletion({ icons: false }),
+      autocompletion({ icons: false, activateOnTypingDelay: 0 }),
       highlightSelectionMatches(),
       keymap.of([...closeBracketsKeymap, ...defaultKeymap, ...searchKeymap, ...historyKeymap, ...completionKeymap, indentWithTab]),
       sqlConfig.of(sqlLanguage(undefined, "Postgres")),

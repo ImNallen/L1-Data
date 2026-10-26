@@ -1,31 +1,53 @@
 use crate::model::{DatabaseKind, ExecutionUnitKind, TableOrderEdit, TableOrderView, TableSortKey, TableScript, Relation};
 use crate::model::{
-    CellWrite, ColumnFilter, DocOffset, DocRange, FilterOp, FormatEdit, FormatError, RunTarget, ScriptOutline, TableQuery,
+    CellWrite, ColumnFilter, CompletionContext, DocOffset, DocRange, FilterOp, FormatEdit, FormatError, RunTarget, ScriptOutline, TableQuery,
 };
 use crate::sql::{self, ByteTarget, DmlVerb, StmtKind, StmtSpan};
 
+/// Converts between byte offsets and UTF-16 code units. Callers convert a script's statements in order, so each
+/// conversion resumes from the last one, which keeps converting a whole script linear.
 pub struct OffsetMap<'a> {
     text: &'a str,
+    one_unit_per_byte: bool,
+    /// The byte offset and the UTF-16 offset of the last conversion, on a char boundary.
+    last: std::cell::Cell<(usize, u32)>,
 }
 
 impl<'a> OffsetMap<'a> {
     pub fn new(text: &'a str) -> Self {
-        Self { text }
+        Self { text, one_unit_per_byte: text.is_ascii(), last: std::cell::Cell::new((0, 0)) }
     }
 
     pub fn to_utf16(&self, byte: usize) -> DocOffset {
         let byte = byte.min(self.text.len());
-        DocOffset(self.text[..byte].encode_utf16().count() as u32)
+        if self.one_unit_per_byte {
+            return DocOffset(byte as u32);
+        }
+        let (from_byte, from_units) = match self.last.get() {
+            (b, u) if b <= byte => (b, u),
+            _ => (0, 0),
+        };
+        let units = from_units + self.text[from_byte..byte].encode_utf16().count() as u32;
+        self.last.set((byte, units));
+        DocOffset(units)
     }
 
     pub fn from_utf16(&self, off: DocOffset) -> usize {
-        let mut units = 0u32;
-        for (byte, ch) in self.text.char_indices() {
+        if self.one_unit_per_byte {
+            return (off.0 as usize).min(self.text.len());
+        }
+        let (start, mut units) = match self.last.get() {
+            (b, u) if u <= off.0 => (b, u),
+            _ => (0, 0),
+        };
+        for (i, ch) in self.text[start..].char_indices() {
             if units + ch.len_utf16() as u32 > off.0 {
-                return byte;
+                self.last.set((start + i, units));
+                return start + i;
             }
             units += ch.len_utf16() as u32;
         }
+        self.last.set((self.text.len(), units));
         self.text.len()
     }
 
@@ -69,6 +91,22 @@ pub fn script_outline(text: &str, cursor: DocOffset, database_kind: DatabaseKind
     ScriptOutline { unit_kind: crate::model::ExecutionUnitKind::Statement,
         statements: spans.iter().map(|s| map.range(s)).collect(),
         at_cursor: picked.first().and_then(|p| spans.iter().position(|s| s == p)).and_then(|i| u16::try_from(i).ok()),
+    }
+}
+
+pub fn completion_context(text: &str, cursor: DocOffset, database_kind: DatabaseKind) -> CompletionContext {
+    let map = OffsetMap::new(text);
+    let Some(scope) = sql::scope_at(text, map.from_utf16(cursor), database_kind) else {
+        return CompletionContext::None;
+    };
+    CompletionContext::Complete {
+        from: map.to_utf16(scope.from_byte),
+        expect: scope.expect,
+        qualifier: scope.qualifier,
+        relations: scope.relations,
+        ctes: scope.ctes,
+        keywords: scope.keywords.into_iter().map(str::to_owned).collect(),
+        functions: scope.functions.into_iter().map(str::to_owned).collect(),
     }
 }
 
@@ -123,6 +161,30 @@ pub fn synthesize_tag(kind: &StmtKind, rows: u64) -> String {
 
 pub fn quote_ident(name: &str) -> String {
     format!("\"{}\"", name.replace('"', "\"\""))
+}
+
+pub fn quote_if_needed(kind: DatabaseKind, name: &str) -> String {
+    name_in(kind, name, &[sql::RESERVED, sql::TYPE_OR_FUNCTION_NAME])
+}
+
+pub fn quote_function_if_needed(kind: DatabaseKind, name: &str) -> String {
+    name_in(kind, name, &[sql::NEVER_A_FUNCTION])
+}
+
+fn name_in(kind: DatabaseKind, name: &str, postgres_keywords: &[&[&str]]) -> String {
+    let mut chars = name.chars();
+    match kind {
+        DatabaseKind::Postgres => {
+            let plain = chars.next().is_some_and(|c| c.is_ascii_lowercase() || c == '_')
+                && chars.all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_' || c == '$');
+            if plain && !postgres_keywords.iter().any(|k| k.contains(&name)) { name.to_owned() } else { quote_ident(name) }
+        }
+        DatabaseKind::SqlServer => {
+            let plain = chars.next().is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
+                && chars.all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '@' | '$' | '#'));
+            if plain && !sql::tsql::RESERVED.contains(&name.to_ascii_uppercase().as_str()) { name.to_owned() } else { sql::tsql::quote_ident(name) }
+        }
+    }
 }
 
 pub fn quote_literal(value: &str) -> String {
@@ -245,6 +307,19 @@ mod tests {
     }
 
     #[test]
+    fn a_name_is_quoted_only_where_the_bare_word_would_read_differently() {
+        let pg = |name| quote_if_needed(DatabaseKind::Postgres, name);
+        assert_eq!(
+            ["orders", "order$1", "Line Items", "a\"b", "order", "Orders", "left", "int", "café"].map(pg),
+            ["orders", "order$1", "\"Line Items\"", "\"a\"\"b\"", "\"order\"", "\"Orders\"", "\"left\"", "int", "\"café\""]
+        );
+        let pg_call = |name| quote_function_if_needed(DatabaseKind::Postgres, name);
+        assert_eq!(["answer", "MyFunc", "int", "left"].map(pg_call), ["answer", "\"MyFunc\"", "\"int\"", "left"]);
+        let ms = |name| quote_if_needed(DatabaseKind::SqlServer, name);
+        assert_eq!(["Orders", "line items", "a]b", "order", "Order", "x#1", "9lives"].map(ms), ["Orders", "[line items]", "[a]]b]", "[order]", "[Order]", "x#1", "[9lives]"]);
+    }
+
+    #[test]
     fn postgres_table_templates_keep_saved_browse_tabs_recognizable() {
         for (schema, table, expected) in [
             ("public", "orders", "SELECT * FROM public.orders"),
@@ -295,6 +370,30 @@ mod tests {
     fn script_outline_ranges_and_cursor_are_utf16() {
         let text = "-- 😀é\nselect 1;\nselect 2;";
         assert_eq!(script_outline(text, DocOffset(18)), ScriptOutline { unit_kind: crate::model::ExecutionUnitKind::Statement, statements: vec![r(0, 15), r(17, 25)], at_cursor: Some(1) });
+    }
+
+    #[test]
+    fn offsets_convert_the_same_in_any_order() {
+        let text = "-- é\nselect '😀', 'ü';\nselect 2;";
+        let map = OffsetMap::new(text);
+        let bytes: Vec<usize> = text.char_indices().map(|(b, _)| b).chain([text.len()]).collect();
+        for &b in bytes.iter().rev().chain(bytes.iter()).chain(bytes.iter().step_by(3).rev()) {
+            let units = map.to_utf16(b);
+            assert_eq!(units, OffsetMap::new(text).to_utf16(b), "to_utf16({b})");
+            assert_eq!(map.from_utf16(units), b, "from_utf16({units:?})");
+        }
+        assert_eq!(map.from_utf16(DocOffset(8)), OffsetMap::new(text).from_utf16(DocOffset(8)));
+    }
+
+    #[test]
+    fn completion_context_reads_and_reports_utf16_offsets() {
+        let text = "select '😀' as e, o.cu from orders o";
+        let CompletionContext::Complete { from, qualifier, .. } = completion_context(text, DocOffset(22), DatabaseKind::Postgres) else {
+            panic!("a column after o. completes");
+        };
+        assert_eq!(from, DocOffset(20));
+        assert_eq!(qualifier, Some(crate::model::Qualifier::Relation { index: 0 }));
+        assert_eq!(completion_context(text, DocOffset(10), DatabaseKind::Postgres), CompletionContext::None);
     }
 
     fn writes(text: &str, target: RunTarget, kind: DatabaseKind) -> Vec<&str> {
@@ -542,5 +641,47 @@ pub fn table_count(kind: DatabaseKind, schema: &str, table: &str, relation: Opti
     match kind {
         DatabaseKind::Postgres => { let text = count_sql(schema,table,query); if sql::split_statements(&text).len()!=1 { Err("The filter must be a single expression.".into()) } else { Ok(text) } },
         DatabaseKind::SqlServer => { sql::tsql::validate_expression(&query.r#where,false)?; sql::tsql::count_sql(schema,table,relation.map(|r| r.columns.as_slice()).unwrap_or_default(),query) },
+    }
+}
+
+#[cfg(test)]
+mod completion_never_panics {
+    use crate::model::{DatabaseKind, DocOffset};
+
+    const TOKENS: &[&str] = &[
+        "select", "from", "where", "join", "on", "using", "natural", "with", "recursive", "as", "lateral", "apply", "cross", "outer", "insert", "into",
+        "values", "update", "set", "delete", "top", "percent", "merge", "output", "returning", "union", "group", "by", "order", "pivot", "unpivot", "for",
+        "nowait", "go", "begin", "end", "case", "over", "window", "isnull", "interval", "o", "orders", "\"Q\"", "[b]", "[a]]b]", "'s'", "'open", "N'x'",
+        "$$x$$", "$$open", "--c\n", "/*c*/", "/*open", "@v", "#t", "$1", "1", "1e", "0x1", "*", "=", "::", ".", "..", ",", ";", "(", ")", "[", "]", "+",
+        "U&\"x\"", "E'a\\'b'", "😀", "é", "\n", "\nGO\n", "GO 5\n", " ", "\t",
+        "x join y join (a join b) pivot (max(v) for k in ([a])) p", "s(v, i)", "with ordinality", "o(a, b)", "on", "returning",
+    ];
+
+    #[test]
+    fn completion_context_never_panics_on_any_token_sequence_or_cursor() {
+        let mut state: u64 = 0x9E37_79B9_7F4A_7C15;
+        let mut next = move || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            state
+        };
+        for _ in 0..8_000 {
+            let len = (next() % 10) as usize;
+            let mut text = String::from(["", "select ", "select * from t ", "with x as (select "][(next() % 4) as usize]);
+            for _ in 0..len {
+                text.push_str(TOKENS[(next() % TOKENS.len() as u64) as usize]);
+                if next() % 3 != 0 {
+                    text.push(' ');
+                }
+            }
+            let units = text.encode_utf16().count() as u32;
+            for cursor in (0..=units).chain([units + 3]) {
+                for kind in [DatabaseKind::Postgres, DatabaseKind::SqlServer] {
+                    let outcome = std::panic::catch_unwind(|| super::completion_context(&text, DocOffset(cursor), kind));
+                    assert!(outcome.is_ok(), "{kind:?} panicked at {cursor} in {text:?}");
+                }
+            }
+        }
     }
 }

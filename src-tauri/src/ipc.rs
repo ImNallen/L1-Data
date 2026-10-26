@@ -114,6 +114,12 @@ pub fn script_outline(engine: State<'_, Arc<Engine>>, text: String, cursor: DocO
 
 #[tauri::command]
 #[specta::specta]
+pub fn completion_context(engine: State<'_, Arc<Engine>>, text: String, cursor: DocOffset, database_kind: DatabaseKind) -> CompletionContext {
+    engine.completion_context(&text, cursor, database_kind)
+}
+
+#[tauri::command]
+#[specta::specta]
 pub fn editor_format(engine: State<'_, Arc<Engine>>, text: String, target: RunTarget, database_kind: DatabaseKind) -> Result<FormatEdit, FormatError> {
     engine.editor_format(&text, target, database_kind)
 }

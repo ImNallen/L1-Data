@@ -12,6 +12,7 @@ const sqlServer = { connectionId: "mssql", database: "shop" };
 const pgFunction: FunctionInfo = {
   oid: 12,
   name: "display name",
+  quoted: '"display name"',
   args: "unparsed display arguments",
   returns: "int",
   kind: "Function",
@@ -155,7 +156,7 @@ it.each(
 )("carries the $label source through the $tree tree and inserts only after the target kind matches", ({ source, destination, fn, tree }) => {
   prepareEdits(destination);
   const expanded = { has: () => true, toggle: () => {} };
-  const schema: SchemaInfo = { name: "schema", system: false, tableCount: 0, relations: [], functions: [fn] };
+  const schema: SchemaInfo = { name: "schema", quoted: "schema", system: false, tableCount: 0, relations: [], functions: [fn] };
   const node =
     tree === "normal"
       ? SchemaNode({ path: "unrelated/display/path", depth: 2, db: source, schema, version: 1, expanded })
