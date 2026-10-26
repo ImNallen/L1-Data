@@ -227,3 +227,5 @@ INSERT INTO pg_seclabel VALUES
   ('app.labeled_s_seq'::regclass, 'pg_class'::regclass, 0, 'dummy', 'classified'),
   ('app.labeled_id_seq'::regclass, 'pg_class'::regclass, 0, 'dummy', 'classified'),
   ('app.labeled_fn()'::regprocedure, 'pg_proc'::regclass, 0, 'dummy', 'classified');
+-- publication membership that comes from the schema
+CREATE PUBLICATION hostile_schema_pub FOR TABLES IN SCHEMA "order";

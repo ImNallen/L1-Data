@@ -2970,6 +2970,7 @@ async fn hostile_object_scripts_replay_every_property_or_warn() {
                 ("My View.sql".to_owned(), vec!["owner l1data of app.\"My View\", whose privileges the view's query is checked against".to_owned()]),
                 ("child.sql".to_owned(), vec!["the column order of app.child, because a replay puts inherited columns first".to_owned()]),
                 ("dups.sql".to_owned(), vec!["the invalid state of index app.dups_v, which a replay builds valid".to_owned()]),
+                ("group.sql".to_owned(), vec!["membership of \"order\".\"group\" in publication hostile_schema_pub through schema \"order\"".to_owned()]),
                 (
                     "labeled.sql".to_owned(),
                     vec![
