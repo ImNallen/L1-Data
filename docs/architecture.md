@@ -81,6 +81,7 @@ async function runTab(tabId: TabId, target?: PageTarget, script?: RunTarget): Pr
       kind: "script",
       text: state.doc.toString(),
       target: script ?? (sel.empty ? { kind: "cursor", offset: sel.head } : { kind: "selection", from: sel.from, to: sel.to }),
+      mode: "Run",
     };
   }
   let res = await commands.consoleRun(tabId, request, null);

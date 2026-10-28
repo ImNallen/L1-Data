@@ -103,7 +103,7 @@ SQL
 )
 QUERY="select c.region, count(*) as orders, sum(o.total) as revenue from orders o join customers c on c.id = o.customer_id where o.status = 'paid' and o.created_at > now() - interval '90 days' group by c.region order by revenue desc"
 RUN=$(invoke console_run "{\"tabId\":\"$TAB\",\"request\":{\"kind\":\"script\",\"text\":$(python3 -c 'import json,sys; print(json.dumps(sys.argv[1]))' "$NOTICE
-$QUERY"),\"target\":{\"kind\":\"all\"}}}" | ok)
+$QUERY"),\"target\":{\"kind\":\"all\"},\"mode\":\"Run\"}}" | ok)
 RUN_ID=$(echo "$RUN" | python3 -c 'import json,sys; print(json.load(sys.stdin)["runId"])')
 echo "run $RUN_ID accepted: $RUN"
 for _ in $(seq 1 30); do

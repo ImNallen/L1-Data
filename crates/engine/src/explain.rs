@@ -96,6 +96,8 @@ impl Bracket {
 pub(crate) struct Prepared {
     bracket: Bracket,
     checked: writes::WritesChecked,
+    origin: DocOffset,
+    prefix: u32,
 }
 
 pub(crate) fn prepare(
@@ -128,10 +130,25 @@ pub(crate) fn prepare(
     }
     let bracket = Bracket::new(mode, txn, statement);
     let sent = bracket.sent();
+    let origin = crate::text::OffsetMap::new(text).to_utf16(span.start);
+    let prefix = prefix_units(bracket.body(), statement);
     match writes::check(target, &sent, confirmed) {
-        Ok(checked) => Ok(Prepared { bracket, checked }),
+        Ok(checked) => Ok(Prepared { bracket, checked, origin, prefix }),
         Err(confirmation) => Err(RunError::ConfirmWrites { confirmation }),
     }
+}
+
+fn prefix_units(body: &str, statement: &str) -> u32 {
+    let prefix = body.len() - statement.len();
+    body[..prefix].encode_utf16().count() as u32
+}
+
+fn in_document(mut error: QueryError, origin: DocOffset, prefix: u32) -> QueryError {
+    if let Some(position) = error.position {
+        let within = position.0.saturating_sub(prefix);
+        error.position = Some(DocOffset(origin.0.saturating_add(within)));
+    }
+    error
 }
 
 fn unsupported(what: &str) -> RunError {
@@ -180,6 +197,8 @@ pub(crate) struct Launch {
     connection: ConnectionConfig,
     database: String,
     entered: TxnState,
+    origin: DocOffset,
+    prefix: u32,
 }
 
 pub(crate) fn launch(
@@ -192,15 +211,15 @@ pub(crate) fn launch(
     database: String,
     entered: TxnState,
 ) -> Result<Launch, RunError> {
-    let Prepared { bracket, checked } = prepared;
+    let Prepared { bracket, checked, origin, prefix } = prepared;
     let Some((session, stop)) = console.take_session(inner, run_id, Work::Run(checked)) else {
         return Err(RunError::Busy);
     };
-    Ok(Launch { session, stop, bracket, schema, run_id, connection, database, entered })
+    Ok(Launch { session, stop, bracket, schema, run_id, connection, database, entered, origin, prefix })
 }
 
 pub(crate) async fn run(console: Arc<Console>, shared: Arc<Shared>, launch: Launch) -> Result<(), Orphaned> {
-    let Launch { mut session, stop, bracket, schema, run_id, connection, database, entered } = launch;
+    let Launch { mut session, stop, bracket, schema, run_id, connection, database, entered, origin, prefix } = launch;
     let body = bracket.body().to_owned();
     let restored = bracket.restores();
     let started = Instant::now();
@@ -222,14 +241,14 @@ pub(crate) async fn run(console: Arc<Console>, shared: Arc<Shared>, launch: Laun
         let lost = Some(error.message.clone());
         let end = match read {
             Read::Cancelled => cancelled(),
-            Read::Failed(error) => failed(error),
+            Read::Failed(error) => failed(in_document(error, origin, prefix)),
             Read::Ready { .. } => failed(error),
         };
         return finish(&console, &shared, session, run_id, &body, &connection, &database, started, entered, lost, end).await;
     }
     match read {
         Read::Cancelled => finish(&console, &shared, session, run_id, &body, &connection, &database, started, restored, None, cancelled()).await,
-        Read::Failed(error) => finish(&console, &shared, session, run_id, &body, &connection, &database, started, restored, None, failed(error)).await,
+        Read::Failed(error) => finish(&console, &shared, session, run_id, &body, &connection, &database, started, restored, None, failed(in_document(error, origin, prefix))).await,
         Read::Ready { cell, columns } => {
             let output = match store_plan(&console, run_id, &schema, &connection, &database, &cell, columns, &caps, started) {
                 Ok(output) => output,
@@ -532,5 +551,31 @@ mod tests {
         let digest = confirmation.digest.clone();
         let active = prepare(ExplainMode::Analyze, DatabaseKind::Postgres, TxnState::Active, text, &spans, &target, Some(&digest));
         assert!(matches!(active, Err(RunError::ConfirmWrites { .. })), "idle digest must not accept active analyze, got {active:?}");
+    }
+
+    #[test]
+    fn a_statement_error_points_at_the_document() {
+        let text = "select 1; select '你', missing_column";
+        let start = text.find("select '你'").unwrap();
+        let statement = &text[start..];
+        let map = crate::text::OffsetMap::new(text);
+        let expected = map.to_utf16(text.find("missing_column").unwrap());
+        for mode in [ExplainMode::Explain, ExplainMode::Analyze] {
+            let body = Bracket::new(mode, TxnState::Idle, statement).body().to_owned();
+            let prefix = prefix_units(&body, statement);
+            let at = body.find("missing_column").unwrap();
+            let n = u32::try_from(body[..at].chars().count()).unwrap() + 1;
+            let seen = crate::text::OffsetMap::new(&body).pg_position(&StmtSpan { start: 0, end: body.len() }, n);
+            let error = QueryError {
+                severity: "ERROR".into(),
+                sqlstate: Some("42703".into()),
+                message: "column missing_column does not exist".into(),
+                detail: None,
+                hint: None,
+                context: None,
+                position: Some(seen),
+            };
+            assert_eq!(in_document(error, map.to_utf16(start), prefix).position, Some(expected));
+        }
     }
 }
