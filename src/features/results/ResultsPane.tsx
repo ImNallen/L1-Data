@@ -39,6 +39,7 @@ import { groupDigits, pageStatus, pluralRows } from "./format";
 import { ErrorBlock, OutputPanel } from "./OutputPanel";
 import { PlanView } from "./PlanView";
 import { gridEditing, ResultGrid, type GridActions, type GridEditing, type GridQuery } from "./ResultGrid";
+import { acceptSelectionTotals, type SelectionSlot } from "./selectionTotals";
 import { cycleTableOrder, filterForValue, useFilterDrafts, useTableOrder } from "./tableQuery";
 
 const NO_OUTPUT: OutputLog = { entries: [], dropped: 0 };
@@ -242,6 +243,7 @@ function ResultBody({
   query,
   editing,
   actions,
+  onSelectionTotals,
 }: {
   run: RunState;
   view: ResultView;
@@ -249,6 +251,7 @@ function ResultBody({
   query: GridQuery | null;
   editing: GridEditing | null;
   actions: RefObject<GridActions | null>;
+  onSelectionTotals: (slot: SelectionSlot) => void;
 }) {
   switch (view.kind) {
     case "rows":
@@ -260,6 +263,7 @@ function ResultBody({
           query={query}
           editing={editing}
           actionsRef={actions}
+          onSelectionTotals={onSelectionTotals}
         />
       );
     case "plan":
@@ -331,6 +335,16 @@ export function ResultsPane({ tabId }: { tabId: TabId | null }) {
     [browsingTable?.console.db, browsingTable?.table.schema, browsingTable?.table.table, catalogView, shown?.meta, databaseKind],
   );
   const actions = useRef<GridActions | null>(null);
+  const shownKeyRef = useRef(shownRef);
+  shownKeyRef.current = shownRef;
+  const [totals, setTotals] = useState<SelectionSlot | null>(null);
+  if (view.kind !== "rows" || (totals !== null && totals.key !== shownRef)) {
+    if (totals !== null) setTotals(null);
+  }
+  const onSelectionTotals = (next: SelectionSlot) => {
+    setTotals((current) => acceptSelectionTotals(current, next, shownKeyRef.current));
+  };
+  const selectionText = view.kind === "rows" && totals?.key === shownRef ? totals.text : null;
   const pageSize = useWorkspace((s) => s.settings.tablePageSize);
   const exporting = console?.export ?? null;
 
@@ -365,6 +379,11 @@ export function ResultsPane({ tabId }: { tabId: TabId | null }) {
 
         <div className="flex-1" />
 
+        {selectionText !== null && (
+          <span data-testid="result-selection" title={selectionText} className="min-w-0 truncate text-ui-13 text-dim">
+            {selectionText}
+          </span>
+        )}
         {exporting ? <ExportStatus progress={exporting} /> : summary && <SummaryText summary={summary} />}
         <RunAnnouncement key={tabId} summary={summary} />
         {tab && <CursorPosition />}
@@ -419,7 +438,7 @@ export function ResultsPane({ tabId }: { tabId: TabId | null }) {
       {browsingTable && <FilterBar tab={browsingTable} />}
 
       <div className="relative flex min-h-0 flex-1 flex-col">
-        <ResultBody run={run} view={view} output={output} query={gridQuery} editing={editing} actions={actions} />
+        <ResultBody run={run} view={view} output={output} query={gridQuery} editing={editing} actions={actions} onSelectionTotals={onSelectionTotals} />
       </div>
       {pager && <TablePager tab={pager} rows={shown?.meta.rowCount ?? 0} />}
     </section>

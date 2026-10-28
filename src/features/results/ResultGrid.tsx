@@ -20,7 +20,7 @@ import {
   type LucideIcon,
 } from "lucide-react";
 import { useEffect, useId, useImperativeHandle, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore, type KeyboardEvent, type Ref } from "react";
-import type { ColumnMeta, Density, FontSetting, ResultMeta, TypeCategory } from "../../ipc/bindings";
+import { commands, type ColumnMeta, type ColSpan, type Density, type FontSetting, type ResultMeta, type RowSpan, type TypeCategory } from "../../ipc/bindings";
 import { DENSITY_FACTOR, gridRowHeight } from "../../shell/appearance";
 import { commandForKey } from "../../shell/commands";
 import { rowCacheFor, type RowCache } from "../../state/rowCache";
@@ -45,6 +45,7 @@ import { ContextMenuArea, ContextMenuItem, ContextMenuSeparator, cx } from "../.
 import { openTableTab } from "../editor/runActions";
 import { useKeyLinks, type KeyLink } from "./foreignKeys";
 import { groupDigits, isNumeric, toTsv } from "./format";
+import { formatSelectionTotals, type SelectionSlot } from "./selectionTotals";
 import { referencedRows, type SortKey } from "./tableQuery";
 
 const HEADER_H = 28;
@@ -220,6 +221,56 @@ function fullRowRange(sel: Selection, colCount: number): [number, number] | null
   return [Math.min(sel.anchor.row, sel.focus.row), Math.max(sel.anchor.row, sel.focus.row)];
 }
 
+function selectionBounds(sel: NonNullable<Selection>) {
+  return {
+    r0: Math.min(sel.anchor.row, sel.focus.row),
+    r1: Math.max(sel.anchor.row, sel.focus.row),
+    c0: Math.min(sel.anchor.col, sel.focus.col),
+    c1: Math.max(sel.anchor.col, sel.focus.col),
+  };
+}
+
+function visualCellCount(sel: NonNullable<Selection>): number {
+  const { r0, r1, c0, c1 } = selectionBounds(sel);
+  return (r1 - r0 + 1) * (c1 - c0 + 1);
+}
+
+function storedSpan(sel: NonNullable<Selection>, rowCount: number): { rows: RowSpan; cols: ColSpan } | null {
+  const { r0, r1, c0, c1 } = selectionBounds(sel);
+  if (rowCount === 0 || r0 >= rowCount) return null;
+  return { rows: { start: r0, end: Math.min(r1, rowCount - 1) }, cols: { start: c0, end: c1 } };
+}
+
+function selectionTouchesPending(
+  sel: NonNullable<Selection>,
+  rowCount: number,
+  columns: ColumnMeta[],
+  edits: TableEdits,
+  cache: RowCache,
+  rowIdOf: (row: number) => RowId | null,
+): boolean {
+  const { r0, r1, c0, c1 } = selectionBounds(sel);
+  const names = columns.slice(c0, c1 + 1).map((column) => column.name);
+  const unseen = Object.keys(edits.updates).length > 0 || Object.keys(edits.deletes).length > 0;
+  for (let row = r0; row <= r1; row++) {
+    if (row >= rowCount) return true;
+    if (!cache.get(row)) {
+      if (unseen) return true;
+      continue;
+    }
+    const id = rowIdOf(row);
+    if (!id) {
+      if (unseen) return true;
+      continue;
+    }
+    const key = rowKey(id);
+    if (key in edits.deletes) return true;
+    const values = edits.updates[key]?.values;
+    if (values && names.some((name) => name in values)) return true;
+  }
+  return false;
+}
+
 function inSelection(sel: Selection, row: number, col: number): boolean {
   if (!sel) return false;
   const r0 = Math.min(sel.anchor.row, sel.focus.row);
@@ -291,12 +342,14 @@ export function ResultGrid({
   query,
   editing,
   actionsRef,
+  onSelectionTotals,
 }: {
   meta: ResultMeta;
   done: boolean;
   query: GridQuery | null;
   editing: GridEditing | null;
   actionsRef?: Ref<GridActions | null>;
+  onSelectionTotals?: (slot: SelectionSlot) => void;
 }) {
   const cache = rowCacheFor(meta.ref);
   const cacheVersion = useSyncExternalStore(cache.subscribe, cache.getVersion);
@@ -400,8 +453,95 @@ export function ResultGrid({
     void cache.ensure({ start: Math.max(0, firstRow - PREFETCH), end: lastRow + 1 + PREFETCH }, rowCount);
   }, [cache, cacheVersion, firstRow, lastRow, rowCount]);
 
+  const onSelectionTotalsRef = useRef(onSelectionTotals);
+  onSelectionTotalsRef.current = onSelectionTotals;
+  const selectionRef = useRef(selection);
+  selectionRef.current = selection;
+  const epochRef = useRef(0);
+  const sentSpan = useRef("");
+  const mounted = useRef(true);
+  const inflightTotals = useRef(0);
+  const queuedTotal = useRef<{ epoch: number; rows: RowSpan; cols: ColSpan; pending: boolean } | null>(null);
+  const dragPosted = useRef(false);
+  const lastPublished = useRef<string | null>(null);
+  const resultKey = `${meta.ref.tabId}:${meta.ref.runId}:${meta.ref.index}`;
+  const publishTotals = (epoch: number, text: string | null) => {
+    lastPublished.current = text;
+    onSelectionTotalsRef.current?.({ key: resultKey, epoch, text });
+  };
+  const syncTotals = (force: boolean) => {
+    const sel = selectionRef.current;
+    const cells = sel ? visualCellCount(sel) : 0;
+    const pending = sel !== null && cells >= 2 && selectionTouchesPending(sel, rowCount, columns, edits, cache, rowIdOf);
+    const span = sel !== null && cells >= 2 ? storedSpan(sel, rowCount) : null;
+    const sig =
+      cells < 2 || sel === null ? "clear" : span === null ? "inserts" : `${span.rows.start},${span.rows.end},${span.cols.start},${span.cols.end},${pending}`;
+    if (dragging.current) {
+      queuedTotal.current = null;
+      const text = sig === "clear" ? null : sig === "inserts" || pending ? "excludes pending edits" : null;
+      if (!dragPosted.current) {
+        dragPosted.current = true;
+        epochRef.current += 1;
+      }
+      if (lastPublished.current !== text) publishTotals(epochRef.current, text);
+      return;
+    }
+    dragPosted.current = false;
+    if (!force && sentSpan.current === sig) return;
+    sentSpan.current = sig;
+    const epoch = ++epochRef.current;
+    if (sig === "clear") {
+      queuedTotal.current = null;
+      publishTotals(epoch, null);
+      return;
+    }
+    if (sig === "inserts" || span === null) {
+      queuedTotal.current = null;
+      publishTotals(epoch, "excludes pending edits");
+      return;
+    }
+    publishTotals(epoch, pending ? "excludes pending edits" : null);
+    const job = { epoch, rows: span.rows, cols: span.cols, pending };
+    const run = (next: typeof job) => {
+      inflightTotals.current += 1;
+      void commands
+        .resultAggregate(meta.ref, next.rows, next.cols)
+        .then(
+          (res) => {
+            if (mounted.current && res.status === "ok" && next.epoch === epochRef.current) {
+              publishTotals(next.epoch, formatSelectionTotals(res.data, next.pending));
+            }
+          },
+          () => {},
+        )
+        .finally(() => {
+          inflightTotals.current -= 1;
+          const waiting = queuedTotal.current;
+          queuedTotal.current = null;
+          if (waiting && mounted.current) run(waiting);
+        });
+    };
+    if (inflightTotals.current >= 2) queuedTotal.current = job;
+    else run(job);
+  };
+  const syncTotalsRef = useRef(syncTotals);
+  syncTotalsRef.current = syncTotals;
   useEffect(() => {
-    const up = () => (dragging.current = null);
+    syncTotalsRef.current(false);
+  }, [selection, cacheVersion, edits, rowCount, columns]);
+  useEffect(() => {
+    mounted.current = true;
+    return () => {
+      mounted.current = false;
+    };
+  }, []);
+
+  useEffect(() => {
+    const up = () => {
+      if (!dragging.current) return;
+      dragging.current = null;
+      syncTotalsRef.current(true);
+    };
     window.addEventListener("mouseup", up);
     return () => window.removeEventListener("mouseup", up);
   }, []);

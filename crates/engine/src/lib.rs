@@ -1,3 +1,4 @@
+mod aggregate;
 mod assistant;
 mod catalog;
 mod connection;
@@ -1636,6 +1637,18 @@ impl Engine {
     pub fn result_cell(&self, r: ResultRef, row: u32, col: u16) -> Result<Option<String>, ResultError> {
         let set = self.shared.result_set(r).ok_or(ResultError::Gone)?;
         set.cell(row, col).ok_or(ResultError::OutOfRange)
+    }
+
+    pub async fn result_aggregate(&self, r: ResultRef, rows: RowSpan, cols: ColSpan) -> Result<CellAggregate, ResultError> {
+        let set = self.shared.result_set(r).ok_or(ResultError::Gone)?;
+        self.shared
+            .runtime
+            .spawn_blocking(move || {
+                let copied = set.copy_rect(rows, cols)?;
+                Ok(aggregate::aggregate(&copied))
+            })
+            .await
+            .expect("result_aggregate task panicked")
     }
 
     pub fn result_plan(&self, r: ResultRef) -> Result<Plan, ResultError> {

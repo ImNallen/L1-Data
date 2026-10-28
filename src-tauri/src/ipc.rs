@@ -175,6 +175,12 @@ pub fn result_cell(engine: State<'_, Arc<Engine>>, result_ref: ResultRef, row: u
 
 #[tauri::command]
 #[specta::specta]
+pub async fn result_aggregate(engine: State<'_, Arc<Engine>>, result_ref: ResultRef, rows: RowSpan, cols: ColSpan) -> Result<CellAggregate, ResultError> {
+    engine.result_aggregate(result_ref, rows, cols).await
+}
+
+#[tauri::command]
+#[specta::specta]
 pub fn result_plan(engine: State<'_, Arc<Engine>>, result_ref: ResultRef) -> Result<Plan, ResultError> {
     engine.result_plan(result_ref)
 }
