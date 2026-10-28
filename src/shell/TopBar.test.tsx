@@ -1,6 +1,6 @@
 import { renderToStaticMarkup } from "react-dom/server";
 import { afterEach, expect, it } from "vitest";
-import type { ConsoleState, ConsoleWork, Environment, TransactionLoss, TxnState } from "../ipc/bindings";
+import type { ConsoleState, ConsoleWork, DatabaseKind, Environment, TransactionLoss, TxnState } from "../ipc/bindings";
 import { connectedState, connectionConfig, databaseState } from "../testing/connections";
 import { useLive } from "../state/live";
 import { useWorkspace, type Tab } from "../state/workspace";
@@ -15,7 +15,7 @@ afterEach(() => {
   live.consoles = saved.consoles;
 });
 
-function onConnection(environment: Environment | null, txn: TxnState = "Idle"): string {
+function onConnection(environment: Environment | null, txn: TxnState = "Idle", databaseKind: DatabaseKind = "Postgres"): string {
   const tab: Tab = { id: "t1", title: "Query 3", console: { db: { connectionId: "c1", database: "shop" }, mode: "Manual" }, table: null, file: null };
   const state: ConsoleState = {
     tabId: tab.id,
@@ -28,7 +28,11 @@ function onConnection(environment: Environment | null, txn: TxnState = "Idle"): 
     export: null,
     run: { kind: "Idle" },
   };
-  Object.assign(workspace, { tabs: { [tab.id]: tab }, active: tab.id, configs: { c1: { ...connectionConfig("c1", "prod-postgres"), environment } } });
+  Object.assign(workspace, {
+    tabs: { [tab.id]: tab },
+    active: tab.id,
+    configs: { c1: { ...connectionConfig("c1", "prod-postgres"), environment, databaseKind } },
+  });
   live.consoles = { [tab.id]: state };
   return renderToStaticMarkup(<TopBar hosted={null} />);
 }
@@ -68,6 +72,11 @@ it("reads the run target as the environment icon and connection, then database, 
   expect(order.every((i) => i >= 0)).toBe(true);
   expect([...order].sort((a, b) => a - b)).toEqual(order);
   expect(html).not.toContain("Query 3");
+});
+
+it("offers Explain on a PostgreSQL script tab and hides it on SQL Server", () => {
+  expect(onConnection("Local")).toContain('data-testid="explain-menu"');
+  expect(onConnection("Local", "Idle", "SqlServer")).not.toContain('data-testid="explain-menu"');
 });
 
 it("shows an open transaction as pending and an aborted one as an error", () => {

@@ -103,6 +103,7 @@ const notice = (runId: number, message: string, severity = "NOTICE"): OutputEntr
 const failure: QueryError = { severity: "ERROR", sqlstate: "40001", message: "could not serialize", detail: null, hint: null, context: null, position: null };
 const finishedRun = (runId: number, statements: StatementRun[] = []): RunState => ({ kind: "Finished", runId, elapsedMs: 5, statements, outcome: "Ok" });
 const rowsAt = (index: number) => rows(index, meta(index, 1));
+const planAt = (index: number) => stmt(index, { kind: "Finished" }, [{ kind: "Plan", result: meta(index, 1), format: "Json" }]);
 
 describe("resultView", () => {
   const withRows = finishedRun(7, [rowsAt(0), rowsAt(1)]);
@@ -134,6 +135,13 @@ describe("resultView", () => {
 
   it("shows the log instead of the tail when the tab has entries", () => {
     expect(resultView(finishedRun(7, [command(0, "DO", 1)]), undefined, true)).toEqual({ kind: "output" });
+  });
+
+  it("shows a plan as a tree until the rows view is chosen", () => {
+    const run = finishedRun(7, [planAt(0)]);
+    expect(resultView(run, undefined, false)).toMatchObject({ kind: "plan", result: { index: 0, plan: true } });
+    expect(resultView(run, undefined, false, true)).toMatchObject({ kind: "rows", result: { index: 0, plan: true } });
+    expect(runSummary(finished([planAt(0)]), undefined, 0)).toEqual({ tone: "ok", text: "Plan · 38 ms" });
   });
 
   it("falls back to the tail when the log is empty", () => {

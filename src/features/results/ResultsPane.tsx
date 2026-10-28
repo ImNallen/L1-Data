@@ -12,7 +12,7 @@ import {
   SquareTerminalIcon,
   Undo2Icon,
 } from "lucide-react";
-import { useEffect, useMemo, useRef, useSyncExternalStore, type RefObject } from "react";
+import { useEffect, useMemo, useRef, useState, useSyncExternalStore, type RefObject } from "react";
 import type { ConsoleState, QueryError, RunState, TabId } from "../../ipc/bindings";
 import { useLive, type OutputLog } from "../../state/live";
 import { isBusy, outputTone, resultView, rowResults, runStatements, runSummary, shownResult, type ResultView, type Summary } from "../../state/status";
@@ -37,6 +37,7 @@ import { ExportMenu } from "./ExportMenu";
 import { FilterBar } from "./FilterBar";
 import { groupDigits, pageStatus, pluralRows } from "./format";
 import { ErrorBlock, OutputPanel } from "./OutputPanel";
+import { PlanView } from "./PlanView";
 import { gridEditing, ResultGrid, type GridActions, type GridEditing, type GridQuery } from "./ResultGrid";
 import { cycleTableOrder, filterForValue, useFilterDrafts, useTableOrder } from "./tableQuery";
 
@@ -261,6 +262,8 @@ function ResultBody({
           actionsRef={actions}
         />
       );
+    case "plan":
+      return <PlanView result={view.result} />;
     case "output":
       return <OutputPanel log={output} />;
     case "tail": {
@@ -292,7 +295,11 @@ export function ResultsPane({ tabId }: { tabId: TabId | null }) {
   const shown = shownResult(run, picked);
   const summary = runSummary(run, picked, now);
   const output = useLive((s) => (tabId ? s.output[tabId] : undefined)) ?? NO_OUTPUT;
-  const view = resultView(run, picked, output.entries.length > 0);
+  const shownRef = shown ? `${shown.meta.ref.tabId}:${shown.meta.ref.runId}:${shown.index}` : "";
+  const [rowPref, setRowPref] = useState<{ key: string; prefer: boolean } | null>(null);
+  if ((rowPref?.key ?? "") !== shownRef) setRowPref({ key: shownRef, prefer: false });
+  const preferRows = rowPref?.key === shownRef && rowPref.prefer;
+  const view = resultView(run, picked, output.entries.length > 0, preferRows);
   const tone = outputTone(output.entries);
   const outputPick = run.kind === "Idle" ? undefined : { kind: "output" as const, runId: run.runId, result: shown?.index };
 
@@ -347,7 +354,7 @@ export function ResultsPane({ tabId }: { tabId: TabId | null }) {
                 onClick={() => tabId && setActiveResult(tabId, r.index)}
                 className={cx(
                   "h-5 min-w-6 rounded px-1.5 font-mono text-ui-11.5",
-                  view.kind === "rows" && view.result.index === r.index ? "bg-pill text-fg" : "text-dim hover:text-muted",
+                  (view.kind === "rows" || view.kind === "plan") && view.result.index === r.index ? "bg-pill text-fg" : "text-dim hover:text-muted",
                 )}
               >
                 {i + 1}
@@ -363,6 +370,11 @@ export function ResultsPane({ tabId }: { tabId: TabId | null }) {
         {tab && <CursorPosition />}
 
         <div className="flex items-center gap-0.5">
+          {shown?.plan && (
+            <Button data-testid="plan-rows-toggle" className="h-7 px-2" onClick={() => setRowPref({ key: shownRef, prefer: !preferRows })}>
+              {preferRows ? "Plan" : "Rows"}
+            </Button>
+          )}
           <ExportMenu
             tab={tab}
             result={shown}

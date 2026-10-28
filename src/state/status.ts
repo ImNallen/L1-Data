@@ -38,7 +38,7 @@ export function connectionTone(state: ConnectionState | undefined): Tone {
   }
 }
 
-export type RowResult = { index: number; meta: ResultMeta; state: RowsState };
+export type RowResult = { index: number; meta: ResultMeta; state: RowsState; plan: boolean };
 
 export function runStatements(run: RunState): StatementRun[] {
   return run.kind === "Idle" ? [] : run.statements;
@@ -48,7 +48,8 @@ export function rowResults(run: RunState): RowResult[] {
   const out: RowResult[] = [];
   for (const s of runStatements(run)) {
     for (const output of s.outputs) {
-      if (output.kind === "Rows") out.push({ index: output.result.ref.index, meta: output.result, state: output.state });
+      if (output.kind === "Rows") out.push({ index: output.result.ref.index, meta: output.result, state: output.state, plan: false });
+      else if (output.kind === "Plan") out.push({ index: output.result.ref.index, meta: output.result, state: "Complete", plan: true });
     }
   }
   return out;
@@ -62,12 +63,13 @@ export function shownResult(run: RunState, picked: ResultPick | undefined): RowR
   return results.find((r) => r.index === index) ?? results.at(-1);
 }
 
-export type ResultView = { kind: "rows"; result: RowResult } | { kind: "output" } | { kind: "tail" };
+export type ResultView = { kind: "rows"; result: RowResult } | { kind: "plan"; result: RowResult } | { kind: "output" } | { kind: "tail" };
 
-export function resultView(run: RunState, picked: ResultPick | undefined, hasOutput: boolean): ResultView {
+export function resultView(run: RunState, picked: ResultPick | undefined, hasOutput: boolean, preferRows = false): ResultView {
   const pickedOutput = typeof picked === "object" && run.kind !== "Idle" && picked.runId === run.runId;
   if (hasOutput && pickedOutput) return { kind: "output" };
   const result = shownResult(run, picked);
+  if (result?.plan && !preferRows) return { kind: "plan", result };
   if (result) return { kind: "rows", result };
   return hasOutput ? { kind: "output" } : { kind: "tail" };
 }
@@ -103,6 +105,7 @@ export function runSummary(run: RunState, picked: ResultPick | undefined, nowMs:
       if (failed?.status.kind === "Failed") return { tone: "error", text: failed.status.error.message };
       if (run.outcome === "Cancelled") return { tone: "muted", text: `Cancelled · ${formatElapsed(run.elapsedMs)}` };
       const shown = shownResult(run, picked);
+      if (shown?.plan) return { tone: "ok", text: `Plan · ${formatElapsed(shown.meta.elapsedMs)}` };
       if (shown) return { tone: "ok", text: `${rowsText(shown.meta)} · ${formatElapsed(shown.meta.elapsedMs)}` };
       const last = run.statements.flatMap((s) => s.outputs).at(-1);
       if (last?.kind === "Command") return { tone: "ok", text: `${last.tag} · ${formatElapsed(last.elapsedMs)}` };
