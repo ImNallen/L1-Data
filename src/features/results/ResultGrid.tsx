@@ -462,8 +462,11 @@ export function ResultGrid({
   const mounted = useRef(true);
   const inflightTotals = useRef(0);
   const queuedTotal = useRef<{ epoch: number; rows: RowSpan; cols: ColSpan; pending: boolean } | null>(null);
+  const dragPosted = useRef(false);
+  const lastPublished = useRef<string | null>(null);
   const resultKey = `${meta.ref.tabId}:${meta.ref.runId}:${meta.ref.index}`;
   const publishTotals = (epoch: number, text: string | null) => {
+    lastPublished.current = text;
     onSelectionTotalsRef.current?.({ key: resultKey, epoch, text });
   };
   const syncTotals = (force: boolean) => {
@@ -476,9 +479,14 @@ export function ResultGrid({
     if (dragging.current) {
       queuedTotal.current = null;
       const text = sig === "clear" ? null : sig === "inserts" || pending ? "excludes pending edits" : null;
-      publishTotals(++epochRef.current, text);
+      if (!dragPosted.current) {
+        dragPosted.current = true;
+        epochRef.current += 1;
+      }
+      if (lastPublished.current !== text) publishTotals(epochRef.current, text);
       return;
     }
+    dragPosted.current = false;
     if (!force && sentSpan.current === sig) return;
     sentSpan.current = sig;
     const epoch = ++epochRef.current;
@@ -500,7 +508,9 @@ export function ResultGrid({
         .resultAggregate(meta.ref, next.rows, next.cols)
         .then(
           (res) => {
-            if (mounted.current && res.status === "ok") publishTotals(next.epoch, formatSelectionTotals(res.data, next.pending));
+            if (mounted.current && res.status === "ok" && next.epoch === epochRef.current) {
+              publishTotals(next.epoch, formatSelectionTotals(res.data, next.pending));
+            }
           },
           () => {},
         )

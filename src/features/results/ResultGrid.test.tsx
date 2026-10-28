@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { clearMocks, mockIPC } from "@tauri-apps/api/mocks";
-import { cleanup, render, screen } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { useState } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
@@ -605,4 +605,53 @@ it("shows the later rectangle's sum when that reply arrives first", async () => 
   resolvers[0]!({ status: "ok", data: { kind: "Numeric", count: 2, nonNull: 2, sum: "earlier", avg: "0", min: "0", max: "0" } });
   await vi.waitFor(() => expect(screen.getByTestId("result-selection").textContent).toContain("Sum later"));
   expect(screen.getByTestId("result-selection").textContent).not.toContain("earlier");
+});
+
+it("publishes the header once when a drag ends, not on each cell entered", async () => {
+  const resolvers: ((value: { status: "ok"; data: CellAggregate }) => void)[] = [];
+  vi.spyOn(commands, "resultAggregate").mockImplementation(
+    () =>
+      new Promise((resolve) => {
+        resolvers.push(resolve);
+      }),
+  );
+  const meta = queryResult([["1"], ["2"], ["3"]], { columns: [{ name: "total", attnum: 4 }] });
+  const shownKey = `${meta.ref.tabId}:${meta.ref.runId}:${meta.ref.index}`;
+  let publishes = 0;
+  function Counting() {
+    const [slot, setSlot] = useState<SelectionSlot | null>(null);
+    const text = slot?.key === shownKey ? slot.text : null;
+    return (
+      <>
+        {text !== null && <span data-testid="result-selection">{text}</span>}
+        <ResultGrid
+          meta={meta}
+          done
+          query={null}
+          editing={null}
+          onSelectionTotals={(next) => {
+            publishes += 1;
+            setSlot((current) => acceptSelectionTotals(current, next, shownKey));
+          }}
+        />
+      </>
+    );
+  }
+  render(<Counting />);
+  await screen.findByTestId("grid-cell-0-0");
+  await vi.waitFor(() => expect(publishes).toBeGreaterThan(0));
+  const before = publishes;
+  fireEvent.mouseDown(screen.getByTestId("grid-cell-0-0"), { button: 0 });
+  fireEvent.mouseEnter(screen.getByTestId("grid-cell-1-0"));
+  fireEvent.mouseEnter(screen.getByTestId("grid-cell-2-0"));
+  expect(publishes).toBe(before);
+  expect(resolvers).toHaveLength(0);
+  fireEvent.mouseUp(document);
+  await vi.waitFor(() => expect(resolvers).toHaveLength(1));
+  expect(publishes).toBe(before + 1);
+  expect(screen.queryByTestId("result-selection")).toBeNull();
+  resolvers[0]!({ status: "ok", data: { kind: "Numeric", count: 3, nonNull: 3, sum: "6", avg: "2.000000", min: "1", max: "3" } });
+  expect((await screen.findByTestId("result-selection")).textContent).toContain("Sum 6");
+  expect(publishes).toBe(before + 2);
+  expect(resolvers).toHaveLength(1);
 });
