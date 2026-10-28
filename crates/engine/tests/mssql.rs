@@ -1213,3 +1213,114 @@ async fn hostile_object_scripts_replay_every_property_or_warn() {
         std::panic::resume_unwind(panic);
     }
 }
+
+async fn run_mode(h: &mut Harness, sql: &str, mode: RunMode) -> Result<ConsoleState, RunError> {
+    match h.engine.console_run(h.tab, RunRequest::Script { text: sql.into(), target: RunTarget::All, mode }, None).await {
+        Ok(accepted) => Ok(h.finish(accepted.run_id).await),
+        Err(error) => Err(error),
+    }
+}
+
+fn assert_plan(h: &Harness, state: &ConsoleState) -> Plan {
+    let RunState::Finished { statements, outcome, .. } = &state.run else { panic!("not finished: {:?}", state.run) };
+    assert!(matches!(outcome, RunOutcome::Ok), "{outcome:?} {statements:?}");
+    let Some(RunOutput::Plan { result, format }) = statements.first().and_then(|statement| statement.outputs.first()) else { panic!("no plan: {statements:?}") };
+    assert_eq!(*format, PlanFormat::Xml);
+    assert_eq!(result.database_kind, DatabaseKind::SqlServer);
+    let cell = h.engine.result_cell(result.r#ref, 0, 0).unwrap().expect("plan cell");
+    let name = result.columns.first().map(|column| column.name.as_str()).unwrap_or("");
+    eprintln!("showplan column {name:?} prefix {}", &cell[..cell.len().min(160)]);
+    assert!(cell.contains("<ShowPlan"), "{cell}");
+    h.engine.result_plan(result.r#ref).expect("showplan parses")
+}
+
+fn any_actual(node: &PlanNode) -> bool {
+    node.actual_rows.is_some() || node.children.iter().any(any_actual)
+}
+
+#[tokio::test]
+async fn explain_returns_a_plan_and_the_next_select_returns_rows() {
+    let mut h = Harness::open(TxnMode::AutoCommit).await;
+    let state = run_mode(&mut h, "select 1", RunMode::Explain).await.unwrap();
+    let plan = assert_plan(&h, &state);
+    assert!(!plan.statements.is_empty());
+    assert!(plan.statements.iter().all(|statement| !statement.statement_text.is_empty()));
+    let state = h.ok("select 2").await;
+    assert_eq!(h.rows(Harness::rowsets(&state)[0]), vec![vec![Some("2".into())]]);
+}
+
+#[tokio::test]
+async fn explain_of_two_statements_returns_two_roots() {
+    let mut h = Harness::open(TxnMode::AutoCommit).await;
+    let state = run_mode(&mut h, "select 1; select 2", RunMode::Explain).await.unwrap();
+    let plan = assert_plan(&h, &state);
+    assert_eq!(plan.statements.len(), 2);
+    eprintln!("statement texts: {:?}", plan.statements.iter().map(|statement| &statement.statement_text).collect::<Vec<_>>());
+    assert!(plan.statements.iter().all(|statement| !statement.statement_text.is_empty()));
+}
+
+#[tokio::test]
+async fn explain_analyze_of_a_select_records_actual_rows() {
+    let mut h = Harness::open(TxnMode::AutoCommit).await;
+    let state = run_mode(&mut h, "SELECT TOP (1) id FROM dbo.orders", RunMode::ExplainAnalyze).await.unwrap();
+    let plan = assert_plan(&h, &state);
+    assert!(plan.statements.iter().any(|statement| any_actual(&statement.root)));
+    let state = h.ok("select 2").await;
+    assert_eq!(h.rows(Harness::rowsets(&state)[0]), vec![vec![Some("2".into())]]);
+}
+
+#[tokio::test]
+async fn explain_of_an_update_does_not_ask_and_analyze_does() {
+    let mut h = Harness::open(TxnMode::AutoCommit).await;
+    let update = "UPDATE dbo.orders SET status = status WHERE 1 = 0";
+    let state = run_mode(&mut h, update, RunMode::Explain).await.expect("plain explain does not ask");
+    let plan = assert_plan(&h, &state);
+    assert!(!plan.statements.is_empty());
+    let err = h.engine.console_run(h.tab, RunRequest::Script { text: update.into(), target: RunTarget::All, mode: RunMode::ExplainAnalyze }, None).await.unwrap_err();
+    let RunError::ConfirmWrites { confirmation } = err else { panic!("{err:?}") };
+    assert!(!confirmation.on_production);
+    assert_eq!(confirmation.sends.statements, [update]);
+    let id = h
+        .engine
+        .console_run(h.tab, RunRequest::Script { text: update.into(), target: RunTarget::All, mode: RunMode::ExplainAnalyze }, Some(confirmation.digest))
+        .await
+        .unwrap()
+        .run_id;
+    let finished = h.finish(id).await;
+    let _plan = assert_plan(&h, &finished);
+}
+
+#[tokio::test]
+async fn explain_refuses_several_go_batches() {
+    let mut h = Harness::open(TxnMode::AutoCommit).await;
+    let err = run_mode(&mut h, "select 1\nGO\nselect 2", RunMode::Explain).await.unwrap_err();
+    assert!(matches!(err, RunError::Unsupported { ref what } if what == "Explain one batch."), "{err:?}");
+}
+
+#[tokio::test]
+async fn explain_of_a_temp_table_finishes_and_the_next_select_returns_rows() {
+    let mut h = Harness::open(TxnMode::AutoCommit).await;
+    let sql = "CREATE TABLE #lane7 (id int); SELECT * FROM #lane7";
+    let state = run_mode(&mut h, sql, RunMode::Explain).await.expect("explain runs");
+    let RunState::Finished { outcome, .. } = &state.run else { panic!("not finished") };
+    eprintln!("lane 7 outcome {outcome:?}");
+    match outcome {
+        RunOutcome::Ok => {
+            let _plan = assert_plan(&h, &state);
+        }
+        RunOutcome::Failed => {}
+        other => panic!("{other:?}"),
+    }
+    let state = h.ok("SELECT 2 AS n").await;
+    assert_eq!(h.rows(Harness::rowsets(&state)[0]), vec![vec![Some("2".into())]]);
+}
+
+#[tokio::test]
+async fn plain_explain_on_production_does_not_ask() {
+    let mut h = Harness::open(TxnMode::AutoCommit).await;
+    set_environment(&h, Some(Environment::Production)).await;
+    let update = "UPDATE dbo.orders SET status = status WHERE 1 = 0";
+    let state = run_mode(&mut h, update, RunMode::Explain).await.expect("plain explain does not ask on Production");
+    let plan = assert_plan(&h, &state);
+    assert!(!plan.statements.is_empty());
+}

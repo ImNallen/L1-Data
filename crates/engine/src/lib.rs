@@ -6,6 +6,7 @@ mod entra;
 mod export;
 mod explain;
 mod plan;
+mod showplan;
 mod files;
 mod history;
 pub mod model;
@@ -1352,6 +1353,43 @@ impl Engine {
         let SessionSlot::Idle(idle) = &inner.session else { return Err(RunError::Busy) };
         let target = writes::Target { saved: &current, opened: idle.opened(), console: &config, txn: inner.txn, unasked: &inner.unasked };
         if let Some(mode) = explain_mode {
+            if current.database_kind == DatabaseKind::SqlServer {
+                let analyze = matches!(mode, explain::ExplainMode::Analyze);
+                let prepared = match showplan::prepare(analyze, &text, &spans, &target, confirmed.as_ref()) {
+                    Ok(prepared) => prepared,
+                    Err(RunError::ConfirmWrites { confirmation }) => {
+                        console.publish(&mut inner, s);
+                        return Err(RunError::ConfirmWrites { confirmation });
+                    }
+                    Err(error) => return Err(error),
+                };
+                let run_id = s.next_run_id();
+                let entered = inner.txn;
+                let launch = showplan::launch(
+                    &console,
+                    &mut inner,
+                    run_id,
+                    prepared,
+                    config.schema.clone(),
+                    current.clone(),
+                    config.database.clone(),
+                    entered,
+                )?;
+                console.results.lock().unwrap().clear();
+                inner.run = RunState::Running {
+                    run_id,
+                    started_at_ms: console::now_ms(),
+                    statements: ranges
+                        .iter()
+                        .enumerate()
+                        .map(|(i, range)| StatementRun { index: i as u16, range: *range, status: StmtStatus::Pending, outputs: Vec::new() })
+                        .collect(),
+                };
+                console.publish(&mut inner, s);
+                drop(inner);
+                s.spawn(showplan::run(console.clone(), s.clone(), launch));
+                return Ok(RunAccepted { run_id, statements: ranges });
+            }
             let prepared = match explain::prepare(mode, current.database_kind, inner.txn, &text, &spans, &target, confirmed.as_ref()) {
                 Ok(prepared) => prepared,
                 Err(RunError::ConfirmWrites { confirmation }) => {
@@ -1605,12 +1643,17 @@ impl Engine {
         if set.meta().truncated.is_some() {
             return Err(ResultError::NotAPlan { what: "The plan was truncated.".into() });
         }
+        let format = set.plan_format.ok_or(ResultError::NotAPlan { what: "The result is not a plan.".into() })?;
         let cell = set.cell(0, 0).ok_or(ResultError::NotAPlan { what: "The result is not a plan.".into() })?;
         drop(set);
-        let Some(json) = cell else {
+        let Some(document) = cell else {
             return Err(ResultError::NotAPlan { what: "The result is not a plan.".into() });
         };
-        plan::parse(&json).map_err(|what| ResultError::NotAPlan { what })
+        let parsed = match format {
+            PlanFormat::Json => plan::parse(&document),
+            PlanFormat::Xml => showplan::parse(&document),
+        };
+        parsed.map_err(|what| ResultError::NotAPlan { what })
     }
 
     /// Writes one result to `path` as `format`. The file appears at `path` only when complete, and

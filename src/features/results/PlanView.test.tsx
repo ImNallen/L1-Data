@@ -35,6 +35,7 @@ const plan: Plan = {
     {
       planningTimeMs: 0.12,
       executionTimeMs: 1.5,
+      statementText: "",
       properties: [],
       root: node({
         operation: "Hash Join",
@@ -85,6 +86,7 @@ it("renders the plan tree, moves focus from the keyboard, and keeps the detail o
   render(<PlanView result={result} />);
 
   expect((await screen.findByTestId("plan-node-0")).textContent).toContain("Hash Join");
+  expect(screen.queryByTestId("plan-statement-0")).toBeNull();
   expect(screen.getByTestId("plan-header").textContent).toContain("Planning 0.12 ms");
   expect(screen.getByTestId("plan-header").textContent).toContain("Execution 1.5 ms");
   expect(screen.getAllByTestId("plan-diverges")).toHaveLength(1);
@@ -107,6 +109,39 @@ it("renders the plan tree, moves focus from the keyboard, and keeps the detail o
   expect(focused()).toBe(screen.getByTestId("plan-node-1"));
   expect(performance.getEntriesByName("plan-paint")).toHaveLength(1);
   expect(intoView).toHaveBeenCalled();
+});
+
+it("shows each statement above its tree and moves across both roots", async () => {
+  const two: Plan = {
+    statements: [
+      {
+        planningTimeMs: null,
+        executionTimeMs: null,
+        statementText: "SELECT 1",
+        properties: [],
+        root: node({ operation: "Constant Scan", children: [node({ operation: "Filter" })] }),
+      },
+      {
+        planningTimeMs: null,
+        executionTimeMs: null,
+        statementText: "SELECT 2",
+        properties: [],
+        root: node({ operation: "Clustered Index Scan", totalTimeMs: null, selfTimeMs: null, actualRows: null }),
+      },
+    ],
+  };
+  vi.spyOn(commands, "resultPlan").mockResolvedValue({ status: "ok", data: two });
+  const user = userEvent.setup();
+  render(<PlanView result={result} />);
+
+  expect((await screen.findByTestId("plan-statement-0")).textContent).toBe("SELECT 1");
+  expect(screen.getByTestId("plan-statement-1").textContent).toBe("SELECT 2");
+  expect(screen.getByTestId("plan-statement-0").getAttribute("role")).toBeNull();
+  expect(screen.getAllByRole("treeitem")).toHaveLength(3);
+  screen.getByRole("tree").focus();
+  await user.keyboard("{End}");
+  expect(focused()?.textContent).toContain("Clustered Index Scan");
+  expect(screen.getByTestId("plan-header").textContent).not.toContain("Planning");
 });
 
 it("shows a plan read error and does not mark a paint", async () => {

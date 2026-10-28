@@ -196,19 +196,31 @@ async function writesConfirmed(tab: Tab, asked: WriteConfirmation, mode: RunMode
   const h = asked.holds.count;
   const unit = asked.unit === "Batch" ? (n === 1 ? "batch" : "batches") : n === 1 ? "statement" : "statements";
   const { statements, note } = shownWrites(asked);
+  const sqlServerAnalyze = mode === "ExplainAnalyze" && databaseKindFor(tabTarget(tab), ws().configs) === "SqlServer";
+  const offProduction = sqlServerAnalyze && !asked.onProduction;
   const body = [
-    n > 0 && `This run sends ${n} ${unit} that ${n === 1 ? "writes" : "write"} to ${asked.connection} / ${asked.database}.`,
+    offProduction
+      ? `Explain Analyze executes this batch on ${asked.connection} / ${asked.database}. This app does not roll it back.`
+      : n > 0 && `This run sends ${n} ${unit} that ${n === 1 ? "writes" : "write"} to ${asked.connection} / ${asked.database}.`,
     h > 0 && heldWrites(asked),
     note,
-    mode === "ExplainAnalyze" && "A rollback does not undo sequence values or outside side effects.",
+    mode === "ExplainAnalyze" && !sqlServerAnalyze && "A rollback does not undo sequence values or outside side effects.",
   ];
   const ok = await confirm({
-    title: n > 0 ? `Run ${plural(n, "write")} on Production?` : "Run on Production?",
+    title: offProduction ? "Run this batch?" : n > 0 ? `Run ${plural(n, "write")} on Production?` : "Run on Production?",
     body: body.filter(Boolean).join(" "),
     statements,
-    confirmLabel: n > 0 ? "Run writes" : "Run",
+    confirmLabel: offProduction ? "Run" : n > 0 ? "Run writes" : "Run",
   });
   return ok && ws().tabs[tab.id]?.console === tab.console;
+}
+
+export function explainSupported(kind: DatabaseKind): boolean {
+  switch (kind) {
+    case "Postgres":
+    case "SqlServer":
+      return true;
+  }
 }
 
 async function runTab(tabId: TabId, target?: PageTarget, script?: RunTarget, mode: RunMode = "Run"): Promise<void> {
@@ -257,7 +269,7 @@ async function runTab(tabId: TabId, target?: PageTarget, script?: RunTarget, mod
 export function explainActive(mode: "Explain" | "ExplainAnalyze"): void {
   const id = ws().active;
   const tab = id ? ws().tabs[id] : undefined;
-  if (!id || !tab || isBrowsing(tab) || databaseKindFor(tabTarget(tab), ws().configs) !== "Postgres") return;
+  if (!id || !tab || isBrowsing(tab) || !explainSupported(databaseKindFor(tabTarget(tab), ws().configs))) return;
   void runTab(id, undefined, undefined, mode);
 }
 

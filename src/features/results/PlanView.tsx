@@ -1,5 +1,5 @@
 import { ChevronRightIcon } from "lucide-react";
-import { useEffect, useRef, useState, type KeyboardEvent } from "react";
+import { Fragment, useEffect, useRef, useState, type KeyboardEvent } from "react";
 import { commands, type Plan, type PlanBuffers, type PlanNode, type ResultRef } from "../../ipc/bindings";
 import type { RowResult } from "../../state/status";
 import { treeKey, type TreeItem } from "../sidebar/treeKeys";
@@ -146,45 +146,52 @@ export function PlanView({ result }: { result: RowResult }) {
             const expanded = expandable && !active.collapsed.has(row.id);
             const root = plan.statements[row.statement]?.root;
             const ratio = root?.totalTimeMs != null && root.totalTimeMs > 0 && row.node.selfTimeMs != null ? row.node.selfTimeMs / root.totalTimeMs : null;
+            const statementText = row.id === String(row.statement) ? (plan.statements[row.statement]?.statementText ?? "") : "";
             return (
-              <div
-                key={row.id}
-                id={`plan-node-${index}`}
-                role="treeitem"
-                aria-level={row.level}
-                aria-expanded={expandable ? expanded : undefined}
-                data-testid={`plan-node-${index}`}
-                data-focused={index === at ? "true" : undefined}
-                style={{ paddingLeft: 8 + (row.level - 1) * INDENT }}
-                onClick={() => {
-                  setTree({ key: refKey, collapsed: active.collapsed, focusId: row.id });
-                  treeRef.current?.focus();
-                }}
-                className={cx("flex h-7 cursor-default items-center gap-2 pr-3 text-ui-13", index === at ? "bg-selected" : "hover:bg-hover")}
-              >
-                <span className="grid w-3.5 shrink-0 place-items-center text-muted">
-                  {expandable && <ChevronRightIcon size={14} className={cx("transition-transform duration-100", expanded && "rotate-90")} />}
-                </span>
-                <span className="truncate text-fg">{row.node.operation}</span>
-                {row.node.detail && <span className="min-w-0 truncate text-muted">{row.node.detail}</span>}
-                <span className="shrink-0 tabular-nums text-muted">
-                  {row.node.totalCost != null && <span>cost {countText(row.node.totalCost)}</span>}
-                  {row.node.planRows != null && <span> est {countText(row.node.planRows)}</span>}
-                  {row.node.actualRows != null && <span> actual {countText(row.node.actualRows)}</span>}
-                  {row.node.totalTimeMs != null && <span> {msText(row.node.totalTimeMs)}</span>}
-                </span>
-                {row.node.diverges && (
-                  <span data-testid="plan-diverges" className="shrink-0 font-medium text-amber">
-                    10×
-                  </span>
+              <Fragment key={row.id}>
+                {statementText !== "" && (
+                  <p data-testid={`plan-statement-${row.statement}`} className="truncate px-3 pt-1.5 font-mono text-ui-12.5 text-fg">
+                    {statementText}
+                  </p>
                 )}
-                {ratio != null && (
-                  <span data-testid="plan-self-bar" className="relative h-1.5 w-16 shrink-0 overflow-hidden rounded-full bg-control">
-                    <span className="absolute inset-y-0 left-0 bg-run" style={{ width: `${Math.min(100, ratio * 100)}%` }} />
+                <div
+                  id={`plan-node-${index}`}
+                  role="treeitem"
+                  aria-level={row.level}
+                  aria-expanded={expandable ? expanded : undefined}
+                  data-testid={`plan-node-${index}`}
+                  data-focused={index === at ? "true" : undefined}
+                  style={{ paddingLeft: 8 + (row.level - 1) * INDENT }}
+                  onClick={() => {
+                    setTree({ key: refKey, collapsed: active.collapsed, focusId: row.id });
+                    treeRef.current?.focus();
+                  }}
+                  className={cx("flex h-7 cursor-default items-center gap-2 pr-3 text-ui-13", index === at ? "bg-selected" : "hover:bg-hover")}
+                >
+                  <span className="grid w-3.5 shrink-0 place-items-center text-muted">
+                    {expandable && <ChevronRightIcon size={14} className={cx("transition-transform duration-100", expanded && "rotate-90")} />}
                   </span>
-                )}
-                {row.node.selfTimeMs != null && <span className="ml-auto shrink-0 tabular-nums text-muted">{msText(row.node.selfTimeMs)}</span>}
-              </div>
+                  <span className="truncate text-fg">{row.node.operation}</span>
+                  {row.node.detail && <span className="min-w-0 truncate text-muted">{row.node.detail}</span>}
+                  <span className="shrink-0 tabular-nums text-muted">
+                    {row.node.totalCost != null && <span>cost {countText(row.node.totalCost)}</span>}
+                    {row.node.planRows != null && <span> est {countText(row.node.planRows)}</span>}
+                    {row.node.actualRows != null && <span> actual {countText(row.node.actualRows)}</span>}
+                    {row.node.totalTimeMs != null && <span> {msText(row.node.totalTimeMs)}</span>}
+                  </span>
+                  {row.node.diverges && (
+                    <span data-testid="plan-diverges" className="shrink-0 font-medium text-amber">
+                      10×
+                    </span>
+                  )}
+                  {ratio != null && (
+                    <span data-testid="plan-self-bar" className="relative h-1.5 w-16 shrink-0 overflow-hidden rounded-full bg-control">
+                      <span className="absolute inset-y-0 left-0 bg-run" style={{ width: `${Math.min(100, ratio * 100)}%` }} />
+                    </span>
+                  )}
+                  {row.node.selfTimeMs != null && <span className="ml-auto shrink-0 tabular-nums text-muted">{msText(row.node.selfTimeMs)}</span>}
+                </div>
+              </Fragment>
             );
           })}
         </div>

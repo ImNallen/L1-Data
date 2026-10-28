@@ -26,6 +26,7 @@ fn statement(mut obj: Map<String, Value>) -> Result<StatementPlan, String> {
     Ok(StatementPlan {
         planning_time_ms,
         execution_time_ms,
+        statement_text: String::new(),
         root,
         properties,
     })
@@ -104,14 +105,14 @@ fn detail(obj: &Map<String, Value>) -> String {
     text
 }
 
-fn self_time(inclusive: Option<f64>, children: &[PlanNode]) -> Option<f64> {
+pub(crate) fn self_time(inclusive: Option<f64>, children: &[PlanNode]) -> Option<f64> {
     let inclusive = inclusive?;
     let spent: f64 = children.iter().filter_map(|child| child.total_time_ms).sum();
     // Timing noise can put the children above the parent.
     Some((inclusive - spent).max(0.0))
 }
 
-fn diverges(plan_rows: f64, actual_rows: Option<f64>) -> bool {
+pub(crate) fn diverges(plan_rows: f64, actual_rows: Option<f64>) -> bool {
     let Some(actual) = actual_rows else {
         return false;
     };
@@ -311,6 +312,7 @@ mod tests {
         assert_eq!(plan.statements.len(), 4);
 
         let timed = &plan.statements[0];
+        assert_eq!(timed.statement_text, "");
         assert_eq!(timed.planning_time_ms, Some(0.5));
         assert_eq!(timed.execution_time_ms, Some(1.5));
         assert_eq!(
