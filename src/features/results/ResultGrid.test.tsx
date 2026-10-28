@@ -2,9 +2,20 @@
 import { clearMocks, mockIPC } from "@tauri-apps/api/mocks";
 import { cleanup, render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
+import { useState } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { afterEach, expect, it, vi } from "vitest";
-import type { ColumnMeta, DatabaseKind, RelationDetail, ResultMeta, RowPage, TableScript, TypeCategory } from "../../ipc/bindings";
+import {
+  commands,
+  type CellAggregate,
+  type ColumnMeta,
+  type DatabaseKind,
+  type RelationDetail,
+  type ResultMeta,
+  type RowPage,
+  type TableScript,
+  type TypeCategory,
+} from "../../ipc/bindings";
 import { buildCatalogView, useCatalog } from "../../state/catalog";
 import { dbKey } from "../../state/dbKey";
 import { useRelationDetail } from "../../state/relationDetail";
@@ -15,6 +26,7 @@ import { Overlays } from "../../shell/Overlays";
 import { shopCatalog } from "../../testing/shopCatalog";
 import { dropEditor } from "../editor/editorStates";
 import { gridEditing, gridKeyColumns, HeaderIcon, nextFocus, primaryKeyColumns, ResultGrid, selectRows } from "./ResultGrid";
+import { acceptSelectionTotals, type SelectionSlot } from "./selectionTotals";
 
 const iconOf = (category: TypeCategory, primaryKey = false) => {
   const html = renderToStaticMarkup(<HeaderIcon column={{ name: "c", type: { display: "t", category }, source: null }} primaryKey={primaryKey} />);
@@ -230,8 +242,9 @@ function queryResult(rows: (string | null)[][], spec: ResultSpec = {}): ResultMe
       disconnect() {}
     },
   );
-  mockIPC((cmd, args): RowPage | RelationDetail | TableScript | string | null => {
+  mockIPC((cmd, args): RowPage | RelationDetail | TableScript | CellAggregate | string | null => {
     if (cmd === "result_page") return { start: 0, rows, cut: spec.cut ?? [] };
+    if (cmd === "result_aggregate") return { kind: "Counts", count: 0, nonNull: 0 };
     if (cmd === "result_cell") {
       const a = args as { row: number; col: number };
       return spec.cell!(a.row, a.col);
@@ -451,4 +464,145 @@ it("loads its visible rows again after the record view pages them out of the sha
   const cache = rowCacheFor(meta.ref);
   for (let page = 10; page < 80; page++) await cache.ensure({ start: page * PAGE_SIZE, end: page * PAGE_SIZE + 1 }, meta.rowCount);
   await vi.waitFor(() => expect(screen.getByTestId("grid-cell-0-0").textContent).toBe("1"));
+});
+
+function SelectionHarness({ meta, editing }: { meta: ResultMeta; editing: { pkColumns: string[]; writableColumns: ReadonlySet<string> } | null }) {
+  const shownKey = `${meta.ref.tabId}:${meta.ref.runId}:${meta.ref.index}`;
+  const [slot, setSlot] = useState<SelectionSlot | null>(null);
+  const text = slot?.key === shownKey ? slot.text : null;
+  return (
+    <>
+      {text !== null && (
+        <span data-testid="result-selection" title={text}>
+          {text}
+        </span>
+      )}
+      <ResultGrid
+        meta={meta}
+        done
+        query={null}
+        editing={editing}
+        onSelectionTotals={(next) => setSlot((current) => acceptSelectionTotals(current, next, shownKey))}
+      />
+    </>
+  );
+}
+
+function numericTotal(sum: string, avg = "0.5", min = "0.25", max = "0.75"): { status: "ok"; data: CellAggregate } {
+  return { status: "ok", data: { kind: "Numeric", count: 2, nonNull: 2, sum, avg, min, max } };
+}
+
+it("leaves the selection total hidden for one cell and does not ask for a total", async () => {
+  const user = userEvent.setup();
+  const aggregate = vi.spyOn(commands, "resultAggregate").mockResolvedValue(numericTotal("999"));
+  render(<SelectionHarness meta={queryResult([["1", "10"]])} editing={null} />);
+  await user.click(await screen.findByTestId("grid-cell-0-0"));
+  await vi.waitFor(() => expect(screen.getByTestId("grid-cell-0-0").getAttribute("aria-selected")).toBe("true"));
+  expect(screen.queryByTestId("result-selection")).toBeNull();
+  expect(aggregate).not.toHaveBeenCalled();
+});
+
+it("shows the mocked sum for two cells instead of adding the painted text", async () => {
+  const user = userEvent.setup();
+  vi.spyOn(commands, "resultAggregate").mockResolvedValue(numericTotal("1000", "2000.50", "3000", "4000"));
+  render(
+    <SelectionHarness
+      meta={queryResult(
+        [
+          ["1", "10"],
+          ["2", "20"],
+        ],
+        { columns: [{ name: "total", attnum: 4 }] },
+      )}
+      editing={null}
+    />,
+  );
+  await user.click(await screen.findByTestId("grid-cell-0-0"));
+  await user.keyboard("{Shift>}{ArrowDown}{/Shift}");
+  const span = await screen.findByTestId("result-selection");
+  expect(span.textContent).toBe("2 cells · 2 non-null · Sum 1000 · Avg 2000.50 · Min 3000 · Max 4000");
+});
+
+it("counts a selection across an integer column and a text column without a sum", async () => {
+  const user = userEvent.setup();
+  vi.spyOn(commands, "resultAggregate").mockResolvedValue({ status: "ok", data: { kind: "Counts", count: 4, nonNull: 4 } });
+  render(
+    <SelectionHarness
+      meta={queryResult(
+        [
+          ["1", "paid"],
+          ["2", "open"],
+        ],
+        {
+          columns: [
+            { name: "id", attnum: 1 },
+            { name: "status", attnum: 3 },
+          ],
+        },
+      )}
+      editing={null}
+    />,
+  );
+  await user.click(await screen.findByTestId("result-grid"));
+  await user.keyboard("{Meta>}a{/Meta}");
+  const span = await screen.findByTestId("result-selection");
+  expect(span.textContent).toContain("4 cells");
+  expect(span.textContent).toContain("4 non-null");
+  expect(span.textContent).not.toContain("Sum");
+});
+
+it("keeps a staged value on screen and says the stored sum excludes it", async () => {
+  const user = userEvent.setup();
+  vi.spyOn(commands, "resultAggregate").mockResolvedValue(numericTotal("50.00", "25.00", "10", "20"));
+  const meta = queryResult([
+    ["1", "10"],
+    ["2", "20"],
+  ]);
+  render(<SelectionHarness meta={meta} editing={EDITING} />);
+  await screen.findByText("10");
+  useTableEdits.getState().edit("q1", (e) => setCell(e, [{ column: "id", value: "1" }], "customer_id", "77", "10"));
+  await user.click(await screen.findByText("77"));
+  await user.keyboard("{Shift>}{ArrowDown}{/Shift}");
+  const span = await screen.findByTestId("result-selection");
+  expect(span.textContent).toContain("excludes pending edits");
+  expect(span.textContent).toContain("Sum 50.00");
+  expect(screen.getByTestId("grid-cell-0-1").textContent).toContain("77");
+});
+
+it("names pending edits and does not total a selection of only new rows", async () => {
+  const user = userEvent.setup();
+  const aggregate = vi.spyOn(commands, "resultAggregate").mockResolvedValue(numericTotal("999"));
+  const meta = queryResult([]);
+  useTableEdits.getState().addRow("q1");
+  useTableEdits.getState().addRow("q1");
+  render(<SelectionHarness meta={meta} editing={EDITING} />);
+  await user.click(await screen.findByTestId("grid-cell-0-0"));
+  await user.keyboard("{Shift>}{ArrowDown}{/Shift}");
+  expect((await screen.findByTestId("result-selection")).textContent).toBe("excludes pending edits");
+  expect(aggregate).not.toHaveBeenCalled();
+});
+
+it("shows the later rectangle's sum when that reply arrives first", async () => {
+  const user = userEvent.setup();
+  const resolvers: ((value: { status: "ok"; data: CellAggregate }) => void)[] = [];
+  vi.spyOn(commands, "resultAggregate").mockImplementation(
+    () =>
+      new Promise((resolve) => {
+        resolvers.push(resolve);
+      }),
+  );
+  render(<SelectionHarness meta={queryResult([["4"], ["5"], ["6"]], { columns: [{ name: "total", attnum: 4 }] })} editing={null} />);
+  await user.click(await screen.findByTestId("grid-cell-0-0"));
+  await user.keyboard("{Shift>}{ArrowDown}{/Shift}");
+  await vi.waitFor(() => expect(resolvers).toHaveLength(1));
+  await user.click(screen.getByTestId("grid-cell-1-0"));
+  await user.keyboard("{Shift>}{ArrowDown}{/Shift}");
+  await vi.waitFor(() => expect(resolvers).toHaveLength(2));
+  expect(screen.getByTestId("grid-cell-2-0").getAttribute("aria-selected")).toBe("true");
+  expect(screen.getByTestId("grid-cell-0-0").getAttribute("aria-selected")).toBe("false");
+  resolvers[1]!({ status: "ok", data: { kind: "Numeric", count: 2, nonNull: 2, sum: "later", avg: "0", min: "0", max: "0" } });
+  await vi.waitFor(() => expect(screen.getByTestId("result-selection").textContent).toContain("Sum later"));
+  resolvers[0]!({ status: "ok", data: { kind: "Numeric", count: 2, nonNull: 2, sum: "earlier", avg: "0", min: "0", max: "0" } });
+  await vi.waitFor(() => expect(screen.getByTestId("result-selection").textContent).toContain("Sum later"));
+  expect(screen.getByTestId("result-selection").textContent).not.toContain("earlier");
 });
