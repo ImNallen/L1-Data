@@ -1023,6 +1023,22 @@ pub struct RowPage {
     pub cut: Vec<(u32, u16)>,
 }
 
+/// Inclusive indexes into the stored rows.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct RowSpan {
+    pub start: u32,
+    pub end: u32,
+}
+
+/// Inclusive indexes into the stored columns.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct ColSpan {
+    pub start: u16,
+    pub end: u16,
+}
+
 /// `count` includes NULL. `non_null` counts every `Some`, including `""`.
 /// `Numeric` is present only when sum, avg, min, and max all exist.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Type)]

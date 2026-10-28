@@ -1,7 +1,11 @@
 use std::sync::{Arc, RwLock};
 use std::time::Instant;
 
-use crate::model::{AllRows, ColumnMeta, ConnectionId, DatabaseKind, DatabaseRef, PlanFormat, QueryError, ResultMeta, ResultRef, RowPage, RunId, RunOutput, TabId, TruncateReason};
+use crate::aggregate::ColumnText;
+use crate::model::{
+    AllRows, ColSpan, ColumnMeta, ConnectionId, DatabaseKind, DatabaseRef, PlanFormat, QueryError, ResultError, ResultMeta, ResultRef, RowPage, RowSpan, RunId, RunOutput, TabId,
+    TruncateReason,
+};
 
 pub const CELL_CHAR_LIMIT: usize = 2_000;
 pub const PAGE_LEN_MAX: u32 = 2_000;
@@ -174,6 +178,27 @@ impl ResultSet {
         Some(a.cell(row as usize, col as usize).map(str::to_owned))
     }
 
+    /// Full arena strings for an inclusive rectangle. The read lock ends with this call, before the caller parses.
+    pub(crate) fn copy_rect(&self, rows: RowSpan, cols: ColSpan) -> Result<Vec<ColumnText>, ResultError> {
+        if rows.start > rows.end || cols.start > cols.end {
+            return Err(ResultError::OutOfRange);
+        }
+        let a = self.data.read().unwrap();
+        if rows.end >= a.row_count() || cols.end as usize >= a.ncols {
+            return Err(ResultError::OutOfRange);
+        }
+        let mut copied = Vec::with_capacity((cols.end - cols.start + 1) as usize);
+        for col in cols.start..=cols.end {
+            let meta = &self.columns[col as usize];
+            let mut cells = Vec::with_capacity((rows.end - rows.start + 1) as usize);
+            for row in rows.start..=rows.end {
+                cells.push(a.cell(row as usize, col as usize).map(str::to_owned));
+            }
+            copied.push(ColumnText { display: meta.r#type.display.clone(), category: meta.r#type.category, cells });
+        }
+        Ok(copied)
+    }
+
     pub fn each_row<E>(&self, mut f: impl FnMut(&[Option<&str>]) -> Result<(), E>) -> Result<(u64, bool), E> {
         let a = self.data.read().unwrap();
         let rows = a.row_count();
@@ -280,6 +305,25 @@ mod tests {
         assert_eq!(page.cut, vec![(0, 0)]);
         assert_eq!(page.rows[0][0].as_ref().unwrap().chars().count(), CELL_CHAR_LIMIT);
         assert_eq!(rs.cell(0, 0), Some(Some(long)));
+    }
+
+    #[test]
+    fn copy_rect_keeps_full_strings_and_rejects_a_span_outside_the_grid() {
+        let mut rs = set(2);
+        rs.columns[0].r#type = SqlTypeRef { display: "numeric".into(), category: TypeCategory::Numeric };
+        let long = "é".repeat(CELL_CHAR_LIMIT + 5);
+        rs.push_row([Some("1.50"), None].into_iter(), &NO_CAPS);
+        rs.push_row([Some(""), Some(long.as_str())].into_iter(), &NO_CAPS);
+        let copied = rs.copy_rect(RowSpan { start: 0, end: 1 }, ColSpan { start: 0, end: 1 }).unwrap();
+        assert_eq!(copied[0].display, "numeric");
+        assert_eq!(copied[0].category, TypeCategory::Numeric);
+        assert_eq!(copied[0].cells, vec![Some("1.50".into()), Some("".into())]);
+        assert_eq!(copied[1].cells[0], None);
+        assert_eq!(copied[1].cells[1].as_deref(), Some(long.as_str()));
+        assert!(matches!(rs.copy_rect(RowSpan { start: 1, end: 0 }, ColSpan { start: 0, end: 0 }), Err(ResultError::OutOfRange)));
+        assert!(matches!(rs.copy_rect(RowSpan { start: 0, end: 2 }, ColSpan { start: 0, end: 0 }), Err(ResultError::OutOfRange)));
+        assert!(matches!(rs.copy_rect(RowSpan { start: 0, end: 1 }, ColSpan { start: 1, end: 0 }), Err(ResultError::OutOfRange)));
+        assert!(matches!(rs.copy_rect(RowSpan { start: 0, end: 1 }, ColSpan { start: 0, end: 2 }), Err(ResultError::OutOfRange)));
     }
 
     #[test]

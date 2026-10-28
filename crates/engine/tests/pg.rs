@@ -784,6 +784,36 @@ async fn big_result_truncates_at_max_rows_and_keeps_counting() {
 }
 
 #[tokio::test]
+async fn aggregate_orders_total_matches_sql_sum_only_when_every_row_is_stored() {
+    let mut h = Harness::start().await;
+    let tab = h.sql_tab(TxnMode::AutoCommit).await;
+    h.engine.set_settings(Settings { max_rows: 241_000, ..h.engine.settings() });
+    let state = h.run_ok(tab, "select total from public.orders").await;
+    let meta = Harness::result(&state, 0);
+    assert_eq!(meta.truncated, None, "the cap has to hold every orders row");
+    assert!(meta.row_count >= 241_000, "stored {}", meta.row_count);
+    let full = h
+        .engine
+        .result_aggregate(meta.r#ref, RowSpan { start: 0, end: meta.row_count - 1 }, ColSpan { start: 0, end: 0 })
+        .await
+        .unwrap();
+    let CellAggregate::Numeric { sum, .. } = full else { panic!("expected a numeric total, got {full:?}") };
+    let sql_sum = h.scalar(tab, "select sum(total) from public.orders").await;
+    assert_eq!(sum, sql_sum);
+    h.engine.set_settings(Settings { max_rows: 200_000, ..h.engine.settings() });
+    let state = h.run_ok(tab, "select total from public.orders").await;
+    let meta = Harness::result(&state, 0);
+    assert_eq!(meta.row_count, 200_000);
+    let capped = h
+        .engine
+        .result_aggregate(meta.r#ref, RowSpan { start: 0, end: meta.row_count - 1 }, ColSpan { start: 0, end: 0 })
+        .await
+        .unwrap();
+    let CellAggregate::Numeric { sum: capped_sum, .. } = capped else { panic!("expected a numeric total, got {capped:?}") };
+    assert_ne!(capped_sum, sql_sum);
+}
+
+#[tokio::test]
 async fn ddl_refreshes_the_catalog() {
     let mut h = Harness::start().await;
     let tab = h.sql_tab(TxnMode::AutoCommit).await;

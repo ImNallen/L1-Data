@@ -34,6 +34,7 @@ export const commands = {
 	consoleClose: (tabId: TabId, force: boolean) => typedError<null, DisconnectError>(__TAURI_INVOKE("console_close", { tabId, force })),
 	resultPage: (resultRef: ResultRef, start: number, len: number) => typedError<RowPage, ResultError>(__TAURI_INVOKE("result_page", { resultRef, start, len })),
 	resultCell: (resultRef: ResultRef, row: number, col: number) => typedError<string | null, ResultError>(__TAURI_INVOKE("result_cell", { resultRef, row, col })),
+	resultAggregate: (resultRef: ResultRef, rows: RowSpan, cols: ColSpan) => typedError<CellAggregate, ResultError>(__TAURI_INVOKE("result_aggregate", { resultRef, rows, cols })),
 	resultPlan: (resultRef: ResultRef) => typedError<Plan, ResultError>(__TAURI_INVOKE("result_plan", { resultRef })),
 	resultExport: (resultRef: ResultRef, format: ExportFormat, scope: ExportScope, path: string) => typedError<ExportSummary, ExportError>(__TAURI_INVOKE("result_export", { resultRef, format, scope, path })),
 	fileOpen: (path: string) => typedError<FileOpened, FileReadError>(__TAURI_INVOKE("file_open", { path })),
@@ -209,6 +210,12 @@ export type CatalogStatus =
  */
 { kind: "Failed"; message: string; version: number | null };
 
+/**
+ *  `count` includes NULL. `non_null` counts every `Some`, including `""`.
+ *  `Numeric` is present only when sum, avg, min, and max all exist.
+ */
+export type CellAggregate = { kind: "Counts"; count: number; nonNull: number } | { kind: "Numeric"; count: number; nonNull: number; sum: string; avg: string; min: string; max: string };
+
 export type CellWrite = {
 	column: string,
 	/**  Postgres text input for the column's type; `None` is NULL. */
@@ -269,6 +276,12 @@ export type ChatView = {
 	state: ChatState,
 	/**  Every entry in seq order, the running turn's as of now. */
 	entries: EntrySnapshot[],
+};
+
+/**  Inclusive indexes into the stored columns. */
+export type ColSpan = {
+	start: number,
+	end: number,
 };
 
 export type ColorScheme = "System" | "Light" | "Dark";
@@ -1145,6 +1158,12 @@ export type RowPage = {
 	start: number,
 	rows: ((string | null)[])[],
 	cut: ([number, number])[],
+};
+
+/**  Inclusive indexes into the stored rows. */
+export type RowSpan = {
+	start: number,
+	end: number,
 };
 
 export type RowUpdate = {
