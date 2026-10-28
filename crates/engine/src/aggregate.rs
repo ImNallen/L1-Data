@@ -202,7 +202,11 @@ fn summarize(values: &[Parsed], non_null: u64) -> Option<(String, String, String
         ("-Infinity".to_owned(), "-Infinity".to_owned())
     } else {
         let sum = finite_sum.as_ref()?;
-        let avg = div_half_even(sum, non_null, sum.scale.checked_add(6)?)?;
+        // Exponent text parses with a negative scale. Adding six there would
+        // round through integer digits, so the average always keeps six
+        // fractional digits.
+        let avg_scale = sum.scale.max(0).checked_add(6)?;
+        let avg = div_half_even(sum, non_null, avg_scale)?;
         (print_exact(sum), print_exact(&avg))
     };
     let min = if neg_inf {
@@ -592,6 +596,29 @@ mod tests {
     fn negative_scale_and_exponents_print_without_an_exponent() {
         assert_eq!(sum_of(aggregate(&[nums(&["12e2", "3e2"])])), "1500");
         assert_eq!(sum_of(aggregate(&[nums(&["1.5e+2", "1.5e-1"])])), "150.15");
+    }
+
+    #[test]
+    fn negative_scale_average_keeps_six_fractional_digits() {
+        let exponent = nums(&["1e+20", "1e+20", "2e+20"]);
+        let plain = nums(&[
+            "100000000000000000000",
+            "100000000000000000000",
+            "200000000000000000000",
+        ]);
+        assert_eq!(sum_of(aggregate(&[exponent])), "400000000000000000000");
+        assert_eq!(
+            avg_of(aggregate(&[nums(&["1e+20", "1e+20", "2e+20"])])),
+            "133333333333333333333.333333"
+        );
+        assert_eq!(
+            avg_of(aggregate(&[plain])),
+            "133333333333333333333.333333"
+        );
+        assert_eq!(
+            avg_of(aggregate(&[nums(&["1e+20"])])),
+            "100000000000000000000.000000"
+        );
     }
 
     #[test]
