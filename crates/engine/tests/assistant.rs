@@ -1056,7 +1056,7 @@ mod pg {
     async fn scalar(h: &Harness, config: &ConnectionConfig, sql: &str) -> String {
         let tab_id = TabId(uuid::Uuid::new_v4());
         h.engine.console_configure(tab_id, ConsoleConfig { connection_id: config.id, database: config.database.clone(), schema: None, mode: TxnMode::AutoCommit }).await.unwrap();
-        let accepted = h.engine.console_run(tab_id, RunRequest::Script { text: sql.into(), target: RunTarget::All }, None).await.unwrap();
+        let accepted = h.engine.console_run(tab_id, RunRequest::Script { text: sql.into(), target: RunTarget::All, mode: RunMode::Run }, None).await.unwrap();
         let started = Instant::now();
         loop {
             let state = h.engine.boot().consoles.into_iter().find(|c| c.tab_id == tab_id).unwrap();
@@ -1081,7 +1081,7 @@ mod pg {
         let before = scalar(&h, &config, "select count(*) from public.orders").await;
         let manual = TabId(uuid::Uuid::new_v4());
         h.engine.console_configure(manual, ConsoleConfig { connection_id: config.id, database: config.database.clone(), schema: None, mode: TxnMode::Manual }).await.unwrap();
-        h.engine.console_run(manual, RunRequest::Script { text: "insert into public.orders (number, customer_id, total) values ('ASSIST-TXN', 1, 1)".into(), target: RunTarget::All }, None).await.unwrap();
+        h.engine.console_run(manual, RunRequest::Script { text: "insert into public.orders (number, customer_id, total) values ('ASSIST-TXN', 1, 1)".into(), target: RunTarget::All, mode: RunMode::Run }, None).await.unwrap();
         let started = Instant::now();
         loop {
             let state = h.engine.boot().consoles.into_iter().find(|c| c.tab_id == manual).unwrap();

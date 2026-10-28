@@ -34,6 +34,7 @@ import {
   setTabTarget,
   runActive,
   runOrChoose,
+  explainActive,
   openSqlTab,
   isBrowsing,
   submitEdits,
@@ -897,7 +898,8 @@ describe("a run the engine asks about", () => {
     });
     expect(question()?.choices).toEqual([{ id: "btn", label: "Run writes", variant: "danger" }]);
     expect(question()?.statements).toEqual(["update orders set n = 1", "delete from orders"]);
-    const request = { kind: "script", text: SCRIPT, target: { kind: "all" } };
+    expect(question()?.body).not.toContain("A rollback does not undo sequence values or outside side effects.");
+    const request = { kind: "script", text: SCRIPT, target: { kind: "all" }, mode: "Run" };
     expect(runs).toEqual([{ tabId: id, request, confirmed: null }]);
     useWorkspace.getState().answer("btn");
     await vi.waitFor(() => expect(runs).toHaveLength(2));
@@ -975,6 +977,52 @@ describe("a run the engine asks about", () => {
     useWorkspace.getState().answer("btn");
     await vi.waitFor(() => expect(runs).toHaveLength(3));
     expect(runs.map((r) => r.confirmed)).toEqual([null, "d1", "d2"]);
+  });
+
+  it("adds the rollback sentence when Explain Analyze asks, including when the run itself sends nothing", async () => {
+    connection();
+    const id = openSqlTab({ db: { connectionId: "prod", database: "shop" }, text: "update public.orders set n = 2" });
+    const runs = queueRunReplies(asked("d1", { sends: { count: 0, statements: [] }, holds: { count: 1, statements: ["update public.orders set n = 1"] } }));
+    explainActive("ExplainAnalyze");
+    await vi.waitFor(() => expect(question()).not.toBeNull());
+    expect(question()?.title).toBe("Run on Production?");
+    expect(question()?.body).toContain("A rollback does not undo sequence values or outside side effects.");
+    expect(runs[0]).toMatchObject({
+      tabId: id,
+      request: { kind: "script", text: "update public.orders set n = 2", mode: "ExplainAnalyze" },
+      confirmed: null,
+    });
+  });
+
+  it("sends nothing for Explain on SQL Server", () => {
+    connection({ databaseKind: "SqlServer" });
+    openSqlTab({ db: { connectionId: "prod", database: "shop" }, text: "select 1" });
+    const runs = queueRunReplies(null);
+    explainActive("Explain");
+    expect(runs).toEqual([]);
+  });
+
+  it("sends nothing while the tab is browsing a table", async () => {
+    const runs: unknown[] = [];
+    mockIPC((cmd, args) => {
+      if (cmd === "console_run") runs.push(args);
+      if (cmd === "table_script") return ordersScript;
+      return null;
+    });
+    connection();
+    const id = crypto.randomUUID();
+    seedEditor(id, ordersScript.text);
+    useWorkspace.getState().addTab({
+      id,
+      title: "orders",
+      console: { db: orders.db, mode: "AutoCommit" },
+      table: { schema: "public", table: "orders", page: 0, query: { orderBy: "", filters: [], where: "" } },
+      file: null,
+    });
+    await browseTemplate(orders.db, "public", "orders");
+    expect(isBrowsing(useWorkspace.getState().tabs[id]!)).toBe(true);
+    explainActive("Explain");
+    expect(runs).toEqual([]);
   });
 
   it("runs once without asking when the engine accepts", async () => {

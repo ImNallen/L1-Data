@@ -1,8 +1,8 @@
 import * as Menu from "@radix-ui/react-dropdown-menu";
 import { ChevronDownIcon, ListIndentIncreaseIcon, PlayIcon, SquareIcon } from "lucide-react";
 import { ConnectionColorDot, EnvironmentIcon } from "../features/connections/connectionColors";
-import { cancelActive, endTransaction, formatActive, runOrChoose, setTabMode, setTabTarget } from "../features/editor/runActions";
-import type { ConnectionState, DatabaseRef, TransactionLoss, TxnMode } from "../ipc/bindings";
+import { cancelActive, endTransaction, explainActive, formatActive, isBrowsing, runOrChoose, setTabMode, setTabTarget } from "../features/editor/runActions";
+import type { ConnectionState, DatabaseRef, Environment, TransactionLoss, TxnMode } from "../ipc/bindings";
 import { homeDb } from "../state/dbKey";
 import { instanceOf, useLive } from "../state/live";
 import { canCancel, connectionTone, hasUncommittedWork, isBusy } from "../state/status";
@@ -55,6 +55,48 @@ function DatabaseMenu({ tab, db }: { tab: Tab; db: DatabaseRef }) {
         ))}
       </MenuContent>
     </Menu.Root>
+  );
+}
+
+function RunButton({ busy, environment, explainable }: { busy: boolean; environment: Environment | null; explainable: boolean }) {
+  return (
+    <span className={cx("inline-flex", environment === "Production" && "rounded-lg ring-2 ring-danger ring-offset-2 ring-offset-bg")}>
+      <Button
+        data-testid="run-btn"
+        data-environment={environment ?? undefined}
+        disabled={busy}
+        variant="primary"
+        title={`Run the selection or the marked statement (⌘↵). On a blank line, or with ⌘⇧↵, choose which statement to run.${environment === "Production" ? " This tab targets Production, so a run that writes asks first." : ""}`}
+        className={cx("w-[104px] justify-center pr-2 pl-2.5 font-medium", explainable && "rounded-r-none")}
+        onClick={() => void runOrChoose()}
+      >
+        <PlayIcon fill="currentColor" size={13} className="text-run-icon" />
+        Run
+        <Kbd className="bg-run-fg/15 text-run-fg/85">⌘↵</Kbd>
+      </Button>
+      {explainable && (
+        <Menu.Root modal={false}>
+          <Menu.Trigger
+            data-testid="explain-menu"
+            disabled={busy}
+            aria-label="Explain"
+            className="inline-flex h-8 items-center rounded-r-lg border-l border-run-fg/25 bg-run px-1.5 text-run-fg outline-none hover:bg-run-hover disabled:pointer-events-none disabled:opacity-40"
+          >
+            <ChevronDownIcon size={14} />
+          </Menu.Trigger>
+          <MenuContent align="end">
+            <MenuItem testId="explain-item" onSelect={() => explainActive("Explain")}>
+              <span className="flex-1">Explain</span>
+              <Kbd className="bg-control text-muted">⌘⌥↵</Kbd>
+            </MenuItem>
+            <MenuItem testId="explain-analyze-item" onSelect={() => explainActive("ExplainAnalyze")}>
+              <span className="flex-1">Explain Analyze</span>
+              <Kbd className="bg-control text-muted">⌘⌥⇧↵</Kbd>
+            </MenuItem>
+          </MenuContent>
+        </Menu.Root>
+      )}
+    </span>
   );
 }
 
@@ -212,22 +254,7 @@ export function TopBar({ hosted }: { hosted: HostedWindow | null }) {
             <Kbd className="bg-control text-muted">Esc</Kbd>
           </Button>
         ) : (
-          <Button
-            data-testid="run-btn"
-            data-environment={environment ?? undefined}
-            disabled={busy}
-            variant="primary"
-            title={`Run the selection or the marked statement (⌘↵). On a blank line, or with ⌘⇧↵, choose which statement to run.${environment === "Production" ? " This tab targets Production, so a run that writes asks first." : ""}`}
-            className={cx(
-              "w-[104px] justify-center pr-2 pl-2.5 font-medium",
-              environment === "Production" && "ring-2 ring-danger ring-offset-2 ring-offset-bg",
-            )}
-            onClick={() => void runOrChoose()}
-          >
-            <PlayIcon fill="currentColor" size={13} className="text-run-icon" />
-            Run
-            <Kbd className="bg-run-fg/15 text-run-fg/85">⌘↵</Kbd>
-          </Button>
+          <RunButton busy={busy} environment={environment} explainable={config?.databaseKind === "Postgres" && !isBrowsing(tab)} />
         ))}
 
       {layout.rightPanel === null && (

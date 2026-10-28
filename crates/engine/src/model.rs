@@ -699,11 +699,17 @@ pub enum StmtStatus {
     Skipped,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Type)]
+pub enum PlanFormat {
+    Json,
+}
+
 #[derive(Debug, Clone, Serialize, Type)]
 #[serde(tag = "kind", rename_all_fields = "camelCase")]
 pub enum RunOutput {
     Rows { result: ResultMeta, state: RowsState },
     Command { tag: String, affected_rows: Option<u64>, elapsed_ms: u32 },
+    Plan { result: ResultMeta, format: PlanFormat },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Type)]
@@ -729,10 +735,17 @@ pub struct TableScript {
     pub accepted_texts: Vec<String>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Type)]
+pub enum RunMode {
+    Run,
+    Explain,
+    ExplainAnalyze,
+}
+
 #[derive(Debug, Clone, Deserialize, Type)]
 #[serde(tag = "kind", rename_all = "camelCase", rename_all_fields = "camelCase")]
 pub enum RunRequest {
-    Script { text: String, target: RunTarget },
+    Script { text: String, target: RunTarget, mode: RunMode },
     TablePage {
         schema: String,
         table: String,
@@ -1936,11 +1949,67 @@ pub enum TxnError {
     ConfirmWrites { confirmation: WriteConfirmation },
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Type)]
+#[derive(Debug, Clone, Serialize, Type)]
 #[serde(tag = "kind")]
 pub enum ResultError {
     Gone,
     OutOfRange,
+    NotAPlan { what: String },
+}
+
+#[derive(Debug, Clone, Serialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct Plan {
+    pub statements: Vec<StatementPlan>,
+}
+
+#[derive(Debug, Clone, Serialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct StatementPlan {
+    pub planning_time_ms: Option<f64>,
+    pub execution_time_ms: Option<f64>,
+    pub root: PlanNode,
+    pub properties: Vec<PlanProperty>,
+}
+
+#[derive(Debug, Clone, Serialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct PlanNode {
+    pub operation: String,
+    pub detail: String,
+    pub startup_cost: f64,
+    pub total_cost: f64,
+    pub plan_rows: f64,
+    pub actual_rows: Option<f64>,
+    pub loops: Option<f64>,
+    pub total_time_ms: Option<f64>,
+    pub self_time_ms: Option<f64>,
+    pub diverges: bool,
+    pub buffers: Option<PlanBuffers>,
+    pub properties: Vec<PlanProperty>,
+    pub children: Vec<PlanNode>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct PlanProperty {
+    pub name: String,
+    pub value: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct PlanBuffers {
+    pub shared_hit: i64,
+    pub shared_read: i64,
+    pub shared_dirtied: i64,
+    pub shared_written: i64,
+    pub local_hit: i64,
+    pub local_read: i64,
+    pub local_dirtied: i64,
+    pub local_written: i64,
+    pub temp_read: i64,
+    pub temp_written: i64,
 }
 
 /// Staged edits to one table, applied together by `table_apply`. Rows to update or delete are found by primary key.

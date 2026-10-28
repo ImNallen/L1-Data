@@ -86,7 +86,7 @@ impl Harness {
     }
 
     async fn sql(&mut self, text: &str) -> Vec<Vec<Option<String>>> {
-        self.run(RunRequest::Script { text: text.into(), target: RunTarget::All }).await
+        self.run(RunRequest::Script { text: text.into(), target: RunTarget::All, mode: RunMode::Run }).await
     }
 
     async fn page(&mut self, table: &str, query: TableQuery) -> Vec<Vec<Option<String>>> {

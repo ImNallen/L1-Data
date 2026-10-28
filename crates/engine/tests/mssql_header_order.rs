@@ -70,7 +70,7 @@ impl Harness {
     }
 
     async fn sql(&mut self, text: &str) -> ConsoleState {
-        let state = self.request(RunRequest::Script { text: text.into(), target: RunTarget::All }).await;
+        let state = self.request(RunRequest::Script { text: text.into(), target: RunTarget::All, mode: RunMode::Run }).await;
         Self::assert_ok(&state);
         state
     }

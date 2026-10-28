@@ -5,6 +5,7 @@ import {
   type ConsoleConfig,
   type DatabaseRef,
   type DatabaseKind,
+  type RunMode,
   type RunRequest,
   type RunTarget,
   type Settings,
@@ -190,7 +191,7 @@ function shownWrites(asked: WriteConfirmation): { statements: string[]; note: st
 }
 
 /** The answer holds only for the target it named, so a target changed meanwhile drops the run. */
-async function writesConfirmed(tab: Tab, asked: WriteConfirmation): Promise<boolean> {
+async function writesConfirmed(tab: Tab, asked: WriteConfirmation, mode: RunMode): Promise<boolean> {
   const n = asked.sends.count;
   const h = asked.holds.count;
   const unit = asked.unit === "Batch" ? (n === 1 ? "batch" : "batches") : n === 1 ? "statement" : "statements";
@@ -199,6 +200,7 @@ async function writesConfirmed(tab: Tab, asked: WriteConfirmation): Promise<bool
     n > 0 && `This run sends ${n} ${unit} that ${n === 1 ? "writes" : "write"} to ${asked.connection} / ${asked.database}.`,
     h > 0 && heldWrites(asked),
     note,
+    mode === "ExplainAnalyze" && "A rollback does not undo sequence values or outside side effects.",
   ];
   const ok = await confirm({
     title: n > 0 ? `Run ${plural(n, "write")} on Production?` : "Run on Production?",
@@ -209,7 +211,7 @@ async function writesConfirmed(tab: Tab, asked: WriteConfirmation): Promise<bool
   return ok && ws().tabs[tab.id]?.console === tab.console;
 }
 
-async function runTab(tabId: TabId, target?: PageTarget, script?: RunTarget): Promise<void> {
+async function runTab(tabId: TabId, target?: PageTarget, script?: RunTarget, mode: RunMode = "Run"): Promise<void> {
   const tab = ws().tabs[tabId];
   if (!tab) return;
   if (target && queuedPages.get(tabId)?.intent !== target.intent) return;
@@ -229,13 +231,13 @@ async function runTab(tabId: TabId, target?: PageTarget, script?: RunTarget): Pr
   } else {
     const state = editorStateOf(tabId);
     text = state.doc.toString();
-    request = { kind: "script", text, target: script ?? selectionTarget(state) };
+    request = { kind: "script", text, target: script ?? selectionTarget(state), mode };
     showDiagnostics(tabId, []);
   }
 
   let res = await commands.consoleRun(tabId, request, null);
   while (res.status === "error" && res.error.kind === "ConfirmWrites") {
-    if (!(await writesConfirmed(tab, res.error.confirmation))) return;
+    if (!(await writesConfirmed(tab, res.error.confirmation, mode))) return;
     res = await commands.consoleRun(tabId, request, res.error.confirmation.digest);
   }
   if (res.status === "error") {
@@ -250,6 +252,13 @@ async function runTab(tabId: TabId, target?: PageTarget, script?: RunTarget): Pr
     flashRanges(tabId, res.data.statements);
     showRunErrors(useLive.getState());
   }
+}
+
+export function explainActive(mode: "Explain" | "ExplainAnalyze"): void {
+  const id = ws().active;
+  const tab = id ? ws().tabs[id] : undefined;
+  if (!id || !tab || isBrowsing(tab) || databaseKindFor(tabTarget(tab), ws().configs) !== "Postgres") return;
+  void runTab(id, undefined, undefined, mode);
 }
 
 /** Runs the selection or the statement at the cursor, or `script` when given. A browsing table tab loads its page. */
@@ -663,6 +672,8 @@ export function installRunBehavior(): void {
       keymap.of([
         { key: "Mod-Enter", run: () => (void runOrChoose(), true) },
         { key: "Mod-Shift-Enter", run: () => (void runOrChoose(true), true) },
+        { key: "Mod-Alt-Enter", run: () => (explainActive("Explain"), true) },
+        { key: "Mod-Alt-Shift-Enter", run: () => (explainActive("ExplainAnalyze"), true) },
         { key: "Mod-Alt-l", run: () => (void formatActive(), true) },
         { key: "Escape", run: () => cancelActive() },
       ]),
