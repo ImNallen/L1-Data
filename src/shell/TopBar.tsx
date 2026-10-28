@@ -1,7 +1,17 @@
 import * as Menu from "@radix-ui/react-dropdown-menu";
 import { ChevronDownIcon, ListIndentIncreaseIcon, PlayIcon, SquareIcon } from "lucide-react";
 import { ConnectionColorDot, EnvironmentIcon } from "../features/connections/connectionColors";
-import { cancelActive, endTransaction, explainActive, formatActive, isBrowsing, runOrChoose, setTabMode, setTabTarget } from "../features/editor/runActions";
+import {
+  cancelActive,
+  endTransaction,
+  explainActive,
+  explainSupported,
+  formatActive,
+  isBrowsing,
+  runOrChoose,
+  setTabMode,
+  setTabTarget,
+} from "../features/editor/runActions";
 import type { ConnectionState, DatabaseRef, Environment, TransactionLoss, TxnMode } from "../ipc/bindings";
 import { homeDb } from "../state/dbKey";
 import { instanceOf, useLive } from "../state/live";
@@ -254,7 +264,7 @@ export function TopBar({ hosted }: { hosted: HostedWindow | null }) {
             <Kbd className="bg-control text-muted">Esc</Kbd>
           </Button>
         ) : (
-          <RunButton busy={busy} environment={environment} explainable={config?.databaseKind === "Postgres" && !isBrowsing(tab)} />
+          <RunButton busy={busy} environment={environment} explainable={!!config && explainSupported(config.databaseKind) && !isBrowsing(tab)} />
         ))}
 
       {layout.rightPanel === null && (

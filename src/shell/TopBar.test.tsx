@@ -74,9 +74,9 @@ it("reads the run target as the environment icon and connection, then database, 
   expect(html).not.toContain("Query 3");
 });
 
-it("offers Explain on a PostgreSQL script tab and hides it on SQL Server", () => {
+it("offers Explain on a PostgreSQL or SQL Server script tab", () => {
   expect(onConnection("Local")).toContain('data-testid="explain-menu"');
-  expect(onConnection("Local", "Idle", "SqlServer")).not.toContain('data-testid="explain-menu"');
+  expect(onConnection("Local", "Idle", "SqlServer")).toContain('data-testid="explain-menu"');
 });
 
 it("shows an open transaction as pending and an aborted one as an error", () => {

@@ -702,6 +702,7 @@ pub enum StmtStatus {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Type)]
 pub enum PlanFormat {
     Json,
+    Xml,
 }
 
 #[derive(Debug, Clone, Serialize, Type)]
@@ -1928,6 +1929,8 @@ pub struct WriteConfirmation {
     /// end. Any run on the tab, and Commit, can commit them.
     pub holds: WriteList,
     pub digest: WriteDigest,
+    /// True when the saved connection or the opened session is Production.
+    pub on_production: bool,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Type)]
@@ -1968,6 +1971,8 @@ pub struct Plan {
 pub struct StatementPlan {
     pub planning_time_ms: Option<f64>,
     pub execution_time_ms: Option<f64>,
+    /// Empty when the server sent no statement text. PostgreSQL plans leave it empty.
+    pub statement_text: String,
     pub root: PlanNode,
     pub properties: Vec<PlanProperty>,
 }

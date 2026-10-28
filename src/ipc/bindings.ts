@@ -961,7 +961,7 @@ export type PlanBuffers = {
 	tempWritten: number,
 };
 
-export type PlanFormat = "Json";
+export type PlanFormat = "Json" | "Xml";
 
 export type PlanNode = {
 	operation: string,
@@ -1408,6 +1408,8 @@ export type SslMode = "Disable" | "Prefer" | "Require" | "VerifyCa" | "VerifyFul
 export type StatementPlan = {
 	planningTimeMs: number | null,
 	executionTimeMs: number | null,
+	/**  Empty when the server sent no statement text. PostgreSQL plans leave it empty. */
+	statementText: string,
 	root: PlanNode,
 	properties: PlanProperty[],
 };
@@ -1643,6 +1645,8 @@ export type WriteConfirmation = {
 	 */
 	holds: WriteList,
 	digest: WriteDigest,
+	/**  True when the saved connection or the opened session is Production. */
+	onProduction: boolean,
 };
 
 /**

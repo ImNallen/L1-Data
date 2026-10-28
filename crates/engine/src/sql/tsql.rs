@@ -460,6 +460,19 @@ pub(crate) fn is_write(text: &str) -> bool {
     })
 }
 
+pub(crate) fn changes_showplan(text: &str) -> bool {
+    let Ok(tokens) = significant(text) else {
+        return true;
+    };
+    tokens.iter().enumerate().any(|(i, token)| {
+        token.word("SHOWPLAN")
+            || token.word("SHOWPLAN_XML")
+            || token.word("SHOWPLAN_ALL")
+            || token.word("SHOWPLAN_TEXT")
+            || token.word("STATISTICS") && (word_at(&tokens, i + 1, "XML") || word_at(&tokens, i + 1, "PROFILE"))
+    })
+}
+
 pub(crate) fn rerun_refusal(text: &str) -> Option<&'static str> {
     const MAY_WRITE: &str = "The batch may write, so it does not run again.";
     let Ok(tokens) = significant(text) else { return Some(MAY_WRITE) };

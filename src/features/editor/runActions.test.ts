@@ -860,6 +860,7 @@ describe("a run the engine asks about", () => {
       sends: { count: 2, statements: ["update orders set n = 1", "delete from orders"] },
       holds: { count: 0, statements: [] },
       digest,
+      onProduction: true,
       ...patch,
     },
   });
@@ -994,12 +995,53 @@ describe("a run the engine asks about", () => {
     });
   });
 
-  it("sends nothing for Explain on SQL Server", () => {
+  it("sends Explain on SQL Server", async () => {
     connection({ databaseKind: "SqlServer" });
-    openSqlTab({ db: { connectionId: "prod", database: "shop" }, text: "select 1" });
+    const id = openSqlTab({ db: { connectionId: "prod", database: "shop" }, text: "select 1" });
     const runs = queueRunReplies(null);
     explainActive("Explain");
-    expect(runs).toEqual([]);
+    await vi.waitFor(() => expect(runs).toHaveLength(1));
+    expect(runs[0]).toMatchObject({ tabId: id, request: { kind: "script", mode: "Explain" }, confirmed: null });
+    expect(question()).toBeNull();
+  });
+
+  it("asks before Explain Analyze runs a SQL Server batch off Production", async () => {
+    useWorkspace.setState({ configs: { ms: { ...connectionConfig("ms", "dev-mssql"), databaseKind: "SqlServer" } } });
+    openSqlTab({ db: { connectionId: "ms", database: "shop" }, text: "UPDATE dbo.orders SET status = status" });
+    queueRunReplies(
+      asked("d1", {
+        connection: "dev-mssql",
+        unit: "Batch",
+        onProduction: false,
+        sends: { count: 1, statements: ["UPDATE dbo.orders SET status = status"] },
+        holds: { count: 1, statements: ["insert into t values (1)"] },
+      }),
+    );
+    explainActive("ExplainAnalyze");
+    await vi.waitFor(() => expect(question()).not.toBeNull());
+    expect(question()).toMatchObject({
+      title: "Run this batch?",
+      body: "Explain Analyze executes this batch on dev-mssql / shop. This app does not roll it back. A write to dev-mssql / shop ran on this tab before the connection was marked Production. If it is still in this tab's transaction, confirming covers it, so a later commit does not ask about it again.",
+    });
+    expect(question()?.choices).toEqual([{ id: "btn", label: "Run", variant: "danger" }]);
+    expect(question()?.body).not.toContain("A rollback does not undo sequence values or outside side effects.");
+  });
+
+  it("keeps the Production title for SQL Server Explain Analyze and omits the rollback sentence", async () => {
+    connection({ name: "prod-mssql", databaseKind: "SqlServer" });
+    openSqlTab({ db: { connectionId: "prod", database: "shop" }, text: "UPDATE dbo.orders SET status = status" });
+    queueRunReplies(
+      asked("d1", {
+        connection: "prod-mssql",
+        unit: "Batch",
+        sends: { count: 1, statements: ["UPDATE dbo.orders SET status = status"] },
+      }),
+    );
+    explainActive("ExplainAnalyze");
+    await vi.waitFor(() => expect(question()).not.toBeNull());
+    expect(question()?.title).toBe("Run 1 write on Production?");
+    expect(question()?.body).toBe("This run sends 1 batch that writes to prod-mssql / shop.");
+    expect(question()?.choices).toEqual([{ id: "btn", label: "Run writes", variant: "danger" }]);
   });
 
   it("sends nothing while the tab is browsing a table", async () => {
@@ -1059,6 +1101,7 @@ describe("staged edits the engine asks about", () => {
       sends: { count: 2, statements: [] },
       holds: { count: 0, statements: [] },
       digest: "d1",
+      onProduction: true,
     },
   };
   const question = () => {
@@ -1150,6 +1193,7 @@ describe("a commit the engine asks about", () => {
       sends: { count: 0, statements: [] },
       holds: { count: 1, statements: ["insert into t values (1)"] },
       digest: "c1",
+      onProduction: true,
     },
   };
 

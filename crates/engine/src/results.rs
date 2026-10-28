@@ -1,6 +1,7 @@
 use std::sync::{Arc, RwLock};
+use std::time::Instant;
 
-use crate::model::{AllRows, ColumnMeta, DatabaseKind, DatabaseRef, ResultMeta, ResultRef, RowPage, TruncateReason};
+use crate::model::{AllRows, ColumnMeta, ConnectionId, DatabaseKind, DatabaseRef, PlanFormat, QueryError, ResultMeta, ResultRef, RowPage, RunId, RunOutput, TabId, TruncateReason};
 
 pub const CELL_CHAR_LIMIT: usize = 2_000;
 pub const PAGE_LEN_MAX: u32 = 2_000;
@@ -15,6 +16,7 @@ pub struct ResultSet {
     /// What produced these rows. Set when the result is created and never changed, and dropped
     /// with the result at the next run or tab close, so no other structure keeps SQL per result.
     pub origin: Origin,
+    pub plan_format: Option<PlanFormat>,
     data: RwLock<Arena>,
 }
 
@@ -77,6 +79,7 @@ impl ResultSet {
             db,
             columns,
             origin,
+            plan_format: None,
             data: RwLock::new(Arena {
                 text: String::new(),
                 cells: Vec::new(),
@@ -182,6 +185,40 @@ impl ResultSet {
         }
         Ok((u64::from(rows), a.truncated.is_some()))
     }
+}
+
+pub(crate) fn plan_output(
+    tab: TabId,
+    run_id: RunId,
+    kind: DatabaseKind,
+    format: PlanFormat,
+    schema: &Option<String>,
+    connection_id: ConnectionId,
+    database: &str,
+    cell: &str,
+    columns: Vec<ColumnMeta>,
+    caps: &Caps,
+    started: Instant,
+) -> Result<(Arc<ResultSet>, RunOutput), QueryError> {
+    if cell.len() as u64 > caps.max_bytes {
+        return Err(crate::session::error("The plan exceeds the result size limit."));
+    }
+    let mut set = ResultSet::new(
+        ResultRef { tab_id: tab, run_id, index: 0 },
+        DatabaseRef { connection_id, database: database.to_owned() },
+        kind,
+        columns,
+        Origin { rerun: Rerun::Refused("Explain is not re-run."), nth: 0, schema: schema.clone(), page: false },
+    );
+    set.plan_format = Some(format);
+    let set = Arc::new(set);
+    set.push_row(std::iter::once(Some(cell)), caps);
+    set.set_elapsed(started.elapsed().as_millis().min(u32::MAX as u128) as u32);
+    if set.meta().truncated.is_some() {
+        return Err(crate::session::error("The plan exceeds the result size limit."));
+    }
+    let output = RunOutput::Plan { result: set.meta(), format };
+    Ok((set, output))
 }
 
 impl Arena {

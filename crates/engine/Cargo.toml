@@ -32,6 +32,7 @@ libc = "0.2"
 native-tls = "0.2"
 postgres-native-tls = "0.5"
 percent-encoding = "2"
+quick-xml = "0.38"
 rusqlite = { version = "0.40", features = ["bundled", "functions"] }
 russh = { version = "=0.64.1", default-features = false, features = ["aws-lc-rs", "rsa"] }
 semver = "1"

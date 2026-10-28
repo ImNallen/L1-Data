@@ -19,6 +19,7 @@ pub struct Target<'a> {
 #[derive(Debug)]
 pub struct WritesChecked {
     on_production: bool,
+    consumes_hold: bool,
 }
 
 impl WritesChecked {
@@ -27,7 +28,7 @@ impl WritesChecked {
     }
 
     pub fn mark_held_writes_asked(&self, unasked: &mut WriteList) {
-        if self.on_production {
+        if self.on_production && self.consumes_hold {
             *unasked = WriteList::default();
         }
     }
@@ -43,7 +44,7 @@ impl WriteList {
 }
 
 impl Target<'_> {
-    fn on_production(&self) -> bool {
+    pub(crate) fn on_production(&self) -> bool {
         [self.saved, self.opened].iter().any(|c| c.environment == Some(Environment::Production))
     }
 
@@ -54,23 +55,46 @@ impl Target<'_> {
     }
 }
 
+pub(crate) fn admit(target: &Target, consumes_hold: bool) -> WritesChecked {
+    WritesChecked { on_production: target.on_production(), consumes_hold }
+}
+
+pub(crate) fn ask(target: &Target, shown: &[&str], bound: &[&str], confirmed: Option<&WriteDigest>) -> Result<WritesChecked, WriteConfirmation> {
+    let digest = target.digest(bound);
+    if confirmed == Some(&digest) {
+        return Ok(WritesChecked { on_production: target.on_production(), consumes_hold: true });
+    }
+    let kind = target.saved.database_kind;
+    let mut sends = WriteList::default();
+    shown.iter().filter(|sql| text::is_write(sql, kind)).for_each(|sql| sends.add(sql));
+    if sends.count == 0 {
+        shown.iter().for_each(|sql| sends.add(sql));
+    }
+    Err(confirmation(target, sends, digest))
+}
+
 /// Held writes make any work ask, because a batch can commit them in forms the classifier cannot see, such as
 /// `IF @@TRANCOUNT > 0 COMMIT` or `PREPARE TRANSACTION` followed by `COMMIT PREPARED` from another session.
 pub fn check(target: &Target, statements: &[&str], confirmed: Option<&WriteDigest>) -> Result<WritesChecked, WriteConfirmation> {
     if !target.on_production() {
-        return Ok(WritesChecked { on_production: false });
+        return Ok(admit(target, true));
     }
     let kind = target.saved.database_kind;
     let mut sends = WriteList::default();
     statements.iter().filter(|sql| text::is_write(sql, kind)).for_each(|sql| sends.add(sql));
     if sends.count == 0 && target.unasked.count == 0 {
-        return Ok(WritesChecked { on_production: true });
+        return Ok(WritesChecked { on_production: true, consumes_hold: true });
     }
     let digest = target.digest(statements);
     if confirmed == Some(&digest) {
-        return Ok(WritesChecked { on_production: true });
+        return Ok(WritesChecked { on_production: true, consumes_hold: true });
     }
-    Err(WriteConfirmation {
+    Err(confirmation(target, sends, digest))
+}
+
+fn confirmation(target: &Target, sends: WriteList, digest: WriteDigest) -> WriteConfirmation {
+    let kind = target.saved.database_kind;
+    WriteConfirmation {
         connection: target.saved.name.clone(),
         database: target.console.database.clone(),
         unit: match kind {
@@ -80,7 +104,8 @@ pub fn check(target: &Target, statements: &[&str], confirmed: Option<&WriteDiges
         sends,
         holds: target.unasked.clone(),
         digest,
-    })
+        on_production: target.on_production(),
+    }
 }
 
 fn shown(sql: &str) -> String {
@@ -215,6 +240,19 @@ mod tests {
         let mut unasked = held.clone();
         check(&open(&staging, &held), WORK, None).unwrap().mark_held_writes_asked(&mut unasked);
         assert_eq!(unasked.count, 2, "a check off Production keeps them");
+    }
+
+    #[test]
+    fn a_run_that_does_not_consume_holds_leaves_them() {
+        let production = connection(Some(Environment::Production));
+        let auto = console(TxnMode::AutoCommit);
+        let held = list(&["update t set n = 1"]);
+        let mut unasked = held.clone();
+        let target = Target { unasked: &held, ..on(&production, &auto) };
+        admit(&target, false).mark_held_writes_asked(&mut unasked);
+        assert_eq!(unasked.count, 1);
+        admit(&target, true).mark_held_writes_asked(&mut unasked);
+        assert_eq!(unasked.count, 0);
     }
 
     #[test]

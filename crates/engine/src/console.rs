@@ -105,7 +105,7 @@ enum RefreshPolicy {
 }
 
 impl ConsoleInner {
-    fn invalidate(&mut self, database_kind: DatabaseKind, invalidates: Invalidates) {
+    pub(crate) fn invalidate(&mut self, database_kind: DatabaseKind, invalidates: Invalidates) {
         if invalidates == Invalidates::Nothing { return; }
         let db = self.config.db();
         let pending = self.refreshes.get_or_insert_with(|| PendingRefreshes {
@@ -441,6 +441,78 @@ pub fn now_ms() -> i64 {
 
 fn elapsed_ms(since: Instant) -> u32 {
     since.elapsed().as_millis().min(u32::MAX as u128) as u32
+}
+
+pub(crate) enum PlanEnd {
+    Failed(QueryError),
+    Cancelled,
+    Ready(RunOutput),
+}
+
+pub(crate) struct PlanFinish {
+    pub session: Session,
+    pub run_id: RunId,
+    pub sql: String,
+    pub started: Instant,
+    pub txn: TxnState,
+    pub lost: Option<String>,
+    pub end: PlanEnd,
+}
+
+pub(crate) async fn finish_plan(console: &Console, shared: &Arc<Shared>, connection: &ConnectionConfig, database: &str, finish: PlanFinish) -> Result<(), Orphaned> {
+    let PlanFinish { session, run_id, sql, started, txn, lost, end } = finish;
+    if let Some(reason) = &lost {
+        console.output(shared, run_id, loss_line(&session, txn, reason));
+    }
+    let (status, outcome, outputs, history, error) = match end {
+        PlanEnd::Failed(error) => (
+            StmtStatus::Failed { error: error.clone() },
+            RunOutcome::Failed,
+            Vec::new(),
+            HistoryOutcome::Error { message: error.message.clone() },
+            Some(error),
+        ),
+        PlanEnd::Cancelled => (StmtStatus::Cancelled, RunOutcome::Cancelled, Vec::new(), HistoryOutcome::Cancelled, None),
+        PlanEnd::Ready(output) => {
+            let rows = match &output {
+                RunOutput::Plan { result, .. } => result.row_count,
+                _ => 0,
+            };
+            (StmtStatus::Finished, RunOutcome::Ok, vec![output], HistoryOutcome::Rows { rows: u64::from(rows) }, None)
+        }
+    };
+    if let Some(error) = &error {
+        console.output(shared, run_id, OutputBody::Error { statement: Some(0), error: error.clone() });
+    }
+    let elapsed = elapsed_ms(started);
+    let due = console
+        .edit(shared, run_id, |inner| {
+            let statements = Console::statements_mut(inner);
+            if let Some(statement) = statements.get_mut(0) {
+                statement.status = status;
+                statement.outputs = outputs;
+            }
+            let due = Console::return_session(inner, session, txn, lost);
+            let due = if matches!(outcome, RunOutcome::Ok) { due.or_else(|| inner.finish_refreshes(true)) } else { due };
+            let statements = Console::statements_mut(inner).clone();
+            inner.run = RunState::Finished { run_id, elapsed_ms: elapsed, statements, outcome };
+            due
+        })
+        .await?;
+    if let Some((db, owed)) = due {
+        shared.schedule_refreshes(db, owed);
+    }
+    shared.record_history(HistoryInsert {
+        database_kind: connection.database_kind,
+        at_ms: now_ms(),
+        connection_id: connection.id,
+        connection_name: connection.name.clone(),
+        database: database.to_owned(),
+        sql,
+        elapsed_ms: elapsed,
+        outcome: history,
+    });
+    Ok(())
 }
 
 /// Every console write goes through `Console::edit`, so an orphaned task returns at its next

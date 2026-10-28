@@ -4,12 +4,11 @@ use std::time::Instant;
 
 use futures_util::StreamExt;
 
-use crate::console::{self, loss_line, statement_line, Console, ConsoleInner, Orphaned, Work};
+use crate::console::{self, statement_line, Console, ConsoleInner, Orphaned, Work};
 use crate::model::*;
-use crate::results::{Caps, Origin, Rerun, ResultSet};
+use crate::results::Caps;
 use crate::session::{self, QueryEvent, Session};
 use crate::sql::StmtSpan;
-use crate::store::HistoryInsert;
 use crate::writes;
 use crate::Shared;
 
@@ -318,53 +317,39 @@ fn store_plan(
     caps: &Caps,
     started: Instant,
 ) -> Result<RunOutput, QueryError> {
-    if cell.len() as u64 > caps.max_bytes {
-        return Err(session::error("The plan exceeds the result size limit."));
-    }
-    let set = Arc::new(ResultSet::new(
-        ResultRef { tab_id: console.tab, run_id, index: 0 },
-        DatabaseRef { connection_id: connection.id, database: database.to_owned() },
+    let (set, output) = crate::results::plan_output(
+        console.tab,
+        run_id,
         DatabaseKind::Postgres,
+        PlanFormat::Json,
+        schema,
+        connection.id,
+        database,
+        cell,
         columns,
-        Origin { rerun: Rerun::Refused("Explain is not re-run."), nth: 0, schema: schema.clone(), page: false },
-    ));
-    set.push_row(std::iter::once(Some(cell)), caps);
-    set.set_elapsed(elapsed_ms(started));
-    if set.meta().truncated.is_some() {
-        return Err(session::error("The plan exceeds the result size limit."));
-    }
-    console.results.lock().unwrap().push(set.clone());
-    Ok(RunOutput::Plan { result: set.meta(), format: PlanFormat::Json })
+        caps,
+        started,
+    )?;
+    console.results.lock().unwrap().push(set);
+    Ok(output)
 }
 
 struct End {
-    status: StmtStatus,
     outcome: RunOutcome,
     outputs: Vec<RunOutput>,
-    history: HistoryOutcome,
     error: Option<QueryError>,
 }
 
 fn failed(error: QueryError) -> End {
-    End {
-        history: HistoryOutcome::Error { message: error.message.clone() },
-        status: StmtStatus::Failed { error: error.clone() },
-        outcome: RunOutcome::Failed,
-        outputs: Vec::new(),
-        error: Some(error),
-    }
+    End { outcome: RunOutcome::Failed, outputs: Vec::new(), error: Some(error) }
 }
 
 fn cancelled() -> End {
-    End { status: StmtStatus::Cancelled, outcome: RunOutcome::Cancelled, outputs: Vec::new(), history: HistoryOutcome::Cancelled, error: None }
+    End { outcome: RunOutcome::Cancelled, outputs: Vec::new(), error: None }
 }
 
 fn ok_plan(output: RunOutput) -> End {
-    let rows = match &output {
-        RunOutput::Plan { result, .. } => result.row_count,
-        _ => 0,
-    };
-    End { status: StmtStatus::Finished, outcome: RunOutcome::Ok, outputs: vec![output], history: HistoryOutcome::Rows { rows: u64::from(rows) }, error: None }
+    End { outcome: RunOutcome::Ok, outputs: vec![output], error: None }
 }
 
 async fn finish(
@@ -380,45 +365,12 @@ async fn finish(
     lost: Option<String>,
     end: End,
 ) -> Result<(), Orphaned> {
-    if let Some(reason) = &lost {
-        console.output(shared, run_id, loss_line(&session, txn, reason));
-    }
-    if let Some(error) = &end.error {
-        console.output(shared, run_id, OutputBody::Error { statement: Some(0), error: error.clone() });
-    }
-    let elapsed = elapsed_ms(started);
-    let End { status, outcome, outputs, history, error: _ } = end;
-    let due = console
-        .edit(shared, run_id, |inner| {
-            let statements = Console::statements_mut(inner);
-            if let Some(statement) = statements.get_mut(0) {
-                statement.status = status;
-                statement.outputs = outputs;
-            }
-            let due = Console::return_session(inner, session, txn, lost);
-            let statements = Console::statements_mut(inner).clone();
-            inner.run = RunState::Finished { run_id, elapsed_ms: elapsed, statements, outcome };
-            due
-        })
-        .await?;
-    if let Some((db, owed)) = due {
-        shared.schedule_refreshes(db, owed);
-    }
-    shared.record_history(HistoryInsert {
-        database_kind: connection.database_kind,
-        at_ms: console::now_ms(),
-        connection_id: connection.id,
-        connection_name: connection.name.clone(),
-        database: database.to_owned(),
-        sql: body.to_owned(),
-        elapsed_ms: elapsed,
-        outcome: history,
-    });
-    Ok(())
-}
-
-fn elapsed_ms(since: Instant) -> u32 {
-    since.elapsed().as_millis().min(u32::MAX as u128) as u32
+    let plan_end = match end {
+        End { error: Some(error), .. } => console::PlanEnd::Failed(error),
+        End { outcome: RunOutcome::Cancelled, .. } => console::PlanEnd::Cancelled,
+        End { outputs, .. } => console::PlanEnd::Ready(outputs.into_iter().next().expect("a finished explain stores one plan")),
+    };
+    console::finish_plan(console, shared, connection, database, console::PlanFinish { session, run_id, sql: body.to_owned(), started, txn, lost, end: plan_end }).await
 }
 
 #[cfg(test)]
