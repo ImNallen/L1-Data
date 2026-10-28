@@ -219,7 +219,6 @@ pub(crate) async fn run(console: Arc<Console>, shared: Arc<Shared>, launch: Laun
     let read = read_plan(&mut session, &body, &stop).await;
     console.output_all(&shared, run_id, console::notice_lines(&mut session));
     if let Err(error) = session.batch(bracket.close()).await {
-        // `entered` is the user's transaction. An idle explain must not report that transaction rolled back.
         let lost = Some(error.message.clone());
         let end = match read {
             Read::Cancelled => cancelled(),

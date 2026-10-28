@@ -86,7 +86,6 @@ export function PlanView({ result }: { result: RowResult }) {
   useEffect(() => {
     if (!plan || marked.current === refKey) return;
     marked.current = refKey;
-    // The perf probe reads this mark for the first paint of a plan.
     performance.mark("plan-paint");
     if (performance.getEntriesByName("plan-data").length > 0) performance.measure("plan-paint-ms", "plan-data", "plan-paint");
   }, [plan, refKey]);

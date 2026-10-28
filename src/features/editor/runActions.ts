@@ -254,7 +254,6 @@ async function runTab(tabId: TabId, target?: PageTarget, script?: RunTarget, mod
   }
 }
 
-/** Explain or Explain Analyze of the selection or the statement at the cursor. A table tab and a SQL Server tab send nothing. */
 export function explainActive(mode: "Explain" | "ExplainAnalyze"): void {
   const id = ws().active;
   const tab = id ? ws().tabs[id] : undefined;
