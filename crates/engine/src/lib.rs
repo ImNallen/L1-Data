@@ -1,3 +1,4 @@
+mod aggregate;
 mod assistant;
 mod catalog;
 mod connection;

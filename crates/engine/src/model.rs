@@ -1023,6 +1023,15 @@ pub struct RowPage {
     pub cut: Vec<(u32, u16)>,
 }
 
+/// `count` includes NULL. `non_null` counts every `Some`, including `""`.
+/// `Numeric` is present only when sum, avg, min, and max all exist.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Type)]
+#[serde(tag = "kind", rename_all_fields = "camelCase")]
+pub enum CellAggregate {
+    Counts { count: u64, non_null: u64 },
+    Numeric { count: u64, non_null: u64, sum: String, avg: String, min: String, max: String },
+}
+
 #[derive(Debug, Clone, Serialize, Type)]
 #[serde(rename_all = "camelCase")]
 pub struct QueryError {
