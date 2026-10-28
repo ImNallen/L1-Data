@@ -219,7 +219,7 @@ impl Harness {
 
     async fn start_run(&mut self, tab: TabId, sql: &str) -> RunAccepted {
         self.engine
-            .console_run(tab, RunRequest::Script { text: sql.into(), target: RunTarget::All }, None)
+            .console_run(tab, RunRequest::Script { text: sql.into(), target: RunTarget::All, mode: RunMode::Run }, None)
             .await
             .unwrap()
     }
@@ -497,6 +497,7 @@ async fn multi_statement_run_tags_notices_and_history() {
     let tags: Vec<String> = statements.iter().flat_map(|s| &s.outputs).map(|o| match o {
         RunOutput::Command { tag, .. } => tag.clone(),
         RunOutput::Rows { result, .. } => format!("rows:{}", result.row_count),
+        RunOutput::Plan { .. } => panic!("a script run does not return a plan"),
     }).collect();
     assert_eq!(tags, ["CREATE TABLE", "INSERT 0 5", "UPDATE 3", "rows:1", "rows:1"]);
     assert_eq!(
@@ -556,7 +557,7 @@ async fn error_position_maps_to_utf16_past_an_emoji() {
     let cursor = text.encode_utf16().count() as u32 - 3;
     let accepted = h
         .engine
-        .console_run(tab, RunRequest::Script { text: text.into(), target: RunTarget::Cursor { offset: DocOffset(cursor) } }, None)
+        .console_run(tab, RunRequest::Script { text: text.into(), target: RunTarget::Cursor { offset: DocOffset(cursor) }, mode: RunMode::Run }, None)
         .await
         .unwrap();
     assert_eq!(accepted.statements.len(), 1, "cursor picks only the second statement");
@@ -576,7 +577,7 @@ async fn cancel_finishes_cancelled_quickly() {
     let tab = h.sql_tab(TxnMode::AutoCommit).await;
     let accepted = h.start_run(tab, "select slow_echo(30); select 2").await;
     tokio::time::sleep(Duration::from_millis(300)).await;
-    assert!(matches!(h.engine.console_run(tab, RunRequest::Script { text: "select 1".into(), target: RunTarget::All }, None).await, Err(RunError::Busy)));
+    assert!(matches!(h.engine.console_run(tab, RunRequest::Script { text: "select 1".into(), target: RunTarget::All, mode: RunMode::Run }, None).await, Err(RunError::Busy)));
     assert!(matches!(h.engine.console_commit(tab, None).await, Err(TxnError::Busy)));
     let started = Instant::now();
     h.engine.console_cancel(tab).await;
@@ -931,7 +932,7 @@ async fn esc_during_all_rows_leaves_the_target_untouched_and_the_session_alive()
     };
     let during = h.wait_console(tab, |s| s.export.as_ref().is_some_and(|p| p.rows > 0)).await;
     assert_eq!((during.work, during.export.as_ref().map(|p| (p.result, p.format))), (Some(ConsoleWork::Export), Some((meta.r#ref, ExportFormat::Csv))));
-    assert!(matches!(h.engine.console_run(tab, RunRequest::Script { text: "select 1".into(), target: RunTarget::All }, None).await, Err(RunError::Busy)), "the export holds the session");
+    assert!(matches!(h.engine.console_run(tab, RunRequest::Script { text: "select 1".into(), target: RunTarget::All, mode: RunMode::Run }, None).await, Err(RunError::Busy)), "the export holds the session");
     h.engine.console_cancel(tab).await;
 
     assert!(matches!(export.await.unwrap(), Err(ExportError::Cancelled)));
@@ -1084,11 +1085,11 @@ async fn schema_and_search_path_follow_the_console_config() {
     assert_eq!(h.scalar(tab, "show search_path").await, "public");
     assert_eq!(h.scalar(tab, "show application_name").await, "L1 Data");
     for copy in ["copy customers from stdin", "copy public.customers (id) to stdout", "copy pg_temp.nope from stdin with (format csv)"] {
-        let err = h.engine.console_run(tab, RunRequest::Script { text: copy.into(), target: RunTarget::All }, None).await.err();
+        let err = h.engine.console_run(tab, RunRequest::Script { text: copy.into(), target: RunTarget::All, mode: RunMode::Run }, None).await.err();
         assert!(matches!(err, Some(RunError::Unsupported { .. })), "{copy}: {err:?}");
     }
     assert_eq!(h.scalar(tab, "select 5").await, "5", "the session survived the rejected COPYs");
-    assert!(matches!(h.engine.console_run(tab, RunRequest::Script { text: " -- nothing\n".into(), target: RunTarget::All }, None).await, Err(RunError::NoStatement)));
+    assert!(matches!(h.engine.console_run(tab, RunRequest::Script { text: " -- nothing\n".into(), target: RunTarget::All, mode: RunMode::Run }, None).await, Err(RunError::NoStatement)));
     h.engine.console_close(tab, false).await.unwrap();
     assert!(h.engine.boot().consoles.is_empty());
     h.engine.disconnect(h.conn, false).await.unwrap();
@@ -2116,7 +2117,7 @@ async fn set_environment(h: &Harness, environment: Option<Environment>) {
 }
 
 fn script(text: &str) -> RunRequest {
-    RunRequest::Script { text: text.into(), target: RunTarget::All }
+    RunRequest::Script { text: text.into(), target: RunTarget::All, mode: RunMode::Run }
 }
 
 async fn asked_to_run(h: &Harness, tab: TabId, request: RunRequest, confirmed: Option<&WriteDigest>) -> WriteConfirmation {
@@ -2165,7 +2166,7 @@ async fn a_write_on_production_runs_only_with_the_digest_of_the_same_work_and_ta
     let selected = format!("select 1;\n{one};\ninsert into public.{table} values (3);");
     let from = selected.find("insert").unwrap() as u32;
     let to = from + one.len() as u32 + 1;
-    let selection = RunRequest::Script { text: selected.clone(), target: RunTarget::Selection { from: DocOffset(from), to: DocOffset(to) } };
+    let selection = RunRequest::Script { text: selected.clone(), target: RunTarget::Selection { from: DocOffset(from), to: DocOffset(to) }, mode: RunMode::Run };
     let asked = asked_to_run(&h, tab, selection, None).await;
     assert_eq!((asked.sends.count, asked.sends.statements.as_slice()), (1, [one.clone()].as_slice()));
 
@@ -3040,5 +3041,158 @@ async fn hostile_object_scripts_replay_every_property_or_warn() {
     }
     if let Err(panic) = outcome {
         std::panic::resume_unwind(panic);
+    }
+}
+
+#[tokio::test]
+async fn explain_fences_keep_the_transaction_and_roll_back_an_update() {
+    let mut h = Harness::start().await;
+    let oracle = h.oracle().await;
+    let table = unique("t_plan");
+    oracle.batch_execute(&format!("create table public.{table} (n int)")).await.unwrap();
+    oracle.batch_execute(&format!("insert into public.{table} (n) values (1)")).await.unwrap();
+    let auto = h.sql_tab(TxnMode::AutoCommit).await;
+
+    let refused = h.engine.console_run(auto, script_mode("select 1; select 2", RunMode::Explain), None).await.unwrap_err();
+    assert!(matches!(refused, RunError::Unsupported { ref what } if what == "Explain one statement."), "{refused:?}");
+    let refused = h.engine.console_run(auto, script_mode("/* c */ explain select 1", RunMode::Explain), None).await.unwrap_err();
+    assert!(matches!(refused, RunError::Unsupported { ref what } if what == "The statement already starts with EXPLAIN."), "{refused:?}");
+    let refused = h.engine.console_run(auto, script_mode(" -- nothing\n", RunMode::ExplainAnalyze), None).await.unwrap_err();
+    assert!(matches!(refused, RunError::NoStatement), "{refused:?}");
+    assert_eq!(h.console(auto).txn, TxnState::Idle, "a refusal sends nothing");
+
+    let select = "select 1";
+    h.drain();
+    let before = h.log(auto).len();
+    let explained = finish_ok(&mut h, auto, select, RunMode::Explain).await;
+    h.drain();
+    assert_eq!(explained.txn, TxnState::Idle);
+    assert_eq!(&h.log(auto)[before..], [format!("0> EXPLAIN (FORMAT JSON) {select}")]);
+    let meta = plan_meta(&explained);
+    let plan = h.engine.result_plan(meta.r#ref).unwrap();
+    assert_eq!(plan.statements.len(), 1);
+    assert_eq!(plan.statements[0].root.operation, "Result");
+    assert!(plan.statements[0].planning_time_ms.is_none(), "plain explain has no planning time until analyze");
+    assert!(plan.statements[0].execution_time_ms.is_none(), "plain explain has no execution time");
+    let cell = h.engine.result_cell(meta.r#ref, 0, 0).unwrap().unwrap();
+    assert!(cell.contains("\"Node Type\""), "{cell}");
+    let (summary, file) = h.export(&meta, ExportFormat::Json, ExportScope::Loaded, "plan.json").await;
+    assert!(summary.rows >= 1);
+    assert!(file.contains("Node Type"), "{file}");
+    let all = h.engine.result_export(meta.r#ref, ExportFormat::Json, ExportScope::All, h.dir.path().join("all.json").display().to_string()).await.unwrap_err();
+    assert!(matches!(all, ExportError::NotRerunnable), "{all:?}");
+    wait_for_history(&h, &format!("EXPLAIN (FORMAT JSON) {select}")).await;
+
+    let rows = h.run_ok(auto, "select 1").await;
+    let err = h.engine.result_plan(Harness::result(&rows, 0).r#ref).unwrap_err();
+    assert!(matches!(err, ResultError::NotAPlan { .. }), "{err:?}");
+
+    let update = format!("update public.{table} set n = 2");
+    h.drain();
+    let before = h.log(auto).len();
+    let analyzed = finish_ok(&mut h, auto, &update, RunMode::ExplainAnalyze).await;
+    h.drain();
+    assert_eq!(analyzed.txn, TxnState::Idle, "an idle analyze rolls its transaction back");
+    assert_eq!(&h.log(auto)[before..], [format!("0> EXPLAIN (FORMAT JSON, ANALYZE, BUFFERS) {update}")]);
+    let analyzed_plan = h.engine.result_plan(plan_meta(&analyzed).r#ref).unwrap();
+    let modify = find_node(&analyzed_plan.statements[0].root, "ModifyTable").expect("update plan");
+    assert_eq!(modify.detail, format!("on {table}"));
+    assert!(modify.actual_rows.is_some());
+    assert!(modify.buffers.is_some(), "analyze asks for buffers");
+    assert!(analyzed_plan.statements[0].planning_time_ms.is_some());
+    assert!(analyzed_plan.statements[0].execution_time_ms.is_some());
+    assert_eq!(count(&oracle, &table).await, 1, "the analyzed update did not commit");
+    assert_eq!(h.scalar(auto, &format!("select n from public.{table}")).await, "1");
+
+    h.drain();
+    let before = h.log(auto).len();
+    let missing = h.engine.console_run(auto, script_mode("select * from public.does_not_exist", RunMode::Explain), None).await.unwrap();
+    let failed = h.wait_finished(auto, missing.run_id).await;
+    h.drain();
+    assert!(matches!(failed.run, RunState::Finished { outcome: RunOutcome::Failed, .. }), "{:?}", failed.run);
+    assert_eq!(failed.txn, TxnState::Idle, "a failed explain still rolls back");
+    assert!(h.log(auto)[before..].iter().any(|line| line.contains("ERROR")), "{:?}", &h.log(auto)[before..]);
+    assert!(!h.log(auto)[before..].iter().any(|line| line.contains("BEGIN")), "the fence stays out of the log");
+    assert_eq!(h.scalar(auto, "select 1").await, "1", "the session still runs");
+
+    let manual = h.sql_tab(TxnMode::Manual).await;
+    h.run_ok(manual, &format!("insert into public.{table} (n) values (3)")).await;
+    assert_eq!(h.console(manual).txn, TxnState::Active);
+    let nested = format!("select n from public.{table}");
+    h.drain();
+    let before = h.log(manual).len();
+    let inside = finish_ok(&mut h, manual, &nested, RunMode::Explain).await;
+    h.drain();
+    assert_eq!(inside.txn, TxnState::Active, "a savepoint explain leaves the transaction open");
+    assert_eq!(&h.log(manual)[before..], [format!("0> EXPLAIN (FORMAT JSON) {nested}")]);
+    let nested_plan = h.engine.result_plan(plan_meta(&inside).r#ref).unwrap();
+    assert!(!nested_plan.statements[0].root.operation.is_empty());
+    assert_eq!(h.scalar(manual, &format!("select count(*) from public.{table}")).await, "2", "the inserted row is still visible");
+
+    let rewrite = format!("update public.{table} set n = 9");
+    let rewritten = finish_ok(&mut h, manual, &rewrite, RunMode::ExplainAnalyze).await;
+    assert_eq!(rewritten.txn, TxnState::Active, "analyze inside a transaction rolls back to the savepoint");
+    assert_eq!(h.scalar(manual, &format!("select count(*) from public.{table} where n = 9")).await, "0");
+    assert_eq!(count(&oracle, &table).await, 1, "the open transaction is not visible outside");
+
+    h.drain();
+    let before = h.log(manual).len();
+    let broken = h.engine.console_run(manual, script_mode("select * from public.does_not_exist", RunMode::ExplainAnalyze), None).await.unwrap();
+    let broken = h.wait_finished(manual, broken.run_id).await;
+    h.drain();
+    assert!(matches!(broken.run, RunState::Finished { outcome: RunOutcome::Failed, .. }), "{:?}", broken.run);
+    assert_eq!(broken.txn, TxnState::Active, "a failed analyze returns to the savepoint");
+    assert!(h.log(manual)[before..].iter().any(|line| line.contains("ERROR")));
+    assert_eq!(h.scalar(manual, &format!("select count(*) from public.{table}")).await, "2");
+
+    let aborted = h.run(manual, "select 1/0").await;
+    assert_eq!(aborted.txn, TxnState::Aborted);
+    let refused = h.engine.console_run(manual, script_mode("select 1", RunMode::Explain), None).await.unwrap_err();
+    assert!(matches!(refused, RunError::Unsupported { ref what } if what == "The transaction must be rolled back first."), "{refused:?}");
+    assert_eq!(h.console(manual).txn, TxnState::Aborted);
+    h.engine.console_rollback(manual).await.unwrap();
+    assert_eq!(h.console(manual).txn, TxnState::Idle);
+    assert_eq!(count(&oracle, &table).await, 1);
+
+    oracle.batch_execute(&format!("drop table public.{table}")).await.unwrap();
+}
+
+fn script_mode(text: &str, mode: RunMode) -> RunRequest {
+    RunRequest::Script { text: text.into(), target: RunTarget::All, mode }
+}
+
+async fn finish_ok(h: &mut Harness, tab: TabId, sql: &str, mode: RunMode) -> ConsoleState {
+    let accepted = h.engine.console_run(tab, script_mode(sql, mode), None).await.unwrap();
+    let state = h.wait_finished(tab, accepted.run_id).await;
+    assert!(matches!(state.run, RunState::Finished { outcome: RunOutcome::Ok, .. }), "{sql}: {:?}", state.run);
+    state
+}
+
+fn plan_meta(state: &ConsoleState) -> ResultMeta {
+    match &state.run {
+        RunState::Finished { statements, .. } => match statements[0].outputs.first() {
+            Some(RunOutput::Plan { result, format: PlanFormat::Json }) => result.clone(),
+            other => panic!("not a plan: {other:?}"),
+        },
+        other => panic!("not finished: {other:?}"),
+    }
+}
+
+fn find_node<'a>(node: &'a PlanNode, operation: &str) -> Option<&'a PlanNode> {
+    if node.operation == operation {
+        return Some(node);
+    }
+    node.children.iter().find_map(|child| find_node(child, operation))
+}
+
+async fn wait_for_history(h: &Harness, sql: &str) {
+    let started = Instant::now();
+    loop {
+        let page = h.engine.history(HistoryQuery { text: Some(sql.into()), connection_id: Some(h.conn), before_id: None, limit: 20 });
+        if page.entries.iter().any(|entry| entry.sql == sql) {
+            return;
+        }
+        assert!(started.elapsed() < Duration::from_secs(2), "history never recorded {sql}");
+        tokio::time::sleep(Duration::from_millis(10)).await;
     }
 }

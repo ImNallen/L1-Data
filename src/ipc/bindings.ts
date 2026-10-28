@@ -34,6 +34,7 @@ export const commands = {
 	consoleClose: (tabId: TabId, force: boolean) => typedError<null, DisconnectError>(__TAURI_INVOKE("console_close", { tabId, force })),
 	resultPage: (resultRef: ResultRef, start: number, len: number) => typedError<RowPage, ResultError>(__TAURI_INVOKE("result_page", { resultRef, start, len })),
 	resultCell: (resultRef: ResultRef, row: number, col: number) => typedError<string | null, ResultError>(__TAURI_INVOKE("result_cell", { resultRef, row, col })),
+	resultPlan: (resultRef: ResultRef) => typedError<Plan, ResultError>(__TAURI_INVOKE("result_plan", { resultRef })),
 	resultExport: (resultRef: ResultRef, format: ExportFormat, scope: ExportScope, path: string) => typedError<ExportSummary, ExportError>(__TAURI_INVOKE("result_export", { resultRef, format, scope, path })),
 	fileOpen: (path: string) => typedError<FileOpened, FileReadError>(__TAURI_INVOKE("file_open", { path })),
 	fileSave: (target: SaveTarget, text: string) => typedError<FileSaved, FileWriteError>(__TAURI_INVOKE("file_save", { target, text })),
@@ -943,6 +944,46 @@ export type Permission =
  */
 "Auto";
 
+export type Plan = {
+	statements: StatementPlan[],
+};
+
+export type PlanBuffers = {
+	sharedHit: number,
+	sharedRead: number,
+	sharedDirtied: number,
+	sharedWritten: number,
+	localHit: number,
+	localRead: number,
+	localDirtied: number,
+	localWritten: number,
+	tempRead: number,
+	tempWritten: number,
+};
+
+export type PlanFormat = "Json";
+
+export type PlanNode = {
+	operation: string,
+	detail: string,
+	startupCost: number | null,
+	totalCost: number | null,
+	planRows: number | null,
+	actualRows: number | null,
+	loops: number | null,
+	totalTimeMs: number | null,
+	selfTimeMs: number | null,
+	diverges: boolean,
+	buffers: PlanBuffers | null,
+	properties: PlanProperty[],
+	children: PlanNode[],
+};
+
+export type PlanProperty = {
+	name: string,
+	value: string,
+};
+
 /**  The quick actions of a picker. `None` is an explicit empty selection. */
 export type Preset = "All" | "DefaultOnly" | "None";
 
@@ -1071,7 +1112,7 @@ export type RestartImpact = {
 	chats: ChatId[],
 };
 
-export type ResultError = { kind: "Gone" } | { kind: "OutOfRange" };
+export type ResultError = { kind: "Gone" } | { kind: "OutOfRange" } | { kind: "NotAPlan"; what: string };
 
 export type ResultMeta = {
 	databaseKind: DatabaseKind,
@@ -1127,11 +1168,13 @@ export type RunError = { kind: "Busy" } | { kind: "NoStatement" } | { kind: "Not
 /**  Engine-wide monotonic. */
 export type RunId = number;
 
+export type RunMode = "Run" | "Explain" | "ExplainAnalyze";
+
 export type RunOutcome = "Ok" | "Failed" | "Cancelled";
 
-export type RunOutput = { kind: "Rows"; result: ResultMeta; state: RowsState } | { kind: "Command"; tag: string; affectedRows: number | null; elapsedMs: number };
+export type RunOutput = { kind: "Rows"; result: ResultMeta; state: RowsState } | { kind: "Command"; tag: string; affectedRows: number | null; elapsedMs: number } | { kind: "Plan"; result: ResultMeta; format: PlanFormat };
 
-export type RunRequest = { kind: "script"; text: string; target: RunTarget } | { kind: "tablePage"; schema: string; table: string; page: number; query?: TableQuery };
+export type RunRequest = { kind: "script"; text: string; target: RunTarget; mode: RunMode } | { kind: "tablePage"; schema: string; table: string; page: number; query?: TableQuery };
 
 export type RunState = { kind: "Idle" } | { kind: "Running"; runId: RunId; startedAtMs: number; statements: StatementRun[] } | { kind: "Finished"; runId: RunId; elapsedMs: number; statements: StatementRun[]; outcome: RunOutcome };
 
@@ -1361,6 +1404,13 @@ export type SshTunnelDraft = {
 };
 
 export type SslMode = "Disable" | "Prefer" | "Require" | "VerifyCa" | "VerifyFull";
+
+export type StatementPlan = {
+	planningTimeMs: number | null,
+	executionTimeMs: number | null,
+	root: PlanNode,
+	properties: PlanProperty[],
+};
 
 export type StatementRun = {
 	outputs: RunOutput[],

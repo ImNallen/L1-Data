@@ -4,6 +4,8 @@ mod connection;
 mod console;
 mod entra;
 mod export;
+mod explain;
+mod plan;
 mod files;
 mod history;
 pub mod model;
@@ -1277,9 +1279,11 @@ impl Engine {
             return Err(RunError::NotConfigured);
         }
 
+        let mut explain_mode = None;
         let mut page = None;
         let (text, spans) = match r {
-            RunRequest::Script { text, target } => {
+            RunRequest::Script { text, target, mode } => {
+                explain_mode = mode.explain();
                 let target = text::OffsetMap::new(&text).target(target);
                 let spans = text::pick(&text, target, connection.database_kind).map_err(|what| RunError::Unsupported { what })?;
                 (text, spans)
@@ -1303,15 +1307,19 @@ impl Engine {
         if spans.is_empty() {
             return Err(RunError::NoStatement);
         }
-        if connection.database_kind == DatabaseKind::SqlServer {
+        if explain_mode.is_none() && connection.database_kind == DatabaseKind::SqlServer {
             for span in &spans { sql::tsql::validate_batch(span.text(&text)).map_err(|what| RunError::Unsupported { what })?; }
         }
-        let statements: Vec<PlannedStmt> = spans.iter().map(|span| {
-            let sql = span.text(&text);
-            let kind = text::classify(sql, connection.database_kind);
-            let transaction = txn::plan(connection.database_kind, config.mode, &kind).map_err(|what| RunError::Unsupported { what })?;
-            Ok(PlannedStmt { span: *span, kind, transaction })
-        }).collect::<Result<_, RunError>>()?;
+        let statements: Vec<PlannedStmt> = if explain_mode.is_some() {
+            Vec::new()
+        } else {
+            spans.iter().map(|span| {
+                let sql = span.text(&text);
+                let kind = text::classify(sql, connection.database_kind);
+                let transaction = txn::plan(connection.database_kind, config.mode, &kind).map_err(|what| RunError::Unsupported { what })?;
+                Ok(PlannedStmt { span: *span, kind, transaction })
+            }).collect::<Result<_, RunError>>()?
+        };
         if statements.iter().any(|p| p.kind == sql::StmtKind::CopyStdio) {
             return Err(RunError::Unsupported { what: "COPY FROM STDIN / TO STDOUT".into() });
         }
@@ -1343,6 +1351,29 @@ impl Engine {
         }
         let SessionSlot::Idle(idle) = &inner.session else { return Err(RunError::Busy) };
         let target = writes::Target { saved: &current, opened: idle.opened(), console: &config, txn: inner.txn, unasked: &inner.unasked };
+        if let Some(mode) = explain_mode {
+            let prepared = match explain::prepare(mode, current.database_kind, inner.txn, &text, &spans, &target, confirmed.as_ref()) {
+                Ok(prepared) => prepared,
+                Err(RunError::ConfirmWrites { confirmation }) => {
+                    console.publish(&mut inner, s);
+                    return Err(RunError::ConfirmWrites { confirmation });
+                }
+                Err(error) => return Err(error),
+            };
+            let run_id = s.next_run_id();
+            let entered = inner.txn;
+            let launch = explain::launch(&console, &mut inner, run_id, prepared, config.schema.clone(), current.clone(), config.database.clone(), entered)?;
+            console.results.lock().unwrap().clear();
+            inner.run = RunState::Running {
+                run_id,
+                started_at_ms: console::now_ms(),
+                statements: ranges.iter().enumerate().map(|(i, range)| StatementRun { index: i as u16, range: *range, status: StmtStatus::Pending, outputs: Vec::new() }).collect(),
+            };
+            console.publish(&mut inner, s);
+            drop(inner);
+            s.spawn(explain::run(console.clone(), s.clone(), launch));
+            return Ok(RunAccepted { run_id, statements: ranges });
+        }
         let checked = match writes::check(&target, &sent, confirmed.as_ref()) {
             Ok(checked) => checked,
             Err(confirmation) => {
@@ -1567,6 +1598,19 @@ impl Engine {
     pub fn result_cell(&self, r: ResultRef, row: u32, col: u16) -> Result<Option<String>, ResultError> {
         let set = self.shared.result_set(r).ok_or(ResultError::Gone)?;
         set.cell(row, col).ok_or(ResultError::OutOfRange)
+    }
+
+    pub fn result_plan(&self, r: ResultRef) -> Result<Plan, ResultError> {
+        let set = self.shared.result_set(r).ok_or(ResultError::Gone)?;
+        if set.meta().truncated.is_some() {
+            return Err(ResultError::NotAPlan { what: "The plan was truncated.".into() });
+        }
+        let cell = set.cell(0, 0).ok_or(ResultError::NotAPlan { what: "The result is not a plan.".into() })?;
+        drop(set);
+        let Some(json) = cell else {
+            return Err(ResultError::NotAPlan { what: "The result is not a plan.".into() });
+        };
+        plan::parse(&json).map_err(|what| ResultError::NotAPlan { what })
     }
 
     /// Writes one result to `path` as `format`. The file appears at `path` only when complete, and
@@ -2069,7 +2113,7 @@ mod tests {
         assert!(matches!(engine.console_configure(tab, unknown).await, Err(ConfigureError::UnknownConnection)));
         let r = ResultRef { tab_id: tab, run_id: RunId(1), index: 0 };
         assert!(matches!(engine.result_page(r, 0, 10), Err(ResultError::Gone)));
-        assert!(matches!(engine.console_run(tab, RunRequest::Script { text: "select 1".into(), target: RunTarget::All }, None).await, Err(RunError::NotConfigured)));
+        assert!(matches!(engine.console_run(tab, RunRequest::Script { text: "select 1".into(), target: RunTarget::All, mode: RunMode::Run }, None).await, Err(RunError::NotConfigured)));
         assert!(matches!(engine.console_commit(tab, None).await, Err(TxnError::NoTransaction)));
     }
 
@@ -2114,8 +2158,8 @@ mod tests {
         engine.shared.consoles.write().unwrap().insert(tab, legacy.clone());
         let before = serde_json::to_value(legacy.snapshot(&*legacy.inner.lock().await)).unwrap();
         for request in [
-            RunRequest::Script { text: "UPDATE dbo.target SET n=2".into(), target: RunTarget::All },
-            RunRequest::Script { text: "UPDATE dbo.target SET n=2\nGO\nSELECT 1".into(), target: RunTarget::All },
+            RunRequest::Script { text: "UPDATE dbo.target SET n=2".into(), target: RunTarget::All, mode: RunMode::Run },
+            RunRequest::Script { text: "UPDATE dbo.target SET n=2\nGO\nSELECT 1".into(), target: RunTarget::All, mode: RunMode::Run },
             RunRequest::TablePage { schema: "dbo".into(), table: "target".into(), page: 0, query: TableQuery::default() },
         ] {
             let refused = engine.console_run(tab, request, None).await;
@@ -2183,7 +2227,7 @@ mod tests {
         use std::panic::AssertUnwindSafe;
 
         async fn rows(engine: &Engine, tab: TabId, text: String) -> Vec<Vec<Option<String>>> {
-            let accepted = engine.console_run(tab, RunRequest::Script { text, target: RunTarget::All }, None).await.unwrap();
+            let accepted = engine.console_run(tab, RunRequest::Script { text, target: RunTarget::All, mode: RunMode::Run }, None).await.unwrap();
             let state = tokio::time::timeout(Duration::from_secs(15), async {
                 loop {
                     let state = engine.boot().consoles.into_iter().find(|s| s.tab_id == tab).unwrap();
@@ -2229,8 +2273,8 @@ mod tests {
                 serde_json::to_value(console.publish(&mut inner, &engine.shared)).unwrap()
             };
             for request in [
-                RunRequest::Script { text: format!("UPDATE dbo.[{name}] SET n=2 WHERE id=1"), target: RunTarget::All },
-                RunRequest::Script { text: format!("UPDATE dbo.[{name}] SET n=2 WHERE id=1\nGO\nSELECT 1"), target: RunTarget::All },
+                RunRequest::Script { text: format!("UPDATE dbo.[{name}] SET n=2 WHERE id=1"), target: RunTarget::All, mode: RunMode::Run },
+                RunRequest::Script { text: format!("UPDATE dbo.[{name}] SET n=2 WHERE id=1\nGO\nSELECT 1"), target: RunTarget::All, mode: RunMode::Run },
                 RunRequest::TablePage { schema: "dbo".into(), table: name.clone(), page: 0, query: TableQuery::default() },
             ] {
                 assert!(matches!(engine.console_run(tab, request, None).await, Err(RunError::Unsupported { .. })));
