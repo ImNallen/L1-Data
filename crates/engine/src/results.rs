@@ -178,7 +178,6 @@ impl ResultSet {
         Some(a.cell(row as usize, col as usize).map(str::to_owned))
     }
 
-    /// Full arena strings for an inclusive rectangle. The read lock ends with this call, before the caller parses.
     pub(crate) fn copy_rect(&self, rows: RowSpan, cols: ColSpan) -> Result<Vec<ColumnText>, ResultError> {
         if rows.start > rows.end || cols.start > cols.end {
             return Err(ResultError::OutOfRange);
