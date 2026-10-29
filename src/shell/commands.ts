@@ -41,7 +41,15 @@ const CLOSE_TAB: Command = {
   run: () => {
     const { screen, active, closeSettings } = ws();
     if (screen.kind === "settings") closeSettings();
-    else if (active) void closeTab(active);
+    else if (active)
+      void closeTab(active).then(() => {
+        if (ws().tabs[active]) return;
+        requestAnimationFrame(() => {
+          const selected = document.querySelector<HTMLButtonElement>('[role="tab"][aria-selected="true"]');
+          const start = document.querySelector<HTMLButtonElement>('[data-testid="start-new-query"]');
+          (selected ?? start)?.focus();
+        });
+      });
   },
 };
 
@@ -85,5 +93,5 @@ export function handleGlobalKey(e: KeyboardEvent): void {
 }
 
 export function shortcutLabel(c: Command): string {
-  return `⌘${c.shift ? "⇧" : ""}${c.key.toUpperCase()}`;
+  return MAC ? `⌘${c.shift ? "⇧" : ""}${c.key.toUpperCase()}` : `Ctrl+${c.shift ? "Shift+" : ""}${c.key.toUpperCase()}`;
 }
