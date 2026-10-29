@@ -29,6 +29,7 @@ function consoleAt(rev: number, txn: ConsoleState["txn"] = "Idle"): ConsoleState
     txnDepth: null,
     work: null,
     export: null,
+    import: null,
     run: { kind: "Idle" },
   };
 }

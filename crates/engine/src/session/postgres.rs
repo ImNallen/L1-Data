@@ -345,6 +345,34 @@ pub(super) fn notice(n: &DbError) -> OutputBody {
 
 impl PgSession {
     pub(super) async fn batch(&self, sql: &str) -> Result<(), QueryError> { self.client.batch_execute(sql).await.map_err(|e| query_failure(e, Some(sql))) }
+    pub(super) async fn import_csv(&mut self, sql: &str, mut chunks: mpsc::Receiver<Result<super::CopyChunk, ImportError>>, stop: &std::sync::atomic::AtomicBool, progress: watch::Sender<(u64, u64)>, mut emit: impl FnMut(OutputBody) + Send) -> Result<u64, ImportError> {
+        use futures_util::SinkExt;
+        use std::sync::atomic::Ordering;
+        let query = |e| ImportError::Query { error: query_failure(e, Some(sql)) };
+        let copying = async {
+            if stop.load(Ordering::Relaxed) { return Err(ImportError::Cancelled); }
+            let sink = self.client.copy_in::<_, bytes::Bytes>(sql).await.map_err(query)?;
+            tokio::pin!(sink);
+            while let Some(chunk) = chunks.recv().await {
+                let chunk = chunk?;
+                if stop.load(Ordering::Relaxed) { return Err(ImportError::Cancelled); }
+                sink.as_mut().send(bytes::Bytes::from(chunk.data)).await.map_err(query)?;
+                progress.send_replace((chunk.bytes, chunk.rows));
+            }
+            if stop.load(Ordering::Relaxed) { return Err(ImportError::Cancelled); }
+            sink.as_mut().finish().await.map_err(query)
+        };
+        tokio::pin!(copying);
+        let mut tick = tokio::time::interval(crate::console::STREAM_EMIT_INTERVAL);
+        let mut notices_open = true;
+        loop {
+            tokio::select! {
+                result = &mut copying => return if stop.load(Ordering::Relaxed) { Err(ImportError::Cancelled) } else { result },
+                _ = tick.tick() => if stop.load(Ordering::Relaxed) { return Err(ImportError::Cancelled); },
+                next = self.notices.recv(), if notices_open => match next { Some(n) => emit(notice(&n)), None => notices_open = false },
+            }
+        }
+    }
     pub(super) async fn execute_edit(&self, sql: &str) -> Result<u64, QueryError> { self.client.execute(sql, &[]).await.map_err(|e| query_failure(e, Some(sql))) }
     pub(super) fn query<'a>(&'a mut self, sql: &'a str) -> super::QueryStream<'a> {
         use futures_util::StreamExt;

@@ -26,6 +26,7 @@ function onConnection(environment: Environment | null, txn: TxnState = "Idle", d
     txnDepth: null,
     work: null,
     export: null,
+    import: null,
     run: { kind: "Idle" },
   };
   Object.assign(workspace, {
@@ -104,6 +105,7 @@ function lostSession(transaction: TransactionLoss): string {
     txnDepth: null,
     work: null,
     export: null,
+    import: null,
     run: { kind: "Idle" },
   };
   Object.assign(workspace, { tabs: { [tab.id]: tab }, active: tab.id });

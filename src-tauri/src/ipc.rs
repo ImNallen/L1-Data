@@ -163,6 +163,30 @@ pub async fn table_apply(engine: State<'_, Arc<Engine>>, tab_id: TabId, changes:
 
 #[tauri::command]
 #[specta::specta]
+pub async fn table_import_prepare(engine: State<'_, Arc<Engine>>, tab_id: TabId, target: ImportTarget, file: String) -> Result<ImportSourceId, ImportError> {
+    engine.table_import_prepare(tab_id, target, file).await
+}
+
+#[tauri::command]
+#[specta::specta]
+pub async fn table_import_preview(engine: State<'_, Arc<Engine>>, tab_id: TabId, source: ImportSourceId, header: bool) -> Result<ImportPreview, ImportError> {
+    engine.table_import_preview(tab_id, source, header).await
+}
+
+#[tauri::command]
+#[specta::specta]
+pub async fn table_import(engine: State<'_, Arc<Engine>>, tab_id: TabId, request: ImportRequest, confirmed: Option<WriteDigest>) -> Result<ImportSummary, ImportError> {
+    engine.table_import(tab_id, request, confirmed).await
+}
+
+#[tauri::command]
+#[specta::specta]
+pub async fn table_import_discard(engine: State<'_, Arc<Engine>>, tab_id: TabId, source: ImportSourceId) -> Result<(), ImportError> {
+    engine.table_import_discard(tab_id, source).await
+}
+
+#[tauri::command]
+#[specta::specta]
 pub async fn console_close(engine: State<'_, Arc<Engine>>, tab_id: TabId, force: bool) -> Result<(), DisconnectError> {
     engine.console_close(tab_id, force).await
 }

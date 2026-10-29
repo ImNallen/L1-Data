@@ -691,6 +691,7 @@ pub enum ConsoleWork {
     Probe,
     /// An `All` export streams the result's source again. Cancellable like a run.
     Export,
+    Import,
 }
 
 #[derive(Debug, Clone, Serialize, Type)]
@@ -704,6 +705,7 @@ pub struct ConsoleState {
     pub work: Option<ConsoleWork>,
     /// `Some` exactly while `work` is `Some(Export)`: both derive from the one value the session slot holds.
     pub export: Option<ExportProgress>,
+    pub import: Option<ImportProgress>,
     pub txn: TxnState,
     pub run: RunState,
 }
@@ -2237,6 +2239,79 @@ pub enum ExportError {
     ShapeChanged,
     /// Esc stopped the export before the file was in place.
     Cancelled,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Type)]
+pub struct ImportSourceId(pub Uuid);
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct ImportTarget {
+    pub db: DatabaseRef,
+    pub schema: String,
+    pub table: String,
+    pub oid: u32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct ImportRequest {
+    pub source: ImportSourceId,
+    pub header: bool,
+    pub mapping: Vec<Option<String>>,
+}
+
+#[derive(Debug, Clone, Serialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct ImportPreview {
+    pub source: ImportSourceId,
+    pub target: ImportTarget,
+    pub bytes: u64,
+    pub rows: u64,
+    pub fields: Vec<String>,
+    pub columns: Vec<ColumnInfo>,
+    pub mapping: Vec<Option<String>>,
+    pub sample: Vec<Vec<Option<String>>>,
+    pub truncated: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct ImportProgress {
+    pub source: ImportSourceId,
+    pub target: ImportTarget,
+    pub bytes: u64,
+    pub total_bytes: u64,
+    pub rows: u64,
+    pub total_rows: u64,
+    pub finishing: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct ImportSummary {
+    pub backend_pid: i32,
+    pub rows: u64,
+    pub committed: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Type)]
+#[serde(tag = "kind", rename_all_fields = "camelCase")]
+pub enum ImportError {
+    NotConfigured,
+    Unsupported,
+    Busy,
+    Gone,
+    TargetChanged,
+    TransactionAborted,
+    Cancelled,
+    Io { message: String },
+    Csv { line: u64, record: u64, message: String },
+    Mapping { message: String },
+    Connect { error: ConnectError },
+    Query { error: QueryError },
+    OutcomeUnknown { error: QueryError },
+    ConfirmWrites { confirmation: WriteConfirmation },
 }
 
 #[derive(Debug, Clone, Serialize, Type)]

@@ -125,6 +125,11 @@ routes! { e;
     console_commit(tab_id: TabId, confirmed: Option<WriteDigest>) => e.console_commit(tab_id, confirmed).await;
     console_rollback(tab_id: TabId) => e.console_rollback(tab_id).await;
     table_apply(tab_id: TabId, changes: TableChanges, confirmed: Option<WriteDigest>) => e.table_apply(tab_id, changes, confirmed).await;
+    table_import_prepare(tab_id: TabId, target: ImportTarget, file: String) => e.table_import_prepare(tab_id, target, file).await;
+    table_import_preview(tab_id: TabId, source: ImportSourceId, header: bool) => e.table_import_preview(tab_id, source, header).await;
+    table_import(tab_id: TabId, request: ImportRequest, confirmed: Option<WriteDigest>) => e.table_import(tab_id, request, confirmed).await;
+    table_import_discard(tab_id: TabId, source: ImportSourceId) => e.table_import_discard(tab_id, source).await;
+
     console_close(tab_id: TabId, force: bool) => e.console_close(tab_id, force).await;
     result_page(result_ref: ResultRef, start: u32, len: u32) => e.result_page(result_ref, start, len);
     result_cell(result_ref: ResultRef, row: u32, col: u16) => e.result_cell(result_ref, row, col);

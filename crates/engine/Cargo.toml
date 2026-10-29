@@ -20,6 +20,7 @@ name = "fake-az"
 path = "src/bin/fake_az.rs"
 
 [dependencies]
+bytes = "1"
 async-stream = "0.3"
 tiberius = { path = "../../vendor/tiberius", version = "=0.13.0", default-features = false, features = ["tds73", "rustls", "chrono"] }
 tokio-util = { version = "0.7", features = ["compat"] }
@@ -52,5 +53,4 @@ zeroize = "1"
 windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_System_Threading"] }
 
 [dev-dependencies]
-bytes = "1"
 tokio = { workspace = true, features = ["test-util"] }

@@ -14,7 +14,7 @@ function port(name: string, fallback: number): number {
 
 export default defineConfig(({ command, mode }) => {
   const serving = command === "serve" && mode !== "test";
-  const read = (name: string, fallback: number) => (serving ? port(name, fallback) : fallback);
+  const read = (name: string, fallback: number) => (serving || mode === "bridge" ? port(name, fallback) : fallback);
   return {
     plugins: [react(), tailwindcss()],
     define: { __L1_DATA_BRIDGE_URL__: JSON.stringify(`http://127.0.0.1:${read("L1_DATA_BRIDGE_PORT", 7077)}`) },

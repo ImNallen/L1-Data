@@ -3533,3 +3533,333 @@ async fn postgres_server_parameters_keep_their_runtime_arguments() {
     assert_eq!(h.scalar(tab, &format!("SELECT public.{function}(3)")).await, "3");
     h.run_ok(tab, &format!("DROP FUNCTION public.{function}(int)")).await;
 }
+
+async fn import_target(h: &Harness, table: &str) -> ImportTarget {
+    h.engine.connect(h.conn).await.unwrap();
+    let catalog = h.catalog_when(&h.db(), |c| c.relation("public", table).is_some()).await;
+    ImportTarget { db: h.db(), schema: "public".into(), table: table.into(), oid: catalog.relation("public", table).unwrap().oid }
+}
+
+async fn csv_request(h: &Harness, tab: TabId, target: &ImportTarget, text: &str, header: bool) -> ImportRequest {
+    let path = h.dir.path().join(format!("{}.csv", uuid::Uuid::new_v4()));
+    std::fs::write(&path, text).unwrap();
+    let source = h.engine.table_import_prepare(tab, target.clone(), path.to_string_lossy().into()).await.unwrap();
+    let preview = h.engine.table_import_preview(tab, source, header).await.unwrap();
+    ImportRequest { source, header, mapping: preview.mapping }
+}
+
+#[tokio::test]
+async fn csv_import_preserves_mapping_defaults_exact_values_and_prepared_bytes() {
+    let mut h = Harness::start().await;
+    let oracle = h.oracle().await;
+    let table = unique("p12_values");
+    oracle.batch_execute(&format!("CREATE TABLE {table} (id int GENERATED ALWAYS AS IDENTITY, n numeric, txt text, fallback text DEFAULT 'kept')")).await.unwrap();
+    let tab = h.sql_tab(TxnMode::AutoCommit).await;
+    let target = import_target(&h, &table).await;
+    let path = h.dir.path().join("exact.csv");
+    std::fs::write(&path, "txt,unused,n\r\n\"a,b\n雪\",skip,9007199254740993\r\n,skip,2\r\n\"\",skip,3").unwrap();
+    let source = h.engine.table_import_prepare(tab, target.clone(), path.to_string_lossy().into()).await.unwrap();
+    let preview = h.engine.table_import_preview(tab, source, true).await.unwrap();
+    assert_eq!(preview.rows, 3);
+    assert_eq!(preview.mapping, vec![Some("txt".into()), None, Some("n".into())]);
+    assert!(!preview.columns.iter().any(|c| c.name == "id"));
+    let without_header = h.engine.table_import_preview(tab, source, false).await.unwrap();
+    assert_eq!(without_header.rows, 4);
+    assert_eq!(without_header.mapping, vec![Some("n".into()), Some("txt".into()), Some("fallback".into())]);
+    std::fs::write(&path, "n\n99\n").unwrap();
+    let request = ImportRequest { source, header: true, mapping: preview.mapping };
+    let summary = h.engine.table_import(tab, request.clone(), None).await.unwrap();
+    assert_eq!((summary.rows, summary.committed), (3, true));
+    assert!(matches!(h.engine.table_import(tab, request, None).await, Err(ImportError::Gone)));
+    let rows = oracle.query(&format!("SELECT n::text,txt,fallback FROM {table} ORDER BY id"), &[]).await.unwrap();
+    assert_eq!(rows[0].get::<_, String>(0), "9007199254740993");
+    assert_eq!(rows[0].get::<_, String>(1), "a,b\n雪");
+    assert_eq!(rows[1].get::<_, Option<String>>(1), None);
+    assert_eq!(rows[2].get::<_, Option<String>>(1), Some("".into()));
+    assert!(rows.iter().all(|r| r.get::<_, String>(2) == "kept"));
+    h.run_ok(tab, "SELECT 1").await;
+    oracle.batch_execute(&format!("DROP TABLE {table}")).await.unwrap();
+}
+
+#[tokio::test]
+async fn csv_import_bad_row_and_savepoint_keep_the_prior_transaction() {
+    let mut h = Harness::start().await;
+    let oracle = h.oracle().await;
+    let table = unique("p12_atomic");
+    oracle.batch_execute(&format!("CREATE TABLE {table} (n int CHECK (n > 0))")).await.unwrap();
+    let tab = h.sql_tab(TxnMode::AutoCommit).await;
+    let target = import_target(&h, &table).await;
+    let request = csv_request(&h, tab, &target, "n\n1\n2\nwrong\n", true).await;
+    let error = h.engine.table_import(tab, request, None).await.unwrap_err();
+    assert!(matches!(&error, ImportError::Query { error } if error.context.as_ref().is_some_and(|c| c.contains("line 3"))), "{error:?}");
+    assert_eq!(count(&oracle, &table).await, 0);
+    h.run_ok(tab, &format!("BEGIN; INSERT INTO {table} VALUES (42)")).await;
+    let request = csv_request(&h, tab, &target, "n\n3\n-1\n", true).await;
+    assert!(h.engine.table_import(tab, request, None).await.is_err());
+    assert_eq!(h.console(tab).txn, TxnState::Active);
+    assert_eq!(h.scalar(tab, &format!("SELECT count(*)::text FROM {table}")).await, "1");
+    let request = csv_request(&h, tab, &target, "n\n7\n8\n", true).await;
+    assert!(!h.engine.table_import(tab, request, None).await.unwrap().committed);
+    assert_eq!(count(&oracle, &table).await, 0);
+    h.engine.console_commit(tab, None).await.unwrap();
+    assert_eq!(count(&oracle, &table).await, 3);
+    oracle.batch_execute(&format!("DROP TABLE {table}")).await.unwrap();
+}
+
+#[tokio::test]
+async fn csv_import_manual_rollback_and_production_bind_the_whole_request() {
+    let h = Harness::start().await;
+    let oracle = h.oracle().await;
+    let table = unique("p12_guard");
+    oracle.batch_execute(&format!("CREATE TABLE {table} (a int, b int)")).await.unwrap();
+    let tab = h.sql_tab(TxnMode::Manual).await;
+    let target = import_target(&h, &table).await;
+    let request = csv_request(&h, tab, &target, "a,b\n1,2\n", true).await;
+    assert!(!h.engine.table_import(tab, request, None).await.unwrap().committed);
+    assert_eq!(h.console(tab).txn, TxnState::Active);
+    h.engine.console_rollback(tab).await.unwrap();
+    assert_eq!(count(&oracle, &table).await, 0);
+    set_environment(&h, Some(Environment::Production)).await;
+    let request = csv_request(&h, tab, &target, "a,b\n3,4\n", true).await;
+    let Err(ImportError::ConfirmWrites { confirmation }) = h.engine.table_import(tab, request.clone(), None).await else { panic!("Production must ask") };
+    assert_eq!(count(&oracle, &table).await, 0);
+    assert_eq!(confirmation.sends.count, 1);
+    assert!(confirmation.sends.statements[0].starts_with("COPY"));
+    let swapped = ImportRequest { mapping: vec![Some("b".into()), Some("a".into())], ..request.clone() };
+    assert!(matches!(h.engine.table_import(tab, swapped, Some(confirmation.digest.clone())).await, Err(ImportError::ConfirmWrites { .. })));
+    assert!(!h.engine.table_import(tab, request, Some(confirmation.digest)).await.unwrap().committed);
+    h.engine.console_commit(tab, None).await.unwrap();
+    assert_eq!(count(&oracle, &table).await, 1);
+    let request = csv_request(&h, tab, &target, "a,b\n5,6\n", true).await;
+    let Err(ImportError::ConfirmWrites { confirmation }) = h.engine.table_import(tab, request.clone(), None).await else { panic!() };
+    h.engine.table_import_discard(tab, request.source).await.unwrap();
+    assert!(matches!(h.engine.table_import(tab, request, Some(confirmation.digest)).await, Err(ImportError::Gone)));
+    assert_eq!(count(&oracle, &table).await, 1);
+    oracle.batch_execute(&format!("DROP TABLE {table}")).await.unwrap();
+}
+
+#[tokio::test]
+async fn csv_import_preparation_replacement_discard_close_and_invalid_files() {
+    let h = Harness::start().await;
+    let oracle = h.oracle().await;
+    let table = unique("p12_prepare");
+    oracle.batch_execute(&format!("CREATE TABLE {table} (n int)")).await.unwrap();
+    let tab = h.sql_tab(TxnMode::AutoCommit).await;
+    let target = import_target(&h, &table).await;
+    let path = h.dir.path().join("large.csv");
+    std::fs::write(&path, "1\n".repeat(1_000_000)).unwrap();
+    let first = h.engine.table_import_prepare(tab, target.clone(), path.to_string_lossy().into()).await.unwrap();
+    let second = h.engine.table_import_prepare(tab, target.clone(), path.to_string_lossy().into()).await.unwrap();
+    assert!(matches!(h.engine.table_import_preview(tab, first, false).await, Err(ImportError::Gone)));
+    h.engine.table_import_discard(tab, first).await.unwrap();
+    h.engine.table_import_discard(tab, second).await.unwrap();
+    assert!(matches!(h.engine.table_import_preview(tab, second, false).await, Err(ImportError::Gone)));
+    let third = h.engine.table_import_prepare(tab, target.clone(), path.to_string_lossy().into()).await.unwrap();
+    h.engine.console_close(tab, true).await.unwrap();
+    assert!(matches!(h.engine.table_import_preview(tab, third, false).await, Err(ImportError::Gone)));
+    let tab = h.sql_tab(TxnMode::AutoCommit).await;
+    for bytes in [b"n\n\"bad".as_slice(), b"n\n1,2", b"n\n\xff", b"n\na\0"] {
+        std::fs::write(&path, bytes).unwrap();
+        let source = h.engine.table_import_prepare(tab, target.clone(), path.to_string_lossy().into()).await.unwrap();
+        assert!(matches!(h.engine.table_import_preview(tab, source, true).await, Err(ImportError::Csv { .. })));
+    }
+    let source = h.engine.table_import_prepare(tab, target, h.dir.path().to_string_lossy().into()).await.unwrap();
+    assert!(matches!(h.engine.table_import_preview(tab, source, false).await, Err(ImportError::Io { .. })));
+    oracle.batch_execute(&format!("DROP TABLE {table}")).await.unwrap();
+}
+
+#[tokio::test]
+async fn csv_import_cancel_is_busy_atomic_and_survives_a_dropped_waiter() {
+    let mut h = Harness::start().await;
+    let oracle = h.oracle().await;
+    let table = unique("p12_cancel");
+    oracle.batch_execute(&format!("CREATE TABLE {table} (n int); CREATE FUNCTION {table}_slow() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN PERFORM pg_sleep(0.001); RETURN NEW; END $$; CREATE TRIGGER slow BEFORE INSERT ON {table} FOR EACH ROW EXECUTE FUNCTION {table}_slow()" )).await.unwrap();
+    let tab = h.sql_tab(TxnMode::AutoCommit).await;
+    let target = import_target(&h, &table).await;
+    let request = csv_request(&h, tab, &target, &"1\n".repeat(100_000), false).await;
+    let engine = h.engine.clone();
+    let waiter = tokio::spawn(async move { engine.table_import(tab, request, None).await });
+    let start = Instant::now();
+    loop {
+        if h.console(tab).import.is_some_and(|p| p.bytes > 0) { break; }
+        assert!(start.elapsed() < Duration::from_secs(10));
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert!(matches!(h.engine.console_run(tab, script("SELECT 1"), None).await, Err(RunError::Busy)));
+    assert!(matches!(h.engine.console_commit(tab, None).await, Err(TxnError::Busy)));
+    waiter.abort();
+    h.engine.console_cancel(tab).await;
+    let start = Instant::now();
+    while h.console(tab).work.is_some() {
+        assert!(start.elapsed() < Duration::from_secs(12));
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert_eq!(count(&oracle, &table).await, 0);
+    assert_eq!(h.console(tab).txn, TxnState::Idle);
+    h.run_ok(tab, "SELECT 1").await;
+    oracle.batch_execute(&format!("DROP TABLE {table}; DROP FUNCTION {table}_slow()")).await.unwrap();
+}
+
+#[tokio::test]
+async fn csv_import_drafts_end_on_reconfigure_disconnect_and_reject_fifos() {
+    let h = Harness::start().await;
+    let oracle = h.oracle().await;
+    let table = unique("p12_lifecycle");
+    oracle.batch_execute(&format!("CREATE TABLE {table} (n int)")).await.unwrap();
+    let tab = h.sql_tab(TxnMode::AutoCommit).await;
+    let target = import_target(&h, &table).await;
+    let request = csv_request(&h, tab, &target, "n\n1\n", true).await;
+    h.engine.console_configure(tab, ConsoleConfig { connection_id: h.conn, database: h.database.clone(), schema: None, mode: TxnMode::Manual }).await.unwrap();
+    assert!(matches!(h.engine.table_import(tab, request, None).await, Err(ImportError::Gone)));
+    let request = csv_request(&h, tab, &target, "n\n1\n", true).await;
+    h.engine.disconnect(h.conn, true).await.unwrap();
+    assert!(matches!(h.engine.table_import_preview(tab, request.source, true).await, Err(ImportError::Gone)));
+    #[cfg(unix)] {
+        let fifo = h.dir.path().join("pipe.csv");
+        assert!(std::process::Command::new("mkfifo").arg(&fifo).status().unwrap().success());
+        let source = h.engine.table_import_prepare(tab, target, fifo.to_string_lossy().into()).await.unwrap();
+        let result = tokio::time::timeout(Duration::from_secs(2), h.engine.table_import_preview(tab, source, false)).await.unwrap();
+        assert!(matches!(result, Err(ImportError::Io { .. })), "{result:?}");
+    }
+    oracle.batch_execute(&format!("DROP TABLE {table}")).await.unwrap();
+}
+
+#[tokio::test]
+async fn csv_import_pending_writes_and_stale_production_target_remain_guarded() {
+    let h = Harness::start().await;
+    let oracle = h.oracle().await;
+    let table = unique("p12_held");
+    oracle.batch_execute(&format!("CREATE TABLE {table} (n int)")).await.unwrap();
+    let tab = h.sql_tab(TxnMode::Manual).await;
+    let target = import_target(&h, &table).await;
+    let request = csv_request(&h, tab, &target, "n\n7\n", true).await;
+    h.engine.table_import(tab, request, None).await.unwrap();
+    set_environment(&h, Some(Environment::Production)).await;
+    let Err(TxnError::ConfirmWrites { confirmation }) = h.engine.console_commit(tab, None).await else { panic!("pending import must be covered") };
+    assert_eq!(confirmation.holds.count, 1);
+    h.engine.console_rollback(tab).await.unwrap();
+    let request = csv_request(&h, tab, &target, "n\n8\n", true).await;
+    let Err(ImportError::ConfirmWrites { confirmation }) = h.engine.table_import(tab, request.clone(), None).await else { panic!() };
+    set_environment(&h, Some(Environment::Staging)).await;
+    assert!(matches!(h.engine.table_import(tab, request, Some(confirmation.digest)).await, Err(ImportError::TargetChanged)));
+    assert_eq!(count(&oracle, &table).await, 0);
+    oracle.batch_execute(&format!("DROP TABLE {table}")).await.unwrap();
+}
+
+#[tokio::test]
+async fn csv_import_rejects_a_replacement_relation_even_with_a_stale_catalog() {
+    let h = Harness::start().await;
+    let oracle = h.oracle().await;
+    let table = unique("p12_oid");
+    oracle.batch_execute(&format!("CREATE TABLE {table} (n int)")).await.unwrap();
+    let tab = h.sql_tab(TxnMode::AutoCommit).await;
+    let target = import_target(&h, &table).await;
+    let request = csv_request(&h, tab, &target, "n\n1\n", true).await;
+    oracle.batch_execute(&format!("DROP TABLE {table}; CREATE TABLE {table} (n int)")).await.unwrap();
+    assert!(matches!(h.engine.table_import(tab, request, None).await, Err(ImportError::TargetChanged)));
+    assert_eq!(count(&oracle, &table).await, 0);
+    assert_eq!(h.console(tab).txn, TxnState::Idle);
+    oracle.batch_execute(&format!("DROP TABLE {table}")).await.unwrap();
+}
+
+#[tokio::test]
+async fn csv_import_close_cannot_publish_into_a_reopened_tab() {
+    let mut h = Harness::start().await;
+    let oracle = h.oracle().await;
+    let table = unique("p12_orphan");
+    oracle.batch_execute(&format!("CREATE TABLE {table} (n int)")).await.unwrap();
+    let tab = h.sql_tab(TxnMode::AutoCommit).await;
+    let target = import_target(&h, &table).await;
+    oracle.batch_execute(&format!("BEGIN; LOCK TABLE {table} IN ACCESS EXCLUSIVE MODE")).await.unwrap();
+    let request = csv_request(&h, tab, &target, "n\n1\n", true).await;
+    let engine = h.engine.clone();
+    let duplicate = request.clone();
+    let worker = tokio::spawn(async move { engine.table_import(tab, request, None).await });
+    let until = Instant::now();
+    while h.console(tab).work != Some(ConsoleWork::Import) {
+        assert!(until.elapsed() < Duration::from_secs(5));
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert!(matches!(h.engine.table_import(tab, duplicate, None).await, Err(ImportError::Gone)));
+    h.engine.console_close(tab, true).await.unwrap();
+    h.engine.console_configure(tab, ConsoleConfig { connection_id: h.conn, database: h.database.clone(), schema: None, mode: TxnMode::AutoCommit }).await.unwrap();
+    h.run_ok(tab, "SELECT 1").await;
+    oracle.batch_execute("ROLLBACK").await.unwrap();
+    assert!(matches!(worker.await.unwrap(), Err(ImportError::Gone)));
+    assert_eq!(h.console(tab).work, None);
+    assert!(matches!(h.console(tab).run, RunState::Finished { outcome: RunOutcome::Ok, .. }));
+    assert_eq!(count(&oracle, &table).await, 0);
+    oracle.batch_execute(&format!("DROP TABLE {table}")).await.unwrap();
+}
+
+#[tokio::test]
+async fn csv_import_lost_cleanup_reports_unknown_and_retires_the_session() {
+    let h = Harness::start().await;
+    let oracle = h.oracle().await;
+    let table = unique("p12_lost");
+    oracle.batch_execute(&format!("CREATE TABLE {table} (n int)")).await.unwrap();
+    let tab = h.sql_tab(TxnMode::AutoCommit).await;
+    let target = import_target(&h, &table).await;
+    oracle.batch_execute(&format!("BEGIN; LOCK TABLE {table} IN ACCESS EXCLUSIVE MODE")).await.unwrap();
+    let request = csv_request(&h, tab, &target, "n\n1\n", true).await;
+    let engine = h.engine.clone();
+    let worker = tokio::spawn(async move { engine.table_import(tab, request, None).await });
+    let until = Instant::now();
+    let pid = loop {
+        let state = h.console(tab);
+        if state.work == Some(ConsoleWork::Import) && let SessionState::Open { backend_pid } = state.session { break backend_pid; }
+        assert!(until.elapsed() < Duration::from_secs(5));
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    };
+    loop {
+        let row = oracle.query_one("SELECT wait_event_type FROM pg_stat_activity WHERE pid = $1", &[&pid]).await.unwrap();
+        if row.get::<_, Option<String>>(0).as_deref() == Some("Lock") { break; }
+        assert!(until.elapsed() < Duration::from_secs(5));
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    oracle.query_one("SELECT pg_terminate_backend($1)", &[&pid]).await.unwrap();
+    oracle.batch_execute("ROLLBACK").await.unwrap();
+    assert!(matches!(worker.await.unwrap(), Err(ImportError::OutcomeUnknown { .. })));
+    assert!(matches!(h.console(tab).session, SessionState::Lost { transaction: TransactionLoss::Unknown, .. }));
+    assert_eq!(count(&oracle, &table).await, 0);
+    oracle.batch_execute(&format!("DROP TABLE {table}")).await.unwrap();
+}
+
+#[tokio::test]
+async fn csv_import_quotes_identifiers_and_uses_utf8_despite_session_settings() {
+    let mut h = Harness::start().await;
+    let oracle = h.oracle().await;
+    let table = unique("p12_quoted_\\'\"");
+    let quoted = format!("\"{}\"", table.replace('"', "\"\""));
+    oracle.batch_execute(&format!("CREATE TABLE {quoted} (txt text)")).await.unwrap();
+    let tab = h.sql_tab(TxnMode::AutoCommit).await;
+    let target = import_target(&h, &table).await;
+    h.run_ok(tab, "SET standard_conforming_strings = off; SET client_encoding = 'LATIN1'").await;
+    let request = csv_request(&h, tab, &target, "txt\n雪\\path\n", true).await;
+    assert_eq!(h.engine.table_import(tab, request, None).await.unwrap().rows, 1);
+    let row = oracle.query_one(&format!("SELECT txt FROM {quoted}"), &[]).await.unwrap();
+    assert_eq!(row.get::<_, String>(0), "雪\\path");
+    oracle.batch_execute(&format!("DROP TABLE {quoted}")).await.unwrap();
+}
+
+#[tokio::test]
+async fn csv_import_round_trips_the_existing_exporter() {
+    let mut h = Harness::start().await;
+    let oracle = h.oracle().await;
+    let table = unique("p12_export");
+    let columns = "id,b,n,t,vc,jb,arr_t,m,tstz";
+    oracle.batch_execute(&format!("CREATE TABLE {table} AS SELECT {columns} FROM lab.type_zoo WITH NO DATA")).await.unwrap();
+    let tab = h.sql_tab(TxnMode::AutoCommit).await;
+    let target = import_target(&h, &table).await;
+    let state = h.run_ok(tab, &format!("SELECT {columns} FROM lab.type_zoo ORDER BY id")).await;
+    let meta = Harness::result(&state, 0);
+    let path = h.dir.path().join("round-trip.csv");
+    let exported = h.engine.result_export(meta.r#ref, ExportFormat::Csv, ExportScope::Loaded, path.to_string_lossy().into()).await.unwrap();
+    let source = h.engine.table_import_prepare(tab, target, path.to_string_lossy().into()).await.unwrap();
+    let preview = h.engine.table_import_preview(tab, source, true).await.unwrap();
+    let imported = h.engine.table_import(tab, ImportRequest { source, header: true, mapping: preview.mapping }, None).await.unwrap();
+    assert_eq!(imported.rows, exported.rows);
+    let row = oracle.query_one(&format!("SELECT count(*) FROM ((SELECT {columns} FROM lab.type_zoo EXCEPT ALL SELECT {columns} FROM {table}) UNION ALL (SELECT {columns} FROM {table} EXCEPT ALL SELECT {columns} FROM lab.type_zoo)) differences"), &[]).await.unwrap();
+    assert_eq!(row.get::<_, i64>(0), 0);
+    oracle.batch_execute(&format!("DROP TABLE {table}")).await.unwrap();
+}

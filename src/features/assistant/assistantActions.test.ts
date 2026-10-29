@@ -92,6 +92,7 @@ it("sends the active tab's text, cursor, and the result its grid shows when atta
     txnDepth: null,
     work: null,
     export: null,
+    import: null,
     run,
   });
 

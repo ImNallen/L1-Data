@@ -14,7 +14,7 @@ export function isBusy(console: ConsoleState | undefined): boolean {
 }
 
 export function canCancel(console: ConsoleState | undefined): boolean {
-  return console?.work === "Count" || console?.work === "Export" || isRunning(console);
+  return console?.work === "Count" || console?.work === "Export" || console?.work === "Import" || isRunning(console);
 }
 
 export type Tone = "live" | "pending" | "off" | "error";

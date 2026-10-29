@@ -92,6 +92,16 @@ pub fn check(target: &Target, statements: &[&str], confirmed: Option<&WriteDiges
     Err(confirmation(target, sends, digest))
 }
 
+pub fn check_import(target: &Target, copy: &str, statements: &[&str], descriptor: &str, confirmed: Option<&WriteDigest>) -> Result<WritesChecked, WriteConfirmation> {
+    if !target.on_production() { return Ok(admit(target, true)); }
+    let bound: Vec<&str> = statements.iter().copied().chain(std::iter::once(descriptor)).collect();
+    let digest = target.digest(&bound);
+    if confirmed == Some(&digest) { return Ok(admit(target, true)); }
+    let mut sends = WriteList::default();
+    sends.add(copy);
+    Err(confirmation(target, sends, digest))
+}
+
 fn confirmation(target: &Target, sends: WriteList, digest: WriteDigest) -> WriteConfirmation {
     let kind = target.saved.database_kind;
     WriteConfirmation {

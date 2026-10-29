@@ -59,6 +59,7 @@ L1 Data is a desktop IDE for PostgreSQL and Microsoft SQL Server, built with Tau
 
 ### Results and table data
 
+- Import CSV into an existing PostgreSQL table from its context menu. Preview a prepared snapshot, choose a header, and map or skip fields. Unquoted empty fields become NULL, quoted empty fields stay empty text, and unmapped columns use defaults. Import shows byte progress and supports Cancel. Errors and cancellation roll back the whole import. Manual mode keeps the rows pending for Commit or Rollback, and Production asks before importing.
 - SQL Server table browsing preserves exact decimal and money values, Unicode, binary values, and temporal precision. An arbitrary query returning raw `money` must cast it to `decimal(19,4)` because the driver otherwise rounds it through floating point. Unsupported value conversions fail explicitly.
 - SQL Server filters compare typed values and search the text shown in the grid. Equality filters for text, ntext, and XML compare serialized text. Text searches on floating-point columns or with excessively long patterns are refused with guidance.
 - The results grid streams large results in pages. Select cells and press `⌘C` to copy them as TSV. Press `Enter`, or click the **…** on a cut-off value, to see the full value.
@@ -176,6 +177,10 @@ A debug binary rewrites `src/ipc/bindings.ts` each time it starts, so `pnpm taur
 The `claude-smoke` test needs the `claude` CLI installed and signed in, and the Docker database. It spends three Haiku turns on your Claude subscription, and one of them waits 75 seconds for an approval.
 
 `pnpm screenshot` starts its own Postgres container on port 5434. It needs `swift`, `osascript`, `cliclick`, and `python3`, free ports 7077, 5173, and 5434, and Accessibility and Screen Recording permission for the terminal.
+
+### CSV import performance
+
+To measure CSV import in a production frontend against a release engine, build `dev-bridge` with `cargo build --release -p dev-bridge`. Build the browser bundle with `L1_DATA_BRIDGE_PORT=7388 pnpm exec vite build --mode bridge --outDir /tmp/l1-import-web`, then serve it with `pnpm exec vite preview --outDir /tmp/l1-import-web --port 5485 --strictPort`. Start that bridge with `L1_DATA_BRIDGE_PORT=7388 L1_DATA_VITE_PORT=5485 L1_DATA_DATA_DIR=$(mktemp -d) target/release/dev-bridge`. Open its page in a named agent-browser session and run `python3 dev/import-smoke.py --bridge http://127.0.0.1:7388 --perf --ui-session <session>`. The script alternates five psql COPY and UI imports into fresh tables, verifies counts, and records preparation separately. Without `--ui-session`, it measures the engine request through its completed reply. Normal production builds do not include the browser bridge.
 
 ## Environment variables
 

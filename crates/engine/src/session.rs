@@ -38,6 +38,12 @@ impl CancelHandle {
     }
 }
 
+pub struct CopyChunk {
+    pub data: Vec<u8>,
+    pub bytes: u64,
+    pub rows: u64,
+}
+
 pub enum QueryEvent {
     Prepared,
     Columns(Vec<ColumnMeta>),
@@ -162,6 +168,12 @@ impl Session {
         match &mut self.driver {
             Driver::Postgres(p) => p.batch(sql).await,
             Driver::SqlServer(s) => s.batch(sql).await,
+        }
+    }
+    pub async fn import_csv(&mut self, sql: &str, chunks: tokio::sync::mpsc::Receiver<Result<CopyChunk, ImportError>>, stop: &std::sync::atomic::AtomicBool, progress: watch::Sender<(u64, u64)>, notice: impl FnMut(OutputBody) + Send) -> Result<u64, ImportError> {
+        match &mut self.driver {
+            Driver::Postgres(p) => p.import_csv(sql, chunks, stop, progress, notice).await,
+            Driver::SqlServer(_) => Err(ImportError::Unsupported),
         }
     }
     pub async fn execute_edit(&mut self, edit: &Edit) -> Result<u64, QueryError> {
