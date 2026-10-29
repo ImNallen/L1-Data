@@ -6,7 +6,7 @@ import { AskOverlay } from "../../shell/Overlays";
 import { useWorkspace, type Screen } from "../../state/workspace";
 import { DialogSurface, IconButton } from "../../ui/primitives";
 import { parseQuery } from "../../ui/textMatch";
-import { SECTION_ACTIONS, SearchResults, SectionBody } from "./sections";
+import { SearchResults, SectionBody } from "./sections";
 import { SettingsSidebarBody } from "./SettingsSidebarBody";
 import { filterSettings, sectionLabel } from "./settingsIndex";
 
@@ -56,7 +56,6 @@ export function SettingsDialog() {
 export function SettingsPage({ screen }: { screen: SettingsScreen }) {
   const tokens = parseQuery(screen.query);
   const matches = tokens.length > 0 ? filterSettings(tokens) : null;
-  const Action = matches ? undefined : SECTION_ACTIONS[screen.section];
   return (
     <>
       <aside className="flex w-[200px] shrink-0 flex-col border-r border-control bg-sidebar pt-4">
@@ -69,7 +68,6 @@ export function SettingsPage({ screen }: { screen: SettingsScreen }) {
             <span className="text-faint">/</span>
             <span className="truncate font-medium text-fg">{matches ? "Search results" : sectionLabel(screen.section)}</span>
           </h1>
-          {Action && <Action />}
           <Dialog.Close asChild>
             <IconButton data-testid="settings-close" aria-label="Close settings" title="Close settings">
               <XIcon size={16} />

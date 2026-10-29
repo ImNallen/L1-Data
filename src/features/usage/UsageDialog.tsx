@@ -1,7 +1,8 @@
 import { RefreshCwIcon, RotateCcwIcon, TriangleAlertIcon } from "lucide-react";
 import type { ReactNode } from "react";
 import type { LimitLevel, LimitSource, LimitWindow, SourceLimits } from "../../ipc/bindings";
-import { cx, IconButton } from "../../ui/primitives";
+import { useWorkspace } from "../../state/workspace";
+import { cx, IconButton, Modal } from "../../ui/primitives";
 import { useNow } from "../../ui/useNow";
 import { SOURCE_ICONS } from "../assistant/providerIcons";
 import { refreshLimits, useLimits, useLimitsReads } from "./useLimits";
@@ -27,6 +28,24 @@ const LEVEL_NOTE = {
   ),
 } satisfies Record<LimitLevel, ReactNode>;
 
+export function UsageDialog() {
+  const overlay = useWorkspace((s) => s.overlay);
+  const close = useWorkspace((s) => s.close);
+  const open = overlay.kind === "usage";
+  return (
+    <Modal open={open} onOpenChange={(value) => !value && close()} title="Usage" width={640} testId="usage-dialog">
+      {open && (
+        <>
+          <div className="mb-4 flex justify-end">
+            <UsageRefresh />
+          </div>
+          <UsageLimits />
+        </>
+      )}
+    </Modal>
+  );
+}
+
 export function UsageRefresh() {
   const { report, loading } = useLimits();
   const now = useNow(report !== null, 30_000);
@@ -42,12 +61,12 @@ export function UsageRefresh() {
   );
 }
 
-export function UsageLimitsSetting() {
+export function UsageLimits() {
   useLimitsReads();
   const { report, error } = useLimits();
   const now = useNow(report !== null, 30_000);
   return (
-    <section data-setting="usageLimits" aria-label="Usage limits" className="flex flex-col gap-6">
+    <section aria-label="Usage limits" className="flex flex-col gap-6">
       {error && (
         <p data-testid="usage-error" className="px-1 text-ui-12 text-danger">
           {error}

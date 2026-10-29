@@ -66,18 +66,6 @@ export const SETTINGS_INDEX = [
     ],
   },
   {
-    id: "usage",
-    label: "Usage",
-    settings: [
-      {
-        id: "usageLimits",
-        label: "Limits",
-        group: null,
-        keywords: "usage limits quota rate remaining subscription session weekly reset claude codex chatgpt plan",
-      },
-    ],
-  },
-  {
     id: "about",
     label: "About",
     settings: [

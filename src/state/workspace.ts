@@ -56,6 +56,7 @@ export type SavedEntry = { kind: "browse" } | { kind: "name"; id: SavedQueryId }
 export type Overlay =
   | { kind: "none" }
   | { kind: "history" }
+  | { kind: "usage" }
   | { kind: "saved"; entry: SavedEntry }
   | { kind: "connection"; editing: ConnectionId | null }
   | { kind: "cell"; title: string; value: string | null }
