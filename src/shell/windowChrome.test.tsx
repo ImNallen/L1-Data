@@ -248,7 +248,8 @@ it("toggles the results with no tabs open", () => {
   const shown = renderToStaticMarkup(<AppLayout />);
   expect(shown).toContain('data-testid="no-tabs"');
   expect(shown).toContain('data-testid="results"');
-  expect(shown).toContain("Run a statement with ⌘↵ to see its result here.");
+  expect(shown).toContain("Results appear here");
+  expect(shown).toContain("Run a statement with");
 
   withLayout({ results: false });
   const hidden = renderToStaticMarkup(<AppLayout />);
