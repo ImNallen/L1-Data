@@ -173,7 +173,7 @@ it.each(
       : FilteredSchemaNode({
           path: "unrelated/display/path",
           db: source,
-          match: { name: schema.name, relations: [], functions: [{ fn, ranges: [] }] },
+          match: { name: schema.name, relations: [], functions: [{ fn, ranges: [] }], sequences: [], types: [], synonyms: [] },
           expanded,
         });
   const rows = routineRows(node);

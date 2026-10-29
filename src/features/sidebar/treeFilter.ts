@@ -1,4 +1,16 @@
-import type { ColumnInfo, ConnectionConfig, ConnectionId, ConnectionState, DatabaseRef, FunctionInfo, Relation } from "../../ipc/bindings";
+import type {
+  ColumnInfo,
+  ConnectionConfig,
+  ConnectionId,
+  ConnectionState,
+  DatabaseRef,
+  ExtensionInfo,
+  FunctionInfo,
+  Relation,
+  SequenceInfo,
+  SynonymInfo,
+  TypeInfo,
+} from "../../ipc/bindings";
 import { isViewKind, viewFor, type CatalogView } from "../../state/catalog";
 import type { DbKey } from "../../state/dbKey";
 import { instanceOf } from "../../state/live";
@@ -9,8 +21,19 @@ export type FilteredColumn = { column: ColumnInfo; ranges: TextRange[] };
 /** `ranges` is null when the relation shows only as the parent of a matching column. */
 export type FilteredRelation = { rel: Relation; ranges: TextRange[] | null; columns: FilteredColumn[] };
 export type FilteredFunction = { fn: FunctionInfo; ranges: TextRange[] };
-export type FilteredSchema = { name: string; relations: FilteredRelation[]; functions: FilteredFunction[] };
-export type FilteredDatabase = { db: DatabaseRef; schemas: FilteredSchema[] };
+export type FilteredSequence = { seq: SequenceInfo; ranges: TextRange[] };
+export type FilteredType = { type: TypeInfo; ranges: TextRange[] };
+export type FilteredSynonym = { syn: SynonymInfo; ranges: TextRange[] };
+export type FilteredExtension = { ext: ExtensionInfo; ranges: TextRange[] };
+export type FilteredSchema = {
+  name: string;
+  relations: FilteredRelation[];
+  functions: FilteredFunction[];
+  sequences: FilteredSequence[];
+  types: FilteredType[];
+  synonyms: FilteredSynonym[];
+};
+export type FilteredDatabase = { db: DatabaseRef; schemas: FilteredSchema[]; extensions: FilteredExtension[] };
 export type FilteredConnection = { config: ConnectionConfig; databases: FilteredDatabase[] };
 /** `count` is the matched objects. `searched` is how many catalogs the filter could search. */
 export type TreeFilter = { connections: FilteredConnection[]; count: number; searched: number };
@@ -55,10 +78,30 @@ export function filterTree(
             const ranges = matchRanges(tokens, fn.name);
             return ranges ? [{ fn, ranges }] : [];
           });
-          count += relations.reduce((n, r) => n + (r.ranges ? 1 : 0) + r.columns.length, 0) + functions.length;
-          return relations.length > 0 || functions.length > 0 ? [{ name, relations, functions }] : [];
+          const sequences = schema.sequences.flatMap((seq) => {
+            const ranges = matchRanges(tokens, seq.name);
+            return ranges ? [{ seq, ranges }] : [];
+          });
+          const types = schema.types.flatMap((type) => {
+            const ranges = matchRanges(tokens, type.name);
+            return ranges ? [{ type, ranges }] : [];
+          });
+          const synonyms = schema.synonyms.flatMap((syn) => {
+            const ranges = matchRanges(tokens, syn.name);
+            return ranges ? [{ syn, ranges }] : [];
+          });
+          count +=
+            relations.reduce((n, r) => n + (r.ranges ? 1 : 0) + r.columns.length, 0) + functions.length + sequences.length + types.length + synonyms.length;
+          return relations.length > 0 || functions.length > 0 || sequences.length > 0 || types.length > 0 || synonyms.length > 0
+            ? [{ name, relations, functions, sequences, types, synonyms }]
+            : [];
         });
-        return schemas.length > 0 ? [{ db, schemas }] : [];
+        const extensions = view.catalog.extensions.flatMap((ext) => {
+          const ranges = matchRanges(tokens, ext.name);
+          return ranges ? [{ ext, ranges }] : [];
+        });
+        count += extensions.length;
+        return schemas.length > 0 || extensions.length > 0 ? [{ db, schemas, extensions }] : [];
       });
       return databases.length > 0 ? [{ config, databases }] : [];
     });
