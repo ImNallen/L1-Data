@@ -82,7 +82,17 @@ export function shopCatalog(connectionId: ConnectionId, version: number): Catalo
     version,
     defaultSchema: "public",
     schemas: [
-      { name: "lab", quoted: "lab", system: false, tableCount: tableCount(LAB), relations: LAB.map((s, i) => relation(s, 16_900 + i, "lab")), functions: [] },
+      {
+        name: "lab",
+        quoted: "lab",
+        system: false,
+        tableCount: tableCount(LAB),
+        relations: LAB.map((s, i) => relation(s, 16_900 + i, "lab")),
+        functions: [],
+        sequences: [],
+        types: [],
+        synonyms: [],
+      },
       {
         name: "public",
         quoted: "public",
@@ -90,7 +100,11 @@ export function shopCatalog(connectionId: ConnectionId, version: number): Catalo
         tableCount: tableCount(SHOP),
         relations: SHOP.map((s, i) => relation(s, 16_400 + i, "public")),
         functions: SHOP_FUNCTIONS,
+        sequences: [],
+        types: [],
+        synonyms: [],
       },
     ],
+    extensions: [],
   };
 }

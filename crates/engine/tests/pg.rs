@@ -1764,12 +1764,58 @@ async fn default_view_shows_home_with_all_its_schemas() {
     let lab = catalog.schemas.iter().find(|s| s.name == "lab").unwrap();
     assert_eq!((lab.system, lab.table_count, lab.relations.len()), (false, 1, 1));
     let public = catalog.schemas.iter().find(|s| s.name == "public").unwrap();
-    let tables = public.relations.iter().filter(|r| !matches!(r.kind, RelKind::View | RelKind::MaterializedView)).count();
-    assert_eq!(public.table_count as usize, tables, "views are relations but not tables");
-    assert!(public.relations.len() >= tables + 3, "the seed's three views are listed");
-    let system: Vec<(&str, bool, usize, usize)> =
-        catalog.schemas.iter().filter(|s| s.system).map(|s| (s.name.as_str(), s.table_count > 0, s.relations.len(), s.functions.len())).collect();
-    assert_eq!(system, [("information_schema", true, 0, 0), ("pg_catalog", true, 0, 0)], "system schemas are listed with a count but not loaded");
+    let tables = public
+        .relations
+        .iter()
+        .filter(|r| !matches!(r.kind, RelKind::View | RelKind::MaterializedView))
+        .count();
+    assert_eq!(
+        public.table_count as usize, tables,
+        "views are relations but not tables"
+    );
+    assert!(
+        public.relations.len() >= tables + 3,
+        "the seed's three views are listed"
+    );
+    let mood = lab
+        .types
+        .iter()
+        .find(|t| t.name == "mood")
+        .expect("lab.mood");
+    assert_eq!(
+        mood.kind,
+        TypeKind::Enum {
+            labels: vec!["sad".into(), "ok".into(), "happy".into()]
+        }
+    );
+    assert!(
+        catalog.extensions.iter().any(|e| e.name == "plpgsql"),
+        "a normal shop load lists extensions"
+    );
+    let system: Vec<(&str, bool, usize, usize, usize, usize, usize)> = catalog
+        .schemas
+        .iter()
+        .filter(|s| s.system)
+        .map(|s| {
+            (
+                s.name.as_str(),
+                s.table_count > 0,
+                s.relations.len(),
+                s.functions.len(),
+                s.sequences.len(),
+                s.types.len(),
+                s.synonyms.len(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        system,
+        [
+            ("information_schema", true, 0, 0, 0, 0, 0),
+            ("pg_catalog", true, 0, 0, 0, 0, 0)
+        ],
+        "system schemas are listed with a count but not loaded"
+    );
 }
 
 #[tokio::test]
@@ -1841,13 +1887,70 @@ async fn probe_counts_schemas_of_a_database_without_a_slot() {
 async fn showing_pg_catalog_loads_its_relations_and_no_functions() {
     let h = Harness::start().await;
     h.engine.connect(h.conn).await.unwrap();
-    let initial = h.catalog_when(&h.db(), |_| true).await.version;
-    h.edit_view(ViewEdit::ShowSystemSchemas { database: "shop".into(), show: true }).await;
-    h.edit_view(ViewEdit::Schema { database: "shop".into(), name: "pg_catalog".into(), shown: true }).await;
-    let loaded = h.catalog_when(&h.db(), |c| c.version > initial && c.schemas.iter().any(|s| s.name == "pg_catalog" && !s.relations.is_empty())).await;
-    let pg_catalog = loaded.schemas.iter().find(|s| s.name == "pg_catalog").unwrap();
-    assert!(pg_catalog.system && pg_catalog.relations.len() > 100 && pg_catalog.functions.is_empty(), "{} relations", pg_catalog.relations.len());
-    let tables = pg_catalog.relations.iter().filter(|r| !matches!(r.kind, RelKind::View | RelKind::MaterializedView)).count();
+    let initial_catalog = h.catalog_when(&h.db(), |_| true).await;
+    let initial = initial_catalog.version;
+    assert!(
+        initial_catalog
+            .schemas
+            .iter()
+            .find(|s| s.name == "pg_catalog")
+            .unwrap()
+            .types
+            .is_empty(),
+        "a normal shop load does not read built-in types"
+    );
+    h.edit_view(ViewEdit::ShowSystemSchemas {
+        database: "shop".into(),
+        show: true,
+    })
+    .await;
+    h.edit_view(ViewEdit::Schema {
+        database: "shop".into(),
+        name: "pg_catalog".into(),
+        shown: true,
+    })
+    .await;
+    let loaded = h
+        .catalog_when(&h.db(), |c| {
+            c.version > initial
+                && c.schemas
+                    .iter()
+                    .any(|s| s.name == "pg_catalog" && !s.relations.is_empty())
+        })
+        .await;
+    let pg_catalog = loaded
+        .schemas
+        .iter()
+        .find(|s| s.name == "pg_catalog")
+        .unwrap();
+    assert!(
+        pg_catalog.system
+            && pg_catalog.relations.len() > 100
+            && pg_catalog.functions.is_empty()
+            && pg_catalog.sequences.is_empty()
+            && pg_catalog.synonyms.is_empty(),
+        "{} relations",
+        pg_catalog.relations.len()
+    );
+    let int4 = pg_catalog
+        .types
+        .iter()
+        .find(|t| t.name == "int4")
+        .expect("pg_catalog.int4");
+    assert_eq!(int4.kind, TypeKind::Builtin);
+    let refused = h
+        .engine
+        .object_script(h.db(), ScriptTarget::Type { oid: int4.oid })
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(refused, DetailError::Failed { message } if message == "Built-in types cannot be scripted.")
+    );
+    let tables = pg_catalog
+        .relations
+        .iter()
+        .filter(|r| !matches!(r.kind, RelKind::View | RelKind::MaterializedView))
+        .count();
     assert_eq!((pg_catalog.table_count, tables), (64, 64));
     let shop = h.wait_database("shop", |d| d.shown_schemas.iter().any(|s| s == "pg_catalog")).await;
     assert_eq!(shop.shown_schemas, ["lab", "pg_catalog", "public"]);
@@ -1857,7 +1960,12 @@ async fn showing_pg_catalog_loads_its_relations_and_no_functions() {
     h.edit_view(ViewEdit::ShowSystemSchemas { database: "shop".into(), show: false }).await;
     let off = h.wait_database("shop", |d| !d.show_system_schemas).await;
     assert_eq!(off.shown_schemas, ["lab", "public"]);
-    h.catalog_when(&h.db(), |c| c.schemas.iter().any(|s| s.name == "pg_catalog" && s.relations.is_empty())).await;
+    h.catalog_when(&h.db(), |c| {
+        c.schemas
+            .iter()
+            .any(|s| s.name == "pg_catalog" && s.relations.is_empty() && s.types.is_empty())
+    })
+    .await;
 
     h.edit_view(ViewEdit::ShowSystemSchemas { database: "shop".into(), show: true }).await;
     let on = h.wait_database("shop", |d| d.shown_schemas.iter().any(|s| s == "pg_catalog")).await;
@@ -1885,6 +1993,141 @@ async fn a_view_row_that_fails_to_parse_falls_back_to_the_initial_view() {
     h.engine.save_connection(ConnectionDraft { id: Some(conn), ..draft_from_url(&url(), "dev").unwrap() }).await.unwrap();
     h.engine.connect(h.conn).await.unwrap();
     assert_default_view(&h).await;
+}
+
+#[tokio::test]
+async fn sequences_types_and_extensions_load_and_script() {
+    let mut h = Harness::start().await;
+    h.engine.connect(h.conn).await.unwrap();
+    let tab = h.sql_tab(TxnMode::AutoCommit).await;
+    let stem = unique("p10");
+    let seq = format!("{stem}_seq");
+    let domain = format!("{stem}_pos");
+    let composite = format!("{stem}_pet");
+    let range = format!("{stem}_span");
+    let en = format!("{stem}_mood");
+    h.run_ok(
+        tab,
+        &format!(
+            "CREATE SEQUENCE public.{seq} AS bigint INCREMENT BY 2;
+             CREATE DOMAIN public.{domain} AS integer CONSTRAINT {domain}_positive CHECK (VALUE > 0);
+             CREATE TYPE public.{composite} AS (id integer, name text);
+             CREATE TYPE public.{range} AS RANGE (SUBTYPE = integer);
+             CREATE TYPE public.{en} AS ENUM ('sad', 'ok', 'happy')"
+        ),
+    )
+    .await;
+    h.engine.refresh_catalog(h.db()).await.unwrap();
+    let catalog = h.engine.catalog(h.db()).await.unwrap();
+    let public = catalog.schemas.iter().find(|s| s.name == "public").unwrap();
+    let sequence = public
+        .sequences
+        .iter()
+        .find(|s| s.name == seq)
+        .expect("sequence");
+    assert_eq!(sequence.type_name, "bigint");
+    let kind = |name: &str| {
+        public
+            .types
+            .iter()
+            .find(|t| t.name == name)
+            .unwrap_or_else(|| panic!("{name} missing"))
+            .kind
+            .clone()
+    };
+    assert_eq!(
+        kind(&domain),
+        TypeKind::Domain {
+            base: "integer".into()
+        }
+    );
+    assert_eq!(
+        kind(&composite),
+        TypeKind::Composite {
+            fields: vec![
+                TypeField {
+                    name: "id".into(),
+                    type_name: "integer".into()
+                },
+                TypeField {
+                    name: "name".into(),
+                    type_name: "text".into()
+                }
+            ]
+        }
+    );
+    assert_eq!(
+        kind(&range),
+        TypeKind::Range {
+            subtype: "integer".into()
+        }
+    );
+    assert_eq!(
+        kind(&en),
+        TypeKind::Enum {
+            labels: vec!["sad".into(), "ok".into(), "happy".into()]
+        }
+    );
+    assert!(
+        catalog
+            .schemas
+            .iter()
+            .filter(|s| s.system)
+            .all(|s| s.types.is_empty() && s.sequences.is_empty() && s.synonyms.is_empty())
+    );
+    let seq_sql = h
+        .engine
+        .object_script(h.db(), ScriptTarget::Sequence { oid: sequence.oid })
+        .await
+        .unwrap()
+        .text;
+    assert!(
+        seq_sql.contains(&format!("CREATE SEQUENCE public.{seq} AS bigint"))
+            && seq_sql.contains("INCREMENT BY 2"),
+        "{seq_sql}"
+    );
+    let enum_oid = public.types.iter().find(|t| t.name == en).unwrap().oid;
+    let enum_sql = h
+        .engine
+        .object_script(h.db(), ScriptTarget::Type { oid: enum_oid })
+        .await
+        .unwrap()
+        .text;
+    assert!(
+        enum_sql.contains("CREATE TYPE")
+            && enum_sql.contains("'sad'")
+            && enum_sql.contains("'ok'")
+            && enum_sql.contains("'happy'"),
+        "{enum_sql}"
+    );
+    let plpgsql = catalog
+        .extensions
+        .iter()
+        .find(|e| e.name == "plpgsql")
+        .expect("plpgsql");
+    let ext_sql = h
+        .engine
+        .object_script(h.db(), ScriptTarget::Extension { oid: plpgsql.oid })
+        .await
+        .unwrap()
+        .text;
+    assert!(
+        ext_sql.contains("CREATE EXTENSION plpgsql") && ext_sql.contains("VERSION"),
+        "{ext_sql}"
+    );
+    let refused = h
+        .engine
+        .object_script(h.db(), ScriptTarget::Synonym { oid: 1 })
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(refused, DetailError::Failed { message } if message == "PostgreSQL has no synonyms.")
+    );
+    h.run_ok(
+        tab,
+        &format!("DROP SEQUENCE public.{seq}; DROP DOMAIN public.{domain}; DROP TYPE public.{composite}; DROP TYPE public.{range}; DROP TYPE public.{en}"),
+    )
+    .await;
 }
 
 /// A role whose search path starts with `pg_catalog` still gets a user schema as its default:

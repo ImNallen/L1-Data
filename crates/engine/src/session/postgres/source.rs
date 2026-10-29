@@ -285,6 +285,10 @@ pub async fn load(client: &mut Client, target: &ScriptTarget) -> Result<ObjectSc
         ScriptTarget::Routine { oid } => routine(&tx, &role, *oid).await,
         ScriptTarget::Index { relation_oid, name } => index(&tx, *relation_oid, name).await,
         ScriptTarget::Trigger { relation_oid, name } => trigger(&tx, *relation_oid, name).await,
+        ScriptTarget::Sequence { oid } => sequence_script(&tx, &role, *oid).await,
+        ScriptTarget::Type { oid } => type_script(&tx, &role, *oid).await,
+        ScriptTarget::Extension { oid } => extension_script(&tx, &role, *oid).await,
+        ScriptTarget::Synonym { .. } => Err(refused("PostgreSQL has no synonyms.")),
     };
     tx.rollback().await.map_err(failed)?;
     script
@@ -298,9 +302,276 @@ fn refused(message: &str) -> DetailError {
     DetailError::Failed { message: message.into() }
 }
 
-async fn relation(tx: &Transaction<'_>, queries: &Queries, role: &str, oid: u32) -> Result<ObjectScript, DetailError> {
-    let relations = tx.query(&queries.relations, &[&oid]).await.map_err(failed)?;
-    let r = relations.iter().find(|r| relid(r) == oid).ok_or(DetailError::Gone)?;
+const SEQUENCE_ROW: &str = "SELECT n.nspname, c.relname, c.relpersistence = 'u', format_type(s.seqtypid, NULL),
+        s.seqstart, s.seqincrement, s.seqmin, s.seqmax, s.seqcache, s.seqcycle,
+        obj_description(c.oid, 'pg_class'), owned.nspname, owned.relname, owned.attname,
+        pg_get_userbyid(c.relowner)::text,
+        EXISTS (SELECT 1 FROM pg_seclabel l WHERE l.classoid = 'pg_class'::regclass AND l.objoid = c.oid)
+     FROM pg_class c
+     JOIN pg_namespace n ON n.oid = c.relnamespace
+     JOIN pg_sequence s ON s.seqrelid = c.oid
+     LEFT JOIN LATERAL (
+         SELECT onsp.nspname, oc.relname, a.attname
+         FROM pg_depend d
+         JOIN pg_class oc ON oc.oid = d.refobjid
+         JOIN pg_namespace onsp ON onsp.oid = oc.relnamespace
+         JOIN pg_attribute a ON a.attrelid = d.refobjid AND a.attnum = d.refobjsubid AND NOT a.attisdropped
+         WHERE d.classid = 'pg_class'::regclass AND d.objid = c.oid
+           AND d.refclassid = 'pg_class'::regclass AND d.deptype IN ('a', 'i')
+         LIMIT 1
+     ) owned ON true
+     WHERE c.oid = $1 AND c.relkind = 'S'";
+
+const TYPE_HEAD: &str = "SELECT t.typtype::text, n.nspname, t.typname, pg_get_userbyid(t.typowner)::text,
+        obj_description(t.oid, 'pg_type'),
+        EXISTS (SELECT 1 FROM pg_seclabel l WHERE l.classoid = 'pg_type'::regclass AND l.objoid = t.oid)
+     FROM pg_type t JOIN pg_namespace n ON n.oid = t.typnamespace WHERE t.oid = $1";
+
+fn sequence_grants() -> String {
+    grants_query(&[acl_changes(
+        "pg_class c",
+        "c.relacl",
+        "acldefault('s', c.relowner)",
+        "c.oid = $1",
+        "c.oid, NULL::text, NULL::text, NULL::text",
+    )])
+}
+
+fn type_grants() -> String {
+    grants_query(&[acl_changes(
+        "pg_type t",
+        "t.typacl",
+        "acldefault('T', t.typowner)",
+        "t.oid = $1",
+        "t.oid, NULL::text, NULL::text, NULL::text",
+    )])
+}
+
+fn privilege_rows(rows: &[Row]) -> Vec<Privilege> {
+    rows.iter().map(grant_row).collect()
+}
+
+async fn sequence_script(
+    tx: &Transaction<'_>,
+    role: &str,
+    oid: u32,
+) -> Result<ObjectScript, DetailError> {
+    let params: &[&(dyn ToSql + Sync)] = &[&oid];
+    let grants_sql = sequence_grants();
+    let (row, grants) = tokio::try_join!(
+        tx.query_opt(SEQUENCE_ROW, params),
+        tx.query(&grants_sql, params)
+    )
+    .map_err(failed)?;
+    let row = row.ok_or(DetailError::Gone)?;
+    let name: String = row.get(1);
+    let type_name = row
+        .get::<_, Option<String>>(3)
+        .ok_or_else(|| refused("The sequence type could not be read."))?;
+    let (owned_schema, owned_table, owned_column) = match (
+        row.get::<_, Option<String>>(11),
+        row.get::<_, Option<String>>(12),
+        row.get::<_, Option<String>>(13),
+    ) {
+        (Some(schema), Some(table), Some(column)) => (schema, table, column),
+        _ => (String::new(), String::new(), String::new()),
+    };
+    let ddl = ddl::standalone_sequence(&ddl::StandaloneSequence {
+        sequence: ddl::Sequence {
+            schema: row.get(0),
+            name: name.clone(),
+            column: String::new(),
+            type_name,
+            start: row.get(4),
+            increment: row.get(5),
+            min: row.get(6),
+            max: row.get(7),
+            cache: row.get(8),
+            cycle: row.get(9),
+        },
+        unlogged: row.get(2),
+        owned_schema,
+        owned_table,
+        owned_column,
+        comment: row.get(10),
+        privileges: privilege_rows(&grants),
+        owner: owner(row.get(14), role),
+        security_label: row.get(15),
+    });
+    Ok(script::object_script(&name, ddl))
+}
+
+async fn type_script(
+    tx: &Transaction<'_>,
+    role: &str,
+    oid: u32,
+) -> Result<ObjectScript, DetailError> {
+    let params: &[&(dyn ToSql + Sync)] = &[&oid];
+    let grants_sql = type_grants();
+    let (head, grants) = tokio::try_join!(
+        tx.query_opt(TYPE_HEAD, params),
+        tx.query(&grants_sql, params)
+    )
+    .map_err(failed)?;
+    let head = head.ok_or(DetailError::Gone)?;
+    let kind: String = head.get(0);
+    if matches!(kind.as_str(), "b" | "p") {
+        return Err(refused("Built-in types cannot be scripted."));
+    }
+    let object = ddl::ScriptedObject {
+        schema: head.get(1),
+        name: head.get(2),
+        comment: head.get(4),
+        privileges: privilege_rows(&grants),
+        owner: owner(head.get(3), role),
+        security_label: head.get(5),
+    };
+    let name = object.name.clone();
+    let ddl = match kind.as_str() {
+        "e" => {
+            let labels = tx.query("SELECT e.enumlabel FROM pg_enum e WHERE e.enumtypid = $1 ORDER BY e.enumsortorder", params).await.map_err(failed)?;
+            ddl::enum_type(
+                &object,
+                &labels.iter().map(|r| r.get(0)).collect::<Vec<String>>(),
+            )
+        }
+        "d" => {
+            let row = tx
+                .query_opt(
+                    "SELECT format_type(t.typbasetype, t.typtypmod),
+                            CASE WHEN t.typcollation <> b.typcollation THEN c.collname END,
+                            pg_get_expr(t.typdefaultbin, 0), t.typnotnull
+                     FROM pg_type t JOIN pg_type b ON b.oid = t.typbasetype
+                     LEFT JOIN pg_collation c ON c.oid = t.typcollation WHERE t.oid = $1",
+                    params,
+                )
+                .await
+                .map_err(failed)?
+                .ok_or(DetailError::Gone)?;
+            let checks = tx.query("SELECT con.conname, pg_get_constraintdef(con.oid) FROM pg_constraint con WHERE con.contypid = $1 ORDER BY con.conname", params).await.map_err(failed)?;
+            let checks = checks
+                .iter()
+                .map(|r| (r.get(0), r.get(1)))
+                .collect::<Vec<(String, String)>>();
+            ddl::domain_type(
+                &object,
+                &row.get::<_, String>(0),
+                row.get::<_, Option<String>>(1).as_deref(),
+                row.get::<_, Option<String>>(2).as_deref(),
+                row.get(3),
+                &checks,
+            )
+        }
+        "c" => {
+            let fields = tx
+                .query(
+                    "SELECT a.attname, format_type(a.atttypid, a.atttypmod),
+                            CASE WHEN a.attcollation <> t.typcollation AND a.attcollation <> 0 THEN c.collname END
+                     FROM pg_attribute a JOIN pg_type t ON t.oid = a.atttypid
+                     LEFT JOIN pg_collation c ON c.oid = a.attcollation
+                     WHERE a.attrelid = (SELECT typrelid FROM pg_type WHERE oid = $1) AND a.attnum > 0 AND NOT a.attisdropped
+                     ORDER BY a.attnum",
+                    params,
+                )
+                .await
+                .map_err(failed)?;
+            let fields = fields
+                .iter()
+                .map(|r| ddl::CompositeField {
+                    name: r.get(0),
+                    type_name: r.get(1),
+                    collation: r.get(2),
+                })
+                .collect::<Vec<_>>();
+            ddl::composite_type(&object, &fields)
+        }
+        "r" => {
+            let row = tx
+                .query_opt(
+                    "SELECT format_type(r.rngsubtype, NULL),
+                            CASE WHEN opc.opcdefault IS NOT FALSE THEN NULL ELSE opn.nspname END,
+                            CASE WHEN opc.opcdefault IS NOT FALSE THEN NULL ELSE opc.opcname END,
+                            CASE WHEN r.rngcollation <> 0 THEN coll.collname END,
+                            CASE WHEN r.rngcanonical <> 0 THEN r.rngcanonical::regproc::text END,
+                            CASE WHEN r.rngsubdiff <> 0 THEN r.rngsubdiff::regproc::text END
+                     FROM pg_range r
+                     LEFT JOIN pg_opclass opc ON opc.oid = r.rngsubopc
+                     LEFT JOIN pg_namespace opn ON opn.oid = opc.opcnamespace
+                     LEFT JOIN pg_collation coll ON coll.oid = r.rngcollation
+                     WHERE r.rngtypid = $1",
+                    params,
+                )
+                .await
+                .map_err(failed)?
+                .ok_or(DetailError::Gone)?;
+            let opclass = match (
+                row.get::<_, Option<String>>(1),
+                row.get::<_, Option<String>>(2),
+            ) {
+                (Some(schema), Some(name)) => Some(ddl::qualified(&schema, &name)),
+                _ => None,
+            };
+            ddl::range_type(
+                &object,
+                &ddl::RangeScript {
+                    subtype: row.get::<_, Option<String>>(0).unwrap_or_default(),
+                    opclass,
+                    collation: row.get(3),
+                    canonical: row.get(4),
+                    subtype_diff: row.get(5),
+                },
+            )
+        }
+        _ => {
+            return Err(refused(
+                "Only enums, domains, composites, and ranges can be scripted.",
+            ));
+        }
+    };
+    Ok(script::object_script(&name, ddl))
+}
+
+async fn extension_script(
+    tx: &Transaction<'_>,
+    role: &str,
+    oid: u32,
+) -> Result<ObjectScript, DetailError> {
+    let row = tx
+        .query_opt(
+            "SELECT e.extname, n.nspname, e.extversion, obj_description(e.oid, 'pg_extension'), pg_get_userbyid(e.extowner)::text,
+                    EXISTS (SELECT 1 FROM pg_seclabel l WHERE l.classoid = 'pg_extension'::regclass AND l.objoid = e.oid)
+             FROM pg_extension e JOIN pg_namespace n ON n.oid = e.extnamespace WHERE e.oid = $1",
+            &[&oid],
+        )
+        .await
+        .map_err(failed)?
+        .ok_or(DetailError::Gone)?;
+    let name: String = row.get(0);
+    let ddl = ddl::extension_script(
+        &name,
+        &row.get::<_, String>(1),
+        &row.get::<_, Option<String>>(2).unwrap_or_default(),
+        row.get::<_, Option<String>>(3).as_deref(),
+        &owner(row.get(4), role),
+        row.get(5),
+    );
+    Ok(script::object_script(&name, ddl))
+}
+
+async fn relation(
+    tx: &Transaction<'_>,
+    queries: &Queries,
+    role: &str,
+    oid: u32,
+) -> Result<ObjectScript, DetailError> {
+    let relations = tx
+        .query(&queries.relations, &[&oid])
+        .await
+        .map_err(failed)?;
+    let r = relations
+        .iter()
+        .find(|r| relid(r) == oid)
+        .ok_or(DetailError::Gone)?;
     let name: String = r.get(2);
     let ddl = match r.get::<_, &str>(0) {
         "r" | "p" | "f" => ddl::table(&table(oid, &Tree::load(tx, queries, role, &relations).await?)?),

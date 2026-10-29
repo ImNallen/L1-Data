@@ -172,8 +172,15 @@ async fn check_visibility(executable: bool) {
             }
             assert_eq!(visible_parameters.len(), 2);
             assert!(visible_parameters.iter().all(|p| p[2].as_ref() == Some(&types[0])));
+            h.sql(owner_tab, &format!("CREATE SYNONYM dbo.[{stem}_syn] FOR dbo.[{table}]")).await;
             h.engine.refresh_catalog(db(owner)).await.unwrap();
             let owner_catalog = h.engine.catalog(db(owner)).await.unwrap();
+            let synonym = owner_catalog.schemas.iter().flat_map(|s| &s.synonyms).find(|s| s.name == format!("{stem}_syn")).expect("synonym");
+            assert!(synonym.target.contains(&table), "{}", synonym.target);
+            let synonym_sql = h.engine.object_script(db(owner), ScriptTarget::Synonym { oid: synonym.oid }).await.unwrap().text;
+            assert!(synonym_sql.contains("CREATE SYNONYM") && synonym_sql.contains(&table), "{synonym_sql}");
+            let alias = owner_catalog.schemas.iter().flat_map(|s| &s.types).find(|t| t.name == types[0]).expect("alias type");
+            assert_eq!(alias.kind, TypeKind::Alias { base: "nvarchar(20)".into(), nullable: true });
             let owner_relation = owner_catalog.relation("dbo", &table).unwrap();
             let owner_routine = owner_catalog.schemas.iter().flat_map(|s| &s.functions).find(|f| f.name == procedure).unwrap();
             assert_eq!(owner_routine.args, format!("@value {}, @echo {} OUTPUT", types[0], types[0]));
@@ -300,6 +307,7 @@ async fn check_visibility(executable: bool) {
     }
     for sql in [
         format!("DROP PROCEDURE IF EXISTS dbo.[{procedure}]"),
+        format!("IF OBJECT_ID(N'dbo.{stem}_syn', N'SN') IS NOT NULL DROP SYNONYM dbo.[{stem}_syn]"),
         format!("DROP TABLE IF EXISTS dbo.[{table}]"),
         format!("IF TYPE_ID(N'dbo.{}') IS NOT NULL DROP TYPE dbo.[{}]", types[0], types[0]),
         format!("IF TYPE_ID(N'dbo.{}') IS NOT NULL DROP TYPE dbo.[{}]", types[1], types[1]),

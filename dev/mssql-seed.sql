@@ -102,6 +102,12 @@ BEGIN
   RETURN (SELECT COUNT(*) FROM dbo.orders WHERE customer_id = @customer_id);
 END;
 GO
+IF TYPE_ID(N'dbo.phone') IS NULL CREATE TYPE dbo.phone FROM nvarchar(20) NULL;
+GO
+IF OBJECT_ID(N'dbo.customers_all', N'SN') IS NULL CREATE SYNONYM dbo.customers_all FOR dbo.customers;
+GO
+IF OBJECT_ID(N'dbo.order_number', N'SO') IS NULL CREATE SEQUENCE dbo.order_number AS bigint START WITH 1000 INCREMENT BY 10;
+GO
 USE reporting;
 GO
 IF OBJECT_ID(N'dbo.customers', N'U') IS NULL

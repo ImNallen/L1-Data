@@ -340,8 +340,11 @@ pub struct Catalog {
     /// picker means this.
     pub default_schema: Option<String>,
     /// Every schema except `pg_toast` and temp schemas, in name order. A system schema carries
-    /// its relations only while the tree shows it, and never its functions.
+    /// its relations and types only while the tree shows it, and never its functions, sequences,
+    /// or synonyms.
     pub schemas: Vec<SchemaInfo>,
+    /// By extension name. Empty on SQL Server, and no query runs there.
+    pub extensions: Vec<ExtensionInfo>,
 }
 
 #[derive(Debug, Clone, Serialize, Type)]
@@ -357,6 +360,13 @@ pub struct SchemaInfo {
     pub table_count: u32,
     pub relations: Vec<Relation>,
     pub functions: Vec<FunctionInfo>,
+    /// User schemas only, by name. Includes identity and serial sequences.
+    pub sequences: Vec<SequenceInfo>,
+    /// Enums, domains, composites, and ranges in every loaded schema.
+    /// Base and pseudo types too, when this schema's relations loaded.
+    pub types: Vec<TypeInfo>,
+    /// SQL Server only, by name. Empty on PostgreSQL, and no query runs there.
+    pub synonyms: Vec<SynonymInfo>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Type)]
@@ -420,6 +430,76 @@ pub enum FnKind {
     Window,
 }
 
+#[derive(Debug, Clone, Serialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct SequenceInfo {
+    pub oid: u32,
+    pub name: String,
+    pub quoted: String,
+    pub type_name: String,
+}
+
+#[derive(Debug, Clone, Serialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct TypeInfo {
+    pub oid: u32,
+    pub name: String,
+    pub quoted: String,
+    pub kind: TypeKind,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct TypeField {
+    pub name: String,
+    pub type_name: String,
+}
+
+/// The facts a type row draws. PostgreSQL `typtype` letters stay in the loader.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Type)]
+#[serde(tag = "kind", rename_all_fields = "camelCase")]
+pub enum TypeKind {
+    Enum {
+        labels: Vec<String>,
+    },
+    Domain {
+        base: String,
+    },
+    Composite {
+        fields: Vec<TypeField>,
+    },
+    Range {
+        subtype: String,
+    },
+    /// PostgreSQL `typtype` `b` or `p` in a system schema whose relations loaded.
+    Builtin,
+    /// SQL Server `CREATE TYPE name FROM ...`. `base` is `display()` of the system type.
+    Alias {
+        base: String,
+        nullable: bool,
+    },
+    Table,
+}
+
+#[derive(Debug, Clone, Serialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct SynonymInfo {
+    pub oid: u32,
+    pub name: String,
+    pub quoted: String,
+    /// `sys.synonyms.base_object_name`, as stored. The row's detail.
+    pub target: String,
+}
+
+#[derive(Debug, Clone, Serialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct ExtensionInfo {
+    pub oid: u32,
+    pub name: String,
+    pub quoted: String,
+    pub version: String,
+}
+
 /// What a table row shows past its columns, read by `relation_detail` when the row first opens.
 /// It is not in `Catalog`, so a DDL refresh never scans constraints, indexes, and triggers.
 #[derive(Debug, Clone, Serialize, Type)]
@@ -439,8 +519,8 @@ pub struct RelationDetail {
     pub triggers: Vec<TriggerInfo>,
 }
 
-/// An object the tree can script. `oid` is the catalog's `Relation.oid` or `FunctionInfo.oid`.
-/// An index or trigger is named within its relation, as `RelationDetail` lists it.
+/// An object the tree can script. `oid` is the catalog id of a relation, routine, sequence, type,
+/// synonym, or extension. An index or trigger is named within its relation, as `RelationDetail` lists it.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Type)]
 #[serde(tag = "kind", rename_all_fields = "camelCase")]
 pub enum ScriptTarget {
@@ -448,6 +528,10 @@ pub enum ScriptTarget {
     Routine { oid: u32 },
     Index { relation_oid: u32, name: String },
     Trigger { relation_oid: u32, name: String },
+    Sequence { oid: u32 },
+    Type { oid: u32 },
+    Synonym { oid: u32 },
+    Extension { oid: u32 },
 }
 
 /// The DDL that creates one object.

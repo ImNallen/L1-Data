@@ -196,8 +196,11 @@ pub fn is_system_schema(name: &str, kind: crate::model::DatabaseKind) -> bool {
 }
 
 /// The system schemas whose relations the catalog must load: the ones in `Only`, while
-/// `show_system_schemas` is on. Functions never load for them.
-pub fn system_schemas_to_load(view: &DatabaseView, kind: crate::model::DatabaseKind) -> Vec<String> {
+/// `show_system_schemas` is on. Types load for them too. Functions, sequences, and synonyms do not.
+pub fn system_schemas_to_load(
+    view: &DatabaseView,
+    kind: crate::model::DatabaseKind,
+) -> Vec<String> {
     match &view.schemas {
         Selection::Only { names } if view.show_system_schemas => names.iter().filter(|n| is_system_schema(n,kind)).cloned().collect(),
         _ => Vec::new(),
@@ -228,8 +231,19 @@ mod tests {
             default_schema: default.map(str::to_owned),
             schemas: schemas
                 .iter()
-                .map(|(name, system)| SchemaInfo { name: (*name).into(), quoted: (*name).into(), system: *system, table_count: 0, relations: Vec::new(), functions: Vec::new() })
+                .map(|(name, system)| SchemaInfo {
+                    name: (*name).into(),
+                    quoted: (*name).into(),
+                    system: *system,
+                    table_count: 0,
+                    relations: Vec::new(),
+                    functions: Vec::new(),
+                    sequences: Vec::new(),
+                    types: Vec::new(),
+                    synonyms: Vec::new(),
+                })
                 .collect(),
+            extensions: Vec::new(),
         })
     }
 

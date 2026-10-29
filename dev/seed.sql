@@ -202,6 +202,11 @@ INSERT INTO lab.type_zoo (b, i2, i8, f4, f8, n, t, vc, ch, u, j, jb, ba, d, tm, 
    '2026-10-13 10:14:00', '2026-10-13 10:14:00+02', '1 day 02:03:04', '192.168.0.1', '{1,2,3}', '{"a","b c"}', 'happy', '(1,2)', '[1,10)'),
   (NULL, NULL, NULL, 'NaN', '-Infinity', NULL, '', NULL, NULL, NULL, 'null', NULL, '\x', NULL, NULL, NULL, NULL, NULL, NULL, '{}', '{NULL}', NULL, NULL, 'empty');
 
+CREATE DOMAIN lab.posint AS integer CONSTRAINT posint_positive CHECK (VALUE > 0);
+CREATE TYPE lab.pet AS (id integer, name text);
+CREATE TYPE lab.span AS RANGE (SUBTYPE = integer);
+CREATE SEQUENCE public.order_number AS bigint START WITH 1000 INCREMENT BY 10;
+
 ANALYZE;
 
 CREATE DATABASE reporting;

@@ -73,7 +73,17 @@ impl MsSession {
             .iter()
             .map(|r| {
                 let name = required(r, 0)?;
-                Ok(SchemaInfo { name: name.into(), quoted: quote_if_needed(DatabaseKind::SqlServer, name), system: number::<u8>(r, 1)? != 0, table_count: number(r, 2)?, relations: vec![], functions: vec![] })
+                Ok(SchemaInfo {
+                    name: name.into(),
+                    quoted: quote_if_needed(DatabaseKind::SqlServer, name),
+                    system: number::<u8>(r, 1)? != 0,
+                    table_count: number(r, 2)?,
+                    relations: vec![],
+                    functions: vec![],
+                    sequences: vec![],
+                    types: vec![],
+                    synonyms: vec![],
+                })
             })
             .collect::<Result<Vec<_>, QueryError>>()?;
         let schema_index: HashMap<String, usize> = schemas.iter().enumerate().map(|(i, s)| (s.name.clone(), i)).collect();
@@ -164,6 +174,62 @@ impl MsSession {
             let f = &mut schema.functions[fi];
             f.insert_text = routine_insert_text(&schema.name, &f.name, f.kind, &arguments);
         }
-        Ok(Catalog { database_kind: DatabaseKind::SqlServer, db, version, default_schema, schemas })
+        let rows = self.rows(&format!("SELECT seq.object_id, s.name, seq.name, TYPE_NAME(seq.system_type_id), seq.precision, seq.scale FROM sys.sequences seq JOIN sys.schemas s ON s.schema_id = seq.schema_id WHERE NOT {SYSTEM} ORDER BY seq.name, seq.object_id")).await?;
+        for r in rows {
+            let Some(&si) = schema_index.get(required(&r, 1)?) else {
+                continue;
+            };
+            let name = required(&r, 2)?;
+            let type_name = required(&r, 3)?;
+            schemas[si].sequences.push(SequenceInfo {
+                oid: object_id(&r, 0)?,
+                name: name.into(),
+                quoted: quote_if_needed(DatabaseKind::SqlServer, name),
+                type_name: display(type_name, 0, number(&r, 4)?, number(&r, 5)?),
+            });
+        }
+        let rows = self.rows(&format!("SELECT syn.object_id, s.name, syn.name, syn.base_object_name FROM sys.synonyms syn JOIN sys.schemas s ON s.schema_id = syn.schema_id WHERE NOT {SYSTEM} ORDER BY syn.name, syn.object_id")).await?;
+        for r in rows {
+            let Some(&si) = schema_index.get(required(&r, 1)?) else {
+                continue;
+            };
+            let name = required(&r, 2)?;
+            schemas[si].synonyms.push(SynonymInfo {
+                oid: object_id(&r, 0)?,
+                name: name.into(),
+                quoted: quote_if_needed(DatabaseKind::SqlServer, name),
+                target: required(&r, 3)?.into(),
+            });
+        }
+        let rows = self.rows(&format!("SELECT t.user_type_id, s.name, t.name, t.is_table_type, t.is_nullable, TYPE_NAME(t.system_type_id), t.max_length, t.precision, t.scale FROM sys.types t JOIN sys.schemas s ON s.schema_id = t.schema_id WHERE t.is_user_defined = 1 AND t.is_assembly_type = 0 AND {filter} ORDER BY t.name, t.user_type_id")).await?;
+        for r in rows {
+            let Some(&si) = schema_index.get(required(&r, 1)?) else {
+                continue;
+            };
+            let name = required(&r, 2)?;
+            let kind = if number::<u8>(&r, 3)? != 0 {
+                TypeKind::Table
+            } else {
+                let base = required(&r, 5)?;
+                TypeKind::Alias {
+                    base: display(base, number(&r, 6)?, number(&r, 7)?, number(&r, 8)?),
+                    nullable: number::<u8>(&r, 4)? != 0,
+                }
+            };
+            schemas[si].types.push(TypeInfo {
+                oid: object_id(&r, 0)?,
+                name: name.into(),
+                quoted: quote_if_needed(DatabaseKind::SqlServer, name),
+                kind,
+            });
+        }
+        Ok(Catalog {
+            database_kind: DatabaseKind::SqlServer,
+            db,
+            version,
+            default_schema,
+            schemas,
+            extensions: vec![],
+        })
     }
 }

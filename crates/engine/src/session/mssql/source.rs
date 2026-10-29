@@ -161,7 +161,181 @@ impl MsSession {
                 let ddl = ddl::index(index, &table, &props).ok_or_else(|| refused(format!("Only clustered, nonclustered, and columnstore indexes can be scripted, and {name} is none of these.")))?;
                 Ok(script::object_script(name, ddl))
             }
+            ScriptTarget::Sequence { oid } => self.sequence_script(native_object_id(*oid)).await,
+            ScriptTarget::Type { oid } => self.type_script(native_object_id(*oid)).await,
+            ScriptTarget::Synonym { oid } => self.synonym_script(native_object_id(*oid)).await,
+            ScriptTarget::Extension { .. } => Err(refused("SQL Server has no extensions.")),
         }
+    }
+
+    async fn object_warnings(
+        &mut self,
+        oid: i32,
+        class: u8,
+    ) -> Result<(Vec<Privilege>, Vec<ddl::Omitted>), DetailError> {
+        let f = self.features().await?;
+        let mut batch = Batch::default();
+        let privileges = if class == 1 {
+            batch.add(privileges_sql(&format!("o.object_id={oid}")))
+        } else {
+            batch.add(format!(
+                "SELECT p.permission_name,COL_NAME(p.major_id,p.minor_id),dp.name,p.state FROM sys.database_permissions p JOIN sys.database_principals dp ON dp.principal_id=p.grantee_principal_id WHERE p.class={class} AND p.major_id={oid} ORDER BY dp.name,p.permission_name,p.minor_id"
+            ))
+        };
+        let owner = if class == 1 {
+            batch.add(format!(
+                "SELECT COALESCE(USER_NAME(o.principal_id),CONVERT(sysname,o.principal_id)) FROM sys.objects o WHERE o.object_id={oid} AND o.principal_id IS NOT NULL AND o.principal_id<>(SELECT s.principal_id FROM sys.schemas s WHERE s.schema_id=o.schema_id)"
+            ))
+        } else {
+            batch.add(format!(
+                "SELECT COALESCE(USER_NAME(t.principal_id),CONVERT(sysname,t.principal_id)) FROM sys.types t WHERE t.user_type_id={oid} AND t.principal_id IS NOT NULL AND t.principal_id<>(SELECT s.principal_id FROM sys.schemas s WHERE s.schema_id=t.schema_id)"
+            ))
+        };
+        let visibility = batch.add(visibility_sql(&f));
+        let sets = self.run_batch(batch).await?;
+        let mut omitted = Vec::new();
+        if let Some(row) = sets[owner].first() {
+            omitted.push(ddl::Omitted::Owner(text(row, 0)?));
+        }
+        omitted.extend(unseen(&sets[visibility], false)?);
+        Ok((privileges_from(&sets[privileges])?, omitted))
+    }
+
+    async fn sequence_script(&mut self, oid: i32) -> Result<ObjectScript, DetailError> {
+        let rows = self
+            .rows(&format!(
+                "SELECT s.name, seq.name, TYPE_NAME(seq.system_type_id), seq.precision, seq.scale, CONVERT(nvarchar(40), seq.start_value), CONVERT(nvarchar(40), seq.increment), CONVERT(nvarchar(40), seq.minimum_value), CONVERT(nvarchar(40), seq.maximum_value), seq.is_cached, seq.cache_size, seq.is_cycling FROM sys.sequences seq JOIN sys.schemas s ON s.schema_id=seq.schema_id WHERE seq.object_id={oid}"
+            ))
+            .await
+            .map_err(failed)?;
+        let row = rows.first().ok_or(DetailError::Gone)?;
+        let type_name = text(row, 2)?;
+        let cache = if bit(row, 9)? {
+            match row.get(10).and_then(Option::as_deref) {
+                Some(size) => ddl::SequenceCache::Size(size.to_owned()),
+                None => ddl::SequenceCache::Default,
+            }
+        } else {
+            ddl::SequenceCache::Off
+        };
+        let (privileges, omitted) = self.object_warnings(oid, 1).await?;
+        let name = text(row, 1)?;
+        let ddl = ddl::sequence_script(&ddl::SequenceScript {
+            schema: text(row, 0)?,
+            name: name.clone(),
+            type_name: display(
+                &type_name,
+                0,
+                number(row, 3).map_err(failed)?,
+                number(row, 4).map_err(failed)?,
+            ),
+            start: text(row, 5)?,
+            increment: text(row, 6)?,
+            min: text(row, 7)?,
+            max: text(row, 8)?,
+            cache,
+            cycle: bit(row, 11)?,
+            privileges,
+            omitted,
+        });
+        Ok(script::object_script(&name, ddl))
+    }
+
+    async fn synonym_script(&mut self, oid: i32) -> Result<ObjectScript, DetailError> {
+        let rows = self.rows(&format!("SELECT s.name, syn.name, syn.base_object_name FROM sys.synonyms syn JOIN sys.schemas s ON s.schema_id=syn.schema_id WHERE syn.object_id={oid}")).await.map_err(failed)?;
+        let row = rows.first().ok_or(DetailError::Gone)?;
+        let (privileges, omitted) = self.object_warnings(oid, 1).await?;
+        let name = text(row, 1)?;
+        Ok(script::object_script(
+            &name,
+            ddl::synonym_script(&text(row, 0)?, &name, &text(row, 2)?, &privileges, &omitted),
+        ))
+    }
+
+    async fn type_script(&mut self, oid: i32) -> Result<ObjectScript, DetailError> {
+        let rows = self
+            .rows(&format!(
+                "SELECT s.name, t.name, t.is_table_type, t.is_nullable, TYPE_NAME(t.system_type_id), t.max_length, t.precision, t.scale, t.is_assembly_type FROM sys.types t JOIN sys.schemas s ON s.schema_id=t.schema_id WHERE t.user_type_id={oid} AND t.is_user_defined=1"
+            ))
+            .await
+            .map_err(failed)?;
+        let row = rows.first().ok_or(DetailError::Gone)?;
+        if bit(row, 8)? {
+            return Err(refused("Assembly types cannot be scripted."));
+        }
+        let schema = text(row, 0)?;
+        let name = text(row, 1)?;
+        let (privileges, omitted) = self.object_warnings(oid, 6).await?;
+        if bit(row, 2)? {
+            let columns = self
+                .rows(&format!(
+                    "SELECT c.name, COALESCE(TYPE_NAME(c.system_type_id),'unknown'), c.max_length, c.precision, c.scale, c.is_nullable, c.is_identity, c.is_computed, c.default_object_id FROM sys.columns c JOIN sys.types t ON t.type_table_object_id=c.object_id WHERE t.user_type_id={oid} ORDER BY c.column_id"
+                ))
+                .await
+                .map_err(failed)?;
+            let columns = columns
+                .iter()
+                .map(|r| {
+                    let base = text(r, 1)?;
+                    Ok(ddl::TableTypeColumn {
+                        name: text(r, 0)?,
+                        type_name: display(
+                            &base,
+                            number(r, 2).map_err(failed)?,
+                            number(r, 3).map_err(failed)?,
+                            number(r, 4).map_err(failed)?,
+                        ),
+                        nullable: bit(r, 5)?,
+                        identity: bit(r, 6)?,
+                        computed: bit(r, 7)?,
+                        defaulted: number::<i32>(r, 8).map_err(failed)? != 0,
+                    })
+                })
+                .collect::<Result<Vec<_>, DetailError>>()?;
+            let mut extra = Vec::new();
+            let qualified = ddl::qualified(&schema, &name);
+            let indexes = self
+                .rows(&format!(
+                    "SELECT i.name, i.is_primary_key, i.is_unique_constraint FROM sys.indexes i JOIN sys.types t ON t.type_table_object_id=i.object_id WHERE t.user_type_id={oid} AND i.index_id>0 ORDER BY i.name"
+                ))
+                .await
+                .map_err(failed)?;
+            for index in &indexes {
+                let kind = if bit(index, 1)? {
+                    "primary key"
+                } else if bit(index, 2)? {
+                    "unique constraint"
+                } else {
+                    "index"
+                };
+                extra.push(format!(
+                    "{kind} {} on {qualified}",
+                    quote_ident(&text(index, 0)?)
+                ));
+            }
+            let checks = self.rows(&format!("SELECT cc.name FROM sys.check_constraints cc JOIN sys.types t ON t.type_table_object_id=cc.parent_object_id WHERE t.user_type_id={oid} ORDER BY cc.name")).await.map_err(failed)?;
+            for check in &checks {
+                extra.push(format!(
+                    "check constraint {} on {qualified}",
+                    quote_ident(&text(check, 0)?)
+                ));
+            }
+            return Ok(script::object_script(
+                &name,
+                ddl::table_type(&schema, &name, &columns, &extra, &privileges, &omitted),
+            ));
+        }
+        let base = text(row, 4)?;
+        let base = display(
+            &base,
+            number(row, 5).map_err(failed)?,
+            number(row, 6).map_err(failed)?,
+            number(row, 7).map_err(failed)?,
+        );
+        Ok(script::object_script(
+            &name,
+            ddl::alias_type(&schema, &name, &base, bit(row, 3)?, &privileges, &omitted),
+        ))
     }
 
     async fn features(&mut self) -> Result<Features, DetailError> {

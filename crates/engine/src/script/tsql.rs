@@ -778,6 +778,139 @@ fn set_options(ansi_nulls: bool, quoted_identifier: bool) -> String {
     format!("SET ANSI_NULLS {}\nGO\nSET QUOTED_IDENTIFIER {}\nGO\n", on(ansi_nulls), on(quoted_identifier))
 }
 
+/// `sys.sequences.cache_size` is null when the sequence uses the server's default cache, so that case omits `CACHE`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SequenceCache {
+    Off,
+    Default,
+    Size(String),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SequenceScript {
+    pub schema: String,
+    pub name: String,
+    pub type_name: String,
+    pub start: String,
+    pub increment: String,
+    pub min: String,
+    pub max: String,
+    pub cache: SequenceCache,
+    pub cycle: bool,
+    pub privileges: Vec<Privilege>,
+    pub omitted: Vec<Omitted>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TableTypeColumn {
+    pub name: String,
+    pub type_name: String,
+    pub nullable: bool,
+    pub identity: bool,
+    pub computed: bool,
+    pub defaulted: bool,
+}
+
+fn warn_object(name: &str, list: &[Privilege], omitted: &[Omitted]) -> Vec<String> {
+    let mut warnings = Vec::new();
+    warnings.extend(privileges(name, list));
+    warnings.extend(omitted.iter().map(|item| item.warning(name)));
+    warnings
+}
+
+pub fn sequence_script(s: &SequenceScript) -> Ddl {
+    let cache = match &s.cache {
+        SequenceCache::Off => "NO CACHE".to_owned(),
+        SequenceCache::Default => String::new(),
+        SequenceCache::Size(size) => format!("CACHE {size}"),
+    };
+    sequence_text(s, &cache)
+}
+
+fn sequence_text(s: &SequenceScript, cache: &str) -> Ddl {
+    let name = qualified(&s.schema, &s.name);
+    let cycle = if s.cycle { "CYCLE" } else { "NO CYCLE" };
+    let cache = if cache.is_empty() {
+        String::new()
+    } else {
+        format!(" {cache}")
+    };
+    let text = format!(
+        "CREATE SEQUENCE {name} AS {} START WITH {} INCREMENT BY {} MINVALUE {} MAXVALUE {}{cache} {cycle};\n",
+        s.type_name, s.start, s.increment, s.min, s.max
+    );
+    Ddl {
+        text,
+        warnings: warn_object(&name, &s.privileges, &s.omitted),
+    }
+}
+
+pub fn alias_type(
+    schema: &str,
+    name: &str,
+    base: &str,
+    nullable: bool,
+    privileges: &[Privilege],
+    omitted: &[Omitted],
+) -> Ddl {
+    let name = qualified(schema, name);
+    let null = if nullable { "NULL" } else { "NOT NULL" };
+    Ddl {
+        text: format!("CREATE TYPE {name} FROM {base} {null};\n"),
+        warnings: warn_object(&name, privileges, omitted),
+    }
+}
+
+pub fn table_type(
+    schema: &str,
+    name: &str,
+    columns: &[TableTypeColumn],
+    extra: &[String],
+    privileges: &[Privilege],
+    omitted: &[Omitted],
+) -> Ddl {
+    let name = qualified(schema, name);
+    let mut warnings = Vec::new();
+    let body = columns
+        .iter()
+        .map(|column| {
+            let quoted = ident(&column.name);
+            if column.identity {
+                warnings.push(format!("column identity on {name}.{quoted}"));
+            }
+            if column.computed {
+                warnings.push(format!("computed column on {name}.{quoted}"));
+            }
+            if column.defaulted {
+                warnings.push(format!("column default on {name}.{quoted}"));
+            }
+            let null = if column.nullable { "NULL" } else { "NOT NULL" };
+            format!("    {quoted} {} {null}", column.type_name)
+        })
+        .collect::<Vec<_>>()
+        .join(",\n");
+    warnings.extend(extra.iter().cloned());
+    warnings.extend(warn_object(&name, privileges, omitted));
+    Ddl {
+        text: format!("CREATE TYPE {name} AS TABLE (\n{body}\n);\n"),
+        warnings,
+    }
+}
+
+pub fn synonym_script(
+    schema: &str,
+    name: &str,
+    target: &str,
+    privileges: &[Privilege],
+    omitted: &[Omitted],
+) -> Ddl {
+    let name = qualified(schema, name);
+    Ddl {
+        text: format!("CREATE SYNONYM {name} FOR {target};\n"),
+        warnings: warn_object(&name, privileges, omitted),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1484,6 +1617,75 @@ EXEC sys.sp_addextendedproperty @name = N'MS_Description', @value = N'bound', @l
 GO
 "
             ))
+        );
+    }
+
+    #[test]
+    fn sequences_types_and_synonyms_script_as_create() {
+        let sequence = SequenceScript {
+            schema: "dbo".into(),
+            name: "order_number".into(),
+            type_name: "bigint".into(),
+            start: "1000".into(),
+            increment: "10".into(),
+            min: "-9223372036854775808".into(),
+            max: "9223372036854775807".into(),
+            cache: SequenceCache::Size("50".into()),
+            cycle: false,
+            privileges: vec![Privilege {
+                name: "UPDATE".into(),
+                column: None,
+                grantee: "[app]".into(),
+                change: Change::Granted,
+            }],
+            omitted: vec![Omitted::Owner("bob".into())],
+        };
+        let ddl = sequence_script(&sequence);
+        assert_eq!(
+            ddl.text,
+            "CREATE SEQUENCE [dbo].[order_number] AS bigint START WITH 1000 INCREMENT BY 10 MINVALUE -9223372036854775808 MAXVALUE 9223372036854775807 CACHE 50 NO CYCLE;\n"
+        );
+        assert_eq!(
+            ddl.warnings,
+            [
+                "privileges on [dbo].[order_number] (UPDATE granted to [app])",
+                "owner [bob] of [dbo].[order_number], set by ALTER AUTHORIZATION"
+            ]
+        );
+        assert_eq!(
+            alias_type("dbo", "phone", "nvarchar(20)", true, &[], &[]).text,
+            "CREATE TYPE [dbo].[phone] FROM nvarchar(20) NULL;\n"
+        );
+        let column = TableTypeColumn {
+            name: "value".into(),
+            type_name: "int".into(),
+            nullable: true,
+            identity: false,
+            computed: false,
+            defaulted: true,
+        };
+        let table = table_type(
+            "dbo",
+            "items",
+            &[column],
+            &["primary key [PK_items] on [dbo].[items]".into()],
+            &[],
+            &[],
+        );
+        assert_eq!(
+            table.text,
+            "CREATE TYPE [dbo].[items] AS TABLE (\n    [value] int NULL\n);\n"
+        );
+        assert_eq!(
+            table.warnings,
+            [
+                "column default on [dbo].[items].[value]",
+                "primary key [PK_items] on [dbo].[items]"
+            ]
+        );
+        assert_eq!(
+            synonym_script("dbo", "customers_all", "[dbo].[customers]", &[], &[]).text,
+            "CREATE SYNONYM [dbo].[customers_all] FOR [dbo].[customers];\n"
         );
     }
 }

@@ -437,7 +437,14 @@ mod tests {
         assert_eq!(slot.status(), CatalogStatus::Failed { message: "first load failed".into(), version: None });
         assert!(slot.last().is_none());
 
-        let catalog = Arc::new(Catalog { database_kind: crate::model::DatabaseKind::Postgres, db, version: 7, default_schema: None, schemas: Vec::new() });
+        let catalog = Arc::new(Catalog {
+            database_kind: crate::model::DatabaseKind::Postgres,
+            db,
+            version: 7,
+            default_schema: None,
+            schemas: Vec::new(),
+            extensions: Vec::new(),
+        });
         slot.set(CatalogSlot::Ready(catalog.clone()));
         slot.fail("statement timeout".into());
         assert_eq!(slot.status(), CatalogStatus::Failed { message: "statement timeout".into(), version: Some(7) });

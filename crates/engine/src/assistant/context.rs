@@ -243,7 +243,39 @@ mod tests {
             db: DatabaseRef { connection_id: ConnectionId(uuid::Uuid::nil()), database: "shop".into() },
             version: 1,
             default_schema: Some("public".into()),
-            schemas: vec![SchemaInfo { name: "public".into(), quoted: "public".into(), system: false, table_count: tables as u32, relations, functions: Vec::new() }, SchemaInfo { name: "hidden".into(), quoted: "hidden".into(), system: false, table_count: 1, relations: vec![Relation { qualified_name: String::new(), oid: 9, name: "secret".into(), quoted: "secret".into(), kind: RelKind::View, row_estimate: None, columns: vec![] }], functions: Vec::new() }],
+            schemas: vec![
+                SchemaInfo {
+                    name: "public".into(),
+                    quoted: "public".into(),
+                    system: false,
+                    table_count: tables as u32,
+                    relations,
+                    functions: Vec::new(),
+                    sequences: Vec::new(),
+                    types: Vec::new(),
+                    synonyms: Vec::new(),
+                },
+                SchemaInfo {
+                    name: "hidden".into(),
+                    quoted: "hidden".into(),
+                    system: false,
+                    table_count: 1,
+                    relations: vec![Relation {
+                        qualified_name: String::new(),
+                        oid: 9,
+                        name: "secret".into(),
+                        quoted: "secret".into(),
+                        kind: RelKind::View,
+                        row_estimate: None,
+                        columns: vec![],
+                    }],
+                    functions: Vec::new(),
+                    sequences: Vec::new(),
+                    types: Vec::new(),
+                    synonyms: Vec::new(),
+                },
+            ],
+            extensions: Vec::new(),
         }
     }
 

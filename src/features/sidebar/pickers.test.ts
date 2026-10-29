@@ -48,7 +48,17 @@ const prod = instance([
   db("vault", { schemaCount: { kind: "Unavailable", message: "permission denied for database vault" } }),
 ]);
 
-const schema = (name: string, tableCount: number, system = false): SchemaInfo => ({ name, quoted: name, system, tableCount, relations: [], functions: [] });
+const schema = (name: string, tableCount: number, system = false): SchemaInfo => ({
+  name,
+  quoted: name,
+  system,
+  tableCount,
+  relations: [],
+  functions: [],
+  sequences: [],
+  types: [],
+  synonyms: [],
+});
 
 const shopCatalog: Catalog = {
   databaseKind: "Postgres",
@@ -63,6 +73,7 @@ const shopCatalog: Catalog = {
     schema("pg_catalog", 64, true),
     schema("public", 13),
   ],
+  extensions: [],
 };
 
 const shopState = db("shop", { shown: true, shownSchemas: ["audit", "pg_catalog", "public"], catalog: { kind: "Ready", version: 3 } });

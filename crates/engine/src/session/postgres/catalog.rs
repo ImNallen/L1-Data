@@ -2,9 +2,12 @@ use std::collections::HashMap;
 
 use tokio_postgres::Client;
 
-use crate::connection::DatabaseInfo;
-use crate::model::{Catalog, DatabaseKind, ColumnInfo, DatabaseRef, DbAccess, FnKind, FunctionInfo, RelKind, Relation, SchemaInfo};
 use super::types;
+use crate::connection::DatabaseInfo;
+use crate::model::{
+    Catalog, ColumnInfo, DatabaseKind, DatabaseRef, DbAccess, ExtensionInfo, FnKind, FunctionInfo,
+    RelKind, Relation, SchemaInfo, SequenceInfo, TypeField, TypeInfo, TypeKind,
+};
 use crate::text::{quote_function_if_needed, quote_if_needed};
 
 /// Postgres reserves the `pg_` prefix for its own schemas. `view::is_system_schema` is the same
@@ -68,12 +71,18 @@ fn default_schema(search_path: &[String], schemas: &[SchemaInfo]) -> Option<Stri
         .map(|s| s.name.clone())
 }
 
-/// Five queries on one database's metadata session. Every schema is listed with its `system` flag
-/// and table count; relations and columns load for user schemas and for the system schemas in
-/// `extra_schemas`; functions load for user schemas only. Each query reads its own snapshot, so a
-/// schema whose relations load counts its tables from them, and DDL between the queries cannot
-/// make the count disagree with the list.
-pub async fn load(client: &Client, db: DatabaseRef, version: u64, extra_schemas: &[String]) -> Result<Catalog, tokio_postgres::Error> {
+/// Eight queries on one database's metadata session. Every schema is listed with its `system` flag
+/// and table count. Relations and columns load for user schemas and for the system schemas in
+/// `extra_schemas`. Functions and sequences load for user schemas only. Types load for user
+/// schemas, plus the base and pseudo types of a system schema named in `extra_schemas`. Each query
+/// reads its own snapshot, so a schema whose relations load counts its tables from them, and DDL
+/// between the queries cannot make the count disagree with the list.
+pub async fn load(
+    client: &Client,
+    db: DatabaseRef,
+    version: u64,
+    extra_schemas: &[String],
+) -> Result<Catalog, tokio_postgres::Error> {
     let schema_rows = client
         .query(
             &format!(
@@ -93,6 +102,9 @@ pub async fn load(client: &Client, db: DatabaseRef, version: u64, extra_schemas:
             table_count: r.get::<_, i32>(2) as u32,
             relations: Vec::new(),
             functions: Vec::new(),
+            sequences: Vec::new(),
+            types: Vec::new(),
+            synonyms: Vec::new(),
         })
         .collect();
     let schema_index: HashMap<String, usize> = schemas.iter().enumerate().map(|(i, s)| (s.name.clone(), i)).collect();
@@ -202,7 +214,145 @@ pub async fn load(client: &Client, db: DatabaseRef, version: u64, extra_schemas:
         });
     }
 
-    Ok(Catalog { database_kind: DatabaseKind::Postgres, db, version, default_schema, schemas })
+    let sequence_rows = client
+        .query(
+            &format!(
+                "SELECT c.oid, n.nspname, c.relname, format_type(s.seqtypid, NULL)
+                 FROM pg_class c
+                 JOIN pg_namespace n ON n.oid = c.relnamespace
+                 JOIN pg_sequence s ON s.seqrelid = c.oid
+                 WHERE c.relkind = 'S' AND {FUNCTION_SCHEMA_FILTER}
+                 ORDER BY c.relname, c.oid"
+            ),
+            &[],
+        )
+        .await?;
+    for r in &sequence_rows {
+        let Some(&si) = schema_index.get(&r.get::<_, String>(1)) else {
+            continue;
+        };
+        let name: String = r.get(2);
+        schemas[si].sequences.push(SequenceInfo {
+            oid: r.get(0),
+            quoted: quote_if_needed(DatabaseKind::Postgres, &name),
+            name,
+            type_name: r
+                .get::<_, Option<String>>(3)
+                .unwrap_or_else(|| "unknown".into()),
+        });
+    }
+
+    // chr(31) and chr(30) separate labels and fields. `format!` would eat braces, and a label can contain a comma.
+    let type_rows = client
+        .query(
+            &format!(
+                "SELECT t.oid, n.nspname, t.typname, t.typtype::text,
+                        CASE
+                          WHEN t.typtype = 'e' THEN COALESCE((SELECT string_agg(e.enumlabel, chr(31) ORDER BY e.enumsortorder) FROM pg_enum e WHERE e.enumtypid = t.oid), '')
+                          WHEN t.typtype = 'd' THEN format_type(t.typbasetype, t.typtypmod)
+                          WHEN t.typtype = 'c' THEN COALESCE((SELECT string_agg(a.attname || chr(31) || format_type(a.atttypid, a.atttypmod), chr(30) ORDER BY a.attnum) FROM pg_attribute a WHERE a.attrelid = t.typrelid AND a.attnum > 0 AND NOT a.attisdropped), '')
+                          WHEN t.typtype = 'r' THEN COALESCE(format_type(r.rngsubtype, NULL), '')
+                          ELSE ''
+                        END
+                 FROM pg_type t
+                 JOIN pg_namespace n ON n.oid = t.typnamespace
+                 LEFT JOIN pg_range r ON r.rngtypid = t.oid
+                 WHERE NOT {UNLISTED_SCHEMA}
+                   AND (NOT {SYSTEM_SCHEMA} OR n.nspname = ANY($1))
+                   AND t.typisdefined
+                   AND t.typtype IN ('b', 'c', 'd', 'e', 'p', 'r')
+                   AND NOT (t.typtype IN ('b', 'p') AND t.typcategory = 'A')
+                   AND NOT EXISTS (SELECT 1 FROM pg_class rel WHERE rel.oid = t.typrelid AND rel.relkind <> 'c')
+                 ORDER BY t.typname, t.oid"
+            ),
+            &[&extra_schemas],
+        )
+        .await?;
+    for r in &type_rows {
+        let Some(&si) = schema_index.get(&r.get::<_, String>(1)) else {
+            continue;
+        };
+        let Some(kind) = type_kind(&r.get::<_, String>(3), &r.get::<_, String>(4)) else {
+            continue;
+        };
+        let name: String = r.get(2);
+        schemas[si].types.push(TypeInfo {
+            oid: r.get(0),
+            quoted: quote_if_needed(DatabaseKind::Postgres, &name),
+            name,
+            kind,
+        });
+    }
+
+    let extension_rows = client
+        .query(
+            "SELECT e.oid, e.extname, e.extversion
+             FROM pg_extension e
+             ORDER BY e.extname, e.oid",
+            &[],
+        )
+        .await?;
+    let extensions = extension_rows
+        .iter()
+        .map(|r| {
+            let name: String = r.get(1);
+            ExtensionInfo {
+                oid: r.get(0),
+                quoted: quote_if_needed(DatabaseKind::Postgres, &name),
+                name,
+                version: r.get::<_, Option<String>>(2).unwrap_or_default(),
+            }
+        })
+        .collect();
+
+    Ok(Catalog {
+        database_kind: DatabaseKind::Postgres,
+        db,
+        version,
+        default_schema,
+        schemas,
+        extensions,
+    })
+}
+
+fn type_kind(typtype: &str, payload: &str) -> Option<TypeKind> {
+    match typtype {
+        "e" => Some(TypeKind::Enum {
+            labels: split_packed(payload, '\u{1f}'),
+        }),
+        "d" => Some(TypeKind::Domain {
+            base: payload.to_owned(),
+        }),
+        "c" => Some(TypeKind::Composite {
+            fields: composite_fields(payload),
+        }),
+        "r" => Some(TypeKind::Range {
+            subtype: payload.to_owned(),
+        }),
+        "b" | "p" => Some(TypeKind::Builtin),
+        _ => None,
+    }
+}
+
+fn split_packed(payload: &str, sep: char) -> Vec<String> {
+    if payload.is_empty() {
+        Vec::new()
+    } else {
+        payload.split(sep).map(str::to_owned).collect()
+    }
+}
+
+fn composite_fields(payload: &str) -> Vec<TypeField> {
+    split_packed(payload, '\u{1e}')
+        .into_iter()
+        .filter_map(|field| {
+            let (name, type_name) = field.split_once('\u{1f}')?;
+            Some(TypeField {
+                name: name.to_owned(),
+                type_name: type_name.to_owned(),
+            })
+        })
+        .collect()
 }
 
 #[cfg(test)]
@@ -210,7 +360,17 @@ mod tests {
     use super::*;
 
     fn schema(name: &str, system: bool) -> SchemaInfo {
-        SchemaInfo { name: name.into(), quoted: name.into(), system, table_count: 0, relations: Vec::new(), functions: Vec::new() }
+        SchemaInfo {
+            name: name.into(),
+            quoted: name.into(),
+            system,
+            table_count: 0,
+            relations: Vec::new(),
+            functions: Vec::new(),
+            sequences: Vec::new(),
+            types: Vec::new(),
+            synonyms: Vec::new(),
+        }
     }
 
     fn path(names: &[&str]) -> Vec<String> {
@@ -226,5 +386,53 @@ mod tests {
         let no_public = [schema("audit", false), schema("pg_catalog", true)];
         assert_eq!(default_schema(&path(&["pg_catalog"]), &no_public).as_deref(), Some("audit"), "then the first user schema");
         assert_eq!(default_schema(&path(&["pg_catalog"]), &[schema("pg_catalog", true)]), None, "a database with only system schemas has no default");
+    }
+
+    #[test]
+    fn type_payloads_become_the_kind_the_row_draws() {
+        assert_eq!(
+            type_kind("e", "sad\u{1f}ok\u{1f}happy"),
+            Some(TypeKind::Enum {
+                labels: vec!["sad".into(), "ok".into(), "happy".into()]
+            })
+        );
+        assert_eq!(
+            type_kind("e", ""),
+            Some(TypeKind::Enum { labels: Vec::new() })
+        );
+        assert_eq!(
+            type_kind("d", "text"),
+            Some(TypeKind::Domain {
+                base: "text".into()
+            })
+        );
+        assert_eq!(
+            type_kind("c", "id\u{1f}integer\u{1e}kind\u{1f}text"),
+            Some(TypeKind::Composite {
+                fields: vec![
+                    TypeField {
+                        name: "id".into(),
+                        type_name: "integer".into()
+                    },
+                    TypeField {
+                        name: "kind".into(),
+                        type_name: "text".into()
+                    }
+                ]
+            })
+        );
+        assert_eq!(
+            type_kind("c", ""),
+            Some(TypeKind::Composite { fields: Vec::new() })
+        );
+        assert_eq!(
+            type_kind("r", "integer"),
+            Some(TypeKind::Range {
+                subtype: "integer".into()
+            })
+        );
+        assert_eq!(type_kind("b", ""), Some(TypeKind::Builtin));
+        assert_eq!(type_kind("p", ""), Some(TypeKind::Builtin));
+        assert_eq!(type_kind("m", "int4multirange"), None);
     }
 }
