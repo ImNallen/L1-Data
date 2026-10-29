@@ -1,6 +1,6 @@
 import type { MapForeignKey, MapQuery } from "../../ipc/bindings";
 import { Button, cx } from "../../ui/primitives";
-import { occurrenceOid, openDatabaseMap, selectMap, type Exploring } from "./controller";
+import { displayedQueryJoins, occurrenceOid, openDatabaseMap, selectMap, type Exploring } from "./controller";
 import { EDGE_LIMIT, NODE_LIMIT } from "./graph";
 
 function ForeignKeyDetail({ edge, map }: { edge: MapForeignKey; map: Exploring }) {
@@ -35,6 +35,7 @@ function ForeignKeyDetail({ edge, map }: { edge: MapForeignKey; map: Exploring }
 
 function QueryDetail({ query, map }: { query: MapQuery; map: Exploring }) {
   const selectedJoin = map.selection.kind === "join" ? query.joins[map.selection.index] : undefined;
+  const joins = displayedQueryJoins(map);
   return (
     <div data-testid="map-query-analysis" className="space-y-2">
       <p className="text-dim">
@@ -65,9 +66,15 @@ function QueryDetail({ query, map }: { query: MapQuery; map: Exploring }) {
           );
         })}
       </div>
-      {query.joins.length > 0 && (
+      {joins.length < query.joins.length && (
+        <p data-testid="map-query-limit" className="text-amber">
+          {query.joins.length - joins.length} SQL equalities are hidden to keep the map within {EDGE_LIMIT} relationships. Simplify the query or reset
+          exploration to show more.
+        </p>
+      )}
+      {joins.length > 0 && (
         <div className="flex flex-wrap gap-1.5">
-          {query.joins.map((join, index) => (
+          {joins.map((join, index) => (
             <button
               key={index}
               type="button"

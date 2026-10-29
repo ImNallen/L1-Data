@@ -116,10 +116,12 @@ impl Engine {
         let (instance, slot) = shared
             .slot(&db)
             .map_err(|error| MapError::Catalog { error })?;
-        shared
-            .ensure_catalog(&instance, &slot)
-            .await
-            .map_err(|error| MapError::Catalog { error })?;
+        if slot.last().is_none() {
+            shared
+                .ensure_catalog(&instance, &slot)
+                .await
+                .map_err(|error| MapError::Catalog { error })?;
+        }
         let mut meta = slot.meta.lock().await;
         if !shared.map_current(&instance, &slot, catalog_version) {
             return Err(MapError::Stale);
@@ -160,10 +162,12 @@ impl Engine {
         let (instance, slot) = shared
             .slot(&db)
             .map_err(|error| MapError::Catalog { error })?;
-        shared
-            .ensure_catalog(&instance, &slot)
-            .await
-            .map_err(|error| MapError::Catalog { error })?;
+        if slot.last().is_none() {
+            shared
+                .ensure_catalog(&instance, &slot)
+                .await
+                .map_err(|error| MapError::Catalog { error })?;
+        }
         let _meta = slot.meta.lock().await;
         if !shared.map_current(&instance, &slot, catalog_version) {
             return Err(MapError::Stale);
@@ -208,6 +212,36 @@ mod tests {
         };
         engine.catalog(db.clone()).await.unwrap();
         (engine, dir, db)
+    }
+
+    #[tokio::test]
+    async fn query_analysis_keeps_the_last_catalog_after_a_failed_refresh() {
+        let (engine, _dir, db) = engine().await;
+        let (_, slot) = engine.shared.slot(&db).unwrap();
+        let guard = slot.meta.lock().await;
+        let catalog = slot.last().unwrap();
+        let version = catalog.version;
+        slot.set(crate::connection::CatalogSlot::Failed {
+            message: "refresh unavailable".into(),
+            last: Some(catalog),
+        });
+        let query = engine.database_map_query(db.clone(), "SELECT 1".into(), DocOffset(2), version);
+        tokio::pin!(query);
+        assert!(matches!(futures_util::poll!(&mut query), Poll::Pending));
+        drop(guard);
+        query.await.unwrap();
+        assert!(
+            slot.ready().is_none(),
+            "cursor analysis must not retry a failed catalog refresh"
+        );
+        assert!(matches!(
+            engine.database_map_neighborhood(db, 0, version, None).await,
+            Err(MapError::Gone)
+        ));
+        assert!(
+            slot.ready().is_none(),
+            "map expansion must not retry a failed catalog refresh"
+        );
     }
 
     #[tokio::test]

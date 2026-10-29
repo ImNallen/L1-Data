@@ -151,7 +151,7 @@ pub(crate) fn analyze(text: &str, cursor: DocOffset, catalog: &Catalog) -> MapQu
         .collect();
     let mut ctes = vec![];
     let mut depth = 0usize;
-    let mut cte_name = tokens.first().is_some_and(|t| t.word("with"));
+    let mut cte_name = false;
     let mut cte_body = false;
     let mut scopes = vec![];
     let mut i = 0;
@@ -160,7 +160,14 @@ pub(crate) fn analyze(text: &str, cursor: DocOffset, catalog: &Catalog) -> MapQu
     let mut from_list = false;
     while i < tokens.len() {
         let t = &tokens[i];
-        if cte_name && i > 0 && !t.word("recursive") {
+        if depth == 0 && t.word("with") {
+            cte_name = true;
+            result.incomplete = true;
+            joins_sound = false;
+            i += 1;
+            continue;
+        }
+        if cte_name && !t.word("recursive") {
             if let Some(name) = t.name(kind) {
                 ctes.push(name);
             }
@@ -606,6 +613,30 @@ mod tests {
         }
         let temp = analyze_at_end("SELECT * FROM #orders", DatabaseKind::SqlServer);
         assert!(temp.occurrences.is_empty() && temp.incomplete);
+    }
+
+    #[test]
+    fn explain_wrappers_do_not_resolve_ctes_as_catalog_tables() {
+        for prefix in [
+            "EXPLAIN ",
+            "EXPLAIN (ANALYZE, BUFFERS) ",
+            "EXPLAIN ANALYZE ",
+        ] {
+            let sql = format!(
+                "{prefix}WITH orders AS (SELECT * FROM public.people) SELECT * FROM orders"
+            );
+            let result = analyze_at_end(&sql, DatabaseKind::Postgres);
+            assert_eq!(result.occurrences.len(), 1);
+            assert!(
+                matches!(
+                    result.occurrences[0].resolution,
+                    MapResolution::Unresolved { .. }
+                ),
+                "{prefix}: {:?}",
+                result.occurrences[0].resolution
+            );
+            assert!(result.incomplete && result.joins.is_empty());
+        }
     }
 
     #[test]

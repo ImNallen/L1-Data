@@ -388,3 +388,19 @@ it("renders exploration, ordered declared key details, zoom, overlay, and close 
   fireEvent.click(screen.getByTestId("map-close"));
   expect(screen.queryByTestId("database-map")).toBeNull();
 });
+
+it("bounds declared and SQL relationships together and reports hidden predicates", async () => {
+  vi.useFakeTimers();
+  const analysis = query();
+  analysis.joins = Array.from({ length: EDGE_LIMIT + 1 }, () => query().joins).flat();
+  vi.mocked(commands.databaseMapQuery).mockResolvedValue({ status: "ok", data: analysis });
+  openDatabaseMap(db, 1);
+  await flush();
+  render(<DatabaseMap />);
+  toggleMapOverlay();
+  await act(async () => {
+    await vi.advanceTimersByTimeAsync(200);
+  });
+  expect(document.querySelectorAll('[data-testid^="map-fk-"], [data-testid^="map-join-"]')).toHaveLength(EDGE_LIMIT);
+  expect(screen.getByTestId("map-query-limit").textContent).toContain("4 SQL equalities are hidden");
+});

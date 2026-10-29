@@ -5,7 +5,7 @@ import { dbKey, sameDb } from "../../state/dbKey";
 import { useLive, wantedCatalogs } from "../../state/live";
 import { tabTarget, useWorkspace } from "../../state/workspace";
 import { clearMapHighlights, editorContextOf, highlightMapSource, onEditorContextChanged, sameEditorContext, type EditorContext } from "../editor/editorStates";
-import { emptyGraph, mergeNeighborhood, type Graph, type Page, type Point, type Viewport } from "./graph";
+import { EDGE_LIMIT, emptyGraph, mergeNeighborhood, type Graph, type Page, type Point, type Viewport } from "./graph";
 
 export type Selection =
   | { kind: "node"; oid: number }
@@ -314,4 +314,8 @@ export function queryJoinEndpoints(query: MapQuery, join: MapQueryJoin): [number
   const a = source ? occurrenceOid(source) : null;
   const b = target ? occurrenceOid(target) : null;
   return a !== null && b !== null ? [a, b] : null;
+}
+
+export function displayedQueryJoins(map: Exploring): MapQueryJoin[] {
+  return map.analysis.kind === "ready" ? map.analysis.query.joins.slice(0, Math.max(0, EDGE_LIMIT - map.graph.edges.size)) : [];
 }

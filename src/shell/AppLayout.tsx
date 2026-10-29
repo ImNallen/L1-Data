@@ -120,7 +120,7 @@ export function AppLayout() {
           {mapOpen && (
             <>
               <ResizeHandle id="map-resize" label="Resize database map" line="vertical" lineColor="bg-border" />
-              <Panel id="database-map" defaultSize="48%" minSize={340}>
+              <Panel id="database-map" defaultSize="60%" minSize={340}>
                 <DatabaseMap />
               </Panel>
             </>

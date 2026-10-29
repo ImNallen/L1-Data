@@ -1,8 +1,18 @@
 import { FocusIcon, MaximizeIcon, MinusIcon, PlusIcon } from "lucide-react";
 import { useEffect, useRef, type KeyboardEvent, type PointerEvent } from "react";
 import { IconButton, Spinner, cx } from "../../ui/primitives";
-import { expandMapNode, moveMapNode, occurrenceOid, openDatabaseMap, queryJoinEndpoints, selectMap, setMapViewport, type Exploring } from "./controller";
-import { CARD_HEIGHT, CARD_WIDTH, fitViewport, zoomViewport, type MapNode, type Point, type Viewport } from "./graph";
+import {
+  displayedQueryJoins,
+  expandMapNode,
+  moveMapNode,
+  occurrenceOid,
+  openDatabaseMap,
+  queryJoinEndpoints,
+  selectMap,
+  setMapViewport,
+  type Exploring,
+} from "./controller";
+import { CARD_HEIGHT, CARD_WIDTH, fitViewport, initialViewport, zoomViewport, type MapNode, type Point, type Viewport } from "./graph";
 
 function activate(event: KeyboardEvent, action: () => void): void {
   if (event.key === "Enter" || event.key === " ") {
@@ -195,7 +205,8 @@ export function MapCanvas({ map }: { map: Exploring }) {
   useEffect(() => {
     if (fitted.current !== map.generation && map.graph.nodes.size) {
       fitted.current = map.generation;
-      fit();
+      const box = canvas.current?.getBoundingClientRect();
+      if (box) setMapViewport(initialViewport(map.graph, map.root, box.width, box.height));
     }
   });
   const zoom = (factor: number) => {
@@ -301,8 +312,8 @@ export function MapCanvas({ map }: { map: Exploring }) {
                 />
               ) : null;
             })}
-            {query?.joins.map((join, index) => {
-              const endpoints = queryJoinEndpoints(query, join);
+            {displayedQueryJoins(map).map((join, index) => {
+              const endpoints = query ? queryJoinEndpoints(query, join) : null;
               const a = endpoints ? map.graph.nodes.get(endpoints[0]) : null;
               const b = endpoints ? map.graph.nodes.get(endpoints[1]) : null;
               return a && b ? (
@@ -353,6 +364,7 @@ export function MapCanvas({ map }: { map: Exploring }) {
       {map.graph.nodes.size === 1 && map.graph.edges.size === 0 && (
         <p className="pointer-events-none absolute top-3 left-3 text-ui-11 text-muted">No declared foreign keys visible for this table.</p>
       )}
+      {map.graph.edges.size > 0 && <p className="pointer-events-none absolute top-3 left-3 text-ui-11 text-dim">Drag to explore · Scroll to zoom</p>}
     </div>
   );
 }

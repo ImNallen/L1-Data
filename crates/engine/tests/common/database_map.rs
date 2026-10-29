@@ -17,16 +17,13 @@ pub fn fixture(schema: &str, stem: &str, kind: DatabaseKind) -> String {
     sql
 }
 
-pub async fn verify(
+async fn wait_for_current_neighborhood(
     engine: &engine::Engine,
-    db: DatabaseRef,
+    db: &DatabaseRef,
     schema: &str,
     stem: &str,
-    kind: DatabaseKind,
-) {
-    engine.refresh_catalog(db.clone()).await.unwrap();
-    // DDL run completion can precede the coalesced catalog refresh it scheduled.
-    let (catalog, first) = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+) -> (std::sync::Arc<Catalog>, MapNeighborhood) {
+    tokio::time::timeout(std::time::Duration::from_secs(10), async {
         loop {
             let catalog = engine.catalog(db.clone()).await.unwrap();
             let root = catalog
@@ -52,7 +49,18 @@ pub async fn verify(
         }
     })
     .await
-    .unwrap();
+    .unwrap()
+}
+
+pub async fn verify(
+    engine: &engine::Engine,
+    db: DatabaseRef,
+    schema: &str,
+    stem: &str,
+    kind: DatabaseKind,
+) {
+    engine.refresh_catalog(db.clone()).await.unwrap();
+    let (catalog, first) = wait_for_current_neighborhood(engine, &db, schema, stem).await;
     let relations = &catalog
         .schemas
         .iter()

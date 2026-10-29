@@ -2,8 +2,8 @@ import type { MapCursor, MapForeignKey, MapNeighborhood, MapRelation } from "../
 
 export const NODE_LIMIT = 160;
 export const EDGE_LIMIT = 512;
-export const CARD_WIDTH = 224;
-export const CARD_HEIGHT = 168;
+export const CARD_WIDTH = 192;
+export const CARD_HEIGHT = 160;
 export type Point = { x: number; y: number };
 export type Viewport = Point & { scale: number };
 export type Page =
@@ -45,7 +45,7 @@ export function mergeNeighborhood(graph: Graph, page: MapNeighborhood, focus: nu
       continue;
     }
     const side = relation.oid === focus ? 0 : (sides.get(relation.oid) ?? 1);
-    const position = { x: origin.x + side * (CARD_WIDTH + 100), y: origin.y };
+    const position = { x: origin.x + side * (CARD_WIDTH + 72), y: origin.y };
     let lane = 0;
     while (occupied.some((p) => Math.abs(p.x - position.x) < CARD_WIDTH + 30 && Math.abs(p.y - position.y) < CARD_HEIGHT + 28)) {
       lane += 1;
@@ -74,4 +74,11 @@ export function zoomViewport(view: Viewport, factor: number, center: Point): Vie
   const scale = Math.max(0.001, Math.min(2.5, view.scale * factor));
   const ratio = scale / view.scale;
   return { scale, x: center.x - (center.x - view.x) * ratio, y: center.y - (center.y - view.y) * ratio };
+}
+
+export function initialViewport(graph: Graph, root: number, width: number, height: number): Viewport {
+  const fit = fitViewport(graph, width, height);
+  const focus = graph.nodes.get(root);
+  if (fit.scale >= 0.85 || !focus) return fit;
+  return { scale: 0.85, x: width / 2 - (focus.position.x + CARD_WIDTH / 2) * 0.85, y: height / 2 - (focus.position.y + CARD_HEIGHT / 2) * 0.85 };
 }

@@ -1,5 +1,4 @@
 #!/usr/bin/env python3
-"""Read-only map IPC smoke. Build dev-bridge and start both seeded databases first."""
 import json
 import os
 from pathlib import Path
@@ -72,6 +71,10 @@ with tempfile.TemporaryDirectory(prefix="l1-map-") as directory:
                 analysis = invoke("database_map_query", db=db, text=text, cursor=len(text.encode("utf-16-le")) // 2, catalogVersion=catalog["version"])
                 assert len(analysis["occurrences"]) == 2 and len(analysis["joins"]) == 1 and not analysis["incomplete"], analysis
                 assert all(o["resolution"]["kind"] == "CatalogMatch" for o in analysis["occurrences"]), analysis
+                def source_range(span):
+                    return text.encode("utf-16-le")[span["from"] * 2:span["to"] * 2].decode("utf-16-le")
+                assert [source_range(o["range"]) for o in analysis["occurrences"]] == [table(schema, root["name"]), table(target["schema"], target["name"])], analysis
+                assert source_range(analysis["joins"][0]["range"]) == f"a.{quoted(pair['source'], kind)}=b.{quoted(pair['target'], kind)}", analysis
                 assert response("database_map_neighborhood", **{**args, "catalogVersion": catalog["version"] + 1})["error"]["kind"] == "Stale"
                 assert response("database_map_neighborhood", **{**args, "oid": 0})["error"]["kind"] == "Gone"
                 invoke("connection_disconnect", id=config["id"], force=True)
