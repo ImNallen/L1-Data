@@ -113,6 +113,31 @@ fn writes(tokens: &[Token<'_>]) -> bool {
         | "VACUUM" | "CLUSTER" => true,
         "PREPARE" => word(tokens.get(1), "TRANSACTION"),
         "COMMIT" | "ROLLBACK" => word(tokens.get(1), "PREPARED"),
+        "COPY" => {
+            let mut i = 1;
+            if word(tokens.get(i), "BINARY") {
+                i += 1;
+            }
+            if tokens.get(i) == Some(&Token::Open) {
+                return closing(tokens, i).is_some_and(|end| writes(&tokens[i + 1..end]));
+            }
+            while i < tokens.len() {
+                if word(tokens.get(i), "FROM") {
+                    return true;
+                }
+                if word(tokens.get(i), "TO") {
+                    return false;
+                }
+                if tokens.get(i) == Some(&Token::Open) {
+                    let Some(end) = closing(tokens, i) else {
+                        return false;
+                    };
+                    i = end;
+                }
+                i += 1;
+            }
+            false
+        }
         "WITH" => {
             let mut i = 1;
             if word(tokens.get(i), "RECURSIVE") {
