@@ -1,5 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { Group, Panel } from "react-resizable-panels";
+import { DatabaseMap } from "../features/databaseMap/DatabaseMap";
+import { useDatabaseMap } from "../features/databaseMap/controller";
 import { ConnectionDialog } from "../features/connections/ConnectionDialog";
 import { SqlEditor } from "../features/editor/SqlEditor";
 import { StatementChooser } from "../features/editor/StatementChooser";
@@ -100,6 +102,7 @@ export function AppLayout() {
   const [hosted] = useState(() => hostedWindow());
   const sidebar = useWorkspace((s) => s.layout.sidebar);
   const rightPanel = useWorkspace((s) => s.layout.rightPanel);
+  const mapOpen = useDatabaseMap((s) => s.map.kind !== "closed");
 
   return (
     <div className="relative flex h-full">
@@ -110,7 +113,19 @@ export function AppLayout() {
       <div data-testid="main" className="flex min-w-80 flex-1 flex-col bg-bg">
         <TopBar hosted={hosted} />
         <TabBar />
-        <MainArea />
+        <Group orientation="horizontal" className="min-h-0 flex-1">
+          <Panel id="sql-work" minSize={240}>
+            <MainArea />
+          </Panel>
+          {mapOpen && (
+            <>
+              <ResizeHandle id="map-resize" label="Resize database map" line="vertical" lineColor="bg-border" />
+              <Panel id="database-map" defaultSize="48%" minSize={340}>
+                <DatabaseMap />
+              </Panel>
+            </>
+          )}
+        </Group>
       </div>
       <PixelColumn column="right" open={rightPanel !== null}>
         <RightPanel hosted={hosted} />
