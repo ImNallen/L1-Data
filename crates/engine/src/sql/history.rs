@@ -343,6 +343,40 @@ mod tests {
     }
 
     #[test]
+    fn copy_from_and_copy_write_queries_are_writes() {
+        for sql in [
+            "copy public.orders from '/tmp/orders.csv' with (format csv)",
+            "copy public.orders from program 'printf 7'",
+            "COPY BINARY public.orders FROM '/tmp/orders.bin'",
+            "/* load */ COPY \"from\".\"to\" (\"to\", \"from\") /* direction */ FROM PROGRAM 'printf 7'",
+            "copy public.orders (id, total) from $file$/tmp/from.csv$file$",
+            "copy public.orders from stdin",
+            "copy (insert into orders values (1) returning *) to '/tmp/orders.csv'",
+            "copy (update orders set total = 1 returning *) to program 'cat'",
+            "copy (delete from orders returning *) to '/tmp/orders.csv'",
+            "copy (with changed as (delete from orders returning *) select * from changed) to '/tmp/orders.csv'",
+        ] {
+            assert!(history_is_write(sql), "{sql}");
+        }
+    }
+
+    #[test]
+    fn copy_to_reads_ignore_from_in_queries_names_and_strings() {
+        for sql in [
+            "copy public.orders to '/tmp/from.csv'",
+            "copy public.orders to program 'echo FROM'",
+            "copy binary \"from\".\"to\" (\"from\") to '/tmp/orders.bin'",
+            "copy (select * from orders) to '/tmp/orders.csv'",
+            "copy (select 'from', \"from\" from orders where id in (select id from items)) to program 'cat'",
+            "copy (with data as (select * from orders) select * from data) to '/tmp/orders.csv'",
+            "copy public.orders (id) /* FROM '/tmp/wrong' */ to stdout",
+            "copy (select $$delete from orders$$) to stdout",
+        ] {
+            assert!(!history_is_write(sql), "{sql}");
+        }
+    }
+
+    #[test]
     fn ignores_quoted_words_comments_and_unexecuted_explain() {
         for sql in [
             "select 'update'",

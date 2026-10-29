@@ -2412,6 +2412,51 @@ async fn count(oracle: &tokio_postgres::Client, table: &str) -> i64 {
 }
 
 #[tokio::test]
+async fn copy_from_on_production_requires_the_exact_statement_digest() {
+    let mut h = Harness::start().await;
+    let oracle = h.oracle().await;
+    let table = unique("t_copy_guard");
+    oracle.batch_execute(&format!("create table public.{table} (n int)")).await.unwrap();
+    set_environment(&h, Some(Environment::Production)).await;
+    let tab = h.sql_tab(TxnMode::AutoCommit).await;
+    let history = h.history_len();
+    let copy = format!("COPY public.{table} (n) FROM PROGRAM 'printf 7'");
+
+    let asked = match h.engine.console_run(tab, script(&copy), None).await {
+        Err(RunError::ConfirmWrites { confirmation }) => confirmation,
+        other => {
+            if let Ok(accepted) = &other {
+                h.wait_finished(tab, accepted.run_id).await;
+            }
+            let rows = count(&oracle, &table).await;
+            oracle.batch_execute(&format!("drop table public.{table}")).await.unwrap();
+            panic!("expected ConfirmWrites before COPY, got {other:?}; stored rows: {rows}");
+        }
+    };
+    assert_eq!((asked.sends.count, asked.sends.statements.as_slice()), (1, [copy.clone()].as_slice()));
+    assert_eq!(count(&oracle, &table).await, 0, "declining the question sends no COPY");
+    assert_eq!(h.history_len(), history, "declining the question records no run");
+    assert!(matches!(h.console(tab).run, RunState::Idle));
+
+    let changed = format!("COPY public.{table} (n) FROM PROGRAM 'printf 8'");
+    let stale = asked_to_run(&h, tab, script(&changed), Some(&asked.digest)).await;
+    assert_ne!(stale.digest, asked.digest);
+    assert_eq!(count(&oracle, &table).await, 0, "approval for other SQL sends no COPY");
+
+    let accepted = h.engine.console_run(tab, script(&copy), Some(asked.digest)).await.unwrap();
+    let state = h.wait_finished(tab, accepted.run_id).await;
+    assert!(matches!(state.run, RunState::Finished { outcome: RunOutcome::Ok, .. }), "{:?}", state.run);
+    assert_eq!(h.scalar(tab, &format!("select n from public.{table}")).await, "7");
+    assert_eq!(count(&oracle, &table).await, 1);
+
+    for sql in [format!("copy public.{table} from stdin"), format!("copy public.{table} to stdout")] {
+        assert!(matches!(h.engine.console_run(tab, script(&sql), None).await, Err(RunError::Unsupported { .. })), "{sql}");
+    }
+    assert_eq!(h.scalar(tab, "select 1").await, "1");
+    oracle.batch_execute(&format!("drop table public.{table}")).await.unwrap();
+}
+
+#[tokio::test]
 async fn a_write_on_production_runs_only_with_the_digest_of_the_same_work_and_target() {
     let mut h = Harness::start().await;
     let oracle = h.oracle().await;
