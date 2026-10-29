@@ -291,8 +291,9 @@ export function Modal({
             })
           }
           onCloseAutoFocus={(e) => {
+            e.preventDefault();
+            if (document.activeElement !== document.body) return;
             if (opener.current instanceof HTMLElement && opener.current.isConnected) {
-              e.preventDefault();
               opener.current.focus();
             }
           }}

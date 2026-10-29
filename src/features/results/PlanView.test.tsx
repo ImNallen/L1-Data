@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { cleanup, render, screen } from "@testing-library/react";
+import { cleanup, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, expect, it, vi } from "vitest";
 import { commands, type Plan, type PlanNode } from "../../ipc/bindings";
@@ -95,7 +95,7 @@ it("renders the plan tree, moves focus from the keyboard, and keeps the detail o
   expect(screen.getByTestId("plan-node-0").textContent).not.toContain("10×");
   expect(focused()).toBe(screen.getByTestId("plan-node-0"));
   expect(screen.getByTestId("plan-detail").textContent).toContain("(o.id = c.id)");
-  expect(performance.getEntriesByName("plan-paint")).toHaveLength(1);
+  await waitFor(() => expect(performance.getEntriesByName("plan-paint")).toHaveLength(1));
 
   screen.getByRole("tree").focus();
   await user.keyboard("{ArrowDown}");

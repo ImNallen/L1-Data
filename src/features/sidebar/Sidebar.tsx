@@ -78,7 +78,7 @@ function WorkspaceSidebarBody() {
         <IconButton data-testid="open-settings" aria-label="Settings" title="Settings" onClick={() => openSettings()}>
           <SlidersHorizontalIcon size={16} />
         </IconButton>
-        <IconButton data-testid="open-usage" aria-label="Usage" title="Usage" onClick={() => openSettings("usage")}>
+        <IconButton data-testid="open-usage" aria-label="Usage" title="Usage" onClick={() => open({ kind: "usage" })}>
           <ChartNoAxesColumnIcon size={16} />
         </IconButton>
         <IconButton data-testid="open-history" aria-label="Query history" title="Query history" onClick={() => open({ kind: "history" })}>
