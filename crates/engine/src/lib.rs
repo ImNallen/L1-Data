@@ -1,6 +1,7 @@
 mod aggregate;
 mod assistant;
 mod catalog;
+mod database_map;
 mod connection;
 mod console;
 mod entra;

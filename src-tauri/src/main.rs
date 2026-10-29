@@ -32,6 +32,7 @@ fn specta_builder() -> tauri_specta::Builder<tauri::Wry> {
             ipc::connection_edit_view,
             ipc::connection_probe_databases,
             ipc::relation_detail,
+            ipc::database_map_neighborhood,
             ipc::object_script,
             ipc::exact_row_count,
             ipc::console_configure,

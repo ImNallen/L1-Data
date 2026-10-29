@@ -110,6 +110,7 @@ routes! { e;
     connection_refresh(id: ConnectionId) => e.refresh_connection(id).await;
     connection_edit_view(id: ConnectionId, edit: ViewEdit) => e.edit_view(id, edit).await;
     connection_probe_databases(id: ConnectionId, databases: Vec<String>) => { e.probe_databases(id, databases); ok(()) };
+    database_map_neighborhood(db: DatabaseRef, oid: u32, catalog_version: u64, after: Option<MapCursor>) => e.database_map_neighborhood(db, oid, catalog_version, after).await;
     relation_detail(db: DatabaseRef, oid: u32) => e.relation_detail(db, oid).await;
     object_script(db: DatabaseRef, target: ScriptTarget) => e.object_script(db, target).await;
     exact_row_count(tab_id: TabId, db: DatabaseRef, schema: String, table: String, query: TableQuery) => e.exact_row_count(tab_id, db, schema, table, query).await;

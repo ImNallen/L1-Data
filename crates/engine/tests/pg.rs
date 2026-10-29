@@ -3965,3 +3965,17 @@ async fn csv_import_round_trips_the_existing_exporter() {
     assert_eq!(row.get::<_, i64>(0), 0);
     oracle.batch_execute(&format!("DROP TABLE {table}")).await.unwrap();
 }
+
+#[path = "common/database_map.rs"]
+mod database_map_cases;
+
+#[tokio::test]
+async fn database_map_pages_declared_neighborhoods() {
+    let mut h = Harness::start().await;
+    let schema = format!("map_{}", uuid::Uuid::new_v4().simple());
+    let tab = h.sql_tab(TxnMode::AutoCommit).await;
+    h.run_ok(tab,&format!("CREATE SCHEMA {schema}")).await;
+    h.run_ok(tab,&database_map_cases::fixture(&schema,DatabaseKind::Postgres)).await;
+    database_map_cases::verify(&h.engine,h.db(),&schema,DatabaseKind::Postgres).await;
+    h.run_ok(tab,&format!("DROP SCHEMA {schema} CASCADE")).await;
+}

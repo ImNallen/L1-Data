@@ -1385,3 +1385,16 @@ async fn parameters_preserve_declarations_and_quote_unicode_across_go() {
     assert_eq!(h.rows(sets[0]), [vec![Some("7".into()), Some(value.into())]]);
     assert_eq!(h.rows(sets[1]), [vec![Some("outside".into()), Some(value.into()), None]]);
 }
+
+#[path = "common/database_map.rs"]
+mod database_map_cases;
+
+#[tokio::test]
+async fn database_map_pages_declared_neighborhoods() {
+    let mut h = Harness::open(TxnMode::AutoCommit).await;
+    let schema = format!("map_{}", uuid::Uuid::new_v4().simple());
+    h.ok(&format!("CREATE SCHEMA {schema}")).await;
+    h.ok(&database_map_cases::fixture(&schema,DatabaseKind::SqlServer)).await;
+    database_map_cases::verify(&h.engine,h.db(),&schema,DatabaseKind::SqlServer).await;
+    h.ok(&format!("DROP TABLE {schema}.fan,{schema}.child; ALTER TABLE {schema}.root DROP CONSTRAINT self_pair; DROP TABLE {schema}.root,{schema}.anchor,{schema}.alone; DROP SCHEMA {schema}")).await;
+}

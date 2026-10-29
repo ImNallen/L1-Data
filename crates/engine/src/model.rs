@@ -3370,3 +3370,61 @@ mod database_compatibility_tests {
         assert!(block("ConnectionDraft").contains("\tsqlServerAuth: SqlServerAuth | null,"), "{}", block("ConnectionDraft"));
     }
 }
+
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct MapCursor {
+    pub db: DatabaseRef,
+    pub root: u32,
+    pub catalog_version: u64,
+    pub last_constraint: u32,
+}
+
+#[derive(Debug, Clone, Serialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct MapRelation {
+    pub oid: u32,
+    pub schema: String,
+    pub name: String,
+    pub columns: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct MapColumnPair {
+    pub source: String,
+    pub target: String,
+}
+
+#[derive(Debug, Clone, Serialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct MapForeignKey {
+    pub id: u32,
+    pub name: String,
+    pub source: u32,
+    pub target: u32,
+    pub columns: Vec<MapColumnPair>,
+    pub enabled: bool,
+    pub validated: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct MapNeighborhood {
+    pub db: DatabaseRef,
+    pub catalog_version: u64,
+    pub root: MapRelation,
+    pub relations: Vec<MapRelation>,
+    pub foreign_keys: Vec<MapForeignKey>,
+    pub after: Option<MapCursor>,
+}
+
+#[derive(Debug, Clone, Serialize, Type)]
+#[serde(tag = "kind", rename_all_fields = "camelCase")]
+pub enum MapError {
+    Catalog { error: CatalogError },
+    Gone,
+    Stale,
+    Failed { message: String },
+}
