@@ -32,6 +32,10 @@ export const commands = {
 	consoleCommit: (tabId: TabId, confirmed: string | null) => typedError<null, TxnError>(__TAURI_INVOKE("console_commit", { tabId, confirmed })),
 	consoleRollback: (tabId: TabId) => typedError<null, TxnError>(__TAURI_INVOKE("console_rollback", { tabId })),
 	tableApply: (tabId: TabId, changes: TableChanges, confirmed: string | null) => typedError<ApplySummary, ApplyError>(__TAURI_INVOKE("table_apply", { tabId, changes, confirmed })),
+	tableImportPrepare: (tabId: TabId, target: ImportTarget, file: string) => typedError<ImportSourceId, ImportError>(__TAURI_INVOKE("table_import_prepare", { tabId, target, file })),
+	tableImportPreview: (tabId: TabId, source: ImportSourceId, header: boolean) => typedError<ImportPreview, ImportError>(__TAURI_INVOKE("table_import_preview", { tabId, source, header })),
+	tableImport: (tabId: TabId, request: ImportRequest, confirmed: string | null) => typedError<ImportSummary, ImportError>(__TAURI_INVOKE("table_import", { tabId, request, confirmed })),
+	tableImportDiscard: (tabId: TabId, source: ImportSourceId) => typedError<null, ImportError>(__TAURI_INVOKE("table_import_discard", { tabId, source })),
 	consoleClose: (tabId: TabId, force: boolean) => typedError<null, DisconnectError>(__TAURI_INVOKE("console_close", { tabId, force })),
 	resultPage: (resultRef: ResultRef, start: number, len: number) => typedError<RowPage, ResultError>(__TAURI_INVOKE("result_page", { resultRef, start, len })),
 	resultCell: (resultRef: ResultRef, row: number, col: number) => typedError<string | null, ResultError>(__TAURI_INVOKE("result_cell", { resultRef, row, col })),
@@ -446,13 +450,14 @@ export type ConsoleState = {
 	work: ConsoleWork | null,
 	/**  `Some` exactly while `work` is `Some(Export)`: both derive from the one value the session slot holds. */
 	export: ExportProgress | null,
+	import: ImportProgress | null,
 	txn: TxnState,
 	run: RunState,
 };
 
 export type ConsoleWork = "Run" | "Count" | "Transaction" | "Edit" | "Probe" | 
 /**  An `All` export streams the result's source again. Cancellable like a run. */
-"Export";
+"Export" | "Import";
 
 export type CountError = { kind: "NotConnected" } | { kind: "Failed"; message: string };
 
@@ -825,6 +830,51 @@ export type HistoryRun = {
 
 /**  Engine-wide monotonic. Names one host key the engine observed and is holding for a trust decision. */
 export type HostKeyId = number;
+
+export type ImportError = { kind: "NotConfigured" } | { kind: "Unsupported" } | { kind: "Busy" } | { kind: "Gone" } | { kind: "TargetChanged" } | { kind: "TransactionAborted" } | { kind: "Cancelled" } | { kind: "Io"; message: string } | { kind: "Csv"; line: number; record: number; message: string } | { kind: "Mapping"; message: string } | { kind: "Connect"; error: ConnectError } | { kind: "Query"; error: QueryError } | { kind: "OutcomeUnknown"; error: QueryError } | { kind: "ConfirmWrites"; confirmation: WriteConfirmation };
+
+export type ImportPreview = {
+	source: ImportSourceId,
+	target: ImportTarget,
+	bytes: number,
+	rows: number,
+	fields: string[],
+	columns: ColumnInfo[],
+	mapping: (string | null)[],
+	sample: ((string | null)[])[],
+	truncated: boolean,
+};
+
+export type ImportProgress = {
+	source: ImportSourceId,
+	target: ImportTarget,
+	bytes: number,
+	totalBytes: number,
+	rows: number,
+	totalRows: number,
+	finishing: boolean,
+};
+
+export type ImportRequest = {
+	source: ImportSourceId,
+	header: boolean,
+	mapping: (string | null)[],
+};
+
+export type ImportSourceId = string;
+
+export type ImportSummary = {
+	backendPid: number,
+	rows: number,
+	committed: boolean,
+};
+
+export type ImportTarget = {
+	db: DatabaseRef,
+	schema: string,
+	table: string,
+	oid: number,
+};
 
 export type IndexInfo = {
 	name: string,

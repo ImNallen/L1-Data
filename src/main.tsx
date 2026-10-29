@@ -9,7 +9,7 @@ import { boot } from "./boot";
 import { AppLayout } from "./shell/AppLayout";
 
 async function start() {
-  if (import.meta.env.DEV && !isTauri()) {
+  if ((import.meta.env.DEV || import.meta.env.MODE === "bridge") && !isTauri()) {
     const { installBridgeShim } = await import("./dev/bridgeShim");
     installBridgeShim();
   }

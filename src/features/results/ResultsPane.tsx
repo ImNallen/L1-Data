@@ -347,6 +347,7 @@ export function ResultsPane({ tabId }: { tabId: TabId | null }) {
   const selectionText = view.kind === "rows" && totals?.key === shownRef ? totals.text : null;
   const pageSize = useWorkspace((s) => s.settings.tablePageSize);
   const exporting = console?.export ?? null;
+  const importing = console?.import ?? null;
 
   return (
     <section className="flex h-full min-h-0 flex-col bg-bg">
@@ -384,7 +385,20 @@ export function ResultsPane({ tabId }: { tabId: TabId | null }) {
             {selectionText}
           </span>
         )}
-        {exporting ? <ExportStatus progress={exporting} /> : summary && <SummaryText summary={summary} />}
+        {importing ? (
+          <span data-testid="import-status" role="status" className="flex min-w-0 items-center gap-1.5 text-ui-13 text-dim">
+            <Spinner />
+            <span className="truncate tabular-nums">
+              {importing.finishing
+                ? "Finishing import…"
+                : `Importing ${importing.rows.toLocaleString()} / ${importing.totalRows.toLocaleString()} rows · ${importing.bytes.toLocaleString()} / ${importing.totalBytes.toLocaleString()} bytes`}
+            </span>
+          </span>
+        ) : exporting ? (
+          <ExportStatus progress={exporting} />
+        ) : (
+          summary && <SummaryText summary={summary} />
+        )}
         <RunAnnouncement key={tabId} summary={summary} />
         {tab && <CursorPosition />}
 

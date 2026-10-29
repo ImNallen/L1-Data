@@ -62,6 +62,7 @@ pub struct Console {
 }
 
 pub struct ConsoleInner {
+    pub import: Option<crate::import::Draft>,
     pub config: ConsoleConfigView,
     pub session: SessionSlot,
     pub txn: TxnState,
@@ -130,6 +131,7 @@ impl ConsoleInner {
 
     /// Every way a session leaves the tab goes through here, so its transaction state and held writes leave with it.
     pub fn end_session(&mut self, next: SessionSlot) -> SessionSlot {
+        self.import = None;
         self.txn = TxnState::Idle;
         self.txn_depth = None;
         self.unasked = WriteList::default();
@@ -160,6 +162,7 @@ pub enum Work {
     Edit(WritesChecked),
     Probe,
     Export(ExportProgress),
+    Import { checked: WritesChecked, progress: ImportProgress },
 }
 
 impl Work {
@@ -171,6 +174,7 @@ impl Work {
             Work::Edit(_) => ConsoleWork::Edit,
             Work::Probe => ConsoleWork::Probe,
             Work::Export(_) => ConsoleWork::Export,
+            Work::Import { .. } => ConsoleWork::Import,
         }
     }
 }
@@ -219,6 +223,7 @@ pub struct Orphaned;
 impl Console {
     pub fn new(tab: TabId, config: ConsoleConfigView) -> Self {
         let inner = ConsoleInner {
+            import: None,
             config,
             session: SessionSlot::Empty,
             txn: TxnState::Idle,
@@ -235,6 +240,7 @@ impl Console {
             session: SessionState::None,
             work: None,
             export: None,
+            import: None,
             txn: TxnState::Idle,
             txn_depth: None,
             run: RunState::Idle,
@@ -272,6 +278,10 @@ impl Console {
                 SessionSlot::Busy { work: Work::Export(progress), .. } => Some(progress.clone()),
                 _ => None,
             },
+            import: match &inner.session {
+                SessionSlot::Busy { work: Work::Import { progress, .. }, .. } => Some(progress.clone()),
+                _ => None,
+            },
             txn_depth: inner.txn_depth,
             run: inner.run.clone(),
         }
@@ -305,7 +315,7 @@ impl Console {
     pub fn take_session(&self, inner: &mut ConsoleInner, run_id: RunId, work: Work) -> Option<(Session, Arc<AtomicBool>)> {
         let SessionSlot::Idle(_) = inner.session else { return None };
         let SessionSlot::Idle(IdleSession { session, opened }) = std::mem::replace(&mut inner.session, SessionSlot::Empty) else { unreachable!() };
-        if let Work::Run(checked) | Work::Commit(checked) | Work::Edit(checked) = &work {
+        if let Work::Run(checked) | Work::Commit(checked) | Work::Edit(checked) | Work::Import { checked, .. } = &work {
             checked.mark_held_writes_asked(&mut inner.unasked);
         }
         let stop = Arc::new(AtomicBool::new(false));

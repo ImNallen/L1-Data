@@ -8,6 +8,7 @@ import type {
   DetailError,
   DisconnectError,
   ExportError,
+  ImportError,
   FileReadError,
   FileWriteError,
   RunError,
@@ -375,6 +376,42 @@ export function updateFailureText(f: UpdateFailure): string {
       return `The update failed: ${f.message}`;
     default: {
       const unreachable: never = f;
+      return unreachable;
+    }
+  }
+}
+
+export function importErrorText(error: ImportError): string {
+  switch (error.kind) {
+    case "NotConfigured":
+      return "Choose a connection for the table tab.";
+    case "Unsupported":
+      return "CSV import is available for PostgreSQL tables.";
+    case "Busy":
+      return "The table tab is busy. Wait for its current work to finish.";
+    case "Gone":
+      return "The prepared CSV was discarded. Choose the file again.";
+    case "TargetChanged":
+      return "The table or connection changed. Choose the file again.";
+    case "TransactionAborted":
+      return "Rollback the failed transaction before importing.";
+    case "Cancelled":
+      return "Import cancelled. No import rows were kept.";
+    case "Io":
+    case "Mapping":
+      return error.message;
+    case "Csv":
+      return `CSV record ${error.record}, line ${error.line}: ${error.message}`;
+    case "Connect":
+      return connectErrorText(error.error);
+    case "Query":
+      return [error.error.message, error.error.context, "The import was rolled back."].filter(Boolean).join("\n");
+    case "OutcomeUnknown":
+      return `${error.error.message} The outcome is unknown. Check the database before trying again.`;
+    case "ConfirmWrites":
+      return "Production confirmation is required.";
+    default: {
+      const unreachable: never = error;
       return unreachable;
     }
   }

@@ -30,6 +30,7 @@ function setRun(tabId: string, run: RunState) {
     txnDepth: null,
     work: null,
     export: null,
+    import: null,
     run,
   };
   act(() => useLive.setState((s) => ({ consoles: { ...s.consoles, [tabId]: state } })));

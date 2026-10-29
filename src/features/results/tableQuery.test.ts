@@ -116,6 +116,7 @@ it("keeps the query, editor and displayed rows when the engine refuses an additi
     txnDepth: 0,
     work: null,
     export: null,
+    import: null,
     run: {
       kind: "Finished",
       runId: 7,

@@ -5,6 +5,7 @@ mod connection;
 mod console;
 mod entra;
 mod export;
+mod import;
 mod explain;
 mod plan;
 mod params;
@@ -1256,6 +1257,7 @@ impl Engine {
             inner.end_session(SessionSlot::Empty);
             due
         } else { None };
+        if inner.config != view { inner.import = None; }
         inner.config = view.clone();
         let state = console.publish(&mut inner, s);
         drop(inner);
@@ -1615,6 +1617,22 @@ impl Engine {
             s.schedule_refreshes(db, owed);
         }
         outcome.map(|()| ApplySummary { committed: after == TxnState::Idle })
+    }
+
+    pub async fn table_import_prepare(&self, tab: TabId, target: ImportTarget, file: String) -> Result<ImportSourceId, ImportError> {
+        import::prepare(&self.shared, tab, target, file).await
+    }
+
+    pub async fn table_import_preview(&self, tab: TabId, source: ImportSourceId, header: bool) -> Result<ImportPreview, ImportError> {
+        import::preview(&self.shared, tab, source, header).await
+    }
+
+    pub async fn table_import(&self, tab: TabId, request: ImportRequest, confirmed: Option<WriteDigest>) -> Result<ImportSummary, ImportError> {
+        import::import(&self.shared, tab, request, confirmed).await
+    }
+
+    pub async fn table_import_discard(&self, tab: TabId, source: ImportSourceId) -> Result<(), ImportError> {
+        import::discard(&self.shared, tab, source).await
     }
 
     pub async fn console_close(&self, tab: TabId, force: bool) -> Result<(), DisconnectError> {

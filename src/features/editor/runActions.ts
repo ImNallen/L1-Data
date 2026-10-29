@@ -63,7 +63,7 @@ function sameConfig(a: ConsoleConfig, b: ConsoleConfig): boolean {
   return a.connectionId === b.connectionId && a.database === b.database && a.schema === b.schema && a.mode === b.mode;
 }
 
-async function ensureConsole(tab: Tab): Promise<boolean> {
+export async function ensureConsole(tab: Tab): Promise<boolean> {
   const config = consoleConfig(tab.console);
   if (!config) {
     notify("Choose a connection for this tab.");
@@ -430,7 +430,7 @@ function showResults() {
   if (!ws().layout.results) ws().setLayout({ results: true });
 }
 
-export async function openTableTab(ref: RelationRef, query?: TableQuery): Promise<void> {
+export async function openTableTab(ref: RelationRef, query?: TableQuery): Promise<TabId | null> {
   const reusable = (t: TableTab) => query === undefined || (pendingCount(useTableEdits.getState().byTab[t.id] ?? NO_EDITS) === 0 && isBrowsing(t));
   const findOpen = () =>
     Object.values(ws().tabs).find(
@@ -439,13 +439,14 @@ export async function openTableTab(ref: RelationRef, query?: TableQuery): Promis
   const show = (tab: TableTab) => {
     ws().setActive(tab.id);
     if (query) updateTableQuery(tab.id, () => query);
+    return tab.id;
   };
   const existing = findOpen();
   ws().select(ref);
   showResults();
   if (existing) return show(existing);
   const template = await browseTemplate(ref.db, ref.schema, ref.relation);
-  if (template === null) return;
+  if (template === null) return null;
   const opened = findOpen();
   if (opened) return show(opened);
   const id = crypto.randomUUID();
@@ -457,6 +458,7 @@ export async function openTableTab(ref: RelationRef, query?: TableQuery): Promis
     table: { schema: ref.schema, table: ref.relation, page: 0, query: query ?? EMPTY_QUERY },
     file: null,
   });
+  return id;
 }
 
 const loadedTables = new Set<TabId>();

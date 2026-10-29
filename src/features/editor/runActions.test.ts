@@ -183,6 +183,7 @@ async function openWithConsole(mode: "AutoCommit" | "Manual" = "AutoCommit") {
     txnDepth: null,
     work: null,
     export: null,
+    import: null,
     run: { kind: "Idle" },
   };
   useLive.setState({ consoles: { [id]: console } });

@@ -1,3 +1,4 @@
+import { beginImport } from "../results/importState";
 import {
   BracesIcon,
   CheckCheckIcon,
@@ -218,10 +219,16 @@ function ScriptMenuItem({ db, target, label }: { db: DatabaseRef; target: Script
   );
 }
 
-function RelationMenu({ db, rel }: { db: DatabaseRef; rel: Relation }) {
+function RelationMenu({ db, schema, rel }: { db: DatabaseRef; schema: string; rel: Relation }) {
+  const kind = useWorkspace((s) => databaseKindFor(db, s.configs));
   return (
     <>
       <ScriptMenuItem db={db} target={{ kind: "Relation", oid: rel.oid }} label="Script as CREATE" />
+      {kind === "Postgres" && (rel.kind === "Table" || rel.kind === "PartitionedTable") && (
+        <ContextMenuItem testId="tree-menu-import" onSelect={() => void beginImport({ db, schema, table: rel.name, oid: rel.oid })}>
+          Import CSV…
+        </ContextMenuItem>
+      )}
       <ContextMenuSeparator />
       <NewMenu db={db} />
     </>
@@ -490,7 +497,7 @@ function RelationRow({
         onClick={() => select({ db, schema, relation: rel.name })}
         onToggle={toggle}
         onDoubleClick={() => openTableTab({ db, schema, relation: rel.name })}
-        contextMenu={<RelationMenu db={db} rel={rel} />}
+        contextMenu={<RelationMenu db={db} schema={schema} rel={rel} />}
         icon={relationIcon(rel)}
         title={rel.name}
         label={rel.name}
@@ -1040,7 +1047,7 @@ function FilteredRelationNode({
         onClick={() => select({ db, schema, relation: rel.name })}
         onToggle={expandable ? () => expanded.toggle(me) : undefined}
         onDoubleClick={() => openTableTab({ db, schema, relation: rel.name })}
-        contextMenu={<RelationMenu db={db} rel={rel} />}
+        contextMenu={<RelationMenu db={db} schema={schema} rel={rel} />}
         icon={relationIcon(rel)}
         title={rel.name}
         label={<Highlight text={rel.name} ranges={ranges} />}

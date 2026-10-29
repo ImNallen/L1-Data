@@ -40,6 +40,7 @@ function consoleWith(mode: "AutoCommit" | "Manual", txn: ConsoleState["txn"]): C
     txnDepth: null,
     work: null,
     export: null,
+    import: null,
     txn,
     run: { kind: "Idle" },
   };

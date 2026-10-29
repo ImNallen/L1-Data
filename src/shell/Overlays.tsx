@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { ParamsDialog } from "../features/editor/ParamsDialog";
+import { ImportDialog } from "../features/results/ImportDialog";
 import { RecordView } from "../features/results/RecordView";
 import { useWorkspace, type Overlay } from "../state/workspace";
 import { Button, Modal } from "../ui/primitives";
@@ -86,6 +87,7 @@ export function Overlays() {
   return (
     <>
       <ParamsDialog />
+      <ImportDialog />
       {overlay.kind === "ask" && <AskDialog key={overlay.seq} question={overlay} />}
       {overlay.kind === "record" && <RecordView key={`${overlay.meta.ref.runId}:${overlay.row}`} meta={overlay.meta} row={overlay.row} onClose={close} />}
       <Modal open={overlay.kind === "cell"} onOpenChange={onOpenChange} title={overlay.kind === "cell" ? overlay.title : ""} width={720} testId="cell-dialog">
