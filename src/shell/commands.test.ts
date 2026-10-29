@@ -153,26 +153,27 @@ const searchState = () => {
 it("asks the sidebar search box for focus on ⌘P, closing any overlay so the box can take it", () => {
   useWorkspace.getState().open({ kind: "history" });
   press("p")?.run();
-  expect(searchState()).toEqual({ screen: { kind: "workspace" }, overlay: { kind: "none" }, sidebar: true, searchFocus: true });
+  expect(searchState()).toEqual({ screen: { kind: "workspace" }, overlay: { kind: "none" }, sidebar: true, searchFocus: "workspace" });
   useWorkspace.getState().searchFocused();
-  expect(useWorkspace.getState().searchFocus).toBe(false);
+  expect(useWorkspace.getState().searchFocus).toBeNull();
 });
 
 it("reveals a hidden sidebar on ⌘P so its search box can mount and take focus", () => {
   useWorkspace.getState().setLayout({ sidebar: false });
   press("p")?.run();
-  expect(searchState()).toEqual({ screen: { kind: "workspace" }, overlay: { kind: "none" }, sidebar: true, searchFocus: true });
+  expect(searchState()).toEqual({ screen: { kind: "workspace" }, overlay: { kind: "none" }, sidebar: true, searchFocus: "workspace" });
 });
 
 it("stays on settings on ⌘P there and focuses the settings search box", () => {
+  useWorkspace.getState().setLayout({ sidebar: false });
   useWorkspace.getState().openSettings("queries");
   useWorkspace.getState().setSettingsQuery("row");
   press("p")?.run();
   expect(searchState()).toEqual({
     screen: { kind: "settings", section: "queries", query: "row" },
     overlay: { kind: "none" },
-    sidebar: true,
-    searchFocus: true,
+    sidebar: false,
+    searchFocus: "settings",
   });
 });
 

@@ -79,8 +79,14 @@ function AskDialog({ question }: { question: Extract<Overlay, { kind: "ask" }> }
   );
 }
 
+export function AskOverlay() {
+  const overlay = useWorkspace((s) => s.overlay);
+  return overlay.kind === "ask" ? <AskDialog key={overlay.seq} question={overlay} /> : null;
+}
+
 export function Overlays() {
   const overlay = useWorkspace((s) => s.overlay);
+  const inSettings = useWorkspace((s) => s.screen.kind === "settings");
   const close = useWorkspace((s) => s.close);
   const onOpenChange = (open: boolean) => !open && close();
 
@@ -88,7 +94,7 @@ export function Overlays() {
     <>
       <ParamsDialog />
       <ImportDialog />
-      {overlay.kind === "ask" && <AskDialog key={overlay.seq} question={overlay} />}
+      {!inSettings && <AskOverlay />}
       {overlay.kind === "record" && <RecordView key={`${overlay.meta.ref.runId}:${overlay.row}`} meta={overlay.meta} row={overlay.row} onClose={close} />}
       <Modal open={overlay.kind === "cell"} onOpenChange={onOpenChange} title={overlay.kind === "cell" ? overlay.title : ""} width={720} testId="cell-dialog">
         {overlay.kind === "cell" && (

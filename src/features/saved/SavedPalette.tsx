@@ -9,7 +9,7 @@ import { databaseKindFor } from "../../state/databaseKind";
 import { useLive } from "../../state/live";
 import { tabTarget, useWorkspace, type SavedEntry } from "../../state/workspace";
 import { day } from "../../ui/day";
-import { Button, cx, DatabaseBadge, DialogBackdrop, Highlight, inputClass, Kbd } from "../../ui/primitives";
+import { Button, cx, DatabaseBadge, DialogSurface, Highlight, inputClass, Kbd } from "../../ui/primitives";
 import { focusEditor } from "../editor/editorStates";
 import { SqlText } from "../editor/SqlText";
 import { canInsert, copySaved, deleteSaved, insertSaved, openSaved, saveActiveQuery, updateSaved } from "./savedActions";
@@ -36,7 +36,6 @@ export function SavedPalette() {
   return (
     <Dialog.Root open={entry !== null} onOpenChange={(open) => !open && close()}>
       <Dialog.Portal>
-        <DialogBackdrop />
         <SavedDialog key={opened.key} entry={opened.entry} close={close} />
       </Dialog.Portal>
     </Dialog.Root>
@@ -147,7 +146,7 @@ function SavedDialog({ entry, close, ref }: { entry: SavedEntry; close: () => vo
     ? `${ranked.length.toLocaleString()} of ${items.length.toLocaleString()}`
     : `${items.length.toLocaleString()} saved ${items.length === 1 ? "query" : "queries"}`;
   return (
-    <Dialog.Content
+    <DialogSurface
       ref={ref}
       aria-describedby={undefined}
       data-testid="saved-palette"
@@ -160,7 +159,7 @@ function SavedDialog({ entry, close, ref }: { entry: SavedEntry; close: () => vo
         restoreFocus.current = false;
         focusEditor();
       }}
-      className="motion-pop fixed top-1/2 left-1/2 z-50 flex h-[640px] max-h-[85vh] w-[960px] max-w-[96vw] -translate-x-1/2 -translate-y-1/2 flex-col overflow-hidden rounded-xl border border-control bg-raised shadow-[var(--shadow-dialog)] outline-none"
+      className="flex h-[640px] w-[960px] flex-col overflow-hidden"
     >
       <Dialog.Title className="sr-only">Saved queries</Dialog.Title>
       <div className="flex min-h-14 shrink-0 items-center gap-3 border-b border-control px-4">
@@ -374,7 +373,7 @@ function SavedDialog({ entry, close, ref }: { entry: SavedEntry; close: () => vo
           Save current query<Kbd className="bg-pill">{mac ? "⌘⇧E" : "Ctrl+Shift+E"}</Kbd>
         </button>
       </div>
-    </Dialog.Content>
+    </DialogSurface>
   );
 }
 

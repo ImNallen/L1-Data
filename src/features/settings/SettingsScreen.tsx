@@ -1,55 +1,86 @@
-import { useEffect } from "react";
-import type { HostedWindow } from "../../shell/hostedWindow";
-import { WindowControls } from "../../shell/WindowChrome";
-import { SidebarToggle, windowEdgeInset, windowLeadingInset } from "../../shell/WindowEdgeActions";
+import * as Dialog from "@radix-ui/react-dialog";
+import { XIcon } from "lucide-react";
+import { useLayoutEffect, useRef } from "react";
+import type { TabId } from "../../ipc/bindings";
+import { AskOverlay } from "../../shell/Overlays";
 import { useWorkspace, type Screen } from "../../state/workspace";
-import { cx } from "../../ui/primitives";
+import { DialogSurface, IconButton } from "../../ui/primitives";
 import { parseQuery } from "../../ui/textMatch";
 import { SECTION_ACTIONS, SearchResults, SectionBody } from "./sections";
+import { SettingsSidebarBody } from "./SettingsSidebarBody";
 import { filterSettings, sectionLabel } from "./settingsIndex";
-
-/** Escape clears a settings search, back to the section it started on, and otherwise leaves settings. */
-function useEscape() {
-  useEffect(() => {
-    const onKey = (e: KeyboardEvent) => {
-      const { overlay, screen, closeSettings, setSettingsQuery } = useWorkspace.getState();
-      if (e.key !== "Escape" || e.defaultPrevented || overlay.kind !== "none") return;
-      if (screen.kind === "settings" && screen.query) setSettingsQuery("");
-      else closeSettings();
-    };
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
-  }, []);
-}
 
 type SettingsScreen = Extract<Screen, { kind: "settings" }>;
 
-export function SettingsPage({ hosted, screen }: { hosted: HostedWindow | null; screen: SettingsScreen }) {
-  useEscape();
+export function SettingsDialog() {
+  const screen = useWorkspace((s) => s.screen);
+  const closeSettings = useWorkspace((s) => s.closeSettings);
+  const open = screen.kind === "settings";
+  const opener = useRef<{ element: Element | null; tabId: TabId | null } | null>(null);
+  useLayoutEffect(() => {
+    if (open) opener.current = { element: document.activeElement, tabId: useWorkspace.getState().active };
+  }, [open]);
+
+  return (
+    <Dialog.Root open={open} onOpenChange={(value) => !value && closeSettings()}>
+      <Dialog.Portal>
+        <DialogSurface
+          data-testid="settings-dialog"
+          aria-describedby={undefined}
+          className="flex h-[640px] w-[960px] overflow-hidden"
+          onEscapeKeyDown={(event) => {
+            const { screen, setSettingsQuery } = useWorkspace.getState();
+            if (screen.kind === "settings" && screen.query) {
+              event.preventDefault();
+              setSettingsQuery("");
+            }
+          }}
+          onCloseAutoFocus={(event) => {
+            event.preventDefault();
+            const { overlay, active } = useWorkspace.getState();
+            if (overlay.kind !== "none" || active !== opener.current?.tabId) return;
+            const element = opener.current.element;
+            if (element instanceof HTMLElement && element.isConnected) element.focus();
+          }}
+        >
+          <Dialog.Title className="sr-only">Settings</Dialog.Title>
+          {screen.kind === "settings" && <SettingsPage screen={screen} />}
+          <AskOverlay />
+        </DialogSurface>
+      </Dialog.Portal>
+    </Dialog.Root>
+  );
+}
+
+export function SettingsPage({ screen }: { screen: SettingsScreen }) {
   const tokens = parseQuery(screen.query);
   const matches = tokens.length > 0 ? filterSettings(tokens) : null;
-  const sidebar = useWorkspace((s) => s.layout.sidebar);
   const Action = matches ? undefined : SECTION_ACTIONS[screen.section];
   return (
-    <div data-testid="settings-page" className="flex min-h-0 flex-1 flex-col">
-      <header
-        data-tauri-drag-region="deep"
-        className={cx("flex h-[52px] shrink-0 items-center gap-2", windowEdgeInset(hosted), sidebar ? "pl-4" : windowLeadingInset(hosted))}
-      >
-        {!sidebar && <SidebarToggle />}
-        <h1 data-testid="settings-breadcrumb" className="flex min-w-0 flex-1 items-center gap-2 text-ui-14">
-          <span className="truncate px-0.5 text-dim">Settings</span>
-          <span className="text-faint">/</span>
-          <span className="truncate font-medium text-fg">{matches ? "Search results" : sectionLabel(screen.section)}</span>
-        </h1>
-        {Action && <Action />}
-        {hosted?.chrome === "custom" && <WindowControls hosted={hosted} />}
-      </header>
-      <div className="min-h-0 flex-1 overflow-auto [scrollbar-gutter:stable_both-edges]">
-        <div className="mx-auto max-w-[640px] px-8 pt-6 pb-16">
-          {matches ? <SearchResults query={screen.query.trim()} matches={matches} /> : <SectionBody section={screen.section} />}
+    <>
+      <aside className="flex w-[200px] shrink-0 flex-col border-r border-control bg-sidebar pt-4">
+        <SettingsSidebarBody section={screen.section} query={screen.query} />
+      </aside>
+      <div data-testid="settings-page" className="flex min-h-0 min-w-0 flex-1 flex-col">
+        <header className="flex min-h-14 shrink-0 items-center gap-2 border-b border-control px-5">
+          <h1 data-testid="settings-breadcrumb" className="flex min-w-0 flex-1 items-center gap-2 text-ui-14">
+            <span className="truncate px-0.5 text-dim">Settings</span>
+            <span className="text-faint">/</span>
+            <span className="truncate font-medium text-fg">{matches ? "Search results" : sectionLabel(screen.section)}</span>
+          </h1>
+          {Action && <Action />}
+          <Dialog.Close asChild>
+            <IconButton data-testid="settings-close" aria-label="Close settings" title="Close settings">
+              <XIcon size={16} />
+            </IconButton>
+          </Dialog.Close>
+        </header>
+        <div className="min-h-0 flex-1 overflow-auto [scrollbar-gutter:stable_both-edges]">
+          <div className="mx-auto max-w-[640px] px-8 pt-6 pb-16">
+            {matches ? <SearchResults query={screen.query.trim()} matches={matches} /> : <SectionBody section={screen.section} />}
+          </div>
         </div>
       </div>
-    </div>
+    </>
   );
 }

@@ -7,7 +7,7 @@ import { sameDb } from "../../state/dbKey";
 import { useLive } from "../../state/live";
 import { confirm, tabTarget, useWorkspace } from "../../state/workspace";
 import { day } from "../../ui/day";
-import { Button, cx, DialogBackdrop, Kbd, DatabaseBadge, StatusDot } from "../../ui/primitives";
+import { Button, cx, DialogSurface, Kbd, DatabaseBadge, StatusDot } from "../../ui/primitives";
 import { focusEditor } from "../editor/editorStates";
 import { SqlText } from "../editor/SqlText";
 import { formatElapsed, pluralRows } from "../results/format";
@@ -455,8 +455,7 @@ export function HistoryPalette() {
   return (
     <Dialog.Root open={open} onOpenChange={(value) => !value && close()}>
       <Dialog.Portal>
-        <DialogBackdrop />
-        <Dialog.Content
+        <DialogSurface
           aria-describedby={undefined}
           data-testid="history-palette"
           onCloseAutoFocus={(event) => {
@@ -466,7 +465,7 @@ export function HistoryPalette() {
               focusEditor();
             }
           }}
-          className="motion-pop fixed top-1/2 left-1/2 z-50 h-[640px] max-h-[85vh] w-[960px] max-w-[96vw] -translate-x-1/2 -translate-y-1/2 overflow-hidden rounded-xl border border-control bg-raised shadow-[var(--shadow-dialog)] outline-none"
+          className="h-[640px] w-[960px] overflow-hidden"
         >
           <Dialog.Title className="sr-only">Query history</Dialog.Title>
           <HistoryBrowser
@@ -475,7 +474,7 @@ export function HistoryPalette() {
               restoreFocus.current = true;
             }}
           />
-        </Dialog.Content>
+        </DialogSurface>
       </Dialog.Portal>
     </Dialog.Root>
   );

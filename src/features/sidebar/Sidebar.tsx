@@ -2,13 +2,12 @@ import { BookmarkIcon, ChartNoAxesColumnIcon, ClockIcon, PlusIcon, SlidersHorizo
 import { useMemo, useRef } from "react";
 import { useCatalog } from "../../state/catalog";
 import { useLive } from "../../state/live";
-import { useWorkspace, type Screen } from "../../state/workspace";
+import { useWorkspace } from "../../state/workspace";
 import { cx, IconButton } from "../../ui/primitives";
 import { parseQuery } from "../../ui/textMatch";
 import { isMac, type HostedWindow } from "../../shell/hostedWindow";
 import { SidebarToggle, windowLeadingInset } from "../../shell/WindowEdgeActions";
 import { openTableTab } from "../editor/runActions";
-import { SettingsSidebarBody } from "../settings/SettingsSidebarBody";
 import { UpdateButton } from "../updates/UpdateButton";
 import { ConnectionTree } from "./ConnectionTree";
 import { SidebarSearch } from "./SidebarSearch";
@@ -27,26 +26,12 @@ function SidebarHeader({ hosted }: { hosted: HostedWindow | null }) {
 }
 
 export function Sidebar({ hosted }: { hosted: HostedWindow | null }) {
-  const screen = useWorkspace((s) => s.screen);
   return (
     <aside data-testid="sidebar-root" className="flex h-full flex-col bg-sidebar">
       <SidebarHeader hosted={hosted} />
-      {sidebarBody(screen)}
+      <WorkspaceSidebarBody />
     </aside>
   );
-}
-
-function sidebarBody(screen: Screen) {
-  switch (screen.kind) {
-    case "workspace":
-      return <WorkspaceSidebarBody />;
-    case "settings":
-      return <SettingsSidebarBody section={screen.section} query={screen.query} />;
-    default: {
-      const unreachable: never = screen;
-      return unreachable;
-    }
-  }
 }
 
 function useTreeFilter(query: string): TreeFilter | null {
@@ -75,6 +60,7 @@ function WorkspaceSidebarBody() {
     <>
       <SidebarSearch
         testId="sidebar-search"
+        scope="workspace"
         query={query}
         count={filter?.count ?? 0}
         onQueryChange={setTreeQuery}

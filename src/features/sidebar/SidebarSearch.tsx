@@ -1,11 +1,12 @@
 import { SearchIcon, XIcon } from "lucide-react";
 import { useEffect, useRef, useState, type KeyboardEvent, type ReactNode } from "react";
-import { useWorkspace } from "../../state/workspace";
+import { useWorkspace, type Screen } from "../../state/workspace";
 import { cx, IconButton, Kbd } from "../../ui/primitives";
 
 /** The sidebar's filter box. `count` is how many objects the query matches. */
 export function SidebarSearch({
   testId,
+  scope,
   query,
   count,
   onQueryChange,
@@ -14,6 +15,7 @@ export function SidebarSearch({
   children,
 }: {
   testId: string;
+  scope: Screen["kind"];
   query: string;
   count: number;
   onQueryChange: (query: string) => void;
@@ -24,7 +26,7 @@ export function SidebarSearch({
   const input = useRef<HTMLInputElement>(null);
   const [focused, setFocused] = useState(false);
   // A box that mounts after ⌘P revealed the sidebar still sees the request.
-  const wantsFocus = useWorkspace((s) => s.searchFocus);
+  const wantsFocus = useWorkspace((s) => s.searchFocus === scope);
   useEffect(() => {
     if (!wantsFocus) return;
     input.current?.focus({ preventScroll: true });
@@ -38,8 +40,7 @@ export function SidebarSearch({
       e.preventDefault();
       onArrowDown();
     }
-    if (e.key !== "Escape") return;
-    // An empty box lets Escape through, so it still leaves settings.
+    if (e.key !== "Escape" || scope === "settings") return;
     if (query) {
       e.preventDefault();
       onQueryChange("");
