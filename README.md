@@ -95,6 +95,7 @@ L1 Data is a desktop IDE for PostgreSQL and Microsoft SQL Server, built with Tau
 ### The window
 
 - **Settings** (`⌘,`) opens in a centered dialog over the dimmed, blurred workspace. Its section navigation and content scroll independently, and closing it returns focus to the control you left. **Appearance** picks a System, Light, or Dark scheme and the themes for each. It also sets the density (Compact, Standard, or Spacious), the speed of panel, dialog, and menu animations, and the interface and monospace fonts and sizes. The monospace font is used by the SQL editor and the result tables. **Queries** sets the row limit, the table page size, and whether a script stops at its first error. The search box above the sections filters the settings in place and shows the matches with their controls. `Esc` clears it and returns to the section you were on. With no search, `Esc` closes Settings.
+- History, saved queries, connections, and theme dialogs share Settings' centered frame and blurred backdrop. `Esc` closes the active dialog first, after any field cancels its draft.
 - On macOS the window keeps the native traffic lights. On Windows and Linux the app draws its own window controls and resize edges.
 
 ## Keyboard shortcuts

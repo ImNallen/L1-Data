@@ -9,6 +9,7 @@ import { useLive } from "../../state/live";
 import { confirm, useWorkspace } from "../../state/workspace";
 import { dropEditor } from "../editor/editorStates";
 import { SavedPalette } from "../saved/SavedPalette";
+import { InstallingOverlay } from "../updates/InstallingOverlay";
 import { SettingsDialog } from "./SettingsScreen";
 
 beforeEach(() => {
@@ -117,6 +118,66 @@ it("hands focus to a new dialog when a command leaves settings", async () => {
   await user.keyboard("orders");
   expect(document.activeElement).toBe(screen.getByTestId("saved-input"));
   expect(screen.getByTestId("saved-input")).toHaveProperty("value", "orders");
+});
+
+it("closes theme creation before clearing settings search or closing settings", async () => {
+  const user = userEvent.setup();
+  render(<Dialogs />);
+  act(() => useWorkspace.getState().openSettings());
+  await user.type(screen.getByTestId("settings-search"), "theme");
+  await user.click(screen.getByTestId("create-theme"));
+  expect(screen.getByTestId("create-theme-panel").contains(document.activeElement)).toBe(true);
+  await user.keyboard("{Escape}");
+  expect(screen.queryByTestId("create-theme-panel")).toBeNull();
+  expect(screen.getByTestId("settings-search")).toHaveProperty("value", "theme");
+  await user.keyboard("{Escape}");
+  expect(screen.getByTestId("settings-search")).toHaveProperty("value", "");
+  expect(screen.getByTestId("settings-dialog")).toBeTruthy();
+});
+
+it("cancels a field draft before clearing settings search", async () => {
+  const user = userEvent.setup();
+  render(<Dialogs />);
+  act(() => useWorkspace.getState().openSettings("queries"));
+  await user.type(screen.getByTestId("settings-search"), "row");
+  const input = screen.getByTestId("setting-maxRows");
+  await user.clear(input);
+  await user.type(input, "123");
+  await user.keyboard("{Escape}");
+  expect(screen.getByTestId("settings-search")).toHaveProperty("value", "row");
+  expect(screen.getByTestId("setting-maxRows")).toHaveProperty("value", "200000");
+  expect(useWorkspace.getState().settings.maxRows).toBe(200000);
+});
+
+it("hands focus to installation and restores settings after installation ends", async () => {
+  const user = userEvent.setup();
+  render(
+    <>
+      <Dialogs />
+      <InstallingOverlay />
+    </>,
+  );
+  act(() => useWorkspace.getState().openSettings("about"));
+  const search = screen.getByTestId("settings-search");
+  act(() =>
+    useLive.setState({
+      updates: { rev: 1, track: "Stable", currentVersion: "0.1.0", checkedAtMs: null, status: { kind: "Installing", version: "0.2.0" } },
+    }),
+  );
+  const blocker = screen.getByTestId("update-installing");
+  expect(document.activeElement).toBe(blocker);
+  search.focus();
+  expect(document.activeElement).toBe(blocker);
+  await user.keyboard("{Escape}text");
+  expect(screen.getByTestId("settings-dialog")).toBeTruthy();
+  expect(search).toHaveProperty("value", "");
+  act(() =>
+    useLive.setState({
+      updates: { rev: 2, track: "Stable", currentVersion: "0.1.0", checkedAtMs: null, status: { kind: "Failed", failure: { kind: "ReadOnlyLocation" } } },
+    }),
+  );
+  expect(screen.queryByTestId("update-installing")).toBeNull();
+  await waitFor(() => expect(document.activeElement).toBe(search));
 });
 
 it("keeps focus in the new editor when the new-tab shortcut leaves settings", async () => {

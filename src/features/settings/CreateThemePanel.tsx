@@ -1,11 +1,11 @@
-import { SwatchBookIcon, XIcon } from "lucide-react";
-import { useEffect, useId, useState } from "react";
+import { SwatchBookIcon } from "lucide-react";
+import { useEffect, useRef, useState } from "react";
 import type { Appearance } from "../../ipc/bindings";
 import { previewTheme } from "../../shell/theme";
 import { APPEARANCE_LABEL, APPEARANCES, L1_VARIANTS, type ThemeDraft } from "../../themes/catalog";
 import { formatHex, isDark, parseHex } from "../../themes/color";
 import { completePalette, TOKEN_NAMES, type Token } from "../../themes/palette";
-import { Button, cx, IconButton, inputClass } from "../../ui/primitives";
+import { Button, cx, inputClass, Modal } from "../../ui/primitives";
 import { addCustomThemes } from "./themeActions";
 
 const SEEDS = ["background", "accent"] as const satisfies readonly Token[];
@@ -62,7 +62,7 @@ function ColorField({ token, value, onChange }: { token: Token; value: string; o
 export function CreateThemePanel({ initial, onClose }: { initial: ThemeDraft; onClose: () => void }) {
   const [draft, setDraft] = useState(initial);
   const [advanced, setAdvanced] = useState(false);
-  const titleId = useId();
+  const nameInput = useRef<HTMLInputElement>(null);
   const palette = completePalette(draft.appearance, draft.colors);
   const name = draft.name.trim();
 
@@ -92,36 +92,25 @@ export function CreateThemePanel({ initial, onClose }: { initial: ThemeDraft; on
   };
 
   return (
-    <div
-      role="dialog"
-      aria-labelledby={titleId}
-      data-testid="create-theme-panel"
-      onKeyDown={(e) => {
-        if (e.key !== "Escape") return;
-        e.preventDefault();
-        onClose();
-      }}
-      className="fixed right-4 bottom-4 z-30 flex max-h-[calc(100vh-32px)] w-[380px] flex-col rounded-xl border border-control bg-raised shadow-[var(--shadow-dialog)]"
+    <Modal
+      open
+      onOpenChange={(open) => !open && onClose()}
+      title="Create theme"
+      description="Two colors, the rest derived."
+      width={440}
+      testId="create-theme-panel"
+      initialFocus={nameInput}
     >
-      <div className="flex h-11 shrink-0 items-center gap-2 border-b border-border pr-2 pl-4">
-        <h2 id={titleId} className="text-ui-13 font-medium text-fg">
-          Create theme
-        </h2>
-        <span className="flex-1 truncate text-ui-12 text-dim">Two colors, the rest derived</span>
-        <IconButton aria-label="Close" onClick={onClose}>
-          <XIcon size={15} />
-        </IconButton>
-      </div>
-      <div className="flex min-h-0 flex-col gap-3 overflow-auto px-4 py-3">
+      <div className="flex flex-col gap-3">
         <div className="flex items-center justify-between gap-4">
           <label htmlFor="theme-name" className="shrink-0 text-ui-13 text-fg">
             Theme name
           </label>
           <div className="w-[210px]">
             <input
+              ref={nameInput}
               id="theme-name"
               data-testid="theme-name"
-              autoFocus
               placeholder="e.g. Aurora"
               value={draft.name}
               onChange={(e) => setDraft((d) => ({ ...d, name: e.target.value }))}
@@ -174,7 +163,7 @@ export function CreateThemePanel({ initial, onClose }: { initial: ThemeDraft; on
           ))}
         </div>
       </div>
-      <div className="flex shrink-0 items-center justify-end gap-2 border-t border-border px-4 py-3">
+      <div className="mt-4 flex justify-end gap-2">
         <Button variant="ghost" onClick={onClose}>
           Cancel
         </Button>
@@ -189,6 +178,6 @@ export function CreateThemePanel({ initial, onClose }: { initial: ThemeDraft; on
           Create theme
         </Button>
       </div>
-    </div>
+    </Modal>
   );
 }

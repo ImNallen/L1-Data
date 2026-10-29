@@ -28,12 +28,13 @@ export function SettingsDialog() {
           data-testid="settings-dialog"
           aria-describedby={undefined}
           className="flex h-[640px] w-[960px] overflow-hidden"
-          onEscapeKeyDown={(event) => {
-            const { screen, setSettingsQuery } = useWorkspace.getState();
-            if (screen.kind === "settings" && screen.query) {
-              event.preventDefault();
-              setSettingsQuery("");
-            }
+          onEscapeKeyDown={(event) => event.preventDefault()}
+          onKeyDown={(event) => {
+            if (event.key !== "Escape" || !(event.target instanceof Node) || !event.currentTarget.contains(event.target)) return;
+            event.preventDefault();
+            const { screen, setSettingsQuery, closeSettings } = useWorkspace.getState();
+            if (screen.kind === "settings" && screen.query) setSettingsQuery("");
+            else closeSettings();
           }}
           onCloseAutoFocus={(event) => {
             event.preventDefault();

@@ -1,38 +1,44 @@
-import { useEffect, useRef } from "react";
+import * as Dialog from "@radix-ui/react-dialog";
+import { useEffect, useLayoutEffect, useRef } from "react";
 import { useLive } from "../../state/live";
 import { Spinner } from "../../ui/primitives";
 
 function Blocker({ version }: { version: string }) {
-  const self = useRef<HTMLDivElement>(null);
+  const opener = useRef<Element | null>(null);
+  useLayoutEffect(() => {
+    opener.current = document.activeElement;
+  }, []);
   useEffect(() => {
-    const hold = () => self.current?.focus();
     const swallow = (e: KeyboardEvent) => {
       e.preventDefault();
       e.stopImmediatePropagation();
     };
-    hold();
-    window.addEventListener("focusin", hold, { capture: true });
     window.addEventListener("keydown", swallow, { capture: true });
     return () => {
-      window.removeEventListener("focusin", hold, { capture: true });
       window.removeEventListener("keydown", swallow, { capture: true });
     };
   }, []);
   return (
-    <div
-      ref={self}
-      tabIndex={-1}
-      role="alertdialog"
-      aria-modal="true"
-      aria-label={`Installing L1 Data ${version}`}
-      data-testid="update-installing"
-      className="fixed inset-0 z-[60] grid place-items-center bg-backdrop/50 backdrop-blur-[6px] outline-none"
-    >
-      <div className="flex items-center gap-2.5 rounded-xl border border-control bg-raised px-5 py-4 text-ui-13.5 text-fg shadow-[var(--shadow-dialog)]">
-        <Spinner />
-        Installing L1 Data {version}… L1 Data will restart.
-      </div>
-    </div>
+    <Dialog.Root open>
+      <Dialog.Portal>
+        <Dialog.Content
+          role="alertdialog"
+          aria-modal="true"
+          aria-describedby={undefined}
+          data-testid="update-installing"
+          onCloseAutoFocus={(event) => {
+            event.preventDefault();
+            if (opener.current instanceof HTMLElement && opener.current.isConnected) opener.current.focus();
+          }}
+          className="fixed inset-0 z-[60] grid place-items-center bg-backdrop/50 backdrop-blur-[6px] outline-none"
+        >
+          <div className="flex items-center gap-2.5 rounded-xl border border-control bg-raised px-5 py-4 text-ui-13.5 text-fg shadow-[var(--shadow-dialog)]">
+            <Spinner />
+            <Dialog.Title>Installing L1 Data {version}… L1 Data will restart.</Dialog.Title>
+          </div>
+        </Dialog.Content>
+      </Dialog.Portal>
+    </Dialog.Root>
   );
 }
 
