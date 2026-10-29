@@ -3,14 +3,23 @@ use crate::database_map::Neighborhood;
 use crate::model::*;
 
 impl PgSession {
-    pub(in crate::session) async fn map_neighborhood(&self, oid: u32, after: u32) -> Result<Option<Neighborhood>, QueryError> {
+    pub(in crate::session) async fn map_neighborhood(
+        &self,
+        oid: u32,
+        after: u32,
+    ) -> Result<Option<Neighborhood>, QueryError> {
         let root = self.client.query_opt(
             "SELECT c.oid,n.nspname,c.relname FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace
              WHERE c.oid=$1 AND c.relkind IN ('r','p','f','v','m')
                AND (has_table_privilege(c.oid,'SELECT,INSERT,UPDATE,DELETE,TRUNCATE,REFERENCES,TRIGGER') OR has_any_column_privilege(c.oid,'SELECT,INSERT,UPDATE,REFERENCES'))", &[&oid]
         ).await.map_err(|e| super::query_failure(e, None))?;
         let Some(root) = root else { return Ok(None) };
-        let mut page = Neighborhood::new(MapRelation { oid: root.get(0), schema: root.get(1), name: root.get(2), columns: vec![] });
+        let mut page = Neighborhood::new(MapRelation {
+            oid: root.get(0),
+            schema: root.get(1),
+            name: root.get(2),
+            columns: vec![],
+        });
         let rows = self.client.query(
             "WITH incident AS (
                 SELECT k.* FROM pg_constraint k
@@ -32,10 +41,31 @@ impl PgSession {
         ).await.map_err(|e| super::query_failure(e, None))?;
         for r in rows {
             page.pair(
-                MapForeignKey { id: r.get(0), name: r.get(1), source: r.get(2), target: r.get(5), columns: vec![], enabled: true, validated: r.get(10) },
-                MapRelation { oid: r.get(2), schema: r.get(3), name: r.get(4), columns: vec![] },
-                MapRelation { oid: r.get(5), schema: r.get(6), name: r.get(7), columns: vec![] },
-                MapColumnPair { source: r.get(8), target: r.get(9) },
+                MapForeignKey {
+                    id: r.get(0),
+                    name: r.get(1),
+                    source: r.get(2),
+                    target: r.get(5),
+                    columns: vec![],
+                    enabled: true,
+                    validated: r.get(10),
+                },
+                MapRelation {
+                    oid: r.get(2),
+                    schema: r.get(3),
+                    name: r.get(4),
+                    columns: vec![],
+                },
+                MapRelation {
+                    oid: r.get(5),
+                    schema: r.get(6),
+                    name: r.get(7),
+                    columns: vec![],
+                },
+                MapColumnPair {
+                    source: r.get(8),
+                    target: r.get(9),
+                },
             );
         }
         Ok(Some(page))

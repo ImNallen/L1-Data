@@ -1392,9 +1392,8 @@ mod database_map_cases;
 #[tokio::test]
 async fn database_map_pages_declared_neighborhoods() {
     let mut h = Harness::open(TxnMode::AutoCommit).await;
-    let schema = format!("map_{}", uuid::Uuid::new_v4().simple());
-    h.ok(&format!("CREATE SCHEMA {schema}")).await;
-    h.ok(&database_map_cases::fixture(&schema,DatabaseKind::SqlServer)).await;
-    database_map_cases::verify(&h.engine,h.db(),&schema,DatabaseKind::SqlServer).await;
-    h.ok(&format!("DROP TABLE {schema}.fan,{schema}.child; ALTER TABLE {schema}.root DROP CONSTRAINT self_pair; DROP TABLE {schema}.root,{schema}.anchor,{schema}.alone; DROP SCHEMA {schema}")).await;
+    let stem = format!("map_{}", uuid::Uuid::new_v4().simple());
+    h.ok(&database_map_cases::fixture("dbo",&stem,DatabaseKind::SqlServer)).await;
+    database_map_cases::verify(&h.engine,h.db(),"dbo",&stem,DatabaseKind::SqlServer).await;
+    h.ok(&format!("DROP TABLE dbo.{stem}_fan,dbo.{stem}_child; ALTER TABLE dbo.{stem}_root DROP CONSTRAINT {stem}_self_pair; DROP TABLE dbo.{stem}_root,dbo.{stem}_anchor,dbo.{stem}_alone")).await;
 }

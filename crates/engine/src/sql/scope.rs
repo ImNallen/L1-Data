@@ -1277,7 +1277,7 @@ fn renames_known_columns(rel: &Rel) -> bool {
     }
 }
 
-fn closed(kind: DatabaseKind, lexeme: &str) -> bool {
+pub(super) fn closed(kind: DatabaseKind, lexeme: &str) -> bool {
     match kind {
         DatabaseKind::Postgres => lex(&format!("{lexeme} x")).first().is_some_and(|l| l.span.end == lexeme.len()),
         DatabaseKind::SqlServer => tsql::lexeme_closed(lexeme),
