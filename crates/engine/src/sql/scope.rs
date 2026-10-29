@@ -64,6 +64,17 @@ fn postgres_statement(text: &str, at: usize) -> Vec<Lexeme> {
         }
         None => (0, at),
     };
+    postgres_lexemes(text, start, end)
+}
+
+pub(super) fn map_lexemes(text: &str, kind: DatabaseKind) -> Vec<Lexeme> {
+    match kind {
+        DatabaseKind::Postgres => postgres_lexemes(text, 0, text.len()),
+        DatabaseKind::SqlServer => tsql::completion_lexemes(text, 0..text.len()),
+    }
+}
+
+fn postgres_lexemes(text: &str, start: usize, end: usize) -> Vec<Lexeme> {
     lex(&text[start..end])
         .into_iter()
         .filter_map(|l| {
@@ -1266,7 +1277,7 @@ fn renames_known_columns(rel: &Rel) -> bool {
     }
 }
 
-fn closed(kind: DatabaseKind, lexeme: &str) -> bool {
+pub(super) fn closed(kind: DatabaseKind, lexeme: &str) -> bool {
     match kind {
         DatabaseKind::Postgres => lex(&format!("{lexeme} x")).first().is_some_and(|l| l.span.end == lexeme.len()),
         DatabaseKind::SqlServer => tsql::lexeme_closed(lexeme),

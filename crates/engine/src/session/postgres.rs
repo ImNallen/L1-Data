@@ -1,5 +1,6 @@
 mod catalog;
 mod detail;
+mod map;
 mod source;
 mod types;
 

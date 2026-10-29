@@ -42,6 +42,7 @@ export const editorTheme = EditorView.theme({
   ".cm-matchingBracket": { backgroundColor: "var(--code-bracket)", outline: "none" },
   ".cm-selectionMatch": { backgroundColor: "var(--code-selection-match)" },
   ".cm-call, .cm-call *": { color: "var(--code) !important" },
+  ".cm-map-source": { backgroundColor: "color-mix(in srgb, var(--color-keyword) 22%, transparent)", borderBottom: "2px solid var(--color-keyword)" },
   ".cm-executed": { backgroundColor: "var(--code-executed)", transition: "background-color 600ms ease-out" },
   ".cm-lintRange-error": {
     backgroundImage: "none",

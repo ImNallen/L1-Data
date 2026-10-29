@@ -1385,3 +1385,15 @@ async fn parameters_preserve_declarations_and_quote_unicode_across_go() {
     assert_eq!(h.rows(sets[0]), [vec![Some("7".into()), Some(value.into())]]);
     assert_eq!(h.rows(sets[1]), [vec![Some("outside".into()), Some(value.into()), None]]);
 }
+
+#[path = "common/database_map.rs"]
+mod database_map_cases;
+
+#[tokio::test]
+async fn database_map_pages_declared_neighborhoods() {
+    let mut h = Harness::open(TxnMode::AutoCommit).await;
+    let stem = format!("map_{}", uuid::Uuid::new_v4().simple());
+    h.ok(&database_map_cases::fixture("dbo",&stem,DatabaseKind::SqlServer)).await;
+    database_map_cases::verify(&h.engine,h.db(),"dbo",&stem,DatabaseKind::SqlServer).await;
+    h.ok(&format!("DROP TABLE dbo.{stem}_fan,dbo.{stem}_child; ALTER TABLE dbo.{stem}_root DROP CONSTRAINT {stem}_self_pair; DROP TABLE dbo.{stem}_root,dbo.{stem}_anchor,dbo.{stem}_alone")).await;
+}

@@ -13,6 +13,16 @@ const script = fileURLToPath(new URL("./invoke.mjs", import.meta.url));
 const probe = (args) =>
   new Promise((resolve) => execFile(process.execPath, [script, ...args], (error, stdout, stderr) => resolve({ code: error?.code ?? 0, stdout, stderr })));
 
+function afterMinimumDelay(delay, callback) {
+  const deadline = performance.now() + delay;
+  const fire = () => {
+    const remaining = deadline - performance.now();
+    if (remaining > 0) setTimeout(fire, remaining);
+    else callback();
+  };
+  setTimeout(fire, delay);
+}
+
 async function fakeBridge({ finishAfterMs = 30, outcome = "Ok", replyAfterMs = 0 } = {}) {
   const calls = [];
   const streams = new Set();
@@ -29,12 +39,12 @@ async function fakeBridge({ finishAfterMs = 30, outcome = "Ok", replyAfterMs = 0
       const command = req.url.replace("/invoke/", "");
       calls.push({ command, body });
       const runId = nextRun++;
-      setTimeout(() => res.end(JSON.stringify({ status: "ok", data: command === "console_run" ? { runId } : null })), replyAfterMs);
+      afterMinimumDelay(replyAfterMs, () => res.end(JSON.stringify({ status: "ok", data: command === "console_run" ? { runId } : null })));
       if (command !== "console_run" || finishAfterMs === null) return;
-      setTimeout(() => {
+      afterMinimumDelay(finishAfterMs, () => {
         const event = { kind: "ConsoleChanged", run: { kind: "Finished", runId, outcome } };
         for (const stream of streams) stream.write(`data:${JSON.stringify(event)}\n\n`);
-      }, finishAfterMs);
+      });
     });
   });
   await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
@@ -93,8 +103,11 @@ test("percentiles use the nearest rank", () => {
   assert.equal(percentile([7], 0.95), 7);
 });
 
-test("a timed wait measures each run to its Finished event, tears down after each, and keeps every sample", async () => {
-  const [a, b] = await Promise.all([fakeBridge(), fakeBridge()]);
+test("a timed wait measures each run to its Finished event, tears down after each, and keeps every sample", async (t) => {
+  const finishAfterMs = 30;
+  const schedule = globalThis.setTimeout;
+  t.mock.method(globalThis, "setTimeout", (callback, delay, ...args) => schedule(callback, delay === finishAfterMs ? 0 : delay, ...args));
+  const [a, b] = await Promise.all([fakeBridge({ finishAfterMs }), fakeBridge({ finishAfterMs })]);
   const raw = join(mkdtempSync(join(tmpdir(), "invoke-")), "raw.json");
   try {
     const { code, stdout, stderr } = await probe([
@@ -115,7 +128,7 @@ test("a timed wait measures each run to its Finished event, tears down after eac
       ];
       assert.deepEqual(bridge.calls, Array(4).fill(cycle).flat(), `${side} ran warm-up plus three cycles with its own bodies`);
       assert.equal(saved[side].samplesMs.length, 3);
-      assert.ok(saved[side].samplesMs.every((ms) => ms >= 30), `${side} samples include the wait: ${saved[side].samplesMs}`);
+      assert.ok(saved[side].samplesMs.every((ms) => ms >= finishAfterMs), `${side} samples include the wait: ${saved[side].samplesMs}`);
       assert.equal(saved[side].p50Ms, percentile(saved[side].samplesMs.toSorted((x, y) => x - y), 0.5));
       assert.deepEqual(summary[side], { url: bridge.url, p50Ms: saved[side].p50Ms, p95Ms: saved[side].p95Ms });
     }

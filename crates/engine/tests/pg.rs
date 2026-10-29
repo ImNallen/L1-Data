@@ -1733,6 +1733,13 @@ async fn relation_detail_hides_partition_clones_and_shows_inherited_triggers() {
     };
     assert_eq!(t.triggers, [trigger("t_replica", false)], "a replica trigger does not fire in a normal session, and RI triggers stay hidden");
 
+    let version = h.engine.catalog(h.db()).await.unwrap().version;
+    let map = h.engine.database_map_neighborhood(h.db(),oid("t").await,version,None).await.unwrap();
+    assert_eq!(map.foreign_keys.len(),1,"referenced partitions do not duplicate declared keys");
+    assert_eq!(map.foreign_keys[0].target,oid("ptarget").await);
+    let incoming = h.engine.database_map_neighborhood(h.db(),oid("ptarget").await,version,None).await.unwrap();
+    assert_eq!(incoming.foreign_keys.len(),1);
+
     let parted_1 = h.engine.relation_detail(h.db(), oid("parted_1").await).await.unwrap();
     assert_eq!(parted_1.triggers, [trigger("t_parent", true)], "a partition shows the row trigger it inherits");
 
@@ -3964,4 +3971,19 @@ async fn csv_import_round_trips_the_existing_exporter() {
     let row = oracle.query_one(&format!("SELECT count(*) FROM ((SELECT {columns} FROM lab.type_zoo EXCEPT ALL SELECT {columns} FROM {table}) UNION ALL (SELECT {columns} FROM {table} EXCEPT ALL SELECT {columns} FROM lab.type_zoo)) differences"), &[]).await.unwrap();
     assert_eq!(row.get::<_, i64>(0), 0);
     oracle.batch_execute(&format!("DROP TABLE {table}")).await.unwrap();
+}
+
+#[path = "common/database_map.rs"]
+mod database_map_cases;
+
+#[tokio::test]
+async fn database_map_pages_declared_neighborhoods() {
+    let h = Harness::start().await;
+    h.engine.connect(h.conn).await.unwrap();
+    let stem = format!("map_{}", uuid::Uuid::new_v4().simple());
+    let (oracle, connection) = tokio_postgres::connect(&url(), NoTls).await.unwrap();
+    tokio::spawn(connection);
+    oracle.batch_execute(&database_map_cases::fixture("public",&stem,DatabaseKind::Postgres)).await.unwrap();
+    database_map_cases::verify(&h.engine,h.db(),"public",&stem,DatabaseKind::Postgres).await;
+    oracle.batch_execute(&format!("DROP TABLE public.{stem}_fan,public.{stem}_child,public.{stem}_root,public.{stem}_anchor,public.{stem}_alone")).await.unwrap();
 }

@@ -18,6 +18,13 @@ export const commands = {
 	connectionEditView: (id: ConnectionId, edit: ViewEdit) => typedError<null, CatalogError>(__TAURI_INVOKE("connection_edit_view", { id, edit })),
 	connectionProbeDatabases: (id: ConnectionId, databases: string[]) => __TAURI_INVOKE<void>("connection_probe_databases", { id, databases }),
 	relationDetail: (db: DatabaseRef, oid: number) => typedError<RelationDetail, DetailError>(__TAURI_INVOKE("relation_detail", { db, oid })),
+	databaseMapNeighborhood: (db: DatabaseRef, oid: number, catalogVersion: number, after: {
+	db: DatabaseRef,
+	root: number,
+	catalogVersion: number,
+	lastConstraint: number,
+} | null) => typedError<MapNeighborhood, MapError>(__TAURI_INVOKE("database_map_neighborhood", { db, oid, catalogVersion, after })),
+	databaseMapQuery: (db: DatabaseRef, text: string, cursor: DocOffset, catalogVersion: number) => typedError<MapQuery, MapError>(__TAURI_INVOKE("database_map_query", { db, text, cursor, catalogVersion })),
 	objectScript: (db: DatabaseRef, target: ScriptTarget) => typedError<ObjectScript, DetailError>(__TAURI_INVOKE("object_script", { db, target })),
 	exactRowCount: (tabId: TabId, db: DatabaseRef, schema: string, table: string, query: TableQuery) => typedError<number, CountError>(__TAURI_INVOKE("exact_row_count", { tabId, db, schema, table, query })),
 	consoleConfigure: (tabId: TabId, config: ConsoleConfig) => typedError<ConsoleState, ConfigureError>(__TAURI_INVOKE("console_configure", { tabId, config })),
@@ -959,6 +966,72 @@ export type LimitsReport = {
 	/**  One per `LimitSource::ALL`, in that order. */
 	sources: SourceLimits[],
 };
+
+export type MapColumnPair = {
+	source: string,
+	target: string,
+};
+
+export type MapCursor = {
+	db: DatabaseRef,
+	root: number,
+	catalogVersion: number,
+	lastConstraint: number,
+};
+
+export type MapError = { kind: "Catalog"; error: CatalogError } | { kind: "Gone" } | { kind: "Stale" } | { kind: "Failed"; message: string };
+
+export type MapForeignKey = {
+	id: number,
+	name: string,
+	source: number,
+	target: number,
+	columns: MapColumnPair[],
+	enabled: boolean,
+	validated: boolean,
+};
+
+export type MapNeighborhood = {
+	db: DatabaseRef,
+	catalogVersion: number,
+	root: MapRelation,
+	relations: MapRelation[],
+	foreignKeys: MapForeignKey[],
+	after: MapCursor | null,
+};
+
+export type MapOccurrence = {
+	id: number,
+	name: string,
+	alias: string | null,
+	range: DocRange,
+	resolution: MapResolution,
+};
+
+export type MapQuery = {
+	db: DatabaseRef,
+	catalogVersion: number,
+	statement: DocRange | null,
+	occurrences: MapOccurrence[],
+	joins: MapQueryJoin[],
+	incomplete: boolean,
+};
+
+export type MapQueryJoin = {
+	source: number,
+	target: number,
+	columns: MapColumnPair,
+	range: DocRange,
+};
+
+export type MapRelation = {
+	oid: number,
+	schema: string,
+	name: string,
+	columns: string[],
+};
+
+export type MapResolution = { kind: "CatalogMatch"; oid: number } | { kind: "Tentative"; oid: number } | { kind: "Unresolved"; reason: string };
 
 /**  A model as its provider names it on its command line (`opus`). Valid only against the last probe. */
 export type ModelId = string;
