@@ -64,6 +64,17 @@ fn postgres_statement(text: &str, at: usize) -> Vec<Lexeme> {
         }
         None => (0, at),
     };
+    postgres_lexemes(text, start, end)
+}
+
+pub(super) fn map_lexemes(text: &str, kind: DatabaseKind) -> Vec<Lexeme> {
+    match kind {
+        DatabaseKind::Postgres => postgres_lexemes(text, 0, text.len()),
+        DatabaseKind::SqlServer => tsql::completion_lexemes(text, 0..text.len()),
+    }
+}
+
+fn postgres_lexemes(text: &str, start: usize, end: usize) -> Vec<Lexeme> {
     lex(&text[start..end])
         .into_iter()
         .filter_map(|l| {

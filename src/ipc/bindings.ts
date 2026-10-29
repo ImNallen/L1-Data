@@ -24,6 +24,7 @@ export const commands = {
 	catalogVersion: number,
 	lastConstraint: number,
 } | null) => typedError<MapNeighborhood, MapError>(__TAURI_INVOKE("database_map_neighborhood", { db, oid, catalogVersion, after })),
+	databaseMapQuery: (db: DatabaseRef, text: string, cursor: DocOffset, catalogVersion: number) => typedError<MapQuery, MapError>(__TAURI_INVOKE("database_map_query", { db, text, cursor, catalogVersion })),
 	objectScript: (db: DatabaseRef, target: ScriptTarget) => typedError<ObjectScript, DetailError>(__TAURI_INVOKE("object_script", { db, target })),
 	exactRowCount: (tabId: TabId, db: DatabaseRef, schema: string, table: string, query: TableQuery) => typedError<number, CountError>(__TAURI_INVOKE("exact_row_count", { tabId, db, schema, table, query })),
 	consoleConfigure: (tabId: TabId, config: ConsoleConfig) => typedError<ConsoleState, ConfigureError>(__TAURI_INVOKE("console_configure", { tabId, config })),
@@ -999,12 +1000,38 @@ export type MapNeighborhood = {
 	after: MapCursor | null,
 };
 
+export type MapOccurrence = {
+	id: number,
+	name: string,
+	alias: string | null,
+	range: DocRange,
+	resolution: MapResolution,
+};
+
+export type MapQuery = {
+	db: DatabaseRef,
+	catalogVersion: number,
+	statement: DocRange | null,
+	occurrences: MapOccurrence[],
+	joins: MapQueryJoin[],
+	incomplete: boolean,
+};
+
+export type MapQueryJoin = {
+	source: number,
+	target: number,
+	columns: MapColumnPair,
+	range: DocRange,
+};
+
 export type MapRelation = {
 	oid: number,
 	schema: string,
 	name: string,
 	columns: string[],
 };
+
+export type MapResolution = { kind: "CatalogMatch"; oid: number } | { kind: "Tentative"; oid: number } | { kind: "Unresolved"; reason: string };
 
 /**  A model as its provider names it on its command line (`opus`). Valid only against the last probe. */
 export type ModelId = string;

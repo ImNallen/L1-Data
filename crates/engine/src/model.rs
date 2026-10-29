@@ -3428,3 +3428,42 @@ pub enum MapError {
     Stale,
     Failed { message: String },
 }
+
+
+#[derive(Debug, Clone, Serialize, Type)]
+#[serde(tag = "kind", rename_all_fields = "camelCase")]
+pub enum MapResolution {
+    CatalogMatch { oid: u32 },
+    Tentative { oid: u32 },
+    Unresolved { reason: String },
+}
+
+#[derive(Debug, Clone, Serialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct MapOccurrence {
+    pub id: u32,
+    pub name: String,
+    pub alias: Option<String>,
+    pub range: DocRange,
+    pub resolution: MapResolution,
+}
+
+#[derive(Debug, Clone, Serialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct MapQueryJoin {
+    pub source: u32,
+    pub target: u32,
+    pub columns: MapColumnPair,
+    pub range: DocRange,
+}
+
+#[derive(Debug, Clone, Serialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct MapQuery {
+    pub db: DatabaseRef,
+    pub catalog_version: u64,
+    pub statement: Option<DocRange>,
+    pub occurrences: Vec<MapOccurrence>,
+    pub joins: Vec<MapQueryJoin>,
+    pub incomplete: bool,
+}

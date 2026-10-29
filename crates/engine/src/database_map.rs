@@ -69,3 +69,17 @@ impl Engine {
         Ok(neighborhood.ok_or(MapError::Gone)?.page(slot.db.clone(), catalog_version))
     }
 }
+
+impl Engine {
+    pub async fn database_map_query(&self, db: DatabaseRef, text: String, cursor: DocOffset, catalog_version: u64) -> Result<MapQuery, MapError> {
+        let shared = &self.shared;
+        let (instance,slot) = shared.slot(&db).map_err(|error| MapError::Catalog { error })?;
+        shared.ensure_catalog(&instance,&slot).await.map_err(|error| MapError::Catalog { error })?;
+        let _meta = slot.meta.lock().await;
+        if !shared.map_current(&instance,&slot,catalog_version) { return Err(MapError::Stale); }
+        let catalog = slot.last().ok_or(MapError::Stale)?;
+        let result = crate::sql::map::analyze(&text,cursor,&catalog);
+        if !shared.map_current(&instance,&slot,catalog_version) { return Err(MapError::Stale); }
+        Ok(result)
+    }
+}
