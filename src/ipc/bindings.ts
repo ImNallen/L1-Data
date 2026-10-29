@@ -178,9 +178,12 @@ export type Catalog = {
 	defaultSchema: string | null,
 	/**
 	 *  Every schema except `pg_toast` and temp schemas, in name order. A system schema carries
-	 *  its relations only while the tree shows it, and never its functions.
+	 *  its relations and types only while the tree shows it, and never its functions, sequences,
+	 *  or synonyms.
 	 */
 	schemas: SchemaInfo[],
+	/**  By extension name. Empty on SQL Server, and no query runs there. */
+	extensions: ExtensionInfo[],
 };
 
 export type CatalogError = { kind: "NotConnected" } | 
@@ -632,6 +635,13 @@ export type ExportSummary = {
 	bytes: number,
 	/**  The loaded rows stopped at the row or size limit. Always false for `All`. */
 	truncated: boolean,
+};
+
+export type ExtensionInfo = {
+	oid: number,
+	name: string,
+	quoted: string,
+	version: string,
 };
 
 /**  Made only by the engine (`file_open`, `file_save`); the frontend stores it whole and hands it back whole. */
@@ -1282,6 +1292,15 @@ export type SchemaInfo = {
 	tableCount: number,
 	relations: Relation[],
 	functions: FunctionInfo[],
+	/**  User schemas only, by name. Includes identity and serial sequences. */
+	sequences: SequenceInfo[],
+	/**
+	 *  Enums, domains, composites, and ranges in every loaded schema.
+	 *  Base and pseudo types too, when this schema's relations loaded.
+	 */
+	types: TypeInfo[],
+	/**  SQL Server only, by name. Empty on PostgreSQL, and no query runs there. */
+	synonyms: SynonymInfo[],
 };
 
 export type ScopeRelation = {
@@ -1300,10 +1319,10 @@ export type ScriptOutline = {
 };
 
 /**
- *  An object the tree can script. `oid` is the catalog's `Relation.oid` or `FunctionInfo.oid`.
- *  An index or trigger is named within its relation, as `RelationDetail` lists it.
+ *  An object the tree can script. `oid` is the catalog id of a relation, routine, sequence, type,
+ *  synonym, or extension. An index or trigger is named within its relation, as `RelationDetail` lists it.
  */
-export type ScriptTarget = { kind: "Relation"; oid: number } | { kind: "Routine"; oid: number } | { kind: "Index"; relationOid: number; name: string } | { kind: "Trigger"; relationOid: number; name: string };
+export type ScriptTarget = { kind: "Relation"; oid: number } | { kind: "Routine"; oid: number } | { kind: "Index"; relationOid: number; name: string } | { kind: "Trigger"; relationOid: number; name: string } | { kind: "Sequence"; oid: number } | { kind: "Type"; oid: number } | { kind: "Synonym"; oid: number } | { kind: "Extension"; oid: number };
 
 export type SendError = { kind: "Busy" } | { kind: "EmptyMessage" } | { kind: "ProviderOff"; provider: ProviderKind } | 
 /**  The chat's model left the provider's list since it was picked. */
@@ -1322,6 +1341,13 @@ export type SentContext = {
 	/**  As named at send, so the chip reads right after a rename or a delete. */
 	connectionName: string | null,
 	tabTitle: string,
+};
+
+export type SequenceInfo = {
+	oid: number,
+	name: string,
+	quoted: string,
+	typeName: string,
 };
 
 export type ServerInfo = {
@@ -1443,6 +1469,14 @@ export type StatementRun = {
 export type StmtStatus = { kind: "Pending" } | { kind: "Preparing" } | { kind: "Running" } | { kind: "Finished" } | { kind: "Failed"; error: QueryError } | { kind: "Cancelled" } | 
 /**  An earlier statement failed or was cancelled. */
 { kind: "Skipped" };
+
+export type SynonymInfo = {
+	oid: number,
+	name: string,
+	quoted: string,
+	/**  `sys.synonyms.base_object_name`, as stored. The row's detail. */
+	target: string,
+};
 
 /**  The active tab when the user pressed Send. The engine reads SQL out of `text` itself. */
 export type TabContext = {
@@ -1586,6 +1620,25 @@ export type TypeCategory =
 "Integer" | 
 /**  numeric, real, double precision, money. */
 "Numeric" | "Text" | "Bool" | "Temporal" | "Json" | "Binary" | "Uuid" | "Network" | "Array" | "Enum" | "Composite" | "Range" | "Other";
+
+export type TypeField = {
+	name: string,
+	typeName: string,
+};
+
+export type TypeInfo = {
+	oid: number,
+	name: string,
+	quoted: string,
+	kind: TypeKind,
+};
+
+/**  The facts a type row draws. PostgreSQL `typtype` letters stay in the loader. */
+export type TypeKind = { kind: "Enum"; labels: string[] } | { kind: "Domain"; base: string } | { kind: "Composite"; fields: TypeField[] } | { kind: "Range"; subtype: string } | 
+/**  PostgreSQL `typtype` `b` or `p` in a system schema whose relations loaded. */
+{ kind: "Builtin" } | 
+/**  SQL Server `CREATE TYPE name FROM ...`. `base` is `display()` of the system type. */
+{ kind: "Alias"; base: string; nullable: boolean } | { kind: "Table" };
 
 export type UpdateError = 
 /**  The update is not in the state the action names. The live snapshot already shows where it is. */

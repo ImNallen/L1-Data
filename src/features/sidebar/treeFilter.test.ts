@@ -17,8 +17,8 @@ function search(query: string, connections: Record<string, ConnectionState>) {
 /** Each row the filtered tree draws, by its tree path; a relation shown only for its columns is marked. */
 function rows(filter: TreeFilter): string[] {
   return filter.connections.flatMap(({ config, databases }) =>
-    databases.flatMap(({ db, schemas }) =>
-      schemas.flatMap(({ name, relations, functions }) => {
+    databases.flatMap(({ db, schemas, extensions }) => [
+      ...schemas.flatMap(({ name, relations, functions, sequences, types, synonyms }) => {
         const at = `${config.name}/${db.database}/${name}`;
         return [
           ...relations.flatMap(({ rel, ranges, columns }) => [
@@ -26,9 +26,13 @@ function rows(filter: TreeFilter): string[] {
             ...columns.map((c) => `${at}/${rel.name}/#columns/${c.column.name}`),
           ]),
           ...functions.map((f) => `${at}/#functions/${f.fn.name}`),
+          ...sequences.map((s) => `${at}/#sequences/${s.seq.name}`),
+          ...types.map((t) => `${at}/#types/${t.type.name}`),
+          ...synonyms.map((s) => `${at}/#synonyms/${s.syn.name}`),
         ];
       }),
-    ),
+      ...extensions.map((e) => `${config.name}/${db.database}/#extensions/${e.ext.name}`),
+    ]),
   );
 }
 
@@ -125,6 +129,39 @@ it("drops every container without a match and searches nothing before a catalog 
   expect(search("shop public", prodOnly).connections).toEqual([]);
   const unloaded = { p: connectedState("p", [databaseState("reporting", true, ["public"])]) };
   expect(search("order", unloaded)).toEqual({ connections: [], count: 0, searched: 0 });
+});
+
+it("matches type, synonym, and extension names, and ignores labels, fields, and targets", () => {
+  const catalog = shopCatalog("p", 1);
+  const lab = catalog.schemas.find((s) => s.name === "lab");
+  if (!lab) throw new Error("lab missing");
+  lab.types = [
+    { oid: 1, name: "mood", quoted: "mood", kind: { kind: "Enum", labels: ["sad", "ok", "happy"] } },
+    {
+      oid: 2,
+      name: "pet",
+      quoted: "pet",
+      kind: {
+        kind: "Composite",
+        fields: [
+          { name: "id", typeName: "integer" },
+          { name: "name", typeName: "text" },
+        ],
+      },
+    },
+  ];
+  lab.synonyms = [{ oid: 3, name: "nick", quoted: "nick", target: "secret_target" }];
+  catalog.extensions = [{ oid: 4, name: "plpgsql", quoted: "plpgsql", version: "1.0" }];
+  const key = dbKey({ connectionId: "p", database: "shop" });
+  const localViews = { ...views, [key]: buildCatalogView(catalog) };
+  const connections = { p: connectedState("p", [databaseState("shop", true, ["lab", "public"])]) };
+  const found = (query: string) => filterTree(parseQuery(query), configs, connections, localViews);
+  expect(rows(found("mood"))).toEqual(["prod/shop/lab/#types/mood"]);
+  expect(rows(found("plpgsql"))).toEqual(["prod/shop/#extensions/plpgsql"]);
+  expect(rows(found("nick"))).toEqual(["prod/shop/lab/#synonyms/nick"]);
+  expect(found("sad").count).toBe(0);
+  expect(found("secret_target").count).toBe(0);
+  expect(found("integer").count).toBe(0);
 });
 
 it("names the first table or view whose name starts words of the query, else the first the filter lists", () => {

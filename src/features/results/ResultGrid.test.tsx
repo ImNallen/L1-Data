@@ -98,8 +98,12 @@ it("looks primary keys up in the catalog of the database the rows came from", ()
           },
         ],
         functions: [],
+        sequences: [],
+        types: [],
+        synonyms: [],
       },
     ],
+    extensions: [],
   });
   const views = { [dbKey(shop.catalog.db)]: shop, [dbKey(reporting.catalog.db)]: reporting };
   const column = (name: string, attnum: number): ColumnMeta => ({

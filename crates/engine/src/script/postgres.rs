@@ -711,6 +711,211 @@ fn create_sequence(s: &Sequence) -> String {
     out
 }
 
+/// A sequence scripted from its own row. `owned_column` empty means the sequence has no owner.
+/// `sequence.column` stays empty here. The table path fills that field for an identity clause.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StandaloneSequence {
+    pub sequence: Sequence,
+    pub unlogged: bool,
+    pub owned_schema: String,
+    pub owned_table: String,
+    pub owned_column: String,
+    pub comment: Option<String>,
+    pub privileges: Vec<Privilege>,
+    pub owner: Owner,
+    pub security_label: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ScriptedObject {
+    pub schema: String,
+    pub name: String,
+    pub comment: Option<String>,
+    pub privileges: Vec<Privilege>,
+    pub owner: Owner,
+    pub security_label: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CompositeField {
+    pub name: String,
+    pub type_name: String,
+    pub collation: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RangeScript {
+    pub subtype: String,
+    pub opclass: Option<String>,
+    pub collation: Option<String>,
+    pub canonical: Option<String>,
+    pub subtype_diff: Option<String>,
+}
+
+fn object_warnings(
+    schema: &str,
+    name: &str,
+    privileges: &[Privilege],
+    owner: &Owner,
+    security_label: bool,
+) -> Vec<String> {
+    unscripted(
+        &Unscripted {
+            privileges: privileges.to_vec(),
+            owner: owner.clone(),
+            security_labels: if security_label {
+                vec![name.to_owned()]
+            } else {
+                vec![]
+            },
+            ..Default::default()
+        },
+        schema,
+        name,
+        None,
+    )
+}
+
+pub fn standalone_sequence(s: &StandaloneSequence) -> Ddl {
+    let name = qualified(&s.sequence.schema, &s.sequence.name);
+    let mut statements = vec![create_sequence(&s.sequence)];
+    if !s.owned_column.is_empty() {
+        statements.push(format!(
+            "ALTER SEQUENCE {name} OWNED BY {}.{}",
+            qualified(&s.owned_schema, &s.owned_table),
+            ident(&s.owned_column)
+        ));
+    }
+    if s.unlogged {
+        statements.push(format!("ALTER SEQUENCE {name} SET UNLOGGED"));
+    }
+    statements.extend(comment(&format!("SEQUENCE {name}"), &s.comment));
+    Ddl {
+        text: script(statements),
+        warnings: object_warnings(
+            &s.sequence.schema,
+            &name,
+            &s.privileges,
+            &s.owner,
+            s.security_label,
+        ),
+    }
+}
+
+pub fn enum_type(o: &ScriptedObject, labels: &[String]) -> Ddl {
+    let name = qualified(&o.schema, &o.name);
+    let labels = labels
+        .iter()
+        .map(|label| quote_literal(label))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let mut statements = vec![format!("CREATE TYPE {name} AS ENUM ({labels})")];
+    statements.extend(comment(&format!("TYPE {name}"), &o.comment));
+    Ddl {
+        text: script(statements),
+        warnings: object_warnings(&o.schema, &name, &o.privileges, &o.owner, o.security_label),
+    }
+}
+
+pub fn domain_type(
+    o: &ScriptedObject,
+    base: &str,
+    collation: Option<&str>,
+    default: Option<&str>,
+    not_null: bool,
+    checks: &[(String, String)],
+) -> Ddl {
+    let name = qualified(&o.schema, &o.name);
+    let mut lines = vec![format!("CREATE DOMAIN {name} AS {base}")];
+    if let Some(collation) = collation {
+        lines.push(format!("    COLLATE {}", ident(collation)));
+    }
+    if let Some(default) = default {
+        lines.push(format!("    DEFAULT {default}"));
+    }
+    if not_null {
+        lines.push("    NOT NULL".into());
+    }
+    for (check_name, definition) in checks {
+        lines.push(format!("    CONSTRAINT {} {definition}", ident(check_name)));
+    }
+    let mut statements = vec![lines.join("\n")];
+    statements.extend(comment(&format!("DOMAIN {name}"), &o.comment));
+    Ddl {
+        text: script(statements),
+        warnings: object_warnings(&o.schema, &name, &o.privileges, &o.owner, o.security_label),
+    }
+}
+
+pub fn composite_type(o: &ScriptedObject, fields: &[CompositeField]) -> Ddl {
+    let name = qualified(&o.schema, &o.name);
+    let body = fields
+        .iter()
+        .map(|field| {
+            let mut line = format!("    {} {}", ident(&field.name), field.type_name);
+            if let Some(collation) = &field.collation {
+                line.push_str(&format!(" COLLATE {}", ident(collation)));
+            }
+            line
+        })
+        .collect::<Vec<_>>()
+        .join(",\n");
+    let mut statements = vec![format!("CREATE TYPE {name} AS (\n{body}\n)")];
+    statements.extend(comment(&format!("TYPE {name}"), &o.comment));
+    Ddl {
+        text: script(statements),
+        warnings: object_warnings(&o.schema, &name, &o.privileges, &o.owner, o.security_label),
+    }
+}
+
+pub fn range_type(o: &ScriptedObject, range: &RangeScript) -> Ddl {
+    let name = qualified(&o.schema, &o.name);
+    let mut lines = vec![format!("    SUBTYPE = {}", range.subtype)];
+    if let Some(opclass) = &range.opclass {
+        lines.push(format!("    SUBTYPE_OPCLASS = {opclass}"));
+    }
+    if let Some(collation) = &range.collation {
+        lines.push(format!("    COLLATION = {}", ident(collation)));
+    }
+    if let Some(canonical) = &range.canonical {
+        lines.push(format!("    CANONICAL = {canonical}"));
+    }
+    if let Some(diff) = &range.subtype_diff {
+        lines.push(format!("    SUBTYPE_DIFF = {diff}"));
+    }
+    let mut statements = vec![format!(
+        "CREATE TYPE {name} AS RANGE (\n{}\n)",
+        lines.join(",\n")
+    )];
+    statements.extend(comment(&format!("TYPE {name}"), &o.comment));
+    Ddl {
+        text: script(statements),
+        warnings: object_warnings(&o.schema, &name, &o.privileges, &o.owner, o.security_label),
+    }
+}
+
+pub fn extension_script(
+    name: &str,
+    schema: &str,
+    version: &str,
+    comment_text: Option<&str>,
+    owner: &Owner,
+    security_label: bool,
+) -> Ddl {
+    let quoted = ident(name);
+    let stored = comment_text.map(str::to_owned);
+    let mut statements = vec![format!(
+        "CREATE EXTENSION {quoted} WITH SCHEMA {} VERSION {}",
+        ident(schema),
+        quote_literal(version)
+    )];
+    statements.extend(comment(&format!("EXTENSION {quoted}"), &stored));
+    Ddl {
+        text: script(statements),
+        warnings: object_warnings(schema, &quoted, &[], owner, security_label),
+    }
+}
+
 fn identity_clause(i: &Identity, schema: &str, table: &str) -> String {
     let s = &i.sequence;
     let mut options = sequence_options(s);
@@ -1577,5 +1782,150 @@ ALTER FOREIGN TABLE public.e2 ALTER COLUMN v OPTIONS (ADD column_name 'vv');
     fn only_a_top_level_on_only_is_dropped() {
         assert_eq!(index(r#"CREATE INDEX "x ON ONLY y" ON ONLY public.t USING btree (a)"#), r#"CREATE INDEX "x ON ONLY y" ON public.t USING btree (a)"#);
         assert_eq!(index("CREATE INDEX i ON public.t USING btree (a)"), "CREATE INDEX i ON public.t USING btree (a)");
+    }
+
+    fn bare() -> ScriptedObject {
+        ScriptedObject {
+            schema: "lab".into(),
+            name: "mood".into(),
+            comment: None,
+            privileges: vec![],
+            owner: Owner::default(),
+            security_label: false,
+        }
+    }
+
+    #[test]
+    fn a_standalone_sequence_writes_nondefault_options_then_owned_by_and_warns() {
+        let sequence = Sequence {
+            schema: "public".into(),
+            name: "order_number".into(),
+            column: String::new(),
+            type_name: "bigint".into(),
+            start: 1000,
+            increment: 10,
+            min: 1,
+            max: i64::MAX,
+            cache: 1,
+            cycle: false,
+        };
+        let owned = StandaloneSequence {
+            sequence: sequence.clone(),
+            unlogged: true,
+            owned_schema: "public".into(),
+            owned_table: "orders".into(),
+            owned_column: "id".into(),
+            comment: Some("orders".into()),
+            privileges: vec![grant("USAGE", None, "app", Change::Granted)],
+            owner: Owner {
+                name: "bob".into(),
+                connecting_role: false,
+            },
+            security_label: true,
+        };
+        let ddl = standalone_sequence(&owned);
+        assert_eq!(
+            ddl.text,
+            "CREATE SEQUENCE public.order_number AS bigint START WITH 1000 INCREMENT BY 10;\n\nALTER SEQUENCE public.order_number OWNED BY public.orders.id;\n\nALTER SEQUENCE public.order_number SET UNLOGGED;\n\nCOMMENT ON SEQUENCE public.order_number IS 'orders';\n"
+        );
+        assert_eq!(
+            ddl.warnings,
+            [
+                "owner bob of public.order_number",
+                "privileges on public.order_number (USAGE granted to app)",
+                "security labels on public.order_number"
+            ]
+        );
+        let plain = StandaloneSequence {
+            unlogged: false,
+            owned_column: String::new(),
+            comment: None,
+            privileges: vec![],
+            owner: Owner::default(),
+            security_label: false,
+            ..owned
+        };
+        assert_eq!(
+            standalone_sequence(&plain).text,
+            "CREATE SEQUENCE public.order_number AS bigint START WITH 1000 INCREMENT BY 10;\n"
+        );
+        assert!(standalone_sequence(&plain).warnings.is_empty());
+    }
+
+    #[test]
+    fn types_and_extensions_script_as_create() {
+        assert_eq!(
+            enum_type(&bare(), &["sad".into(), "ok".into(), "happy".into()]).text,
+            "CREATE TYPE lab.mood AS ENUM ('sad', 'ok', 'happy');\n"
+        );
+        let domain = ScriptedObject {
+            name: "posint".into(),
+            ..bare()
+        };
+        assert_eq!(
+            domain_type(
+                &domain,
+                "integer",
+                None,
+                None,
+                false,
+                &[("posint_positive".into(), "CHECK ((VALUE > 0))".into())]
+            )
+            .text,
+            "CREATE DOMAIN lab.posint AS integer\n    CONSTRAINT posint_positive CHECK ((VALUE > 0));\n"
+        );
+        let pet = ScriptedObject {
+            name: "pet".into(),
+            ..bare()
+        };
+        assert_eq!(
+            composite_type(
+                &pet,
+                &[
+                    CompositeField {
+                        name: "id".into(),
+                        type_name: "integer".into(),
+                        collation: None
+                    },
+                    CompositeField {
+                        name: "name".into(),
+                        type_name: "text".into(),
+                        collation: Some("C".into())
+                    }
+                ]
+            )
+            .text,
+            "CREATE TYPE lab.pet AS (\n    id integer,\n    name text COLLATE \"C\"\n);\n"
+        );
+        let span = ScriptedObject {
+            name: "span".into(),
+            ..bare()
+        };
+        assert_eq!(
+            range_type(
+                &span,
+                &RangeScript {
+                    subtype: "integer".into(),
+                    opclass: None,
+                    collation: None,
+                    canonical: None,
+                    subtype_diff: None
+                }
+            )
+            .text,
+            "CREATE TYPE lab.span AS RANGE (\n    SUBTYPE = integer\n);\n"
+        );
+        assert_eq!(
+            extension_script(
+                "plpgsql",
+                "pg_catalog",
+                "1.0",
+                None,
+                &Owner::default(),
+                false
+            )
+            .text,
+            "CREATE EXTENSION plpgsql WITH SCHEMA pg_catalog VERSION '1.0';\n"
+        );
     }
 }

@@ -37,6 +37,7 @@ import {
   type SchemaInfo,
   type ScriptTarget,
   type TypeCategory,
+  type TypeKind,
 } from "../../ipc/bindings";
 import { isViewKind, useCatalog, viewFor } from "../../state/catalog";
 import { connectErrorText, detailErrorText } from "../../ipc/errors";
@@ -209,7 +210,7 @@ export async function openObjectScript(db: DatabaseRef, target: ScriptTarget): P
 function ScriptMenuItem({ db, target, label }: { db: DatabaseRef; target: ScriptTarget; label: string }) {
   return (
     <ContextMenuItem
-      testId={target.kind === "Relation" ? "tree-menu-script-create" : "tree-menu-open-source"}
+      testId={label === "Script as CREATE" ? "tree-menu-script-create" : "tree-menu-open-source"}
       onSelect={() => void openObjectScript(db, target)}
     >
       {label}
@@ -550,6 +551,95 @@ export function FunctionRow({
   );
 }
 
+function typeDetail(kind: TypeKind): string | undefined {
+  switch (kind.kind) {
+    case "Enum":
+      return kind.labels.join(", ") || undefined;
+    case "Domain":
+      return kind.base || undefined;
+    case "Composite":
+      return kind.fields.map((field) => `${field.name} ${field.typeName}`).join(", ") || undefined;
+    case "Range":
+      return kind.subtype || undefined;
+    case "Builtin":
+      return undefined;
+    case "Alias":
+      return `${kind.base}, ${kind.nullable ? "null" : "not null"}`;
+    case "Table":
+      return "table";
+  }
+}
+
+function ScriptRow({
+  path,
+  depth,
+  db,
+  target,
+  name,
+  detail,
+  icon,
+  ranges,
+}: {
+  path: string;
+  depth: number;
+  db: DatabaseRef;
+  target: ScriptTarget;
+  name: string;
+  detail?: string;
+  icon: LucideIcon;
+  ranges?: readonly TextRange[];
+}) {
+  const title = <Highlight text={name} ranges={ranges} />;
+  return (
+    <Row
+      path={`${path}/${name}`}
+      depth={depth}
+      expandable={false}
+      keepChevronSpace
+      icon={glyph(icon)}
+      contextMenu={<ScriptMenuItem db={db} target={target} label="Script as CREATE" />}
+      label={detail ? <DetailName name={title} title={`${name} ${detail}`} detail={detail} nameClass="text-ui-13.5" /> : title}
+    />
+  );
+}
+
+function ObjectGroup({
+  path,
+  depth,
+  db,
+  label,
+  icon,
+  rows,
+  expanded,
+}: {
+  path: string;
+  depth: number;
+  db: DatabaseRef;
+  label: string;
+  icon: LucideIcon;
+  rows: { oid: number; name: string; detail?: string; ranges?: readonly TextRange[]; target: ScriptTarget }[];
+  expanded: Expanded;
+}) {
+  if (rows.length === 0) return null;
+  return (
+    <Group path={path} depth={depth} icon={glyph(icon)} label={label} count={rows.length} expanded={expanded}>
+      {rows.map((row) => (
+        <ScriptRow
+          key={`${row.target.kind}-${row.oid}`}
+          path={path}
+          depth={depth + 1}
+          db={db}
+          target={row.target}
+          name={row.name}
+          detail={row.detail}
+          icon={icon}
+          ranges={row.ranges}
+        />
+      ))}
+    </Group>
+  );
+}
+
 /** `count` is null while it loads. */
 function Group({
   path,
@@ -637,6 +727,33 @@ export function SchemaNode({
               ))}
             </Group>
           )}
+          <ObjectGroup
+            path={`${me}/#sequences`}
+            depth={depth + 1}
+            db={db}
+            label="Sequences"
+            icon={HashIcon}
+            expanded={expanded}
+            rows={schema.sequences.map((seq) => ({ oid: seq.oid, name: seq.name, detail: seq.typeName, target: { kind: "Sequence", oid: seq.oid } }))}
+          />
+          <ObjectGroup
+            path={`${me}/#types`}
+            depth={depth + 1}
+            db={db}
+            label="Types"
+            icon={TypeIcon}
+            expanded={expanded}
+            rows={schema.types.map((type) => ({ oid: type.oid, name: type.name, detail: typeDetail(type.kind), target: { kind: "Type", oid: type.oid } }))}
+          />
+          <ObjectGroup
+            path={`${me}/#synonyms`}
+            depth={depth + 1}
+            db={db}
+            label="Synonyms"
+            icon={LinkIcon}
+            expanded={expanded}
+            rows={schema.synonyms.map((syn) => ({ oid: syn.oid, name: syn.name, detail: syn.target, target: { kind: "Synonym", oid: syn.oid } }))}
+          />
         </>
       )}
     </>
@@ -723,7 +840,7 @@ function DatabaseNode({ path, db, state, expanded }: { path: string; db: Databas
           <Spinner /> Loading catalog
         </div>
       )}
-      {open && view && schemas.length === 0 && (
+      {open && view && schemas.length === 0 && view.catalog.extensions.length === 0 && (
         <div data-testid={`db-empty-${me}`} className="flex h-7 items-center pl-[52px] text-ui-12 text-muted">
           No schemas shown
         </div>
@@ -731,6 +848,17 @@ function DatabaseNode({ path, db, state, expanded }: { path: string; db: Databas
       {open &&
         view &&
         schemas.map((s) => <SchemaNode key={s.name} path={me} depth={2} db={db} schema={s} version={view.catalog.version} expanded={expanded} />)}
+      {open && view && (
+        <ObjectGroup
+          path={`${me}/#extensions`}
+          depth={2}
+          db={db}
+          label="Extensions"
+          icon={ZapIcon}
+          expanded={expanded}
+          rows={view.catalog.extensions.map((ext) => ({ oid: ext.oid, name: ext.name, detail: ext.version, target: { kind: "Extension", oid: ext.oid } }))}
+        />
+      )}
     </>
   );
 }
@@ -937,6 +1065,51 @@ export function FilteredSchemaNode({ path, db, match, expanded }: { path: string
             <FoldRow path={functions} depth={3} icon={<BracesIcon size={14} className="text-muted" />} label="Functions" expanded={expanded} />
           )}
           {expanded.has(functions) && match.functions.map((f) => <FunctionRow key={f.fn.oid} path={functions} depth={4} db={db} fn={f.fn} ranges={f.ranges} />)}
+          <ObjectGroup
+            path={`${me}/#sequences`}
+            depth={3}
+            db={db}
+            label="Sequences"
+            icon={HashIcon}
+            expanded={expanded}
+            rows={match.sequences.map(({ seq, ranges }) => ({
+              oid: seq.oid,
+              name: seq.name,
+              detail: seq.typeName,
+              ranges,
+              target: { kind: "Sequence", oid: seq.oid },
+            }))}
+          />
+          <ObjectGroup
+            path={`${me}/#types`}
+            depth={3}
+            db={db}
+            label="Types"
+            icon={TypeIcon}
+            expanded={expanded}
+            rows={match.types.map(({ type, ranges }) => ({
+              oid: type.oid,
+              name: type.name,
+              detail: typeDetail(type.kind),
+              ranges,
+              target: { kind: "Type", oid: type.oid },
+            }))}
+          />
+          <ObjectGroup
+            path={`${me}/#synonyms`}
+            depth={3}
+            db={db}
+            label="Synonyms"
+            icon={LinkIcon}
+            expanded={expanded}
+            rows={match.synonyms.map(({ syn, ranges }) => ({
+              oid: syn.oid,
+              name: syn.name,
+              detail: syn.target,
+              ranges,
+              target: { kind: "Synonym", oid: syn.oid },
+            }))}
+          />
         </>
       )}
     </>
@@ -976,12 +1149,33 @@ function FilteredTree({ filter, query }: { filter: TreeFilter; query: string }) 
         expanded={expanded}
       />
       {expanded.has(config.name) &&
-        databases.map(({ db, schemas }) => {
+        databases.map(({ db, schemas, extensions }) => {
           const path = `${config.name}/${db.database}`;
           return (
             <Fragment key={db.database}>
               <FoldRow path={path} depth={1} icon={<DatabaseIcon size={15} className="text-muted" />} label={db.database} expanded={expanded} />
-              {expanded.has(path) && schemas.map((s) => <FilteredSchemaNode key={s.name} path={path} db={db} match={s} expanded={expanded} />)}
+              {expanded.has(path) && (
+                <>
+                  {schemas.map((s) => (
+                    <FilteredSchemaNode key={s.name} path={path} db={db} match={s} expanded={expanded} />
+                  ))}
+                  <ObjectGroup
+                    path={`${path}/#extensions`}
+                    depth={2}
+                    db={db}
+                    label="Extensions"
+                    icon={ZapIcon}
+                    expanded={expanded}
+                    rows={extensions.map(({ ext, ranges }) => ({
+                      oid: ext.oid,
+                      name: ext.name,
+                      detail: ext.version,
+                      ranges,
+                      target: { kind: "Extension", oid: ext.oid },
+                    }))}
+                  />
+                </>
+              )}
             </Fragment>
           );
         })}

@@ -1214,6 +1214,52 @@ async fn hostile_object_scripts_replay_every_property_or_warn() {
     }
 }
 
+#[tokio::test]
+async fn sequences_types_and_synonyms_load_and_script() {
+    let mut h = Harness::open(TxnMode::AutoCommit).await;
+    let stem = format!("p10_{}", uuid::Uuid::new_v4().simple());
+    let alias = format!("{stem}_phone");
+    let synonym = format!("{stem}_customers");
+    let sequence = format!("{stem}_n");
+    let outcome = AssertUnwindSafe(async {
+        h.ok(&format!("CREATE TYPE dbo.[{alias}] FROM nvarchar(20) NULL\nGO\nCREATE SYNONYM dbo.[{synonym}] FOR dbo.customers\nGO\nCREATE SEQUENCE dbo.[{sequence}] AS int START WITH 1000 INCREMENT BY 10")).await;
+        h.engine.refresh_catalog(h.db()).await.unwrap();
+        let catalog = h.engine.catalog(h.db()).await.unwrap();
+        assert!(catalog.extensions.is_empty(), "SQL Server runs no extension query");
+        let dbo = catalog.schemas.iter().find(|s| s.name == "dbo").unwrap();
+        let ty = dbo.types.iter().find(|t| t.name == alias).expect("alias type");
+        assert_eq!(ty.kind, TypeKind::Alias { base: "nvarchar(20)".into(), nullable: true });
+        let syn = dbo.synonyms.iter().find(|s| s.name == synonym).expect("synonym");
+        assert!(syn.target.to_ascii_lowercase().contains("customers"), "{}", syn.target);
+        let seq = dbo.sequences.iter().find(|s| s.name == sequence).expect("sequence");
+        assert_eq!(seq.type_name, "int");
+        let type_sql = h.engine.object_script(h.db(), ScriptTarget::Type { oid: ty.oid }).await.unwrap().text;
+        assert!(type_sql.contains("CREATE TYPE") && type_sql.contains("nvarchar(20)") && type_sql.contains("NULL"), "{type_sql}");
+        let syn_sql = h.engine.object_script(h.db(), ScriptTarget::Synonym { oid: syn.oid }).await.unwrap().text;
+        assert!(syn_sql.contains("CREATE SYNONYM") && syn_sql.to_ascii_lowercase().contains("customers"), "{syn_sql}");
+        let seq_sql = h.engine.object_script(h.db(), ScriptTarget::Sequence { oid: seq.oid }).await.unwrap().text;
+        assert!(seq_sql.contains("CREATE SEQUENCE") && seq_sql.contains("AS int") && seq_sql.contains("START WITH 1000") && seq_sql.contains("INCREMENT BY 10"), "{seq_sql}");
+        let refused = h.engine.object_script(h.db(), ScriptTarget::Extension { oid: 1 }).await.unwrap_err();
+        assert!(matches!(refused, DetailError::Failed { message } if message == "SQL Server has no extensions."));
+    })
+    .catch_unwind()
+    .await;
+    let _ = h
+        .run(&format!("DROP SYNONYM IF EXISTS dbo.[{synonym}]"))
+        .await;
+    let _ = h
+        .run(&format!("DROP SEQUENCE IF EXISTS dbo.[{sequence}]"))
+        .await;
+    let _ = h
+        .run(&format!(
+            "IF TYPE_ID(N'dbo.{alias}') IS NOT NULL DROP TYPE dbo.[{alias}]"
+        ))
+        .await;
+    if let Err(panic) = outcome {
+        std::panic::resume_unwind(panic);
+    }
+}
+
 async fn run_mode(h: &mut Harness, sql: &str, mode: RunMode) -> Result<ConsoleState, RunError> {
     match h.engine.console_run(h.tab, RunRequest::Script { text: sql.into(), target: RunTarget::All, mode }, None).await {
         Ok(accepted) => Ok(h.finish(accepted.run_id).await),

@@ -2237,11 +2237,27 @@ mod tests {
         for change in ["target", "close", "disconnect", "legacy mode"] {
             let (engine, _dir) = engine().await;
             let refuser = Refuser::start();
-            let config = engine.save_connection(ConnectionDraft {
-                database_kind: DatabaseKind::SqlServer, host: "127.0.0.1".into(), port: refuser.port, ..draft("count setup race")
-            }).await.unwrap();
-            let db = DatabaseRef { connection_id: config.id, database: config.database.clone() };
-            let catalog = Arc::new(Catalog { database_kind: DatabaseKind::SqlServer, db: db.clone(), version: 1, default_schema: Some("dbo".into()), schemas: Vec::new() });
+            let config = engine
+                .save_connection(ConnectionDraft {
+                    database_kind: DatabaseKind::SqlServer,
+                    host: "127.0.0.1".into(),
+                    port: refuser.port,
+                    ..draft("count setup race")
+                })
+                .await
+                .unwrap();
+            let db = DatabaseRef {
+                connection_id: config.id,
+                database: config.database.clone(),
+            };
+            let catalog = Arc::new(Catalog {
+                database_kind: DatabaseKind::SqlServer,
+                db: db.clone(),
+                version: 1,
+                default_schema: Some("dbo".into()),
+                schemas: Vec::new(),
+                extensions: Vec::new(),
+            });
             let home = DbSlot::new(db.clone());
             home.set(CatalogSlot::Ready(catalog.clone()));
             let instance = Arc::new(Instance::new(config.clone(), ServerInfo { version: "count fixture".into(), version_num: 0, encoding: "UTF8".into() },
@@ -2397,7 +2413,14 @@ mod tests {
         let home = config.database.clone();
         let db = DatabaseRef { connection_id: config.id, database: home.clone() };
         let slot = DbSlot::new(db.clone());
-        slot.set(CatalogSlot::Ready(Arc::new(Catalog { database_kind: crate::model::DatabaseKind::Postgres, db, version: 1, default_schema: Some("public".into()), schemas: Vec::new() })));
+        slot.set(CatalogSlot::Ready(Arc::new(Catalog {
+            database_kind: crate::model::DatabaseKind::Postgres,
+            db,
+            version: 1,
+            default_schema: Some("public".into()),
+            schemas: Vec::new(),
+            extensions: Vec::new(),
+        })));
         let list = std::iter::once(home.as_str())
             .chain(databases.iter().copied())
             .map(|name| connection::DatabaseInfo { name: name.into(), system: false, access: DbAccess::Ok })
