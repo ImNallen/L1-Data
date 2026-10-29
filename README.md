@@ -66,7 +66,7 @@ L1 Data is a desktop IDE for PostgreSQL and Microsoft SQL Server, built with Tau
 
 ### Results and table data
 
-- Idle results show **Results appear here** and the run shortcut. The results header groups staged edits, result selection, status, and output and export controls. It wraps in narrow panes so those controls remain reachable.
+- Idle results show **Results appear here** and the run shortcut. The results header groups staged edits, result selection, status, and output and export controls. It wraps in narrow panes so those controls remain reachable. Long summaries show at most two lines, with the full text on hover. When a batch returns many results, its numbered selector scrolls horizontally.
 
 - Import CSV into an existing PostgreSQL table from its context menu. Preview a prepared snapshot, choose a header, and map or skip fields. Unquoted empty fields become NULL, quoted empty fields stay empty text, and unmapped columns use defaults. Import shows byte progress and supports Cancel. Errors and cancellation roll back the whole import. Manual mode keeps the rows pending for Commit or Rollback, and Production asks before importing.
 - SQL Server table browsing preserves exact decimal and money values, Unicode, binary values, and temporal precision. An arbitrary query returning raw `money` must cast it to `decimal(19,4)` because the driver otherwise rounds it through floating point. Unsupported value conversions fail explicitly.

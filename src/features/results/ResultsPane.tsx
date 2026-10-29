@@ -103,7 +103,9 @@ function SummaryText({ summary }: { summary: Summary }) {
       {summary.tone === "ok" && <CheckIcon size={15} className="shrink-0 text-green" />}
       {summary.tone === "error" && <CircleAlertIcon size={14} className="shrink-0" />}
       {summary.tone === "running" && <Spinner />}
-      <span className="[overflow-wrap:anywhere]">{summary.text}</span>
+      <span title={summary.text} className="line-clamp-2 [overflow-wrap:anywhere]">
+        {summary.text}
+      </span>
     </span>
   );
 }
@@ -134,7 +136,7 @@ function ExportStatus({ progress }: { progress: NonNullable<ConsoleState["export
   return (
     <span data-testid="export-status" role="status" className="flex min-w-0 items-center gap-1.5 text-ui-13 text-dim">
       <Spinner />
-      <span className="tabular-nums [overflow-wrap:anywhere]">Exporting {pluralRows(progress.rows)}…</span>
+      <span className="line-clamp-2 tabular-nums [overflow-wrap:anywhere]">Exporting {pluralRows(progress.rows)}…</span>
     </span>
   );
 }
@@ -366,7 +368,7 @@ export function ResultsPane({ tabId }: { tabId: TabId | null }) {
           actions={actions}
         />
         {results.length > 1 && (
-          <div data-testid="result-selector" className="flex max-w-full flex-wrap items-center gap-0.5 rounded-md border border-control p-0.5">
+          <div data-testid="result-selector" className="flex max-w-full items-center gap-0.5 overflow-x-auto rounded-md border border-control p-0.5">
             {results.map((r, i) => (
               <button
                 key={r.index}
@@ -375,7 +377,7 @@ export function ResultsPane({ tabId }: { tabId: TabId | null }) {
                 title={`Result ${i + 1} · ${pluralRows(r.meta.rowCount)}`}
                 onClick={() => tabId && setActiveResult(tabId, r.index)}
                 className={cx(
-                  "h-5 min-w-6 rounded px-1.5 font-mono text-ui-11.5",
+                  "h-5 min-w-6 shrink-0 rounded px-1.5 font-mono text-ui-11.5",
                   (view.kind === "rows" || view.kind === "plan") && view.result.index === r.index ? "bg-pill text-fg" : "text-dim hover:text-muted",
                 )}
               >
@@ -389,7 +391,7 @@ export function ResultsPane({ tabId }: { tabId: TabId | null }) {
           {importing ? (
             <span data-testid="import-status" role="status" className="flex min-w-0 items-center gap-1.5 text-ui-13 text-dim">
               <Spinner />
-              <span className="tabular-nums [overflow-wrap:anywhere]">
+              <span className="line-clamp-2 tabular-nums [overflow-wrap:anywhere]">
                 {importing.finishing
                   ? "Finishing import…"
                   : `Importing ${importing.rows.toLocaleString()} / ${importing.totalRows.toLocaleString()} rows · ${importing.bytes.toLocaleString()} / ${importing.totalBytes.toLocaleString()} bytes`}
@@ -401,7 +403,7 @@ export function ResultsPane({ tabId }: { tabId: TabId | null }) {
             summary && <SummaryText summary={summary} />
           )}
           {selectionText !== null && (
-            <span data-testid="result-selection" className="min-w-0 text-ui-13 text-dim [overflow-wrap:anywhere]">
+            <span data-testid="result-selection" title={selectionText} className="line-clamp-2 min-w-0 text-ui-13 text-dim [overflow-wrap:anywhere]">
               {selectionText}
             </span>
           )}
