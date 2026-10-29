@@ -110,7 +110,7 @@ impl Harness {
             tab,
             RunRequest::Script {
                 text: text.into(),
-                target: RunTarget::All, mode: RunMode::Run,
+                target: RunTarget::All, mode: RunMode::Run, params: Vec::new(),
             },
         )
         .await

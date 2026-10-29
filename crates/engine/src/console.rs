@@ -11,7 +11,7 @@ use crate::results::{Caps, Origin, ResultSet, Rerun};
 use crate::session::{CancelHandle, Session, QueryEvent};
 use crate::sql::{Invalidates, StmtKind, StmtSpan};
 use crate::store::HistoryInsert;
-use crate::text::{OffsetMap, synthesize_tag};
+use crate::text::synthesize_tag;
 use crate::txn::{StmtOutcome, TransactionPlan, txn_after};
 use crate::writes::WritesChecked;
 
@@ -429,6 +429,8 @@ pub struct TablePage {
 
 pub struct PlannedStmt {
     pub span: StmtSpan,
+    pub origin: DocOffset,
+    pub changed: bool,
     pub kind: StmtKind,
     pub transaction: TransactionPlan,
 }
@@ -520,7 +522,6 @@ pub(crate) async fn finish_plan(console: &Console, shared: &Arc<Shared>, connect
 pub async fn run_task(console: Arc<Console>, shared: Arc<Shared>, mut session: Session, plan: RunPlan, stop: Arc<AtomicBool>) -> Result<(), Orphaned> {
     let started = Instant::now();
     let run_id = plan.run_id;
-    let map = OffsetMap::new(&plan.text);
     let settings = shared.settings();
     let caps = Caps { max_rows: settings.max_rows, max_bytes: settings.max_result_bytes };
     let mut txn = plan.txn;
@@ -569,7 +570,7 @@ pub async fn run_task(console: Arc<Console>, shared: Arc<Shared>, mut session: S
         let result = ran.map_err(|failed| failed.error);
         let cancelled = stop.load(Ordering::Relaxed) && result.is_err();
         let result = result.map_err(|mut e| {
-            e.position = e.position.map(|p| DocOffset(map.to_utf16(stmt.span.start).0.saturating_add(p.0)));
+            e.position = if stmt.changed { None } else { e.position.map(|p| DocOffset(stmt.origin.0.saturating_add(p.0))) };
             e
         });
         if let Err(e) = &result { if e.severity == "FATAL" { fatal = Some(e.message.clone()); } }
@@ -756,7 +757,10 @@ async fn run_outputs(console: &Console, shared: &Shared, session: &mut Session, 
             Ok(QueryEvent::Notice(body)) => log.push(body),
             Ok(QueryEvent::ServerError(error)) => {
                 if let Some((set, out)) = active.take() { end_rows(&set, &mut outputs[out], started, RowsState::Failed); }
-                log.push(OutputBody::Error { statement: Some(index as u16), error: error.clone() });
+                let stmt = &plan.statements[index];
+                let mut shown = error.clone();
+                shown.position = if stmt.changed { None } else { shown.position.map(|p| DocOffset(stmt.origin.0.saturating_add(p.0))) };
+                log.push(OutputBody::Error { statement: Some(index as u16), error: shown });
                 reported.get_or_insert(error);
             }
         }

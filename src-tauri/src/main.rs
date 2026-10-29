@@ -36,6 +36,7 @@ fn specta_builder() -> tauri_specta::Builder<tauri::Wry> {
             ipc::exact_row_count,
             ipc::console_configure,
             ipc::script_outline,
+            ipc::script_params,
             ipc::completion_context,
             ipc::editor_format,
             ipc::table_script,
@@ -244,7 +245,7 @@ async fn self_check_steps(engine: &Arc<Engine>, url: &str) -> Result<serde_json:
         .await
         .map_err(fail("console_configure"))?;
     let accepted = engine
-        .console_run(tab, RunRequest::Script { text: "SELECT 1".into(), target: RunTarget::All, mode: RunMode::Run }, None)
+        .console_run(tab, RunRequest::Script { text: "SELECT 1".into(), target: RunTarget::All, mode: RunMode::Run, params: Vec::new() }, None)
         .await
         .map_err(fail("console_run"))?;
     let finished = tokio::time::timeout(std::time::Duration::from_secs(30), async {
@@ -273,11 +274,12 @@ async fn self_check_steps(engine: &Arc<Engine>, url: &str) -> Result<serde_json:
     let database_kind = config.database_kind;
     let text_services = std::thread::spawn(move || {
         let outline = text_engine.script_outline("SELECT 1", DocOffset(0), database_kind);
+        let params = text_engine.script_params("SELECT :value::int", RunTarget::All, database_kind).map_err(fail("script_params"))?;
         let completion = text_engine.completion_context("SELECT * FROM orders o WHERE o.", DocOffset(31), database_kind);
         let formatted = text_engine.editor_format("SELECT 1", RunTarget::All, database_kind).map_err(fail("editor_format"))?;
         let browse = text_engine.table_script(text_db.clone(), &text_schema, "orders").map_err(fail("table_script"))?;
         let order = text_engine.table_order(text_db, &text_schema, "orders", "", TableOrderEdit::Cycle { column: "id".into(), additive: false }).map_err(fail("table_order"))?;
-        Ok::<_, (&'static str, serde_json::Value)>(serde_json::json!({ "outline": outline, "completion": completion, "formatted": formatted, "browse": browse, "order": order }))
+        Ok::<_, (&'static str, serde_json::Value)>(serde_json::json!({ "outline": outline, "params": params, "completion": completion, "formatted": formatted, "browse": browse, "order": order }))
     }).join().map_err(|_| ("text_services", serde_json::json!("panicked off the runtime")))??;
     engine
         .edit_view(config.id, ViewEdit::Database { name: "reporting".into(), shown: true })
@@ -454,7 +456,7 @@ mod tests {
             }
             checked += 1;
         }
-        assert_eq!(checked, 29, "the sync commands in ipc.rs");
+        assert_eq!(checked, 30, "the sync commands in ipc.rs");
     }
 
     /// The engine decides what to install and when. A webview that could call the plugin would

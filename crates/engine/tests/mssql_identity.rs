@@ -72,7 +72,7 @@ fn result(state: &ConsoleState) -> &ResultMeta {
 }
 
 fn query() -> RunRequest {
-    RunRequest::Script { text: "SELECT DB_NAME() AS identity_home".into(), target: RunTarget::All, mode: RunMode::Run }
+    RunRequest::Script { text: "SELECT DB_NAME() AS identity_home".into(), target: RunTarget::All, mode: RunMode::Run, params: Vec::new() }
 }
 
 #[tokio::test]

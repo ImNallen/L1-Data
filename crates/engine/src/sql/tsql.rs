@@ -54,6 +54,44 @@ impl Token<'_> {
     }
 }
 
+pub(crate) fn param_occurrences(text: &str) -> Result<Vec<std::ops::Range<usize>>, String> {
+    let tokens: Vec<_> = lex(text)?.into_iter().filter(|t| !t.comment()).collect();
+    let mut code = tokens.iter().filter(|t| t.code());
+    let routine = code.clone().take(5).any(|t| t.word("procedure") || t.word("proc") || t.word("function") || t.word("trigger") || t.word("rule"))
+        && code.next().is_some_and(|t| t.word("create") || t.word("alter"));
+    if routine { return Ok(Vec::new()); }
+    let mut declared = std::collections::HashSet::new();
+    for (i, token) in tokens.iter().enumerate() {
+        if !token.word("declare") { continue; }
+        let mut at = i + 1;
+        while let Some(variable) = tokens.get(at).filter(|t| t.kind == Kind::Variable) {
+            declared.insert(variable.text.to_lowercase());
+            at += 1;
+            let mut depth = 0usize;
+            while let Some(next) = tokens.get(at) {
+                if depth == 0 {
+                    if next.text == "," && tokens.get(at + 1).is_some_and(|t| t.kind == Kind::Variable) { at += 1; break; }
+                    if next.text == ";" || ["select", "set", "declare", "insert", "update", "delete", "exec", "execute", "print", "if", "while", "open", "fetch", "close", "deallocate", "begin", "return"].iter().any(|word| next.word(word)) { break; }
+                }
+                match next.text { "(" => depth += 1, ")" => depth = depth.saturating_sub(1), _ => {} }
+                at += 1;
+            }
+        }
+    }
+    let mut exec = implicit_execution(&tokens);
+    let mut out = Vec::new();
+    for (i, token) in tokens.iter().enumerate() {
+        if token.word("exec") || token.word("execute") { exec = true; }
+        else if token.text == ";" || ["select", "set", "declare", "insert", "update", "delete", "print", "if", "while", "begin", "return"].iter().any(|word| token.word(word)) { exec = false; }
+        if token.kind == Kind::Variable && !token.text.starts_with("@@") && !declared.contains(&token.text.to_lowercase()) {
+            if exec && tokens.get(i + 1).is_some_and(|t| t.text == "=") { continue; }
+            if token.text.len() == 1 { return Err("Invalid parameter @. Use a variable name such as @id.".into()); }
+            out.push(token.start..token.end);
+        }
+    }
+    Ok(out)
+}
+
 fn word_start(ch: char) -> bool {
     ch.is_alphabetic() || matches!(ch, '_' | '@' | '#')
 }
@@ -375,11 +413,14 @@ fn batch_schema_change(tokens: &[Token<'_>]) -> Option<StmtKind> {
     Some(changes.find(|kind| matches!(kind, StmtKind::Ddl(tag) if tag.ends_with(" DATABASE"))).unwrap_or(first))
 }
 
+fn implicit_execution(tokens: &[Token<'_>]) -> bool {
+    tokens.iter().find(|t| t.code()).is_some_and(|t| {
+        matches!(t.kind, Kind::Word | Kind::Ident) && !STATEMENT_WORDS.iter().any(|w| t.word(w))
+    })
+}
+
 fn opaque_execution(tokens: &[Token<'_>]) -> bool {
-    tokens.iter().any(|t| t.word("EXEC") || t.word("EXECUTE"))
-        || tokens.iter().find(|t| t.code()).is_some_and(|t| {
-            matches!(t.kind, Kind::Word | Kind::Ident) && !STATEMENT_WORDS.iter().any(|w| t.word(w))
-        })
+    tokens.iter().any(|t| t.word("EXEC") || t.word("EXECUTE")) || implicit_execution(tokens)
 }
 
 fn selects_into(tokens: &[Token<'_>]) -> bool {

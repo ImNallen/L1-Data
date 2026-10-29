@@ -7,6 +7,7 @@ mod entra;
 mod export;
 mod explain;
 mod plan;
+mod params;
 mod showplan;
 mod files;
 mod history;
@@ -919,6 +920,10 @@ impl Engine {
         text::script_outline(text, cursor, database_kind)
     }
 
+    pub fn script_params(&self, text: &str, target: RunTarget, database_kind: DatabaseKind) -> Result<Vec<Param>, RunError> {
+        params::discover(text, target, database_kind)
+    }
+
     /// The editor's completion. Pure, so the sync command never needs the runtime.
     pub fn completion_context(&self, text: &str, cursor: DocOffset, database_kind: DatabaseKind) -> CompletionContext {
         text::completion_context(text, cursor, database_kind)
@@ -1283,12 +1288,10 @@ impl Engine {
 
         let mut explain_mode = None;
         let mut page = None;
-        let (text, spans) = match r {
-            RunRequest::Script { text, target, mode } => {
+        let executable = match r {
+            RunRequest::Script { text, target, mode, params } => {
                 explain_mode = mode.explain();
-                let target = text::OffsetMap::new(&text).target(target);
-                let spans = text::pick(&text, target, connection.database_kind).map_err(|what| RunError::Unsupported { what })?;
-                (text, spans)
+                params::bind(text, target, connection.database_kind, params)?
             }
             RunRequest::TablePage { schema, table, page: index, query } => {
                 let catalog = self.catalog(config.db()).await.map_err(|_| RunError::NotConfigured)?;
@@ -1302,9 +1305,12 @@ impl Engine {
                 if spans.len() != 1 {
                     return Err(RunError::BadFilter);
                 }
-                (text, spans)
+                let ranges = spans.iter().map(|span| text::OffsetMap::new(&text).range(span)).collect();
+                let changed = vec![false; spans.len()];
+                params::ExecutableScript { text, spans, ranges, changed }
             }
         };
+        let params::ExecutableScript { text, spans, ranges, changed } = executable;
         if spans.len() > usize::from(u16::MAX) { return Err(RunError::Unsupported { what: "Too many execution units".into() }); }
         if spans.is_empty() {
             return Err(RunError::NoStatement);
@@ -1315,18 +1321,16 @@ impl Engine {
         let statements: Vec<PlannedStmt> = if explain_mode.is_some() {
             Vec::new()
         } else {
-            spans.iter().map(|span| {
+            spans.iter().enumerate().map(|(index, span)| {
                 let sql = span.text(&text);
                 let kind = text::classify(sql, connection.database_kind);
                 let transaction = txn::plan(connection.database_kind, config.mode, &kind).map_err(|what| RunError::Unsupported { what })?;
-                Ok(PlannedStmt { span: *span, kind, transaction })
+                Ok(PlannedStmt { span: *span, origin: ranges[index].from, changed: changed[index], kind, transaction })
             }).collect::<Result<_, RunError>>()?
         };
         if statements.iter().any(|p| p.kind == sql::StmtKind::CopyStdio) {
             return Err(RunError::Unsupported { what: "COPY FROM STDIN / TO STDOUT".into() });
         }
-        let map = text::OffsetMap::new(&text);
-        let ranges: Vec<DocRange> = spans.iter().map(|span| map.range(span)).collect();
         let sent: Vec<&str> = spans.iter().map(|span| span.text(&text)).collect();
 
         let mut fresh = None;
@@ -1399,6 +1403,7 @@ impl Engine {
                 }
                 Err(error) => return Err(error),
             };
+            let prepared = prepared.source(ranges[0].from, changed[0]);
             let run_id = s.next_run_id();
             let entered = inner.txn;
             let launch = explain::launch(&console, &mut inner, run_id, prepared, config.schema.clone(), current.clone(), config.database.clone(), entered)?;
@@ -2169,7 +2174,7 @@ mod tests {
         assert!(matches!(engine.console_configure(tab, unknown).await, Err(ConfigureError::UnknownConnection)));
         let r = ResultRef { tab_id: tab, run_id: RunId(1), index: 0 };
         assert!(matches!(engine.result_page(r, 0, 10), Err(ResultError::Gone)));
-        assert!(matches!(engine.console_run(tab, RunRequest::Script { text: "select 1".into(), target: RunTarget::All, mode: RunMode::Run }, None).await, Err(RunError::NotConfigured)));
+        assert!(matches!(engine.console_run(tab, RunRequest::Script { text: "select 1".into(), target: RunTarget::All, mode: RunMode::Run, params: Vec::new() }, None).await, Err(RunError::NotConfigured)));
         assert!(matches!(engine.console_commit(tab, None).await, Err(TxnError::NoTransaction)));
     }
 
@@ -2214,8 +2219,8 @@ mod tests {
         engine.shared.consoles.write().unwrap().insert(tab, legacy.clone());
         let before = serde_json::to_value(legacy.snapshot(&*legacy.inner.lock().await)).unwrap();
         for request in [
-            RunRequest::Script { text: "UPDATE dbo.target SET n=2".into(), target: RunTarget::All, mode: RunMode::Run },
-            RunRequest::Script { text: "UPDATE dbo.target SET n=2\nGO\nSELECT 1".into(), target: RunTarget::All, mode: RunMode::Run },
+            RunRequest::Script { text: "UPDATE dbo.target SET n=2".into(), target: RunTarget::All, mode: RunMode::Run, params: Vec::new() },
+            RunRequest::Script { text: "UPDATE dbo.target SET n=2\nGO\nSELECT 1".into(), target: RunTarget::All, mode: RunMode::Run, params: Vec::new() },
             RunRequest::TablePage { schema: "dbo".into(), table: "target".into(), page: 0, query: TableQuery::default() },
         ] {
             let refused = engine.console_run(tab, request, None).await;
@@ -2299,7 +2304,7 @@ mod tests {
         use std::panic::AssertUnwindSafe;
 
         async fn rows(engine: &Engine, tab: TabId, text: String) -> Vec<Vec<Option<String>>> {
-            let accepted = engine.console_run(tab, RunRequest::Script { text, target: RunTarget::All, mode: RunMode::Run }, None).await.unwrap();
+            let accepted = engine.console_run(tab, RunRequest::Script { text, target: RunTarget::All, mode: RunMode::Run, params: Vec::new() }, None).await.unwrap();
             let state = tokio::time::timeout(Duration::from_secs(15), async {
                 loop {
                     let state = engine.boot().consoles.into_iter().find(|s| s.tab_id == tab).unwrap();
@@ -2345,8 +2350,8 @@ mod tests {
                 serde_json::to_value(console.publish(&mut inner, &engine.shared)).unwrap()
             };
             for request in [
-                RunRequest::Script { text: format!("UPDATE dbo.[{name}] SET n=2 WHERE id=1"), target: RunTarget::All, mode: RunMode::Run },
-                RunRequest::Script { text: format!("UPDATE dbo.[{name}] SET n=2 WHERE id=1\nGO\nSELECT 1"), target: RunTarget::All, mode: RunMode::Run },
+                RunRequest::Script { text: format!("UPDATE dbo.[{name}] SET n=2 WHERE id=1"), target: RunTarget::All, mode: RunMode::Run, params: Vec::new() },
+                RunRequest::Script { text: format!("UPDATE dbo.[{name}] SET n=2 WHERE id=1\nGO\nSELECT 1"), target: RunTarget::All, mode: RunMode::Run, params: Vec::new() },
                 RunRequest::TablePage { schema: "dbo".into(), table: name.clone(), page: 0, query: TableQuery::default() },
             ] {
                 assert!(matches!(engine.console_run(tab, request, None).await, Err(RunError::Unsupported { .. })));

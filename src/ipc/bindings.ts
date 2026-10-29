@@ -22,6 +22,7 @@ export const commands = {
 	exactRowCount: (tabId: TabId, db: DatabaseRef, schema: string, table: string, query: TableQuery) => typedError<number, CountError>(__TAURI_INVOKE("exact_row_count", { tabId, db, schema, table, query })),
 	consoleConfigure: (tabId: TabId, config: ConsoleConfig) => typedError<ConsoleState, ConfigureError>(__TAURI_INVOKE("console_configure", { tabId, config })),
 	scriptOutline: (text: string, cursor: DocOffset, databaseKind: DatabaseKind) => __TAURI_INVOKE<ScriptOutline>("script_outline", { text, cursor, databaseKind }),
+	scriptParams: (text: string, target: RunTarget, databaseKind: DatabaseKind) => typedError<Param[], RunError>(__TAURI_INVOKE("script_params", { text, target, databaseKind })),
 	completionContext: (text: string, cursor: DocOffset, databaseKind: DatabaseKind) => __TAURI_INVOKE<CompletionContext>("completion_context", { text, cursor, databaseKind }),
 	editorFormat: (text: string, target: RunTarget, databaseKind: DatabaseKind) => typedError<FormatEdit, FormatError>(__TAURI_INVOKE("editor_format", { text, target, databaseKind })),
 	tableScript: (db: DatabaseRef, schema: string, table: string) => typedError<TableScript, string>(__TAURI_INVOKE("table_script", { db, schema, table })),
@@ -956,6 +957,15 @@ export type OutputEntry = {
 	body: OutputBody,
 };
 
+export type Param = {
+	name: string,
+};
+
+export type ParamValue = {
+	name: string,
+	value: string | null,
+};
+
 export type PasswordInput = "Keep" | { Set: string } | "Clear";
 
 export type Permission = 
@@ -1203,7 +1213,7 @@ export type RunOutcome = "Ok" | "Failed" | "Cancelled";
 
 export type RunOutput = { kind: "Rows"; result: ResultMeta; state: RowsState } | { kind: "Command"; tag: string; affectedRows: number | null; elapsedMs: number } | { kind: "Plan"; result: ResultMeta; format: PlanFormat };
 
-export type RunRequest = { kind: "script"; text: string; target: RunTarget; mode: RunMode } | { kind: "tablePage"; schema: string; table: string; page: number; query?: TableQuery };
+export type RunRequest = { kind: "script"; text: string; target: RunTarget; mode: RunMode; params: ParamValue[] } | { kind: "tablePage"; schema: string; table: string; page: number; query?: TableQuery };
 
 export type RunState = { kind: "Idle" } | { kind: "Running"; runId: RunId; startedAtMs: number; statements: StatementRun[] } | { kind: "Finished"; runId: RunId; elapsedMs: number; statements: StatementRun[]; outcome: RunOutcome };
 

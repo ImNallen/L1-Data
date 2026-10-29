@@ -42,12 +42,14 @@ import {
   editorStateOf,
   flashRanges,
   installEditorBehavior,
+  onBuffersChanged,
   seedEditor,
   showDiagnostics,
   showRunTarget,
   textOf,
 } from "./editorStates";
 import { closeChooser, openChooser } from "./chooserState";
+import { cancelStaleParams, finishParams, forgetParams, promptParams } from "./paramsState";
 import { docText } from "./docText";
 
 const ws = () => useWorkspace.getState();
@@ -77,6 +79,8 @@ async function ensureConsole(tab: Tab): Promise<boolean> {
   }
   return ws().tabs[tab.id]?.console === tab.console;
 }
+
+const runIntents = new Map<TabId, symbol>();
 
 const sent = new Map<TabId, { runId: number; text: string }>();
 
@@ -230,26 +234,52 @@ async function runTab(tabId: TabId, target?: PageTarget, script?: RunTarget, mod
   if (target?.countContext && !isCurrentCount(target.countContext)) return;
   if (target && !isBrowsing(tab)) return;
   if (deferPageForPendingWork(tabId, target)) return;
+  const intent = Symbol();
+  runIntents.set(tabId, intent);
+  finishParams(null);
+  const state = editorStateOf(tabId);
+  const destination = textTarget(tab);
+  const browsing = isBrowsing(tab);
+  const valid = () =>
+    runIntents.get(tabId) === intent &&
+    (browsing || ws().active === tabId) &&
+    ws().tabs[tabId]?.console === tab.console &&
+    editorStateOf(tabId).doc === state.doc &&
+    (browsing || editorStateOf(tabId).selection.eq(state.selection)) &&
+    sameTextTarget(tabId, destination) &&
+    (browsing || (ws().overlay.kind === "none" && ws().screen.kind === "workspace"));
   if (!(await ensureConsole(tab)) || (target && !isBrowsing(tab))) return;
   if (target && queuedPages.get(tabId)?.intent !== target.intent) return;
   if (target?.countContext && !isCurrentCount(target.countContext)) return;
   if (deferPageForPendingWork(tabId, target)) return;
 
+  if (!valid()) return;
   let request: RunRequest;
   let text = "";
   if (isBrowsing(tab)) {
     const { schema, table, page, query } = tab.table;
     request = { kind: "tablePage", schema, table, page: target?.page ?? page, query };
   } else {
-    const state = editorStateOf(tabId);
     text = state.doc.toString();
-    request = { kind: "script", text, target: script ?? selectionTarget(state), mode };
+    const runTarget = script ?? selectionTarget(state);
+    const discovered = await commands.scriptParams(text, runTarget, destination.databaseKind);
+    if (!valid()) return;
+    if (discovered.status === "error") {
+      notify(runErrorText(discovered.error));
+      return;
+    }
+    const db = destination.db;
+    const targetKey = JSON.stringify([db, destination.databaseKind]);
+    const description = db ? `${ws().configs[db.connectionId]?.name ?? db.connectionId} / ${db.database}` : "";
+    const params = discovered.data.length ? await promptParams(tabId, targetKey, discovered.data, description, valid) : [];
+    if (!params || !valid()) return;
+    request = { kind: "script", text, target: runTarget, mode, params };
     showDiagnostics(tabId, []);
   }
 
   let res = await commands.consoleRun(tabId, request, null);
   while (res.status === "error" && res.error.kind === "ConfirmWrites") {
-    if (!(await writesConfirmed(tab, res.error.confirmation, mode))) return;
+    if (!(await writesConfirmed(tab, res.error.confirmation, mode)) || !valid()) return;
     res = await commands.consoleRun(tabId, request, res.error.confirmation.digest);
   }
   if (res.status === "error") {
@@ -575,6 +605,8 @@ async function applyEdits(tab: TableTab, edits: TableEdits): Promise<void> {
 }
 
 export function forgetTab(tabId: TabId) {
+  runIntents.delete(tabId);
+  forgetParams(tabId);
   sent.delete(tabId);
   queuedPages.delete(tabId);
   loadedTables.delete(tabId);
@@ -664,9 +696,21 @@ function runQueuedPages(s: ReturnType<typeof useLive.getState>, previous?: Retur
 }
 
 export function installRunBehavior(): void {
+  onBuffersChanged(cancelStaleParams);
   useLive.subscribe(showRunErrors);
   useLive.subscribe(runQueuedPages);
   useWorkspace.subscribe((s, prev) => {
+    if (s.active !== prev.active && prev.active) {
+      const previous = s.tabs[prev.active];
+      if (previous && !isBrowsing(previous)) runIntents.delete(prev.active);
+    }
+    for (const [id, before] of Object.entries(prev.tabs)) {
+      const now = s.tabs[id];
+      if (!now) runIntents.delete(id);
+      if (!now || !sameDb(tabTarget(now), tabTarget(before)) || databaseKindFor(tabTarget(now), s.configs) !== databaseKindFor(tabTarget(before), prev.configs))
+        forgetParams(id);
+    }
+    cancelStaleParams();
     const tab = s.active ? s.tabs[s.active] : undefined;
     const before = prev.active ? prev.tabs[prev.active] : undefined;
     if (
@@ -693,6 +737,10 @@ export function installRunBehavior(): void {
     EditorView.updateListener.of((u) => {
       if (u.docChanged) for (const l of docListeners) l();
       if (u.docChanged || u.selectionSet) {
+        const active = ws().active;
+        const tab = active ? ws().tabs[active] : undefined;
+        if (tab && !isBrowsing(tab)) runIntents.delete(tab.id);
+        cancelStaleParams();
         ws().setCursor(cursorOf(u.state));
         refreshRunMark();
       }
