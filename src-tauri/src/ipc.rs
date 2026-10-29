@@ -108,6 +108,12 @@ pub async fn console_configure(engine: State<'_, Arc<Engine>>, tab_id: TabId, co
 
 #[tauri::command]
 #[specta::specta]
+pub fn script_params(engine: State<'_, Arc<Engine>>, text: String, target: RunTarget, database_kind: DatabaseKind) -> Result<Vec<Param>, RunError> {
+    engine.script_params(&text, target, database_kind)
+}
+
+#[tauri::command]
+#[specta::specta]
 pub fn script_outline(engine: State<'_, Arc<Engine>>, text: String, cursor: DocOffset, database_kind: DatabaseKind) -> ScriptOutline {
     engine.script_outline(&text, cursor, database_kind)
 }

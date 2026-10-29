@@ -23,6 +23,7 @@ import { markDeleted, pendingCount, setCell, useTableEdits } from "../../state/t
 import { useWorkspace, workspaceSnapshot } from "../../state/workspace";
 import { gridEditing } from "../results/ResultGrid";
 import { dropEditor, editorStateOf, insertAtCursor, moveCursor, seedEditor, textOf } from "./editorStates";
+import { finishParams, useParams } from "./paramsState";
 import {
   browseTemplate,
   formatActive,
@@ -63,12 +64,13 @@ const ordersScript = {
 
 beforeEach(() => {
   vi.stubGlobal("window", { crypto });
-  mockIPC((cmd) => (cmd === "table_script" ? ordersScript : null));
+  mockIPC((cmd) => (cmd === "script_params" ? [] : cmd === "table_script" ? ordersScript : null));
 });
 
 it("uses the engine's canonical template for bracketed table names", async () => {
   const calls: unknown[] = [];
   mockIPC((cmd, args) => {
+    if (cmd === "script_params") return [];
     if (cmd === "table_script") {
       calls.push(args);
       return { text: "SELECT * FROM [Sales].[line items]", acceptedTexts: ["SELECT * FROM [Sales].[line items]"] } satisfies TableScript;
@@ -111,6 +113,7 @@ it("writes settings one at a time, so the write that lands last carries every ch
   let overlapped = false;
   let persisted: Settings | null = null;
   mockIPC((cmd, args) => {
+    if (cmd === "script_params") return [];
     if (cmd !== "settings_set") return;
     const { settings } = args as { settings: Settings };
     overlapped ||= ++inFlight > 1;
@@ -137,6 +140,7 @@ it("writes settings one at a time, so the write that lands last carries every ch
 it("shows a query in the table's open tab, or in a second tab while the first holds staged edits or edited text", async () => {
   const pages: unknown[] = [];
   mockIPC((cmd, args) => {
+    if (cmd === "script_params") return [];
     if (cmd === "table_script") return ordersScript;
     if (cmd === "console_run") pages.push((args as { request: unknown }).request);
     return null;
@@ -192,6 +196,7 @@ it("Last counts on its own tab and loads the exact last table page", async () =>
     throw new Error("count was not requested");
   };
   mockIPC((cmd, args) => {
+    if (cmd === "script_params") return [];
     requests.push({ cmd, args });
     if (cmd === "exact_row_count")
       return new Promise<number>((resolve) => {
@@ -225,6 +230,7 @@ it.each(["target", "query", "page", "table", "text", "close", "page size"])("Las
     throw new Error("count was not requested");
   };
   mockIPC((cmd) => {
+    if (cmd === "script_params") return [];
     requests.push(cmd);
     if (cmd === "exact_row_count")
       return new Promise<number>((resolve) => {
@@ -266,6 +272,7 @@ it("Last drops its counted page if the query changes during console setup", asyn
     throw new Error("console setup was not requested");
   };
   mockIPC((cmd) => {
+    if (cmd === "script_params") return [];
     requests.push(cmd);
     if (cmd === "exact_row_count") return 1251;
     if (cmd === "console_configure")
@@ -287,6 +294,7 @@ it("switches a table tab to manual transactions through console_configure", asyn
   vi.stubGlobal("window", { crypto });
   const calls: { cmd: string; args: unknown }[] = [];
   mockIPC((cmd, args) => {
+    if (cmd === "script_params") return [];
     if (cmd === "table_script") return ordersScript;
     calls.push({ cmd, args });
     return null;
@@ -303,6 +311,7 @@ it("refuses SQL Server Manual mode before an unopened tab can change commit sema
   const id = openSqlTab({ db: { connectionId: "ms", database: "shop" } });
   const calls: string[] = [];
   mockIPC((cmd) => {
+    if (cmd === "script_params") return [];
     calls.push(cmd);
     return null;
   });
@@ -318,6 +327,7 @@ it("keeps a Manual tab on its old target when SQL Server requires an explicit mo
   useWorkspace.setState({ configs: { ms: { ...connectionConfig("ms", "SQL Server"), databaseKind: "SqlServer" } } });
   const calls: string[] = [];
   mockIPC((cmd) => {
+    if (cmd === "script_params") return [];
     calls.push(cmd);
     return null;
   });
@@ -331,6 +341,7 @@ it("keeps a tab on its database while it has staged edits", async () => {
   vi.stubGlobal("window", { crypto });
   const calls: string[] = [];
   mockIPC((cmd) => {
+    if (cmd === "script_params") return [];
     if (cmd === "table_script") return ordersScript;
     calls.push(cmd);
     return null;
@@ -387,6 +398,7 @@ it.each(["update", "delete"])("submits the original named %s key after PostgreSQ
   expect(gridEditing(refreshed, "public", "orders", meta)?.pkColumns).toEqual(["alternate"]);
   const submitted: unknown[] = [];
   mockIPC((cmd, args) => {
+    if (cmd === "script_params") return [];
     submitted.push({ cmd, args });
     if (cmd === "table_apply") return Promise.reject({ kind: "NoPrimaryKey" } satisfies ApplyError);
     return null;
@@ -419,6 +431,7 @@ it.each(["update", "delete"])("submits the original named %s key after PostgreSQ
 function openScript(text: string, edit: () => unknown) {
   const sent: unknown[] = [];
   mockIPC((cmd, args) => {
+    if (cmd === "script_params") return [];
     if (cmd !== "editor_format") return null;
     sent.push(args);
     return edit();
@@ -469,6 +482,7 @@ it("loads a table tab's page on first show, and never runs edited text unasked",
   vi.stubGlobal("window", { crypto });
   const runs: unknown[] = [];
   mockIPC((cmd, args) => {
+    if (cmd === "script_params") return [];
     if (cmd === "table_script") return ordersScript;
     if (cmd === "console_run") runs.push((args as { request: unknown }).request);
     if (cmd === "console_run") return { runId: 1, statements: [] };
@@ -495,6 +509,7 @@ it.each(["SELECT * FROM public.orders", "SELECT * FROM public.orders;", "\n SELE
   async (text) => {
     const runs: unknown[] = [];
     mockIPC((cmd, args) => {
+      if (cmd === "script_params") return [];
       if (cmd === "table_script") return ordersScript;
       if (cmd === "console_run") {
         runs.push(args);
@@ -529,6 +544,7 @@ it.each(["SELECT * FROM public.orders WHERE status = 'pending'", "SELECT * FROM 
   async (text) => {
     const runs: unknown[] = [];
     mockIPC((cmd, args) => {
+      if (cmd === "script_params") return [];
       if (cmd === "table_script") return ordersScript;
       if (cmd === "console_run") runs.push(args);
       return null;
@@ -608,6 +624,7 @@ it("drops a cached page load after its dialect changes while awaiting the templa
   const id = useWorkspace.getState().active!;
   const calls: string[] = [];
   mockIPC((cmd) => {
+    if (cmd === "script_params") return [];
     calls.push(cmd);
     return null;
   });
@@ -622,6 +639,7 @@ it("never runs edited browse text as a script after awaiting console setup", asy
   const id = useWorkspace.getState().active!;
   const calls: string[] = [];
   mockIPC((cmd) => {
+    if (cmd === "script_params") return [];
     calls.push(cmd);
     if (cmd === "console_configure") insertAtCursor(id, "SELECT 42;\n");
     if (cmd === "console_run") return { runId: 1, statements: [] };
@@ -658,6 +676,7 @@ it("does not run an outline response after switching the target with unchanged t
   const runs: unknown[] = [];
   const id = openSqlTab({ db: { connectionId: "ms", database: "master" }, text: "select 1" });
   mockIPC((cmd, args) => {
+    if (cmd === "script_params") return [];
     if (cmd === "script_outline") {
       requests.push(args);
       useWorkspace.getState().patchConsole(id, { db: { connectionId: "ms", database: "other" } });
@@ -678,6 +697,7 @@ it.each(["database", "mode"])("drops a pending run when its %s changes during co
   };
   const id = openSqlTab({ db: { connectionId: "c1", database: "shop" }, text: "SELECT 1" });
   mockIPC((cmd) => {
+    if (cmd === "script_params") return [];
     calls.push(cmd);
     if (cmd === "console_configure")
       return new Promise<null>((resolve) => {
@@ -712,6 +732,7 @@ describe("pages during an exact count", () => {
     };
     const requests: { cmd: string; args: unknown }[] = [];
     mockIPC((cmd, args) => {
+      if (cmd === "script_params") return [];
       requests.push({ cmd, args });
       if (cmd === "exact_row_count")
         return new Promise<number>((resolve) => {
@@ -815,6 +836,7 @@ describe("pages during an exact count", () => {
     const id = await openWithConsole();
     const requests: { cmd: string; args: unknown }[] = [];
     mockIPC((cmd, args) => {
+      if (cmd === "script_params") return [];
       requests.push({ cmd, args });
       if (cmd === "console_run") return { runId: 8, statements: [] };
       return null;
@@ -839,6 +861,7 @@ describe("pages during an exact count", () => {
     const id = await openWithConsole();
     const requests: string[] = [];
     mockIPC((cmd) => {
+      if (cmd === "script_params") return [];
       requests.push(cmd);
     });
     for (const work of ["Transaction", "Edit", "Probe"] as const) {
@@ -872,6 +895,7 @@ describe("a run the engine asks about", () => {
   function queueRunReplies(...replies: (RunError | null)[]) {
     const runs: { request?: unknown; confirmed?: unknown }[] = [];
     mockIPC((cmd, args) => {
+      if (cmd === "script_params") return [];
       if (cmd === "script_outline") return { statements: [{ from: 0, to: 23 }], atCursor: 0, unitKind: "Statement" };
       if (cmd !== "console_run") return null;
       runs.push(args as { confirmed?: unknown });
@@ -900,7 +924,7 @@ describe("a run the engine asks about", () => {
     expect(question()?.choices).toEqual([{ id: "btn", label: "Run writes", variant: "danger" }]);
     expect(question()?.statements).toEqual(["update orders set n = 1", "delete from orders"]);
     expect(question()?.body).not.toContain("A rollback does not undo sequence values or outside side effects.");
-    const request = { kind: "script", text: SCRIPT, target: { kind: "all" }, mode: "Run" };
+    const request = { kind: "script", text: SCRIPT, target: { kind: "all" }, mode: "Run", params: [] };
     expect(runs).toEqual([{ tabId: id, request, confirmed: null }]);
     useWorkspace.getState().answer("btn");
     await vi.waitFor(() => expect(runs).toHaveLength(2));
@@ -1047,6 +1071,7 @@ describe("a run the engine asks about", () => {
   it("sends nothing while the tab is browsing a table", async () => {
     const runs: unknown[] = [];
     mockIPC((cmd, args) => {
+      if (cmd === "script_params") return [];
       if (cmd === "console_run") runs.push(args);
       if (cmd === "table_script") return ordersScript;
       return null;
@@ -1114,6 +1139,7 @@ describe("staged edits the engine asks about", () => {
     useTableEdits.getState().edit(id, (edits) => markDeleted(setCell(edits, [{ column: "id", value: "2" }], "status", "x", "y"), [key], true));
     const applies: { confirmed?: unknown }[] = [];
     mockIPC((cmd, args) => {
+      if (cmd === "script_params") return [];
       if (cmd !== "table_apply") return null;
       applies.push(args as { confirmed?: unknown });
       const reply = replies.shift();
@@ -1200,6 +1226,7 @@ describe("a commit the engine asks about", () => {
   function queueCommitReplies(...replies: (TxnError | null)[]) {
     const commits: unknown[] = [];
     mockIPC((cmd, args) => {
+      if (cmd === "script_params") return [];
       if (cmd === "script_outline") return { statements: [], atCursor: null, unitKind: "Statement" };
       if (cmd !== "console_commit") return null;
       commits.push(args);
@@ -1241,5 +1268,100 @@ describe("a commit the engine asks about", () => {
     useWorkspace.getState().close();
     await done;
     expect(commits).toEqual([{ tabId: id, confirmed: null }]);
+  });
+});
+
+describe("parameter run intents", () => {
+  function start(mode: "Run" | "Explain" = "Run") {
+    useWorkspace.setState({ configs: { c1: connectionConfig("c1", "dev") } });
+    const runs: unknown[] = [];
+    mockIPC((cmd, args) => {
+      if (cmd === "script_params") return [{ name: ":id" }];
+      if (cmd === "script_outline") return { statements: [], atCursor: null, unitKind: "Statement" };
+      if (cmd === "console_run") {
+        runs.push(args);
+        return { runId: 1, statements: [] };
+      }
+      return null;
+    });
+    const id = openSqlTab({ db: { connectionId: "c1", database: "shop" }, text: "select :id::integer" });
+    if (mode === "Explain") explainActive("Explain");
+    else runActive({ kind: "all" });
+    return { id, runs };
+  }
+
+  it("uses the parameter snapshot for Explain and remembers it in this tab", async () => {
+    const { id, runs } = start("Explain");
+    await vi.waitFor(() => expect(useParams.getState().prompt).not.toBeNull());
+    finishParams([{ name: ":id", value: "42" }]);
+    await vi.waitFor(() => expect(runs).toHaveLength(1));
+    expect(runs[0]).toMatchObject({ tabId: id, request: { kind: "script", mode: "Explain", params: [{ name: ":id", value: "42" }] } });
+    runActive({ kind: "all" });
+    await vi.waitFor(() => expect(useParams.getState().prompt?.values).toEqual([{ name: ":id", value: "42" }]));
+    finishParams(null);
+    expect(runs).toHaveLength(1);
+  });
+
+  it.each(["document", "tab", "database", "overlay"])("cancels a parameter prompt when its %s changes", async (change) => {
+    const { id, runs } = start();
+    await vi.waitFor(() => expect(useParams.getState().prompt).not.toBeNull());
+    if (change === "document") seedEditor(id, "select 2");
+    if (change === "tab") openSqlTab();
+    if (change === "database") useWorkspace.getState().patchConsole(id, { db: { connectionId: "c1", database: "reporting" } });
+    if (change === "overlay") useWorkspace.getState().openSettings();
+    expect(useParams.getState().prompt).toBeNull();
+    await Promise.resolve();
+    expect(runs).toEqual([]);
+  });
+
+  it("retries Production approval with the same parameter values and drops edited documents", async () => {
+    const { id } = start();
+    const runs: unknown[] = [];
+    mockIPC((cmd, args) => {
+      if (cmd === "script_params") return [{ name: ":id" }];
+      if (cmd === "script_outline") return { statements: [], atCursor: null, unitKind: "Statement" };
+      if (cmd !== "console_run") return null;
+      runs.push(args);
+      if (runs.length % 2 === 0) return { runId: runs.length, statements: [] };
+      throw {
+        kind: "ConfirmWrites",
+        confirmation: {
+          connection: "prod",
+          database: "shop",
+          unit: "Statement",
+          sends: { count: 1, statements: ["update t set id = E'42'"] },
+          holds: { count: 0, statements: [] },
+          digest: "value-digest",
+          onProduction: true,
+        },
+      } satisfies RunError;
+    });
+    await vi.waitFor(() => expect(useParams.getState().prompt).not.toBeNull());
+    finishParams([{ name: ":id", value: "42" }]);
+    await vi.waitFor(() => expect(useWorkspace.getState().overlay.kind).toBe("ask"));
+    useWorkspace.getState().answer("btn");
+    await vi.waitFor(() => expect(runs).toHaveLength(2));
+    expect(runs[0]).toMatchObject({ confirmed: null, request: { params: [{ name: ":id", value: "42" }] } });
+    expect(runs[1]).toMatchObject({ confirmed: "value-digest", request: { params: [{ name: ":id", value: "42" }] } });
+    runActive({ kind: "all" });
+    await vi.waitFor(() => expect(useParams.getState().prompt).not.toBeNull());
+    finishParams([{ name: ":id", value: "42" }]);
+    await vi.waitFor(() => expect(useWorkspace.getState().overlay.kind).toBe("ask"));
+    seedEditor(id, "select changed");
+    useWorkspace.getState().answer("btn");
+    await Promise.resolve();
+    expect(runs).toHaveLength(3);
+  });
+
+  it("supersedes a prompt and executes only the latest intent", async () => {
+    const { runs } = start();
+    await vi.waitFor(() => expect(useParams.getState().prompt).not.toBeNull());
+    const first = useParams.getState().prompt;
+    runActive({ kind: "all" });
+    await vi.waitFor(() => expect(useParams.getState().prompt).not.toBe(first));
+    await vi.waitFor(() => expect(useParams.getState().prompt).not.toBeNull());
+    finishParams([{ name: ":id", value: "43" }]);
+    await vi.waitFor(() => expect(runs).toHaveLength(1));
+    expect(runs[0]).toMatchObject({ request: { params: [{ name: ":id", value: "43" }] } });
   });
 });

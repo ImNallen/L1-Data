@@ -827,10 +827,21 @@ pub enum RunMode {
     ExplainAnalyze,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Type)]
+pub struct Param {
+    pub name: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Type)]
+pub struct ParamValue {
+    pub name: String,
+    pub value: Option<String>,
+}
+
 #[derive(Debug, Clone, Deserialize, Type)]
 #[serde(tag = "kind", rename_all = "camelCase", rename_all_fields = "camelCase")]
 pub enum RunRequest {
-    Script { text: String, target: RunTarget, mode: RunMode },
+    Script { text: String, target: RunTarget, mode: RunMode, params: Vec<ParamValue> },
     TablePage {
         schema: String,
         table: String,

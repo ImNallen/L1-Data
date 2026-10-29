@@ -57,6 +57,7 @@ it("runs a new tab through console configuration against the recorded database",
   vi.stubGlobal("window", { crypto });
   const calls: { cmd: string; args: unknown }[] = [];
   mockIPC((cmd, args) => {
+    if (cmd === "script_params") return [];
     calls.push({ cmd, args });
     if (cmd === "console_configure") return null;
     if (cmd === "console_run") return { runId: 1, statements: [] };
@@ -73,6 +74,7 @@ it("runs a new tab through console configuration against the recorded database",
 it("shows the existing configure error when a saved connection was removed", async () => {
   vi.stubGlobal("window", { crypto });
   mockIPC((cmd) => {
+    if (cmd === "script_params") return [];
     if (cmd === "console_configure") throw { kind: "UnknownConnection" };
   });
   openHistoryQuery(group, "select 42", true);

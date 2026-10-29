@@ -90,7 +90,7 @@ impl Harness {
     }
 
     async fn ok(&self, tab: TabId, sql: &str) -> ConsoleState {
-        self.request(tab, RunRequest::Script { text: sql.into(), target: RunTarget::All, mode: RunMode::Run }).await
+        self.request(tab, RunRequest::Script { text: sql.into(), target: RunTarget::All, mode: RunMode::Run, params: Vec::new() }).await
     }
 
     fn rows(&self, state: &ConsoleState) -> Vec<Vec<Option<String>>> {

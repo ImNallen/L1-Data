@@ -70,23 +70,28 @@ What `⌘↵` will run is always marked. On each doc or cursor change, debounced
 
 ```ts
 async function runTab(tabId: TabId, target?: PageTarget, script?: RunTarget): Promise<void> {
-  // ...queue page requests that arrive mid-run, then ensureConsole(tab)
   let request: RunRequest;
   if (tab.kind === "table" && isBrowsing(tab)) {
     request = { kind: "tablePage", schema: tab.schema, table: tab.table, page: target?.page ?? tab.page, query: tab.query };
   } else {
     const state = editorStateOf(tabId);
-    const sel = state.selection.main;
+    const target = script ?? selectionTarget(state);
+    const text = state.doc.toString();
+    const found = await commands.scriptParams(text, target, textTarget(tab).databaseKind);
+    if (found.status === "error") return notify(runErrorText(found.error));
+    const params = found.data.length ? await promptParams(tabId, JSON.stringify(tab.console), found.data, tab.title, valid) : [];
+    if (!params || !valid()) return;
     request = {
       kind: "script",
-      text: state.doc.toString(),
-      target: script ?? (sel.empty ? { kind: "cursor", offset: sel.head } : { kind: "selection", from: sel.from, to: sel.to }),
+      text,
+      target,
       mode: "Run",
+      params,
     };
   }
   let res = await commands.consoleRun(tabId, request, null);
   while (res.status === "error" && res.error.kind === "ConfirmWrites") { // a write on Production; nothing ran
-    if (!(await writesConfirmed(tab, res.error.confirmation))) return;
+    if (!(await writesConfirmed(tab, res.error.confirmation)) || !valid()) return;
     res = await commands.consoleRun(tabId, request, res.error.confirmation.digest);
   }
   if (res.status === "error") return notify(runErrorText(res.error)); // Busy | NoStatement | BadFilter | Connect
@@ -583,6 +588,7 @@ Each command is one line delegating to `Engine`. tauri-specta uses `ErrorHandlin
 | `object_script` | `DatabaseRef, target: ScriptTarget` | `Result<ObjectScript, DetailError>` | The DDL that creates a relation, routine, index, or trigger, read on that database's metadata session. `title` is the object's name and `.sql`. `warnings` names each property the text does not recreate, and the text opens with the same list as comments. `Gone` when the target names nothing. `Failed` names what cannot be scripted yet, such as an aggregate. |
 | `exact_row_count` | `TabId, DatabaseRef, schema: String, table: String, TableQuery` | `Result<u64, CountError>` | Counts with the query's filters for the pager's Last button. PostgreSQL uses the metadata session. SQL Server uses the named tab's native session and checks the expected database target. |
 | `console_configure` | `TabId, ConsoleConfig` | `Result<ConsoleState, ConfigureError>` | Upsert. `TransactionOpen` if mode, connection, or database change with a live txn. A connection or database change resets the session. A schema change issues `SET search_path` (applied on next run if busy). |
+| `script_params` | `text, target, DatabaseKind` | `Result<Vec<Param>, RunError>` | Pure lexical discovery in the selected original units. No session or type inference. |
 | `script_outline` | `text: String, cursor: DocOffset` | `ScriptOutline` | The UTF-16 range of each statement `split_statements` finds, and `atCursor`, the index of the one `pick` returns for a `Cursor` run at `cursor` (`null` only when there are none). The editor's run mark and the statement chooser call it, so neither splits SQL in TypeScript. Pure and sync, and it never touches the runtime. |
 | `completion_context` | `text: String, cursor: DocOffset, databaseKind: DatabaseKind` | `CompletionContext` | `None` inside a string, a comment, a quoted name, a number, or a parameter. Otherwise where the typed word starts, what the clause expects (`Keyword`, `Alias`, `Relation`, `Expression`, or `JoinCondition` with the joined relation's index), the qualifier before a `.` resolved to a relation in scope or left as folded names, the FROM items of the query at the cursor and of each enclosing query with their aliases as written, the CTE names, the keywords that can follow, and the dialect's built-in functions where an expression stands. Pure and sync, and it never touches the runtime. |
 | `editor_format` | `text: String, target: RunTarget` | `Result<FormatEdit, FormatError>` | Formats the statement a `Cursor` run would pick, every statement a selection touches, or the whole document, each statement on its own, and keeps the text between them. `FormatEdit { from, to, insert }` is in UTF-16 units. `NothingToFormat` when no statement is picked, `Unsafe` when the output would lex differently. Pure and sync, and it never touches the runtime. |
@@ -1409,6 +1415,12 @@ Environments and the run target (the Production write check, the connection dial
 - **The PostgreSQL write check counts opaque execution.** `CALL`, `DO`, `EXECUTE`, `REFRESH`, `VACUUM`, and `CLUSTER` count as writes, as `EXEC` already does on SQL Server. History marks new rows with these verbs as writes. Rows saved before keep the mark they had.
 - **An answer holds only for the target it named.** If the tab's connection, database, or mode changes while the question is open, the frontend drops the run. A change it does not see, such as the environment set in another window, makes the engine ask again.
 - **The top bar names the run target.** It reads the environment icon and connection, then database. The tab bar already names the tab, so the top bar leaves the title out. The database sits in a flex box with a zero basis that gets only the room left over, so it truncates before the connection name. The database menu lists the databases `InstanceState` marks shown, plus the tab's own, which is the only entry while the connection is down. The icon sits inside the connection trigger, because the environment belongs to the server, and it adds "Production" or "Staging" to the trigger's accessible name. Staging draws an amber flask. Production draws a danger shield and a 2px danger border under the bar. The shapes differ as well as the colors. Container queries on the bar give the run target room. Below 900px **Format** keeps only its icon, and below 520px it hides, because at the default sidebar and assistant widths a 1100px window leaves the bar about 500px. `⌘⌥L` still formats. The connection tree draws the same icon after each Staging or Production connection's name, outside the name's truncation. An open transaction is amber in the mode menu and on the tab's dot, and an aborted one is danger.
+
+Query parameters. `script_params(text, target, databaseKind)` is a pure synchronous lexical command. It selects the same original statements or GO batches as a run and returns unique names in first-use order. PostgreSQL accepts named `:name` and positive positional `$n` markers. Casts, array slices, quoted text, identifiers, and comments keep their meaning. Parameter occurrences must agree under both PostgreSQL string modes when the source contains backslashes. SQL Server excludes `@@` globals, variables declared in the selected batch, explicit and implicit procedure argument labels, and procedure, function, trigger, or rule definition batches. External parameter identity is exact-case because discovery cannot know the server's collation. Declaration exclusions ignore case to preserve existing scripts on case-insensitive servers. On a case-sensitive server, a differently cased reference to a declared variable remains SQL for the server to reject.
+
+- `RunRequest::Script.params` carries names and `string | null` values. `console_run` rediscovers parameters and rejects missing, duplicate, unexpected, and NUL values. `params::ExecutableScript` materializes executable SQL once, keeps the original UTF-16 ranges separately, and never splits substituted SQL again. PostgreSQL parameter literals use `E'...'` with both quotes and backslashes escaped, independent of `standard_conforming_strings`. SQL Server uses Unicode `N'...'` literals. Classification, transaction planning, Explain, Production digests, history, and export origins all consume that executable text. Server error positions are omitted for substituted units, whose lengths can differ, while unchanged units retain original document positions.
+- The editor captures one immutable run intent before discovery and the parameter dialog. Tab, document, database, mode, screen, or competing overlay changes cancel pending prompts. A sequence identifies each prompt, and supersession settles the previous promise. The same request and value snapshot goes through a Production confirmation retry. Accepted values remain only in memory per tab and target. Canonical table browsing does not discover parameters.
+- The earlier plan requested PostgreSQL prepare-derived type labels from the synchronous command. Discovery has no connection or session and performs no network work, so it supplies no type labels. Explicit casts guide parameter types, and authorized execution still uses the native PostgreSQL prepare path. Discovery never borrows a tab session or adds unchecked work.
 
 ## Open questions and risks
 

@@ -95,7 +95,7 @@ impl Bracket {
 pub(crate) struct Prepared {
     bracket: Bracket,
     checked: writes::WritesChecked,
-    origin: DocOffset,
+    origin: Option<DocOffset>,
     prefix: u32,
 }
 
@@ -132,7 +132,7 @@ pub(crate) fn prepare(
     let origin = crate::text::OffsetMap::new(text).to_utf16(span.start);
     let prefix = prefix_units(bracket.body(), statement);
     match writes::check(target, &sent, confirmed) {
-        Ok(checked) => Ok(Prepared { bracket, checked, origin, prefix }),
+        Ok(checked) => Ok(Prepared { bracket, checked, origin: Some(origin), prefix }),
         Err(confirmation) => Err(RunError::ConfirmWrites { confirmation }),
     }
 }
@@ -142,12 +142,21 @@ fn prefix_units(body: &str, statement: &str) -> u32 {
     body[..prefix].encode_utf16().count() as u32
 }
 
-fn in_document(mut error: QueryError, origin: DocOffset, prefix: u32) -> QueryError {
-    if let Some(position) = error.position {
+fn in_document(mut error: QueryError, origin: Option<DocOffset>, prefix: u32) -> QueryError {
+    if let (Some(position), Some(origin)) = (error.position, origin) {
         let within = position.0.saturating_sub(prefix);
         error.position = Some(DocOffset(origin.0.saturating_add(within)));
+    } else {
+        error.position = None;
     }
     error
+}
+
+impl Prepared {
+    pub(crate) fn source(mut self, origin: DocOffset, changed: bool) -> Self {
+        self.origin = (!changed).then_some(origin);
+        self
+    }
 }
 
 fn unsupported(what: &str) -> RunError {
@@ -196,7 +205,7 @@ pub(crate) struct Launch {
     connection: ConnectionConfig,
     database: String,
     entered: TxnState,
-    origin: DocOffset,
+    origin: Option<DocOffset>,
     prefix: u32,
 }
 
@@ -527,7 +536,7 @@ mod tests {
                 context: None,
                 position: Some(seen),
             };
-            assert_eq!(in_document(error, map.to_utf16(start), prefix).position, Some(expected));
+            assert_eq!(in_document(error, Some(map.to_utf16(start)), prefix).position, Some(expected));
         }
     }
 }

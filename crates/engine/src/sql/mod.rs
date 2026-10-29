@@ -2,7 +2,7 @@ mod classify;
 mod format;
 mod history;
 mod keywords;
-mod lex;
+pub(crate) mod lex;
 pub(crate) mod mssql_value;
 mod relations;
 mod scope;

@@ -47,7 +47,7 @@ impl Harness {
         DatabaseRef { connection_id: self.connection, database: "shop".into() }
     }
     async fn start(&self, sql: &str) -> RunAccepted {
-        self.engine.console_run(self.tab, RunRequest::Script { text: sql.into(), target: RunTarget::All, mode: RunMode::Run }, None).await.unwrap()
+        self.engine.console_run(self.tab, RunRequest::Script { text: sql.into(), target: RunTarget::All, mode: RunMode::Run, params: Vec::new() }, None).await.unwrap()
     }
     async fn finish(&mut self, id: RunId) -> ConsoleState {
         tokio::time::timeout(Duration::from_secs(30), async {
@@ -411,7 +411,7 @@ async fn transactions_are_observed_and_commit_button_finishes_all_nesting() {
 #[tokio::test]
 async fn every_batch_is_validated_before_any_execution_and_dynamic_use_stays_scoped() {
     let mut h = Harness::open(TxnMode::AutoCommit).await;
-    let rejected = h.engine.console_run(h.tab, RunRequest::Script { text: "CREATE TABLE #must_not_exist(id int)\nGO\nUSE reporting".into(), target: RunTarget::All, mode: RunMode::Run }, None).await;
+    let rejected = h.engine.console_run(h.tab, RunRequest::Script { text: "CREATE TABLE #must_not_exist(id int)\nGO\nUSE reporting".into(), target: RunTarget::All, mode: RunMode::Run, params: Vec::new() }, None).await;
     assert!(matches!(rejected, Err(RunError::Unsupported { .. })));
     let state = h.ok("SELECT OBJECT_ID('tempdb..#must_not_exist')").await;
     assert_eq!(h.rows(Harness::rowsets(&state)[0])[0][0], None);
@@ -803,7 +803,7 @@ async fn set_environment(h: &Harness, environment: Option<Environment>) {
 }
 
 async fn asked_to_run(h: &Harness, text: &str, confirmed: Option<WriteDigest>) -> WriteConfirmation {
-    match h.engine.console_run(h.tab, RunRequest::Script { text: text.into(), target: RunTarget::All, mode: RunMode::Run }, confirmed).await {
+    match h.engine.console_run(h.tab, RunRequest::Script { text: text.into(), target: RunTarget::All, mode: RunMode::Run, params: Vec::new() }, confirmed).await {
         Err(RunError::ConfirmWrites { confirmation }) => confirmation,
         other => panic!("{text}: expected ConfirmWrites, got {other:?}"),
     }
@@ -814,7 +814,7 @@ async fn a_batch_that_runs_exec_on_production_waits_for_the_digest() {
     let mut h = Harness::open(TxnMode::AutoCommit).await;
     set_environment(&h, Some(Environment::Production)).await;
     let text = "CREATE TABLE #p1_guard(id int)\nGO\nSELECT 1\nGO\nEXEC sp_who";
-    let request = || RunRequest::Script { text: text.into(), target: RunTarget::All, mode: RunMode::Run };
+    let request = || RunRequest::Script { text: text.into(), target: RunTarget::All, mode: RunMode::Run, params: Vec::new() };
     let asked = asked_to_run(&h, text, None).await;
     assert_eq!((asked.connection.as_str(), asked.database.as_str(), asked.sends.count), ("SQL Server test", "shop", 2));
     assert_eq!(asked.sends.statements, ["CREATE TABLE #p1_guard(id int)", "EXEC sp_who"]);
@@ -840,7 +840,7 @@ async fn every_batch_on_production_asks_while_the_transaction_holds_writes_that_
     }
     let asked = asked_to_run(&h, "IF @@TRANCOUNT > 0 COMMIT TRANSACTION", None).await;
     assert_eq!(asked.holds.statements, ["BEGIN TRAN; INSERT INTO #held VALUES (1)"], "the server reported the CREATE TABLE committed");
-    let id = h.engine.console_run(h.tab, RunRequest::Script { text: "IF @@TRANCOUNT > 0 COMMIT TRANSACTION".into(), target: RunTarget::All, mode: RunMode::Run }, Some(asked.digest)).await.unwrap().run_id;
+    let id = h.engine.console_run(h.tab, RunRequest::Script { text: "IF @@TRANCOUNT > 0 COMMIT TRANSACTION".into(), target: RunTarget::All, mode: RunMode::Run, params: Vec::new() }, Some(asked.digest)).await.unwrap().run_id;
     assert_eq!(h.finish(id).await.txn, TxnState::Idle);
     let state = h.ok("SELECT @@TRANCOUNT, COUNT_BIG(*) FROM #held").await;
     assert_eq!(h.rows(Harness::rowsets(&state)[0])[0], vec![Some("0".into()), Some("1".into())], "the confirmed batch committed the held write");
@@ -1261,7 +1261,7 @@ async fn sequences_types_and_synonyms_load_and_script() {
 }
 
 async fn run_mode(h: &mut Harness, sql: &str, mode: RunMode) -> Result<ConsoleState, RunError> {
-    match h.engine.console_run(h.tab, RunRequest::Script { text: sql.into(), target: RunTarget::All, mode }, None).await {
+    match h.engine.console_run(h.tab, RunRequest::Script { text: sql.into(), target: RunTarget::All, mode, params: Vec::new() }, None).await {
         Ok(accepted) => Ok(h.finish(accepted.run_id).await),
         Err(error) => Err(error),
     }
@@ -1322,13 +1322,13 @@ async fn explain_of_an_update_does_not_ask_and_analyze_does() {
     let state = run_mode(&mut h, update, RunMode::Explain).await.expect("plain explain does not ask");
     let plan = assert_plan(&h, &state);
     assert!(!plan.statements.is_empty());
-    let err = h.engine.console_run(h.tab, RunRequest::Script { text: update.into(), target: RunTarget::All, mode: RunMode::ExplainAnalyze }, None).await.unwrap_err();
+    let err = h.engine.console_run(h.tab, RunRequest::Script { text: update.into(), target: RunTarget::All, mode: RunMode::ExplainAnalyze, params: Vec::new() }, None).await.unwrap_err();
     let RunError::ConfirmWrites { confirmation } = err else { panic!("{err:?}") };
     assert!(!confirmation.on_production);
     assert_eq!(confirmation.sends.statements, [update]);
     let id = h
         .engine
-        .console_run(h.tab, RunRequest::Script { text: update.into(), target: RunTarget::All, mode: RunMode::ExplainAnalyze }, Some(confirmation.digest))
+        .console_run(h.tab, RunRequest::Script { text: update.into(), target: RunTarget::All, mode: RunMode::ExplainAnalyze, params: Vec::new() }, Some(confirmation.digest))
         .await
         .unwrap()
         .run_id;
@@ -1369,4 +1369,19 @@ async fn plain_explain_on_production_does_not_ask() {
     let state = run_mode(&mut h, update, RunMode::Explain).await.expect("plain explain does not ask on Production");
     let plan = assert_plan(&h, &state);
     assert!(!plan.statements.is_empty());
+}
+
+#[tokio::test]
+async fn parameters_preserve_declarations_and_quote_unicode_across_go() {
+    let mut h = Harness::open(TxnMode::AutoCommit).await;
+    let text = "DECLARE @x int = 7; SELECT @X AS declared, @input AS value;\nGO\nSELECT @x AS [external], @input AS repeated, @nil AS nil";
+    let params = h.engine.script_params(text, RunTarget::All, DatabaseKind::SqlServer).unwrap();
+    assert_eq!(params.iter().map(|p| p.name.as_str()).collect::<Vec<_>>(), ["@input", "@x", "@nil"]);
+    let value = "世界'; SELECT 99; -- \\";
+    let accepted = h.engine.console_run(h.tab, RunRequest::Script { text: text.into(), target: RunTarget::All, mode: RunMode::Run, params: vec![ParamValue { name: "@input".into(), value: Some(value.into()) }, ParamValue { name: "@x".into(), value: Some("outside".into()) }, ParamValue { name: "@nil".into(), value: None }] }, None).await.unwrap();
+    let state = h.finish(accepted.run_id).await;
+    assert!(matches!(state.run, RunState::Finished { outcome: RunOutcome::Ok, .. }), "{:?}", state.run);
+    let sets = Harness::rowsets(&state);
+    assert_eq!(h.rows(sets[0]), [vec![Some("7".into()), Some(value.into())]]);
+    assert_eq!(h.rows(sets[1]), [vec![Some("outside".into()), Some(value.into()), None]]);
 }

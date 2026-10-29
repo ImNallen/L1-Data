@@ -54,7 +54,7 @@ class Bridge:
 
     def start(self, tab, text, target=None):
         return self.invoke("console_run", tabId=tab, request={
-            "kind": "script", "text": text, "target": target or {"kind": "all"}, "mode": "Run",
+            "kind": "script", "text": text, "target": target or {"kind": "all"}, "mode": "Run", "params": [],
         })["runId"]
 
     def finished(self, tab, run_id):
