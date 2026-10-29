@@ -56,8 +56,9 @@ impl Token<'_> {
 
 pub(crate) fn param_occurrences(text: &str) -> Result<Vec<std::ops::Range<usize>>, String> {
     let tokens: Vec<_> = lex(text)?.into_iter().filter(|t| !t.comment()).collect();
-    let routine = tokens.iter().take(5).any(|t| t.word("procedure") || t.word("proc") || t.word("function") || t.word("trigger") || t.word("rule"))
-        && tokens.first().is_some_and(|t| t.word("create") || t.word("alter"));
+    let mut code = tokens.iter().filter(|t| t.code());
+    let routine = code.clone().take(5).any(|t| t.word("procedure") || t.word("proc") || t.word("function") || t.word("trigger") || t.word("rule"))
+        && code.next().is_some_and(|t| t.word("create") || t.word("alter"));
     if routine { return Ok(Vec::new()); }
     let mut declared = std::collections::HashSet::new();
     for (i, token) in tokens.iter().enumerate() {

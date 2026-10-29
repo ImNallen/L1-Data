@@ -245,7 +245,7 @@ async function runTab(tabId: TabId, target?: PageTarget, script?: RunTarget, mod
     (browsing || ws().active === tabId) &&
     ws().tabs[tabId]?.console === tab.console &&
     editorStateOf(tabId).doc === state.doc &&
-    (script !== undefined || editorStateOf(tabId).selection.eq(state.selection)) &&
+    (browsing || editorStateOf(tabId).selection.eq(state.selection)) &&
     sameTextTarget(tabId, destination) &&
     ws().overlay.kind === "none" &&
     ws().screen.kind === "workspace";
@@ -701,6 +701,10 @@ export function installRunBehavior(): void {
   useLive.subscribe(showRunErrors);
   useLive.subscribe(runQueuedPages);
   useWorkspace.subscribe((s, prev) => {
+    if (s.active !== prev.active && prev.active) {
+      const previous = s.tabs[prev.active];
+      if (previous && !isBrowsing(previous)) runIntents.delete(prev.active);
+    }
     for (const [id, before] of Object.entries(prev.tabs)) {
       const now = s.tabs[id];
       if (!now) runIntents.delete(id);
@@ -734,6 +738,10 @@ export function installRunBehavior(): void {
     EditorView.updateListener.of((u) => {
       if (u.docChanged) for (const l of docListeners) l();
       if (u.docChanged || u.selectionSet) {
+        const active = ws().active;
+        const tab = active ? ws().tabs[active] : undefined;
+        if (tab && !isBrowsing(tab)) runIntents.delete(tab.id);
+        cancelStaleParams();
         ws().setCursor(cursorOf(u.state));
         refreshRunMark();
       }

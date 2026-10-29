@@ -1272,6 +1272,62 @@ describe("a commit the engine asks about", () => {
 });
 
 describe("parameter run intents", () => {
+  it("keeps a canonical table page run when another tab becomes active", async () => {
+    await openWithConsole();
+    const calls: string[] = [];
+    mockIPC((cmd) => {
+      calls.push(cmd);
+      if (cmd === "script_outline") return { statements: [], atCursor: null, unitKind: "Statement" };
+      if (cmd === "console_run") return { runId: 1, statements: [] };
+      return null;
+    });
+    runActive();
+    openSqlTab();
+    await vi.waitFor(() => expect(calls).toContain("console_run"));
+    expect(calls).not.toContain("script_params");
+  });
+
+  it.each(["tab away and back", "cursor"])("drops a pending discovery after changing the %s", async (change) => {
+    useWorkspace.setState({ configs: { c1: connectionConfig("c1", "dev") } });
+    const db = { connectionId: "c1", database: "shop" };
+    const id = openSqlTab({ db, text: "select 1 as first;\nselect 2 as second" });
+    const other = openSqlTab({ db, text: "select 3" });
+    useWorkspace.getState().setActive(id);
+    const calls: string[] = [];
+    let finish: () => void = () => {
+      throw new Error("discovery was not requested");
+    };
+    mockIPC((cmd) => {
+      calls.push(cmd);
+      if (cmd === "script_outline")
+        return {
+          statements: [
+            { from: 0, to: 18 },
+            { from: 19, to: 37 },
+          ],
+          atCursor: 0,
+          unitKind: "Statement",
+        };
+      if (cmd === "script_params")
+        return new Promise<[]>((resolve) => {
+          finish = () => resolve([]);
+        });
+      if (cmd === "console_run") return { runId: 1, statements: [] };
+      return null;
+    });
+    const pending = runOrChoose();
+    await vi.waitFor(() => expect(calls).toContain("script_params"));
+    if (change === "cursor") moveCursor(id, 28);
+    else {
+      useWorkspace.getState().setActive(other);
+      useWorkspace.getState().setActive(id);
+    }
+    finish();
+    await pending;
+    expect(calls).not.toContain("console_run");
+    expect(useParams.getState().prompt).toBeNull();
+  });
+
   function start(mode: "Run" | "Explain" = "Run") {
     useWorkspace.setState({ configs: { c1: connectionConfig("c1", "dev") } });
     const runs: unknown[] = [];

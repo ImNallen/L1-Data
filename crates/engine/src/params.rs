@@ -77,7 +77,7 @@ fn occurrences(text: &str, kind: DatabaseKind) -> Result<Vec<Range<usize>>, RunE
         DatabaseKind::Postgres if !text.contains([':', '$']) => Ok(Vec::new()),
         DatabaseKind::Postgres => {
             let standard = pg_occurrences(text, Strings::Standard)?;
-            if text.contains('\\') && standard != pg_occurrences(text, Strings::Escaped)? {
+            if !standard.is_empty() && text.contains('\\') && standard != pg_occurrences(text, Strings::Escaped)? {
                 return Err(unsupported("Parameter locations depend on standard_conforming_strings. Use E'...' strings with explicit backslash escaping."));
             }
             Ok(standard)
@@ -228,6 +228,24 @@ mod tests {
             DatabaseKind::Postgres
         )
         .is_err());
+    }
+
+    #[test]
+    fn parameter_free_strings_keep_their_original_sql() {
+        for source in [r"SELECT '\' AS slash, '$0' AS txt", r"SELECT '\' AS slash, '$1' AS txt"] {
+            let found = discover(source, RunTarget::All, DatabaseKind::Postgres);
+            assert!(found.as_ref().is_ok_and(Vec::is_empty), "parameter-free script was rejected: {found:?}");
+            let bound = bind(source.into(), RunTarget::All, DatabaseKind::Postgres, Vec::new()).unwrap();
+            assert_eq!(bound.text, source);
+            assert_eq!(bound.changed, [false]);
+        }
+    }
+
+    #[test]
+    fn leading_semicolons_preserve_routine_parameters() {
+        for source in [";CREATE PROCEDURE dbo.p @x int AS SELECT @x", ";;;CREATE OR ALTER FUNCTION dbo.f(@x int) RETURNS int AS BEGIN RETURN @x END"] {
+            assert_eq!(names(source, DatabaseKind::SqlServer), Vec::<String>::new());
+        }
     }
     #[test]
     fn binding_keeps_original_ranges_and_quotes_values() {
