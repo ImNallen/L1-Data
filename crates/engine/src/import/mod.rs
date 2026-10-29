@@ -11,7 +11,7 @@ use std::sync::{
 
 use sha2::{Digest, Sha256};
 use tempfile::TempPath;
-use tokio::sync::{Notify, watch};
+use tokio::sync::watch;
 
 use crate::{
     Shared,
@@ -24,7 +24,6 @@ pub struct Draft {
     config: ConsoleConfigView,
     state: watch::Sender<DraftState>,
     stop: Arc<AtomicBool>,
-    cancel: Arc<Notify>,
 }
 
 #[derive(Clone)]
@@ -39,7 +38,6 @@ impl Drop for Draft {
         self.stop.store(true, Ordering::Relaxed);
         self.state
             .send_replace(DraftState::Failed(ImportError::Gone));
-        self.cancel.notify_one();
     }
 }
 
@@ -81,6 +79,39 @@ fn same_server(a: &ConnectionConfig, b: &ConnectionConfig) -> bool {
         .expect("connection serializes")
     };
     endpoint(a) == endpoint(b)
+}
+
+fn identifier(name: &str) -> String {
+    if name.is_ascii() {
+        return crate::text::quote_ident(name);
+    }
+    use std::fmt::Write;
+    let mut quoted = String::from("U&\"");
+    for ch in name.chars() {
+        match ch {
+            '"' => quoted.push_str("\"\""),
+            '\\' => quoted.push_str("\\\\"),
+            ch if ch.is_ascii() => quoted.push(ch),
+            ch => write!(quoted, "\\+{:06x}", u32::from(ch)).unwrap(),
+        }
+    }
+    quoted.push('"');
+    quoted
+}
+
+fn literal(value: &str) -> String {
+    use std::fmt::Write;
+    let mut quoted = String::from("E'");
+    for ch in value.chars() {
+        match ch {
+            '\'' => quoted.push_str("''"),
+            '\\' => quoted.push_str("\\\\"),
+            ch if ch.is_ascii() => quoted.push(ch),
+            ch => write!(quoted, "\\U{:08x}", u32::from(ch)).unwrap(),
+        }
+    }
+    quoted.push('\'');
+    quoted
 }
 
 fn bounded(value: &str, left: &mut usize, truncated: &mut bool) -> String {
@@ -197,14 +228,12 @@ pub async fn prepare(
     }
     let id = ImportSourceId(uuid::Uuid::new_v4());
     let stop = Arc::new(AtomicBool::new(false));
-    let cancel = Arc::new(Notify::new());
     let (state, _) = watch::channel(DraftState::Preparing);
     inner.import = Some(Draft {
         id,
         config: config.clone(),
         state: state.clone(),
         stop: stop.clone(),
-        cancel: cancel.clone(),
     });
     let shared = s.clone();
     s.spawn(async move {
@@ -224,6 +253,9 @@ pub async fn prepare(
                 .connect(config.connection_id)
                 .await
                 .map_err(|error| ImportError::Connect { error })?;
+            if stop.load(Ordering::Relaxed) {
+                return Err(ImportError::Cancelled);
+            }
             let catalog = shared
                 .catalog(&target.db)
                 .await
@@ -251,7 +283,7 @@ pub async fn prepare(
                 saved,
             })
         };
-        let result = tokio::select! { _ = cancel.notified() => return, result = result => result };
+        let result = result.await;
         if !stop.load(Ordering::Relaxed) {
             state.send_replace(match result {
                 Ok(ready) => DraftState::Ready(Arc::new(ready)),
@@ -458,24 +490,26 @@ pub async fn import(
         .mapping
         .iter()
         .flatten()
-        .map(|name| crate::text::quote_ident(name))
+        .map(|name| identifier(name))
         .collect::<Vec<_>>()
         .join(", ");
     let sql = format!(
         "COPY {}.{} ({names}) FROM STDIN WITH (FORMAT csv, ENCODING 'UTF8')",
-        crate::text::quote_ident(&prepared.target.schema),
-        crate::text::quote_ident(&prepared.target.table)
+        identifier(&prepared.target.schema),
+        identifier(&prepared.target.table)
     );
     let qualified = format!(
+        "{}.{}",
+        identifier(&prepared.target.schema),
+        identifier(&prepared.target.table)
+    );
+    let lock = format!("LOCK TABLE {qualified} IN ROW EXCLUSIVE MODE");
+    let relation_name = format!(
         "{}.{}",
         crate::text::quote_ident(&prepared.target.schema),
         crate::text::quote_ident(&prepared.target.table)
     );
-    let lock = format!("LOCK TABLE {qualified} IN ROW EXCLUSIVE MODE");
-    let identity = format!(
-        "SELECT E'{}'::regclass::oid::bigint",
-        qualified.replace('\\', "\\\\").replace('\'', "''")
-    );
+    let identity = format!("SELECT {}::regclass::oid::bigint", literal(&relation_name));
     let bound = serde_json::to_string(&(
         csv::VERSION,
         &request,

@@ -122,7 +122,7 @@ pub(super) async fn run(
     let (progress, mut changes) = watch::channel((0, 0));
     let mut opened = false;
     let mut commit_unknown = false;
-    let outcome = async {
+    let mut outcome = async {
         if stop.load(Ordering::Relaxed) { return Err(ImportError::Cancelled); }
         session.batch(fence.open()).await.map_err(|error| ImportError::Query { error })?;
         opened = true;
@@ -145,6 +145,11 @@ pub(super) async fn run(
         };
         Ok(rows)
     }.await;
+    if stop.load(Ordering::Relaxed)
+        && matches!(&outcome, Err(ImportError::Query { error }) if error.sqlstate.as_deref() == Some("57014"))
+    {
+        outcome = Err(ImportError::Cancelled);
+    }
     if outcome.is_err() {
         stop.store(true, Ordering::Relaxed);
     }
@@ -184,7 +189,10 @@ pub(super) async fn run(
     if outcome.is_ok() {
         if let Some(finish) = fence.finish() {
             if let Err(error) = session.batch(finish).await {
-                commit_unknown = matches!(fence, Fence::Auto);
+                commit_unknown = matches!(fence, Fence::Auto)
+                    && error.sqlstate.as_deref().is_none_or(|state| {
+                        state.starts_with("08") || state == "40003"
+                    });
                 outcome = Err(if commit_unknown {
                     ImportError::OutcomeUnknown { error }
                 } else {

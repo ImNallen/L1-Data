@@ -3829,7 +3829,7 @@ async fn csv_import_lost_cleanup_reports_unknown_and_retires_the_session() {
 async fn csv_import_quotes_identifiers_and_uses_utf8_despite_session_settings() {
     let mut h = Harness::start().await;
     let oracle = h.oracle().await;
-    let table = unique("p12_quoted_\\'\"");
+    let table = unique("p12_quoted_é_\\'\"");
     let quoted = format!("\"{}\"", table.replace('"', "\"\""));
     oracle.batch_execute(&format!("CREATE TABLE {quoted} (txt text)")).await.unwrap();
     let tab = h.sql_tab(TxnMode::AutoCommit).await;
@@ -3840,6 +3840,108 @@ async fn csv_import_quotes_identifiers_and_uses_utf8_despite_session_settings() 
     let row = oracle.query_one(&format!("SELECT txt FROM {quoted}"), &[]).await.unwrap();
     assert_eq!(row.get::<_, String>(0), "雪\\path");
     oracle.batch_execute(&format!("DROP TABLE {quoted}")).await.unwrap();
+}
+
+#[tokio::test]
+async fn csv_import_preserves_unicode_column_identity_with_a_latin1_session() {
+    let mut h = Harness::start().await;
+    let oracle = h.oracle().await;
+    let table = unique("p12_encoding");
+    oracle.batch_execute(&format!("CREATE TABLE {table} (\"é\" text, \"Ã©\" text)")).await.unwrap();
+    let tab = h.sql_tab(TxnMode::Manual).await;
+    let target = import_target(&h, &table).await;
+    h.run_ok(tab, "SET standard_conforming_strings = off; SET client_encoding = 'LATIN1'").await;
+    let request = csv_request(&h, tab, &target, "é\n雪\n", true).await;
+    assert!(!h.engine.table_import(tab, request, None).await.unwrap().committed);
+    assert_eq!(h.scalar(tab, "SHOW client_encoding").await, "LATIN1");
+    h.engine.console_commit(tab, None).await.unwrap();
+    let row = oracle.query_one(&format!("SELECT \"é\", \"Ã©\" FROM {table}"), &[]).await.unwrap();
+    assert_eq!(row.get::<_, Option<String>>(0), Some("雪".into()));
+    assert_eq!(row.get::<_, Option<String>>(1), None);
+    oracle.batch_execute(&format!("DROP TABLE {table}")).await.unwrap();
+}
+
+#[tokio::test]
+async fn csv_import_deferred_constraint_rejection_keeps_the_session_reusable() {
+    let mut h = Harness::start().await;
+    let oracle = h.oracle().await;
+    let table = unique("p12_deferred");
+    oracle.batch_execute(&format!("CREATE TABLE {table} (n int UNIQUE DEFERRABLE INITIALLY DEFERRED)")).await.unwrap();
+    let tab = h.sql_tab(TxnMode::AutoCommit).await;
+    let target = import_target(&h, &table).await;
+    let request = csv_request(&h, tab, &target, "n\n1\n1\n", true).await;
+    let error = h.engine.table_import(tab, request, None).await.unwrap_err();
+    assert!(matches!(&error, ImportError::Query { error } if error.sqlstate.as_deref() == Some("23505")), "{error:?}");
+    assert!(matches!(h.console(tab).session, SessionState::Open { .. }));
+    assert_eq!(h.console(tab).txn, TxnState::Idle);
+    assert_eq!(count(&oracle, &table).await, 0);
+    h.run_ok(tab, "SELECT 1").await;
+    oracle.batch_execute(&format!("DROP TABLE {table}")).await.unwrap();
+}
+
+#[tokio::test]
+async fn csv_import_lock_wait_cancel_reports_cancellation() {
+    let mut h = Harness::start().await;
+    let oracle = h.oracle().await;
+    let table = unique("p12_lock_cancel");
+    oracle.batch_execute(&format!("CREATE TABLE {table} (n int)")).await.unwrap();
+    let tab = h.sql_tab(TxnMode::AutoCommit).await;
+    let target = import_target(&h, &table).await;
+    let request = csv_request(&h, tab, &target, "n\n1\n", true).await;
+    oracle.batch_execute(&format!("BEGIN; LOCK TABLE {table} IN ACCESS EXCLUSIVE MODE")).await.unwrap();
+    let engine = h.engine.clone();
+    let worker = tokio::spawn(async move { engine.table_import(tab, request, None).await });
+    let start = Instant::now();
+    loop {
+        if let SessionState::Open { backend_pid } = h.console(tab).session {
+            let waiting: bool = oracle.query_one("SELECT EXISTS (SELECT FROM pg_stat_activity WHERE pid = $1 AND wait_event_type = 'Lock')", &[&backend_pid]).await.unwrap().get(0);
+            if waiting { break; }
+        }
+        assert!(start.elapsed() < Duration::from_secs(5));
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    h.engine.console_cancel(tab).await;
+    let result = tokio::time::timeout(Duration::from_secs(5), worker).await.unwrap().unwrap();
+    oracle.batch_execute("ROLLBACK").await.unwrap();
+    assert!(matches!(result, Err(ImportError::Cancelled)), "{result:?}");
+    assert_eq!(count(&oracle, &table).await, 0);
+    h.run_ok(tab, "SELECT 1").await;
+    oracle.batch_execute(&format!("DROP TABLE {table}")).await.unwrap();
+}
+
+#[tokio::test]
+async fn csv_import_cancelled_preparation_settles_its_pending_connection() {
+    let h = Harness::start().await;
+    let oracle = h.oracle().await;
+    let table = unique("p12_connect_cancel");
+    oracle.batch_execute(&format!("CREATE TABLE {table} (n int)")).await.unwrap();
+    let tab = h.sql_tab(TxnMode::AutoCommit).await;
+    let target = import_target(&h, &table).await;
+    h.engine.disconnect(h.conn, true).await.unwrap();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let (accepted, received) = tokio::sync::oneshot::channel();
+    let (release, released) = tokio::sync::oneshot::channel();
+    let server = tokio::spawn(async move {
+        let (socket, _) = listener.accept().await.unwrap();
+        accepted.send(()).unwrap();
+        let _ = released.await;
+        drop(socket);
+    });
+    let draft = ConnectionDraft { id: Some(h.conn), host: "127.0.0.1".into(), port, ..draft_from_url(&url(), "dev").unwrap() };
+    h.engine.save_connection(draft).await.unwrap();
+    let path = h.dir.path().join("connect.csv");
+    std::fs::write(&path, "n\n1\n").unwrap();
+    let source = h.engine.table_import_prepare(tab, target, path.to_string_lossy().into()).await.unwrap();
+    tokio::time::timeout(Duration::from_secs(5), received).await.unwrap().unwrap();
+    h.engine.table_import_discard(tab, source).await.unwrap();
+    release.send(()).unwrap();
+    server.await.unwrap();
+    let settled = tokio::time::timeout(Duration::from_secs(3), h.wait_status(|s| !matches!(s, ConnStatus::Connecting))).await;
+    assert!(matches!(settled, Ok(ConnStatus::Failed { .. })), "{settled:?}");
+    let retried = tokio::time::timeout(Duration::from_secs(3), h.engine.connect(h.conn)).await;
+    assert!(matches!(retried, Ok(Err(_))), "{retried:?}");
+    oracle.batch_execute(&format!("DROP TABLE {table}")).await.unwrap();
 }
 
 #[tokio::test]
