@@ -113,6 +113,31 @@ fn writes(tokens: &[Token<'_>]) -> bool {
         | "VACUUM" | "CLUSTER" => true,
         "PREPARE" => word(tokens.get(1), "TRANSACTION"),
         "COMMIT" | "ROLLBACK" => word(tokens.get(1), "PREPARED"),
+        "COPY" => {
+            let mut i = 1;
+            if word(tokens.get(i), "BINARY") {
+                i += 1;
+            }
+            if tokens.get(i) == Some(&Token::Open) {
+                return closing(tokens, i).is_some_and(|end| writes(&tokens[i + 1..end]));
+            }
+            while i < tokens.len() {
+                if word(tokens.get(i), "FROM") {
+                    return true;
+                }
+                if word(tokens.get(i), "TO") {
+                    return false;
+                }
+                if tokens.get(i) == Some(&Token::Open) {
+                    let Some(end) = closing(tokens, i) else {
+                        return false;
+                    };
+                    i = end;
+                }
+                i += 1;
+            }
+            false
+        }
         "WITH" => {
             let mut i = 1;
             if word(tokens.get(i), "RECURSIVE") {
@@ -340,6 +365,40 @@ mod tests {
             super::super::classify("with x as (delete from t returning *) select * from x"),
             super::super::StmtKind::Query
         );
+    }
+
+    #[test]
+    fn copy_from_and_copy_write_queries_are_writes() {
+        for sql in [
+            "copy public.orders from '/tmp/orders.csv' with (format csv)",
+            "copy public.orders from program 'printf 7'",
+            "COPY BINARY public.orders FROM '/tmp/orders.bin'",
+            "/* load */ COPY \"from\".\"to\" (\"to\", \"from\") /* direction */ FROM PROGRAM 'printf 7'",
+            "copy public.orders (id, total) from $file$/tmp/from.csv$file$",
+            "copy public.orders from stdin",
+            "copy (insert into orders values (1) returning *) to '/tmp/orders.csv'",
+            "copy (update orders set total = 1 returning *) to program 'cat'",
+            "copy (delete from orders returning *) to '/tmp/orders.csv'",
+            "copy (with changed as (delete from orders returning *) select * from changed) to '/tmp/orders.csv'",
+        ] {
+            assert!(history_is_write(sql), "{sql}");
+        }
+    }
+
+    #[test]
+    fn copy_to_reads_ignore_from_in_queries_names_and_strings() {
+        for sql in [
+            "copy public.orders to '/tmp/from.csv'",
+            "copy public.orders to program 'echo FROM'",
+            "copy binary \"from\".\"to\" (\"from\") to '/tmp/orders.bin'",
+            "copy (select * from orders) to '/tmp/orders.csv'",
+            "copy (select 'from', \"from\" from orders where id in (select id from items)) to program 'cat'",
+            "copy (with data as (select * from orders) select * from data) to '/tmp/orders.csv'",
+            "copy public.orders (id) /* FROM '/tmp/wrong' */ to stdout",
+            "copy (select $$delete from orders$$) to stdout",
+        ] {
+            assert!(!history_is_write(sql), "{sql}");
+        }
     }
 
     #[test]
