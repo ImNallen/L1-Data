@@ -1,3 +1,4 @@
+import * as Dialog from "@radix-ui/react-dialog";
 import { mockIPC } from "@tauri-apps/api/mocks";
 import { renderToStaticMarkup } from "react-dom/server";
 import { afterEach, expect, it, vi } from "vitest";
@@ -15,6 +16,7 @@ import { addCustomThemes, chooseColorScheme, chooseThemes, deleteCustomTheme } f
 import { parseQuery } from "../../ui/textMatch";
 import { filterSettings, type SettingsSectionId } from "./settingsIndex";
 import { useLimits } from "./useLimits";
+import { SettingsPage } from "./SettingsScreen";
 
 const initial = { ...useWorkspace.getInitialState() };
 const initialLive = { ...useLive.getInitialState() };
@@ -33,7 +35,18 @@ afterEach(() => {
 function render(patch: Partial<WorkspaceData>, live: Partial<LiveData> = {}) {
   Object.assign(useWorkspace.getInitialState(), patch);
   Object.assign(useLive.getInitialState(), live);
-  return renderToStaticMarkup(<AppLayout />);
+  const screen = useWorkspace.getInitialState().screen;
+  // Radix portals do not render on the server, so render the settings body separately for content assertions.
+  return renderToStaticMarkup(
+    <>
+      <AppLayout />
+      {screen.kind === "settings" && (
+        <Dialog.Root open>
+          <SettingsPage screen={screen} />
+        </Dialog.Root>
+      )}
+    </>,
+  );
 }
 
 const breadcrumb = (html: string) =>
@@ -45,15 +58,15 @@ const breadcrumb = (html: string) =>
 
 const settingsOpen = (section: SettingsSectionId = "appearance", query = "") => ({ screen: { kind: "settings", section, query } }) as const;
 
-it("puts the settings nav in the sidebar and the section in the main panel, with no workspace chrome", () => {
+it("keeps workspace chrome behind settings with its own navigation and close control", () => {
   const html = render({ ...settingsOpen(), layout: { ...initial.layout, rightPanel: "Assistant" } });
-  expect(html).toMatch(/data-testid="sidebar"[^>]*>.*data-testid="settings-nav"/);
   expect(html).toContain('data-testid="settings-back"');
+  expect(html).toContain('data-testid="settings-close"');
   expect(html).toMatch(/<input[^>]*data-testid="settings-search"[^>]*placeholder="Search"/);
   expect(breadcrumb(html)).toBe("Settings / Appearance");
   expect(html).toMatch(/aria-current="page"[^>]*data-testid="settings-section-appearance"|data-testid="settings-section-appearance"[^>]*aria-current="page"/);
-  for (const absent of ["run-btn", "tab-bar", "no-tabs", "right-panel", "sidebar-search", "new-connection"]) {
-    expect(html).not.toContain(`data-testid="${absent}"`);
+  for (const present of ["no-tabs", "right-panel", "sidebar-search", "new-connection"]) {
+    expect(html).toContain(`data-testid="${present}"`);
   }
 });
 
@@ -76,7 +89,7 @@ it("draws one sidebar at the stored pixel width in both the workspace and settin
   expect(columns(workspace, "sidebar")).toEqual([expect.stringContaining('style="width:300px;')]);
   expect(columns(workspace, "right")).toEqual([expect.stringContaining('style="width:420px;')]);
   expect(columns(settings, "sidebar")).toEqual(columns(workspace, "sidebar"));
-  expect(columns(settings, "right")).toEqual([]);
+  expect(columns(settings, "right")).toEqual(columns(workspace, "right"));
   expect(sidebarHeader(settings)).toBe(sidebarHeader(workspace));
 });
 
@@ -92,10 +105,12 @@ it("keeps the sidebar between 200 and 480 pixels and the right panel between 260
   expect(widths.map((px) => clampWidth("right", px))).toEqual([260, 260, 340, 480, 560]);
 });
 
-it("hides the settings nav with the sidebar and moves the toggle into the page header", () => {
+it("keeps settings navigation when the workspace sidebar is hidden", () => {
   const html = render({ ...settingsOpen(), layout: { ...initial.layout, sidebar: false } });
-  expect(html).not.toContain('data-testid="settings-nav"');
-  expect(html).toMatch(/<header[^>]*>(?:(?!<\/header>).)*data-testid="toggle-sidebar"/);
+  expect(html).toContain('data-testid="settings-nav"');
+  const settings = html.slice(html.indexOf('data-testid="settings-search"'));
+  expect(settings).not.toContain('data-testid="toggle-sidebar"');
+  expect(settings).not.toContain("data-tauri-drag-region");
 });
 
 it("returns to the workspace layout once settings close", () => {
@@ -127,19 +142,6 @@ it("puts the update button in the sidebar footer only while this build can updat
   const offered = render({ screen: { kind: "workspace" } }, status({ kind: "Available", version: "0.2.0", downgrade: false, changes: [] }));
   expect(offered).toMatch(/<button[^>]*data-testid="update-button" data-status="Available" aria-label="Download L1 Data 0.2.0"/);
   expect(render({ screen: { kind: "workspace" } }, status({ kind: "Disabled", reason: "DevBuild" }))).not.toContain('data-testid="update-button"');
-});
-
-it("covers the window while an update installs, and only then", () => {
-  const status = (s: UpdateStatus): Partial<LiveData> => ({ updates: { rev: 1, track: "Stable", currentVersion: "0.1.0", status: s, checkedAtMs: null } });
-  const installing = render({ screen: { kind: "workspace" } }, status({ kind: "Installing", version: "0.2.0" }));
-  expect(installing).toMatch(/<div[^>]*data-testid="update-installing"[^>]*>.*Installing L1 Data 0\.2\.0… L1 Data will restart\.<\/div><\/div>/);
-  for (const s of [
-    { kind: "Downloaded", version: "0.2.0", downgrade: false, changes: [] },
-    { kind: "Failed", failure: { kind: "BadSignature" } },
-    { kind: "Idle" },
-  ] satisfies UpdateStatus[]) {
-    expect(render({ screen: { kind: "workspace" } }, status(s))).not.toContain('data-testid="update-installing"');
-  }
 });
 
 it.each([

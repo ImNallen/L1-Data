@@ -15,7 +15,7 @@ import { DATABASE_LABEL } from "../../state/databaseKind";
 import { useLive } from "../../state/live";
 import { connectionTone } from "../../state/status";
 import { useWorkspace } from "../../state/workspace";
-import { Button, cx, DatabaseBadge, DialogBackdrop, IconButton, inputClass, Modal, Spinner, StatusDot, Switch } from "../../ui/primitives";
+import { Button, cx, DatabaseBadge, DialogSurface, IconButton, inputClass, Modal, Spinner, StatusDot, Switch } from "../../ui/primitives";
 import { connect, unknownHostKey, type UnknownHostKey } from "./connectionActions";
 import { CONNECTION_COLORS, ConnectionColorDot, connectionColorId, type ConnectionColorId } from "./connectionColors";
 import {
@@ -879,11 +879,7 @@ export function ConnectionDialog() {
   return (
     <Dialog.Root open={overlay.kind === "connection"} onOpenChange={(o) => !o && leave(close)}>
       <Dialog.Portal>
-        <DialogBackdrop />
-        <Dialog.Content
-          data-testid="connection-dialog"
-          className="motion-pop fixed top-1/2 left-1/2 z-50 flex h-[560px] max-h-[calc(100vh-48px)] w-[760px] max-w-[calc(100vw-48px)] -translate-x-1/2 -translate-y-1/2 overflow-hidden rounded-xl border border-control bg-raised shadow-[var(--shadow-dialog)] outline-none"
-        >
+        <DialogSurface data-testid="connection-dialog" className="flex h-[560px] w-[760px] overflow-hidden">
           <ConnectionList selected={selected} onSelect={select} />
           <ConnectionForm key={editing ?? "new"} existing={existing} onSaved={close} onClose={() => leave(close)} onDirtyChange={setDirty} />
           <Modal
@@ -904,7 +900,7 @@ export function ConnectionDialog() {
               </Button>
             </div>
           </Modal>
-        </Dialog.Content>
+        </DialogSurface>
       </Dialog.Portal>
     </Dialog.Root>
   );

@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, type ReactNode } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Group, Panel } from "react-resizable-panels";
 import { ConnectionDialog } from "../features/connections/ConnectionDialog";
 import { SqlEditor } from "../features/editor/SqlEditor";
@@ -6,10 +6,10 @@ import { StatementChooser } from "../features/editor/StatementChooser";
 import { HistoryPalette } from "../features/history/HistoryPalette";
 import { SavedPalette } from "../features/saved/SavedPalette";
 import { ResultsPane } from "../features/results/ResultsPane";
-import { SettingsPage } from "../features/settings/SettingsScreen";
+import { SettingsDialog } from "../features/settings/SettingsScreen";
 import { Sidebar } from "../features/sidebar/Sidebar";
 import { InstallingOverlay } from "../features/updates/InstallingOverlay";
-import { isTableTab, useWorkspace, type Screen } from "../state/workspace";
+import { isTableTab, useWorkspace } from "../state/workspace";
 import { Kbd } from "../ui/primitives";
 import { START_COMMANDS, handleGlobalKey, shortcutLabel } from "./commands";
 import { Overlays } from "./Overlays";
@@ -18,7 +18,7 @@ import { ResizeHandle } from "./ResizeHandle";
 import { RightPanel } from "./RightPanel";
 import { TabBar } from "./TabBar";
 import { ResizeEdges } from "./WindowChrome";
-import { hostedWindow, type HostedWindow } from "./hostedWindow";
+import { hostedWindow } from "./hostedWindow";
 import { TopBar } from "./TopBar";
 
 function useGlobalKeys() {
@@ -95,40 +95,11 @@ function MainArea() {
   );
 }
 
-type ScreenPanels = { main: ReactNode; right: boolean };
-
-function screenPanels(screen: Screen, hosted: HostedWindow | null): ScreenPanels {
-  switch (screen.kind) {
-    case "workspace":
-      return {
-        main: (
-          <>
-            <TopBar hosted={hosted} />
-            <TabBar />
-            <MainArea />
-          </>
-        ),
-        right: true,
-      };
-    case "settings":
-      return {
-        main: <SettingsPage hosted={hosted} screen={screen} />,
-        right: false,
-      };
-    default: {
-      const unreachable: never = screen;
-      return unreachable;
-    }
-  }
-}
-
 export function AppLayout() {
   useGlobalKeys();
   const [hosted] = useState(() => hostedWindow());
-  const screen = useWorkspace((s) => s.screen);
   const sidebar = useWorkspace((s) => s.layout.sidebar);
   const rightPanel = useWorkspace((s) => s.layout.rightPanel);
-  const panels = screenPanels(screen, hosted);
 
   return (
     <div className="relative flex h-full">
@@ -137,11 +108,14 @@ export function AppLayout() {
         <Sidebar hosted={hosted} />
       </PixelColumn>
       <div data-testid="main" className="flex min-w-80 flex-1 flex-col bg-bg">
-        {panels.main}
+        <TopBar hosted={hosted} />
+        <TabBar />
+        <MainArea />
       </div>
-      <PixelColumn column="right" open={panels.right && rightPanel !== null}>
+      <PixelColumn column="right" open={rightPanel !== null}>
         <RightPanel hosted={hosted} />
       </PixelColumn>
+      <SettingsDialog />
       <HistoryPalette />
       <SavedPalette />
       <ConnectionDialog />
