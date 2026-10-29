@@ -44,6 +44,7 @@ function Edge({
   offset,
   self,
   label,
+  caption,
   selected,
   query,
   testId,
@@ -54,6 +55,7 @@ function Edge({
   offset: number;
   self: boolean;
   label: string;
+  caption?: string;
   selected: boolean;
   query?: boolean;
   testId: string;
@@ -73,6 +75,7 @@ function Edge({
       onClick={onSelect}
       onKeyDown={(e) => activate(e, onSelect)}
     >
+      <title>{label}</title>
       <path d={path} fill="none" stroke="transparent" strokeWidth={16} />
       <path
         className="map-edge-line"
@@ -93,7 +96,7 @@ function Edge({
         strokeWidth={4}
         strokeLinejoin="round"
       >
-        {label}
+        {caption ?? label}
       </text>
     </g>
   );
@@ -306,6 +309,7 @@ export function MapCanvas({ map }: { map: Exploring }) {
                   offset={offset(edge.source, edge.target)}
                   self={edge.source === edge.target}
                   label={edge.name}
+                  caption={edge.columns.length === 1 ? `${edge.columns[0]?.source} → ${edge.columns[0]?.target}` : `${edge.columns.length} columns`}
                   testId={`map-fk-${edge.id}`}
                   selected={map.selection.kind === "foreignKey" && map.selection.id === edge.id}
                   onSelect={() => selectMap({ kind: "foreignKey", id: edge.id })}

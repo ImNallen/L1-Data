@@ -39,7 +39,7 @@ function QueryDetail({ query, map }: { query: MapQuery; map: Exploring }) {
   return (
     <div data-testid="map-query-analysis" className="space-y-2">
       <p className="text-dim">
-        Cursor statement · {query.incomplete ? "Partial analysis" : "Supported analysis"} · Catalog matches do not prove session resolution.
+        Current statement · {query.incomplete ? "Partial analysis" : "Supported analysis"} · Session settings may affect table-name matches.
       </p>
       {!query.statement && <p>No statement at the cursor.</p>}
       {!!query.statement && !query.occurrences.length && <p>No supported table sources in this statement.</p>}
@@ -88,10 +88,8 @@ function QueryDetail({ query, map }: { query: MapQuery; map: Exploring }) {
           ))}
         </div>
       )}
-      {selectedJoin && <p className="text-keyword">Selected SQL predicate is highlighted in its captured document.</p>}
-      <p className="text-dim">
-        Dashed SQL joins describe syntax, not foreign keys or cardinality. Selection uses the cursor statement even when editor text is selected.
-      </p>
+      {selectedJoin && <p className="text-keyword">Join condition highlighted in SQL.</p>}
+      <p className="text-dim">Dashed links show join conditions. The map follows the statement at the cursor.</p>
     </div>
   );
 }
