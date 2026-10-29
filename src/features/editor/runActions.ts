@@ -247,8 +247,7 @@ async function runTab(tabId: TabId, target?: PageTarget, script?: RunTarget, mod
     editorStateOf(tabId).doc === state.doc &&
     (browsing || editorStateOf(tabId).selection.eq(state.selection)) &&
     sameTextTarget(tabId, destination) &&
-    ws().overlay.kind === "none" &&
-    ws().screen.kind === "workspace";
+    (browsing || (ws().overlay.kind === "none" && ws().screen.kind === "workspace"));
   if (!(await ensureConsole(tab)) || (target && !isBrowsing(tab))) return;
   if (target && queuedPages.get(tabId)?.intent !== target.intent) return;
   if (target?.countContext && !isCurrentCount(target.countContext)) return;

@@ -1272,6 +1272,31 @@ describe("a commit the engine asks about", () => {
 });
 
 describe("parameter run intents", () => {
+  it("reloads a browsing table when page size changes in Settings", async () => {
+    const id = await openWithConsole();
+    useWorkspace.getState().openSettings();
+    const calls: { cmd: string; args: unknown }[] = [];
+    mockIPC((cmd, args) => {
+      calls.push({ cmd, args });
+      if (cmd === "script_outline") return { statements: [], atCursor: null, unitKind: "Statement" };
+      if (cmd === "console_run") return { runId: 1, statements: [] };
+      return null;
+    });
+    await saveSettings({ tablePageSize: useWorkspace.getState().settings.tablePageSize + 50 });
+    await vi.waitFor(() =>
+      expect(calls).toContainEqual({
+        cmd: "console_run",
+        args: {
+          tabId: id,
+          request: { kind: "tablePage", schema: "public", table: "orders", page: 0, query: { orderBy: "", filters: [], where: "" } },
+          confirmed: null,
+        },
+      }),
+    );
+    expect(calls.some(({ cmd }) => cmd === "script_params")).toBe(false);
+    expect(useWorkspace.getState().screen.kind).toBe("settings");
+  });
+
   it("keeps a canonical table page run when another tab becomes active", async () => {
     await openWithConsole();
     const calls: string[] = [];

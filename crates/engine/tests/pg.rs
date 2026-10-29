@@ -3520,3 +3520,16 @@ async fn production_parameter_confirmation_covers_exact_values() {
     assert_eq!(oracle.query_one(&format!("select n from public.{table}"), &[]).await.unwrap().get::<_, String>(0), "two");
     oracle.batch_execute(&format!("drop table public.{table}")).await.unwrap();
 }
+
+#[tokio::test]
+async fn postgres_server_parameters_keep_their_runtime_arguments() {
+    let mut h = Harness::start().await;
+    let tab = h.sql_tab(TxnMode::AutoCommit).await;
+    let prepared = unique("p_native_params");
+    let state = h.run_ok(tab, &format!("PREPARE {prepared}(int) AS SELECT $1; EXECUTE {prepared}(2)")).await;
+    assert_eq!(h.page(&Harness::result(&state, 1), 0, 1), [vec![Some("2".into())]]);
+    let function = unique("f_native_params");
+    h.run_ok(tab, &format!("CREATE FUNCTION public.{function}(int) RETURNS int LANGUAGE SQL RETURN $1")).await;
+    assert_eq!(h.scalar(tab, &format!("SELECT public.{function}(3)")).await, "3");
+    h.run_ok(tab, &format!("DROP FUNCTION public.{function}(int)")).await;
+}
