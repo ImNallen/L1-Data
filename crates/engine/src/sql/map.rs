@@ -125,7 +125,10 @@ pub(crate) fn analyze(text: &str, cursor: DocOffset, catalog: &Catalog) -> MapQu
         .next()
         .map(|s| s.start..s.end),
         DatabaseKind::SqlServer => {
-            let span = super::tsql::statement_around(text, at);
+            let mut span = super::tsql::statement_around(text, at);
+            if text[span.clone()].trim().is_empty() && at > 0 && text.as_bytes()[at - 1] == b';' {
+                span = super::tsql::statement_around(text, at - 1);
+            }
             (!text[span.clone()].trim().is_empty()).then_some(span)
         }
     };
@@ -711,6 +714,32 @@ mod tests {
             );
             assert!(result.incomplete && result.joins.is_empty());
         }
+    }
+
+    #[test]
+    fn a_cursor_after_a_terminal_semicolon_keeps_the_query_overlay() {
+        let sql = "SELECT * FROM public.orders a JOIN public.people b ON a.id = b.id;";
+        for kind in [DatabaseKind::Postgres, DatabaseKind::SqlServer] {
+            let result = analyze_at_end(sql, kind);
+            assert_eq!(result.occurrences.len(), 2, "{kind:?}");
+            assert_eq!(result.joins.len(), 1, "{kind:?}");
+        }
+        let next = "SELECT * FROM public.orders;SELECT * FROM public.people;";
+        let at = next.find(';').unwrap() + 1;
+        let result = analyze(
+            next,
+            DocOffset(at as u32),
+            &catalog(DatabaseKind::SqlServer),
+        );
+        assert!(matches!(
+            result.occurrences[0].resolution,
+            MapResolution::CatalogMatch { oid: 2 }
+        ));
+        assert!(
+            analyze_at_end("SELECT * FROM public.orders;\n\n", DatabaseKind::SqlServer)
+                .statement
+                .is_none()
+        );
     }
 
     #[test]

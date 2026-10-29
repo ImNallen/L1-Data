@@ -67,7 +67,7 @@ with tempfile.TemporaryDirectory(prefix="l1-map-") as directory:
                 target = next(r for r in page["relations"] if r["oid"] == key["target"])
                 pair = key["columns"][0]
                 table = lambda s, n: f"{quoted(s, kind)}.{quoted(n, kind)}"
-                text = f"SELECT '😀' FROM {table(schema, root['name'])} a JOIN {table(target['schema'], target['name'])} b ON a.{quoted(pair['source'], kind)}=b.{quoted(pair['target'], kind)}"
+                text = f"SELECT '😀' FROM {table(schema, root['name'])} a JOIN {table(target['schema'], target['name'])} b ON a.{quoted(pair['source'], kind)}=b.{quoted(pair['target'], kind)};"
                 analysis = invoke("database_map_query", db=db, text=text, cursor=len(text.encode("utf-16-le")) // 2, catalogVersion=catalog["version"])
                 assert len(analysis["occurrences"]) == 2 and len(analysis["joins"]) == 1 and not analysis["incomplete"], analysis
                 assert all(o["resolution"]["kind"] == "CatalogMatch" for o in analysis["occurrences"]), analysis
