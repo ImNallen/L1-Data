@@ -1,6 +1,6 @@
 import * as Menu from "@radix-ui/react-dropdown-menu";
 import { ChevronDownIcon, ListIndentIncreaseIcon, PlayIcon, SquareIcon } from "lucide-react";
-import { ConnectionColorDot, EnvironmentIcon } from "../features/connections/connectionColors";
+import { ConnectionColorDot } from "../features/connections/connectionColors";
 import {
   cancelActive,
   endTransaction,
@@ -70,7 +70,7 @@ function DatabaseMenu({ tab, db }: { tab: Tab; db: DatabaseRef }) {
 
 function RunButton({ busy, environment, explainable }: { busy: boolean; environment: Environment | null; explainable: boolean }) {
   return (
-    <span className={cx("inline-flex", environment === "Production" && "rounded-lg ring-2 ring-danger ring-offset-2 ring-offset-bg")}>
+    <span className="run-environment inline-flex" data-environment={environment ?? undefined}>
       <Button
         data-testid="run-btn"
         data-environment={environment ?? undefined}
@@ -134,8 +134,7 @@ export function TopBar({ hosted }: { hosted: HostedWindow | null }) {
     <header
       data-tauri-drag-region="deep"
       className={cx(
-        "@container flex h-[52px] shrink-0 items-center gap-2 border-b-2 pt-[2px]",
-        environment === "Production" ? "border-danger" : "border-transparent",
+        "@container flex h-[52px] shrink-0 items-center gap-2 border-b-2 border-transparent pt-[2px]",
         windowEdgeInset(hosted),
         layout.sidebar ? "pl-4" : windowLeadingInset(hosted),
       )}
@@ -148,7 +147,6 @@ export function TopBar({ hosted }: { hosted: HostedWindow | null }) {
           <Menu.Root modal={false}>
             <Menu.Trigger data-testid="tab-connection" title={config?.name} className={cx(TARGET_TRIGGER, "-ml-1", config ? "text-fg" : "text-dim")}>
               <ConnectionColorDot color={config?.color ?? null} className="mr-0.5" />
-              <EnvironmentIcon environment={environment} className="mr-0.5" />
               <span className="truncate">{config?.name ?? "No connection"}</span>
               <ChevronDownIcon size={12} className="shrink-0 text-dim" />
             </Menu.Trigger>
@@ -160,7 +158,6 @@ export function TopBar({ hosted }: { hosted: HostedWindow | null }) {
                   <MenuItem key={c.id} checked={c.id === connectionId} onSelect={() => void setTabTarget(tab.id, homeDb(c))}>
                     <StatusDot tone={tone} label={CONNECTION_TONE_LABEL[tone]} />
                     <ConnectionColorDot color={c.color} />
-                    <EnvironmentIcon environment={c.environment} size={13} testId={`env-icon-${c.id}`} />
                     {c.name}
                   </MenuItem>
                 );

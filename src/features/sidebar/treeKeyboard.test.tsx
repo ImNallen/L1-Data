@@ -171,7 +171,7 @@ it("walks the search results the same way, entered from the search box with Down
   expect(row("prod/shop/public").getAttribute("aria-expanded")).toBe("false");
 });
 
-it("marks a Production or Staging connection's row and leaves a Local one plain", () => {
+it("marks Production, Staging and Develop connections in the sidebar", () => {
   useWorkspace.setState({
     configs: {
       p: { ...connectionConfig("p", "prod"), environment: "Production" },
@@ -182,5 +182,5 @@ it("marks a Production or Staging connection's row and leaves a Local one plain"
   render(<Sidebar hosted={null} />);
   expect(screen.getByTestId("env-icon-prod").getAttribute("aria-label")).toBe("Production");
   expect(screen.getByTestId("env-icon-stage").getAttribute("aria-label")).toBe("Staging");
-  expect(screen.queryByTestId("env-icon-local")).toBeNull();
+  expect(screen.getByTestId("env-icon-local").getAttribute("aria-label")).toBe("Develop");
 });

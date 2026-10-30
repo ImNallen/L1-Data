@@ -39,37 +39,18 @@ function onConnection(environment: Environment | null, txn: TxnState = "Idle", d
 }
 
 const header = (html: string) => html.slice(0, html.indexOf(">") + 1);
-const icon = (html: string) => html.match(/<span data-testid="env-icon" role="img" aria-label="([^"]*)" title="[^"]*" class="([^"]*)">/)?.slice(1);
-
-it("marks Production with a danger icon and a danger hairline under the bar", () => {
-  const html = onConnection("Production");
-  expect(icon(html)?.[0]).toBe("Production");
-  expect(icon(html)?.[1]).toMatch(/\btext-danger\b/);
-  expect(header(html)).toMatch(/\bborder-b-2\b[^"]*\bborder-danger\b/);
-});
-
-it("marks Staging with an amber icon and no hairline", () => {
-  const html = onConnection("Staging");
-  expect(icon(html)?.[0]).toBe("Staging");
-  expect(icon(html)?.[1]).toMatch(/\btext-amber\b/);
-  expect(header(html)).not.toContain("border-danger");
-});
-
-it.each(["Local", null] satisfies (Environment | null)[])("draws no marker for a %s connection", (environment) => {
+it.each(["Production", "Staging", "Local", null] satisfies (Environment | null)[])("keeps %s environment styling on the Run button only", (environment) => {
   const html = onConnection(environment);
   expect(html).not.toContain('data-testid="env-icon"');
   expect(header(html)).not.toContain("border-danger");
+  expect(html).not.toContain("ring-danger");
+  expect(html).toContain(`class="run-environment inline-flex"${environment ? ` data-environment="${environment}"` : ""}`);
 });
 
-it("reads the run target as the environment icon and connection, then database, and leaves the tab title to the tab bar", () => {
+it("reads the run target as the connection, then database, and leaves the tab title to the tab bar", () => {
   const html = onConnection("Production");
   const at = (pattern: RegExp) => html.search(pattern);
-  const order = [
-    at(/data-testid="tab-connection"/),
-    at(/data-testid="env-icon"/),
-    at(/>prod-postgres</),
-    at(/data-testid="tab-database"[^>]*>(<[^>]*>)*shop</),
-  ];
+  const order = [at(/data-testid="tab-connection"/), at(/>prod-postgres</), at(/data-testid="tab-database"[^>]*>(<[^>]*>)*shop</)];
   expect(order.every((i) => i >= 0)).toBe(true);
   expect([...order].sort((a, b) => a - b)).toEqual(order);
   expect(html).not.toContain("Query 3");
