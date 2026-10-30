@@ -2,7 +2,6 @@ import { execFileSync } from "node:child_process";
 import { appendFileSync, readFileSync } from "node:fs";
 import { pathToFileURL } from "node:url";
 
-const NIGHTLY_GAP_MS = 6 * 60 * 60 * 1000;
 const VERSION = /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-nightly\.(\d{8})\.([1-9]\d*))?$/;
 
 export function parseVersion(text) {
@@ -69,9 +68,6 @@ function nightlyIsDue(facts, git) {
   const last = latestNightly(facts.releases);
   if (!last) return { due: true, reason: "No nightly has been published yet." };
   const hours = Math.floor((facts.now - last.publishedAt) / 360_000) / 10;
-  if (facts.now - last.publishedAt < NIGHTLY_GAP_MS) {
-    return { due: false, reason: `${last.tag} was published ${hours.toFixed(1)} h ago, less than 6 h.` };
-  }
   const shipped = git.commitOf(last.tag);
   if (!shipped) throw new Error(`Tag ${last.tag} is missing from the checkout.`);
   if (shipped === facts.sha || !git.isAncestor(shipped, facts.sha)) {

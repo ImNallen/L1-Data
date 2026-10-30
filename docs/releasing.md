@@ -17,10 +17,7 @@ The checked-in version in `src-tauri/tauri.conf.json` stays where it is. The bui
 
 ## Publish a nightly
 
-You do not need to do anything. The workflow runs every hour, at 17 minutes past. It publishes a nightly when both of these are true:
-
-- main has commits that the last nightly did not ship.
-- At least 6 hours have passed since the last nightly.
+You do not need to do anything. The workflow runs every hour, at 17 minutes past. It publishes a nightly when main has commits that the last nightly did not ship.
 
 A nightly version is `X.Y.Z-nightly.YYYYMMDD.N`. `X.Y.Z` is the latest Stable version with its patch number raised by one, or `0.1.1` before the first Stable. `YYYYMMDD` is the UTC date of the run, and `N` is the workflow run number. The tag is `v` plus the version, and the release is a GitHub prerelease.
 
@@ -30,7 +27,7 @@ To publish a nightly now, run the workflow by hand from main:
 gh workflow run release.yml --ref main -f channel=nightly
 ```
 
-A manual nightly skips the 6-hour and new-commit checks.
+A manual nightly skips the new-commit check.
 
 ## Cut a Stable release
 
