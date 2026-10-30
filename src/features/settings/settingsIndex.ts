@@ -24,7 +24,7 @@ export const SETTINGS_INDEX = [
       { id: "tablePageSize", label: "Table page size", group: "Results", keywords: "queries rows per page paging browse" },
       { id: "stopOnError", label: "Stop a script at the first error", group: "Scripts", keywords: "queries errors script abort fail skip" },
       { id: "appVersion", label: "Version", group: "Updates", keywords: "about version update check download install restart release" },
-      { id: "updateTrack", label: "Update track", group: "Updates", keywords: "update release channel track stable nightly downgrade switch" },
+      { id: "updateTrack", label: "Update track", group: "Updates", keywords: "about update release channel track stable nightly downgrade switch" },
     ],
   },
   {

@@ -539,7 +539,7 @@ pub struct TabContext { pub tab_id: TabId, pub title: String, pub db: Option<Dat
 
 #### Update types
 
-The sidebar's update button and **Settings** > **About** follow `AppEvent::UpdateChanged`, a whole `UpdateState` with a rising `rev`, as the other panels do.
+The sidebar's update button and **Settings** > **General** follow `AppEvent::UpdateChanged`, a whole `UpdateState` with a rising `rev`, as the other panels do.
 
 ```rust
 pub enum UpdateTrack { Stable, Nightly }               // saved in kv `updates`, never in Settings
@@ -1212,7 +1212,7 @@ Tracing a run from the button to the grid takes four files: `runActions.ts` → 
    - **Settings** > **Providers** with the real `claude` reads `v2.1.301 · Signed in · Claude Max`, a bad binary path reads Not found, and Reset restores it
    - the mockup question streams a reply. In Ask first, `run_query` waits for Run, the SQL card reads "Uses orders, customers", and Run in new tab, Insert at cursor, Replace tab with ⌘Z, a suggestion chip, and Stop each work. Auto runs a query without asking, and a `DELETE` is refused and comes back as an Open in new tab card
    - after a bridge restart, the chat reopens from history and a resumed turn answers from memory
-   - with `L1_DATA_UPDATE_SCENARIO` (AGENTS.md lists the scenarios): `available` checks, downloads with a progress ring, and confirms a restart that names a running query and an open transaction, then shows Restarting; `nightly-build` switched to Stable in **Settings** > **About** offers 0.1.0 as an older build; `offline` and `install-fails` show their failure text; `off` shows no button
+   - with `L1_DATA_UPDATE_SCENARIO` (AGENTS.md lists the scenarios): `available` checks, downloads with a progress ring, and confirms a restart that names a running query and an open transaction, then shows Restarting; `nightly-build` switched to Stable in **Settings** > **General** offers 0.1.0 as an older build; `offline` and `install-fails` show their failure text; `off` shows no button
    - with no signed-in CLI, `fake-claude` stands in. Build it with `cargo build -p engine --bin fake-claude`, then set **Binary path** to `target/debug/fake-claude` and **Launch arguments** to `--fake-scenario <name>`; the comment at the top of `crates/engine/src/bin/fake_claude.rs` lists every scenario, and `card`, `query`, `slow`, `wedged`, `crash`, and `resume-lost` are the ones to start with
 6. **Real shell.** `pnpm self-check` launches the debug binary with `L1_DATA_SELF_CHECK=1`: it boots `Engine` inside Tauri, connects to the dev DB, runs `SELECT 1` and loads the catalog, prints JSON, and exits 0. `pnpm screenshot` covers WKWebView rendering on macOS. It starts a throwaway Postgres, seeds a workspace and an assistant chat that `fake-claude` answers through the dev-bridge, launches the debug app on that data dir, and captures its window with `screencapture` into `docs/images/l1-data.png`. Driving the real webview with `@wdio/tauri-service` (embedded provider, verified to support macOS) is not built.
 7. **Real CLI.** `cargo test -p engine --features claude-smoke --test claude_smoke -- --nocapture` needs a signed-in `claude` and `pnpm db:up`. It spends three Haiku turns at low effort. It checks what `fake-claude` cannot: the CLI accepts the argv and the child env, a resumed session remembers the earlier turn, and a `can_use_tool` ask approved after 75 s still runs its query.

@@ -145,6 +145,7 @@ it.each([
   ["font", ["interfaceFont", "codeFont"]],
   ["row limit", ["maxRows"]],
   ["queries", ["maxRows", "tablePageSize", "stopOnError"]],
+  ["about", ["appVersion", "updateTrack"]],
   ["results", ["maxRows", "tablePageSize", "codeFont"]],
   ["typography", ["interfaceFont", "codeFont"]],
   ["dark", ["colorScheme"]],
