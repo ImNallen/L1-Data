@@ -47,7 +47,7 @@ it("preserves the workspace nodes and directs search focus to settings without r
   expect(screen.getByTestId("conn-tree")).toBe(tree);
   expect(document.activeElement).toBe(screen.getByTestId("settings-search"));
 
-  await user.click(screen.getByTestId("settings-section-queries"));
+  await user.click(screen.getByTestId("settings-section-appearance"));
   act(() => useWorkspace.getState().focusSearch());
   expect(document.activeElement).toBe(screen.getByTestId("settings-search"));
   expect(useWorkspace.getState().searchFocus).toBeNull();
@@ -73,11 +73,11 @@ it("clears search on the first Escape, closes on the next, and returns to the sh
   render(<Dialogs />);
   const opener = screen.getByTestId("opener");
   opener.focus();
-  act(() => useWorkspace.getState().openSettings("queries"));
+  act(() => useWorkspace.getState().openSettings("general"));
   await user.type(screen.getByTestId("settings-search"), "row");
   await user.keyboard("{Escape}");
   expect(screen.getByTestId("settings-search")).toHaveProperty("value", "");
-  expect(screen.getByTestId("settings-breadcrumb").textContent).toBe("Settings/Queries");
+  expect(screen.getByTestId("settings-breadcrumb").textContent).toBe("Settings/General");
   await user.keyboard("{Escape}");
   expect(screen.queryByTestId("settings-dialog")).toBeNull();
   await waitFor(() => expect(document.activeElement).toBe(opener));
@@ -140,7 +140,7 @@ it("closes theme creation before clearing settings search or closing settings", 
 it("cancels a field draft before clearing settings search", async () => {
   const user = userEvent.setup();
   render(<Dialogs />);
-  act(() => useWorkspace.getState().openSettings("queries"));
+  act(() => useWorkspace.getState().openSettings("general"));
   await user.type(screen.getByTestId("settings-search"), "row");
   const input = screen.getByTestId("setting-maxRows");
   await user.clear(input);
@@ -159,7 +159,7 @@ it("hands focus to installation and restores settings after installation ends", 
       <InstallingOverlay />
     </>,
   );
-  act(() => useWorkspace.getState().openSettings("about"));
+  act(() => useWorkspace.getState().openSettings("general"));
   const search = screen.getByTestId("settings-search");
   act(() =>
     useLive.setState({

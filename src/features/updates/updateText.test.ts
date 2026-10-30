@@ -118,7 +118,7 @@ describe("the update's change list", () => {
   });
 });
 
-describe("Settings > About", () => {
+describe("Settings > General", () => {
   it("says where the update is and names the same step as the sidebar button", () => {
     expect(EVERY.map((s) => [aboutStatusText(state(s), NOW), actionLabel(s)])).toEqual([
       ["Development builds don't update themselves.", "Check for updates"],

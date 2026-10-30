@@ -1,4 +1,4 @@
-import { InfoIcon, PaletteIcon, SettingsIcon, SparklesIcon, SquareCodeIcon, type LucideIcon } from "lucide-react";
+import { PaletteIcon, SettingsIcon, SparklesIcon, type LucideIcon } from "lucide-react";
 import type { ComponentType } from "react";
 import { useWorkspace } from "../../state/workspace";
 import { AppVersionSetting, UpdateTrackSetting } from "./AboutSection";
@@ -13,9 +13,7 @@ import { sectionLabel, sectionSettings, settingRuns, type SettingEntry, type Set
 export const SECTION_ICONS = {
   general: SettingsIcon,
   appearance: PaletteIcon,
-  queries: SquareCodeIcon,
   providers: SparklesIcon,
-  about: InfoIcon,
 } satisfies Record<SettingsSectionId, LucideIcon>;
 
 const SETTING_VIEWS = {
