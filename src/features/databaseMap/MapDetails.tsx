@@ -94,6 +94,30 @@ function QueryDetail({ query, map }: { query: MapQuery; map: Exploring }) {
   );
 }
 
+// One short sentence for screen readers. The panel itself is not live, because a whole
+// details panel read on every selection or analysis change is far too much to hear.
+function mapStatus(map: Exploring, errors: number): string {
+  const selection = map.selection;
+  const parts: string[] = [];
+  if (map.limit) parts.push("Map limit reached.");
+  if (errors) parts.push(`${errors} table${errors === 1 ? "" : "s"} failed to load.`);
+  if (selection.kind === "node") {
+    const r = map.graph.nodes.get(selection.oid)?.relation;
+    if (r) parts.push(`Selected ${r.schema}.${r.name}.`);
+  } else if (selection.kind === "foreignKey") {
+    const edge = map.graph.edges.get(selection.id);
+    if (edge) parts.push(`Selected foreign key ${edge.name}.`);
+  }
+  const analysis = map.analysis;
+  if (analysis.kind === "loading") parts.push("Analyzing cursor statement.");
+  else if (analysis.kind === "error") parts.push(analysis.message);
+  else if (analysis.kind === "ready") {
+    const joins = analysis.query.joins.length;
+    parts.push(`Statement analyzed: ${analysis.query.occurrences.length} table sources, ${joins} join condition${joins === 1 ? "" : "s"}.`);
+  }
+  return parts.join(" ");
+}
+
 export function MapDetails({ map }: { map: Exploring }) {
   const selection = map.selection;
   const edge = selection.kind === "foreignKey" ? map.graph.edges.get(selection.id) : undefined;
@@ -104,8 +128,10 @@ export function MapDetails({ map }: { map: Exploring }) {
     <div
       data-testid="map-details"
       className="max-h-[36%] shrink-0 space-y-2 overflow-y-auto border-t border-border bg-sidebar px-4 py-3 text-ui-11.5 text-muted"
-      aria-live="polite"
     >
+      <p role="status" data-testid="map-status" className="sr-only">
+        {mapStatus(map, errors.length)}
+      </p>
       {map.limit && (
         <p data-testid="map-limit" className="text-amber">
           Map limit reached ({NODE_LIMIT} tables / {EDGE_LIMIT} relationships). This page was not added. Focus a selected table or reset exploration to

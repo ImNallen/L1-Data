@@ -44,3 +44,20 @@ export function treeKey(key: string, items: readonly TreeItem[], at: number): Tr
   if (!item) return null;
   return RULES.get(key)?.(items, at, item) ?? null;
 }
+
+/**
+ * The row type-ahead lands on: the next one, wrapping, whose name starts with `typed`. One letter, or the same letter
+ * typed again, starts past the current row and so cycles through the rows it opens; longer text keeps the current row
+ * while it still matches.
+ */
+export function typeAhead(names: readonly string[], at: number, typed: string): number | null {
+  const lower = typed.toLocaleLowerCase();
+  const repeated = [...lower].every((c) => c === lower[0]);
+  const prefix = repeated ? lower.slice(0, 1) : lower;
+  const from = repeated ? at + 1 : at;
+  for (let step = 0; step < names.length; step++) {
+    const i = (from + step) % names.length;
+    if (names[i]?.toLocaleLowerCase().startsWith(prefix)) return i;
+  }
+  return null;
+}

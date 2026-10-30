@@ -1,5 +1,5 @@
 import { FocusIcon, MaximizeIcon, MinusIcon, PlusIcon } from "lucide-react";
-import { useEffect, useRef, type KeyboardEvent, type PointerEvent } from "react";
+import { memo, useCallback, useEffect, useRef, type KeyboardEvent, type PointerEvent, type ReactNode } from "react";
 import { IconButton, Spinner, cx } from "../../ui/primitives";
 import {
   displayedQueryJoins,
@@ -10,7 +10,9 @@ import {
   queryJoinEndpoints,
   selectMap,
   setMapViewport,
+  useDatabaseMap,
   type Exploring,
+  type Selection,
 } from "./controller";
 import { CARD_HEIGHT, CARD_WIDTH, fitViewport, initialViewport, zoomViewport, type MapNode, type Point, type Viewport } from "./graph";
 
@@ -38,7 +40,9 @@ function route(source: Point, target: Point, offset: number, self: boolean): { p
   return { path: `M ${x1} ${y1} C ${x1 + bend} ${y1}, ${x2 - bend} ${y2}, ${x2} ${y2}`, label: { x: (x1 + x2) / 2, y: (y1 + y2) / 2 - 7 } };
 }
 
-function Edge({
+// Edges and cards are memoised on plain props: positions keep their identity until that
+// node moves, so dragging one card re-renders it and its own edges, not the whole map.
+const Edge = memo(function Edge({
   source,
   target,
   offset,
@@ -48,7 +52,7 @@ function Edge({
   selected,
   query,
   testId,
-  onSelect,
+  id,
 }: {
   source: Point;
   target: Point;
@@ -59,9 +63,10 @@ function Edge({
   selected: boolean;
   query?: boolean;
   testId: string;
-  onSelect: () => void;
+  id: number;
 }) {
   const { path, label: at } = route(source, target, offset, self);
+  const onSelect = () => selectMap(query ? { kind: "join", index: id } : { kind: "foreignKey", id });
   return (
     <g
       role="button"
@@ -100,7 +105,7 @@ function Edge({
       </text>
     </g>
   );
-}
+});
 
 function nodePageLabel(node: MapNode): string {
   switch (node.page.kind) {
@@ -117,12 +122,25 @@ function nodePageLabel(node: MapNode): string {
   }
 }
 
-function TableCard({ node, map, beginDrag }: { node: MapNode; map: Exploring; beginDrag: (event: PointerEvent<HTMLButtonElement>, oid: number) => void }) {
+const TableCard = memo(function TableCard({
+  node,
+  selected,
+  root,
+  references,
+  tentative,
+  limit,
+  beginDrag,
+}: {
+  node: MapNode;
+  selected: boolean;
+  root: boolean;
+  references: number;
+  tentative: boolean;
+  limit: boolean;
+  beginDrag: (event: PointerEvent<HTMLButtonElement>, oid: number) => void;
+}) {
   const { relation, position } = node;
-  const selected = map.selection.kind === "node" && map.selection.oid === relation.oid;
-  const occurrences = map.analysis.kind === "ready" ? map.analysis.query.occurrences.filter((o) => occurrenceOid(o) === relation.oid) : [];
-  const tentative = occurrences.some((o) => o.resolution.kind === "Tentative");
-  const matched = occurrences.length > 0;
+  const matched = references > 0;
   return (
     <article
       data-testid={`map-node-${relation.oid}`}
@@ -141,7 +159,7 @@ function TableCard({ node, map, beginDrag }: { node: MapNode; map: Exploring; be
         aria-label={`Select ${relation.schema}.${relation.name}; arrow keys move table`}
         aria-pressed={selected}
         data-testid={`map-select-${relation.oid}`}
-        className="flex cursor-grab flex-col gap-1 border-b border-border px-3 py-2.5 text-left outline-none focus-visible:bg-selected active:cursor-grabbing"
+        className="flex cursor-grab flex-col gap-1 border-b border-border px-3 py-2.5 text-left focus-visible:bg-selected focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-focus active:cursor-grabbing"
         onPointerDown={(e) => beginDrag(e, relation.oid)}
         onClick={() => selectMap({ kind: "node", oid: relation.oid })}
         onKeyDown={(e) => {
@@ -160,7 +178,7 @@ function TableCard({ node, map, beginDrag }: { node: MapNode; map: Exploring; be
       >
         <span className="flex w-full items-center justify-between text-ui-10.5 text-dim">
           <span className="truncate">{relation.schema}</span>
-          <span>{relation.oid === map.root ? "FOCUS" : "TABLE"}</span>
+          <span>{root ? "FOCUS" : "TABLE"}</span>
         </span>
         <span className="w-full truncate font-mono text-ui-13 font-medium text-fg" title={relation.name}>
           {relation.name}
@@ -179,13 +197,13 @@ function TableCard({ node, map, beginDrag }: { node: MapNode; map: Exploring; be
       </div>
       <div className="flex items-center justify-between gap-1 border-t border-border px-2 py-1">
         <span className={cx("truncate px-1 text-ui-10.5", tentative ? "text-amber" : "text-dim")}>
-          {tentative ? "Name match" : matched ? `${occurrences.length} SQL reference${occurrences.length === 1 ? "" : "s"}` : "Declared metadata"}
+          {tentative ? "Name match" : matched ? `${references} SQL reference${references === 1 ? "" : "s"}` : "Declared metadata"}
         </span>
         <button
           type="button"
           data-testid={`map-expand-${relation.oid}`}
           className="shrink-0 rounded px-1.5 py-1 text-ui-10.5 text-fg hover:bg-hover disabled:text-dim"
-          disabled={node.page.kind === "complete" || node.page.kind === "loading" || map.limit}
+          disabled={node.page.kind === "complete" || node.page.kind === "loading" || limit}
           onClick={() => expandMapNode(relation.oid)}
         >
           {nodePageLabel(node)}
@@ -193,6 +211,30 @@ function TableCard({ node, map, beginDrag }: { node: MapNode; map: Exploring; be
       </div>
     </article>
   );
+});
+
+function MapTransform({ children }: { children: ReactNode }) {
+  const { x, y, scale } = useDatabaseMap((s) => s.viewport);
+  return (
+    <div className="absolute origin-top-left" style={{ transform: `translate(${x}px, ${y}px) scale(${scale})` }}>
+      {children}
+    </div>
+  );
+}
+
+function ZoomReadout() {
+  const scale = useDatabaseMap((s) => s.viewport.scale);
+  return <span className="w-10 text-center text-ui-11 text-muted tabular-nums">{scale < 0.01 ? (scale * 100).toFixed(1) : Math.round(scale * 100)}%</span>;
+}
+
+function viewportNow(): Viewport {
+  return useDatabaseMap.getState().viewport;
+}
+
+function selectedOf(selection: Selection, kind: "foreignKey" | "join", value: number): boolean {
+  return selection.kind === "foreignKey"
+    ? kind === "foreignKey" && selection.id === value
+    : selection.kind === "join" && kind === "join" && selection.index === value;
 }
 
 type Drag = { kind: "pan"; start: Point; viewport: Viewport } | { kind: "node"; start: Point; position: Point; oid: number; scale: number };
@@ -214,17 +256,25 @@ export function MapCanvas({ map }: { map: Exploring }) {
   });
   const zoom = (factor: number) => {
     const box = canvas.current?.getBoundingClientRect();
-    if (box) setMapViewport(zoomViewport(map.viewport, factor, { x: box.width / 2, y: box.height / 2 }));
+    if (box) setMapViewport(zoomViewport(viewportNow(), factor, { x: box.width / 2, y: box.height / 2 }));
   };
-  const beginDrag = (event: PointerEvent<HTMLButtonElement>, oid: number) => {
+  const beginDrag = useCallback((event: PointerEvent<HTMLButtonElement>, oid: number) => {
     if (event.button !== 0) return;
-    const node = map.graph.nodes.get(oid);
+    const held = useDatabaseMap.getState().map;
+    const node = held.kind === "exploring" ? held.graph.nodes.get(oid) : undefined;
     if (!node) return;
     event.stopPropagation();
     event.currentTarget.setPointerCapture(event.pointerId);
-    drag.current = { kind: "node", oid, start: { x: event.clientX, y: event.clientY }, position: node.position, scale: map.viewport.scale };
-  };
+    drag.current = { kind: "node", oid, start: { x: event.clientX, y: event.clientY }, position: node.position, scale: viewportNow().scale };
+  }, []);
   const query = map.analysis.kind === "ready" ? map.analysis.query : null;
+  const references = new Map<number, { count: number; tentative: boolean }>();
+  for (const o of query?.occurrences ?? []) {
+    const oid = occurrenceOid(o);
+    if (oid === null) continue;
+    const seen = references.get(oid) ?? { count: 0, tentative: false };
+    references.set(oid, { count: seen.count + 1, tentative: seen.tentative || o.resolution.kind === "Tentative" });
+  }
   const parallel = new Map<string, number>();
   const offset = (a: number, b: number) => {
     const key = `${Math.min(a, b)}/${Math.max(a, b)}`;
@@ -244,7 +294,7 @@ export function MapCanvas({ map }: { map: Exploring }) {
         onPointerDown={(event) => {
           if (event.button !== 0 || (event.target instanceof Element && event.target.closest("[data-map-control]"))) return;
           event.currentTarget.setPointerCapture(event.pointerId);
-          drag.current = { kind: "pan", start: { x: event.clientX, y: event.clientY }, viewport: map.viewport };
+          drag.current = { kind: "pan", start: { x: event.clientX, y: event.clientY }, viewport: viewportNow() };
         }}
         onPointerMove={(event) => {
           const held = drag.current;
@@ -263,7 +313,7 @@ export function MapCanvas({ map }: { map: Exploring }) {
         onWheel={(event) => {
           if (event.target instanceof Element && event.target.closest("article")) return;
           const box = event.currentTarget.getBoundingClientRect();
-          setMapViewport(zoomViewport(map.viewport, event.deltaY > 0 ? 0.92 : 1.08, { x: event.clientX - box.left, y: event.clientY - box.top }));
+          setMapViewport(zoomViewport(viewportNow(), event.deltaY > 0 ? 0.92 : 1.08, { x: event.clientX - box.left, y: event.clientY - box.top }));
         }}
         onKeyDown={(event) => {
           if (event.target !== event.currentTarget) return;
@@ -284,11 +334,12 @@ export function MapCanvas({ map }: { map: Exploring }) {
           const d = delta[event.key];
           if (d) {
             event.preventDefault();
-            setMapViewport({ ...map.viewport, x: map.viewport.x + d.x, y: map.viewport.y + d.y });
+            const view = viewportNow();
+            setMapViewport({ ...view, x: view.x + d.x, y: view.y + d.y });
           }
         }}
       >
-        <div className="absolute origin-top-left" style={{ transform: `translate(${map.viewport.x}px, ${map.viewport.y}px) scale(${map.viewport.scale})` }}>
+        <MapTransform>
           <svg width="1" height="1" className="absolute overflow-visible" aria-label="Relationships">
             <defs>
               <marker id="map-fk-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
@@ -311,8 +362,8 @@ export function MapCanvas({ map }: { map: Exploring }) {
                   label={edge.name}
                   caption={edge.columns.length === 1 ? `${edge.columns[0]?.source} → ${edge.columns[0]?.target}` : `${edge.columns.length} columns`}
                   testId={`map-fk-${edge.id}`}
-                  selected={map.selection.kind === "foreignKey" && map.selection.id === edge.id}
-                  onSelect={() => selectMap({ kind: "foreignKey", id: edge.id })}
+                  selected={selectedOf(map.selection, "foreignKey", edge.id)}
+                  id={edge.id}
                 />
               ) : null;
             })}
@@ -330,24 +381,34 @@ export function MapCanvas({ map }: { map: Exploring }) {
                   query
                   label={`${join.columns.source} = ${join.columns.target}`}
                   testId={`map-join-${index}`}
-                  selected={map.selection.kind === "join" && map.selection.index === index}
-                  onSelect={() => selectMap({ kind: "join", index })}
+                  selected={selectedOf(map.selection, "join", index)}
+                  id={index}
                 />
               ) : null;
             })}
           </svg>
-          {[...map.graph.nodes.values()].map((node) => (
-            <TableCard key={node.relation.oid} node={node} map={map} beginDrag={beginDrag} />
-          ))}
-        </div>
+          {[...map.graph.nodes.values()].map((node) => {
+            const refs = references.get(node.relation.oid);
+            return (
+              <TableCard
+                key={node.relation.oid}
+                node={node}
+                selected={map.selection.kind === "node" && map.selection.oid === node.relation.oid}
+                root={node.relation.oid === map.root}
+                references={refs?.count ?? 0}
+                tentative={refs?.tentative ?? false}
+                limit={map.limit}
+                beginDrag={beginDrag}
+              />
+            );
+          })}
+        </MapTransform>
       </div>
       <div className="absolute right-3 bottom-3 flex items-center gap-1 rounded-lg border border-control bg-raised p-1 shadow-[var(--shadow-float)]">
         <IconButton data-testid="map-zoom-out" title="Zoom out" aria-label="Zoom out" onClick={() => zoom(1 / 1.2)}>
           <MinusIcon size={14} />
         </IconButton>
-        <span className="w-10 text-center text-ui-11 text-muted tabular-nums">
-          {map.viewport.scale < 0.01 ? (map.viewport.scale * 100).toFixed(1) : Math.round(map.viewport.scale * 100)}%
-        </span>
+        <ZoomReadout />
         <IconButton data-testid="map-zoom-in" title="Zoom in" aria-label="Zoom in" onClick={() => zoom(1.2)}>
           <PlusIcon size={14} />
         </IconButton>

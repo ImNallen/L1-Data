@@ -1,11 +1,10 @@
 import { undo } from "@codemirror/commands";
-import { Children, isValidElement, type ComponentProps, type ReactElement, type ReactNode } from "react";
 import { afterEach, beforeEach, expect, it } from "vitest";
 import type { DatabaseRef, FunctionInfo, SchemaInfo } from "../../ipc/bindings";
 import { useWorkspace, type Tab } from "../../state/workspace";
 import { connectionConfig } from "../../testing/connections";
 import { dropEditor, editorStateOf, insertAtCursor, moveCursor, seedEditor, textOf } from "../editor/editorStates";
-import { FilteredSchemaNode, FunctionRow, SchemaNode } from "./ConnectionTree";
+import { filteredSchemaNodes, insertRoutine, schemaNodes } from "./ConnectionTree";
 
 const postgres = { connectionId: "pg", database: "shop" };
 const sqlServer = { connectionId: "mssql", database: "shop" };
@@ -37,17 +36,8 @@ afterEach(() => {
   useWorkspace.setState(useWorkspace.getInitialState(), true);
 });
 
-function routineRow(db: DatabaseRef, fn: FunctionInfo) {
-  const row: ReactElement<{ onDoubleClick: () => void }> = FunctionRow({ path: "connection/shop/schema/#functions", depth: 4, db, fn });
-  return row;
-}
-
-function routineRows(node: ReactNode): ReactElement<ComponentProps<typeof FunctionRow>>[] {
-  return Children.toArray(node).flatMap((child) => {
-    if (isValidElement<ComponentProps<typeof FunctionRow>>(child) && child.type === FunctionRow) return [child];
-    return isValidElement<{ children?: ReactNode }>(child) ? routineRows(child.props.children) : [];
-  });
-}
+/** The routine's row as the tree builds it under a schema's Functions group. */
+const routineRow = (db: DatabaseRef, fn: FunctionInfo) => ({ onDoubleClick: () => insertRoutine(db, fn) });
 
 function target(db: DatabaseRef | null) {
   const tab: Tab = { id: "active", title: "Query", console: { db, mode: "AutoCommit" }, table: null, file: null };
@@ -93,7 +83,7 @@ it.each([
     moveCursor("active", prefix.length);
     seedEditor("other", "SELECT 99");
 
-    routineRow(db, { ...pgFunction, kind, insertText }).props.onDoubleClick();
+    routineRow(db, { ...pgFunction, kind, insertText }).onDoubleClick();
 
     expect(textOf("active")).toBe(`${prefix}${insertText}; -- retain suffix`);
     expect(editorStateOf("active").selection.main.head).toBe(prefix.length + insertText.length);
@@ -111,7 +101,7 @@ it.each([
   useWorkspace.getState().upsertConfig({ ...config, id: destination.connectionId });
   prepareEdits(destination);
 
-  routineRow(source, fn).props.onDoubleClick();
+  routineRow(source, fn).onDoubleClick();
 
   expect(textOf("active")).toBe(`${fn.insertText}SELECT 42; -- retain suffix`);
   expect(editorStateOf("active").selection.main.head).toBe(fn.insertText.length);
@@ -121,7 +111,7 @@ it.each([
 
 it.each(crossKindCases)("refuses a $label routine in a different-kind active tab", ({ source, destination, fn, label }) => {
   prepareEdits(destination);
-  expectRefused(() => routineRow(source, fn).props.onDoubleClick());
+  expectRefused(() => routineRow(source, fn).onDoubleClick());
   expect(useWorkspace.getState().toast?.text).toContain(label);
 });
 
@@ -133,19 +123,19 @@ it.each([
 ])("refuses insertion with $name", ({ db, active }) => {
   prepareEdits(db);
   useWorkspace.setState({ active });
-  expectRefused(() => routineRow(postgres, pgFunction).props.onDoubleClick());
+  expectRefused(() => routineRow(postgres, pgFunction).onDoubleClick());
 });
 
 it.each([postgres, sqlServer])("refuses a routine whose source connection was removed for $connectionId", (db) => {
   prepareEdits(db);
-  expectRefused(() => routineRow({ connectionId: "removed", database: "shop" }, pgFunction).props.onDoubleClick());
+  expectRefused(() => routineRow({ connectionId: "removed", database: "shop" }, pgFunction).onDoubleClick());
 });
 
 it("checks the destination when double-clicked after its target changes", () => {
   prepareEdits(sqlServer);
   const row = routineRow(sqlServer, msProcedure);
   useWorkspace.getState().patchConsole("active", { db: postgres });
-  expectRefused(row.props.onDoubleClick);
+  expectRefused(row.onDoubleClick);
 });
 
 it.each(
@@ -167,23 +157,22 @@ it.each(
     types: [],
     synonyms: [],
   };
-  const node =
+  const nodes =
     tree === "normal"
-      ? SchemaNode({ path: "unrelated/display/path", depth: 2, db: source, schema, version: 1, expanded })
-      : FilteredSchemaNode({
-          path: "unrelated/display/path",
-          db: source,
-          match: { name: schema.name, relations: [], functions: [{ fn, ranges: [] }], sequences: [], types: [], synonyms: [] },
+      ? schemaNodes("unrelated/display/path", 2, source, schema, 1, expanded)
+      : filteredSchemaNodes(
+          "unrelated/display/path",
+          source,
+          { name: schema.name, relations: [], functions: [{ fn, ranges: [] }], sequences: [], types: [], synonyms: [] },
           expanded,
-        });
-  const rows = routineRows(node);
+        );
+  const rows = nodes.filter((n) => n.key === `unrelated/display/path/schema/#functions/${fn.name}`);
   expect(rows).toHaveLength(1);
   for (const row of rows) {
-    expect(row.props.db).toEqual(source);
-    const rendered: ReactElement<{ onDoubleClick: () => void }> = FunctionRow(row.props);
-    expectRefused(rendered.props.onDoubleClick);
+    if (row.kind !== "row" || !row.onDoubleClick) throw new Error("the routine's row has no double-click action");
+    expectRefused(row.onDoubleClick);
     useWorkspace.getState().patchConsole("active", { db: { ...source, database: "reporting" } });
-    rendered.props.onDoubleClick();
+    row.onDoubleClick();
     expect(textOf("active")).toBe(`${fn.insertText}SELECT 42; -- retain suffix`);
     expect(editorStateOf("active").selection.main.head).toBe(fn.insertText.length);
     expect(textOf("other")).toBe("SELECT 99");

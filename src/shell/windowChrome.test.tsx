@@ -1,9 +1,10 @@
 import { renderToStaticMarkup } from "react-dom/server";
-import { afterEach, expect, it, vi } from "vitest";
+import { afterEach, beforeAll, expect, it, vi } from "vitest";
 import { Sidebar } from "../features/sidebar/Sidebar";
 import type { ConnectionConfig, TxnMode } from "../ipc/bindings";
 import { EMPTY_QUERY, useWorkspace, type Tab } from "../state/workspace";
 import { AppLayout } from "./AppLayout";
+import { preloadSurfaces } from "./lazySurfaces";
 import { RightPanel } from "./RightPanel";
 import { ResizeEdges, WindowControlButtons } from "./WindowChrome";
 import { TopBar } from "./TopBar";
@@ -30,6 +31,8 @@ function inTauri(userAgent: string) {
 }
 
 const { layout: initialLayout, tabs: initialTabs, active: initialActive, configs: initialConfigs } = useWorkspace.getInitialState();
+
+beforeAll(preloadSurfaces);
 
 afterEach(() => {
   vi.unstubAllGlobals();
@@ -135,7 +138,7 @@ it("moves the right-panel toggle into the open panel's header in place of a clos
 it("heads the right panel with Assistant, new chat, and chat history before the panel toggles, over the chat composer", () => {
   withLayout({ rightPanel: "Assistant" });
   const panel = renderToStaticMarkup(<RightPanel hosted={null} />);
-  expect(panel).toContain(">Assistant</span>");
+  expect(panel).toMatch(/<aside[^>]*aria-labelledby="right-panel-title".*<h2 id="right-panel-title"[^>]*>Assistant<\/h2>/);
   const order = ['data-testid="assistant-new"', 'data-testid="assistant-history"', RESULTS, TOGGLE, 'data-testid="assistant-panel"'].map((id) =>
     panel.indexOf(id),
   );
