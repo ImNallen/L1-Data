@@ -3,7 +3,7 @@ import { afterEach, expect, it, vi } from "vitest";
 import { dropEditor, seedEditor } from "../features/editor/editorStates";
 import { setCell, useTableEdits } from "../state/tableEdits";
 import { ask, EMPTY_QUERY, useWorkspace } from "../state/workspace";
-import { commandForKey, handleGlobalKey } from "./commands";
+import { COMMANDS, START_COMMANDS, commandForKey, handleGlobalKey, openCommandPalette } from "./commands";
 
 type Mods = Partial<Record<"metaKey" | "ctrlKey" | "shiftKey" | "altKey", boolean>>;
 const chord = (key: string, mods: Mods) => ({ key, metaKey: false, ctrlKey: false, shiftKey: false, altKey: false, ...mods });
@@ -228,4 +228,29 @@ it("opens a section with a blank search when its nav entry is picked from the re
 it("keeps a settings search out of the workspace screen", () => {
   useWorkspace.getState().setSettingsQuery("row");
   expect([useWorkspace.getState().screen, useWorkspace.getState().treeQuery]).toEqual([{ kind: "workspace" }, ""]);
+});
+
+it("shares the command registry with Cmd and Ctrl Shift+P while keeping plain P unchanged", () => {
+  expect(press("P", { metaKey: true, shiftKey: true })).toBe(COMMANDS.find((c) => c.id === "commands"));
+  expect(pressOff("P", { ctrlKey: true, shiftKey: true })?.id).toBe("commands");
+  expect(press("p")?.id).toBe("navigation");
+  expect(pressOff("p", { ctrlKey: true })?.id).toBe("navigation");
+  expect(new Set(COMMANDS.map((c) => c.id)).size).toBe(COMMANDS.length);
+  expect(COMMANDS.filter((c) => c.palette !== false)).toHaveLength(10);
+  expect(START_COMMANDS.map((c) => c.id)).toEqual(["new-query", "open-file", "new-connection", "navigation", "saved-queries", "settings"]);
+  expect(START_COMMANDS.every((c) => COMMANDS.includes(c))).toBe(true);
+});
+
+it("preserves a pending approval and every unrelated overlay on the command-panel shortcut", async () => {
+  const answer = ask({ title: "Approve writes?", body: "", choices: [{ id: "run", label: "Run", variant: "danger" }] });
+  const approval = useWorkspace.getState().overlay;
+  press("p", { metaKey: true, shiftKey: true })?.run();
+  expect(useWorkspace.getState().overlay).toBe(approval);
+  useWorkspace.getState().answer("run");
+  expect(await answer).toBe("run");
+  for (const overlay of [{ kind: "history" }, { kind: "connection", editing: null }] as const) {
+    useWorkspace.getState().open(overlay);
+    openCommandPalette();
+    expect(useWorkspace.getState().overlay).toBe(overlay);
+  }
 });
