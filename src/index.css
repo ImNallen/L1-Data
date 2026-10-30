@@ -264,3 +264,17 @@ textarea,
   stroke: var(--color-focus);
   stroke-width: 3;
 }
+
+.run-environment[data-environment="Production"] {
+  --color-run: #d03539;
+  --color-run-hover: #b52d31;
+  --color-run-fg: #ffffff;
+  --color-run-icon: #ffffff;
+}
+
+.run-environment[data-environment="Staging"] {
+  --color-run: #ffb900;
+  --color-run-hover: #ffd05a;
+  --color-run-fg: #211800;
+  --color-run-icon: #211800;
+}

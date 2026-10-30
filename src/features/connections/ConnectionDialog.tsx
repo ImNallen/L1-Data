@@ -60,7 +60,7 @@ const SSL_MODES: { value: SslMode; label: string; hint: string }[] = [
 
 const ENVIRONMENTS: { value: Environment | null; label: string }[] = [
   { value: null, label: "Not set" },
-  { value: "Local", label: "Local" },
+  { value: "Local", label: "Develop" },
   { value: "Staging", label: "Staging" },
   { value: "Production", label: "Production" },
 ];
@@ -534,7 +534,7 @@ function ConnectionForm({
         <FormRow
           label="Environment"
           htmlFor={`${ids}-environment`}
-          hint="Staging and Production show beside the connection in the top bar. On Production, a run that writes asks first."
+          hint="Staging uses a yellow Run button; Production uses red. On Production, a run that writes asks first."
         >
           <div className="relative">
             <select
