@@ -15,6 +15,7 @@ import { InstallingOverlay } from "../features/updates/InstallingOverlay";
 import { isTableTab, useWorkspace } from "../state/workspace";
 import { Kbd } from "../ui/primitives";
 import { START_COMMANDS, handleGlobalKey, shortcutLabel } from "./commands";
+import { CommandPalette } from "./CommandPalette";
 import { Overlays } from "./Overlays";
 import { PixelColumn } from "./PixelColumn";
 import { ResizeHandle } from "./ResizeHandle";
@@ -139,6 +140,7 @@ export function AppLayout() {
       </PixelColumn>
       <SettingsDialog />
       <NavigationPalette />
+      <CommandPalette />
       <HistoryPalette />
       <SavedPalette />
       <ConnectionDialog />

@@ -1,13 +1,22 @@
 import { closeTab } from "../features/editor/closeTab";
 import { openFiles, saveTab, type SaveMode } from "../features/editor/fileActions";
-import { openSqlTab, submitEdits } from "../features/editor/runActions";
+import { isBrowsing, openSqlTab, submitEdits } from "../features/editor/runActions";
 import { saveActiveQuery } from "../features/saved/savedActions";
 import { openNavigation } from "../features/navigation/navigationActions";
 import { pendingCount, useTableEdits } from "../state/tableEdits";
 import { useWorkspace, type Overlay } from "../state/workspace";
 import { isMac } from "./hostedWindow";
 
-export type Command = { id: string; label: string; key: string; shift?: boolean; run: () => void };
+export type Command = {
+  id: string;
+  label: string;
+  key: string;
+  shift?: boolean;
+  available?: () => boolean;
+  labelForContext?: () => string;
+  palette?: false;
+  run: () => void;
+};
 
 const MAC = typeof navigator !== "undefined" && isMac(navigator.userAgent);
 
@@ -19,6 +28,17 @@ const inWorkspace = (run: () => void) => () => {
 };
 
 const open = (overlay: Overlay) => inWorkspace(() => ws().open(overlay));
+
+export function openCommandPalette(): void {
+  const workspace = ws();
+  if (workspace.overlay.kind === "commands") document.querySelector<HTMLInputElement>('[data-testid="command-input"]')?.focus();
+  else if (workspace.overlay.kind === "none") workspace.open({ kind: "commands" });
+}
+
+const hasWorkspaceTab = () => {
+  const { screen, active, tabs } = ws();
+  return screen.kind === "workspace" && active !== null && tabs[active] !== undefined;
+};
 
 function toggleSaved() {
   const wasOpen = ws().overlay.kind === "saved";
@@ -32,13 +52,21 @@ export const START_COMMANDS: Command[] = [
   { id: "new-connection", label: "New connection", key: "n", run: open({ kind: "connection", editing: null }) },
   { id: "navigation", label: "Quick navigation", key: "p", run: openNavigation },
   { id: "saved-queries", label: "Saved queries", key: "e", run: toggleSaved },
-  { id: "settings", label: "Settings", key: ",", run: () => (ws().screen.kind === "settings" ? ws().closeSettings() : ws().openSettings()) },
+  {
+    id: "settings",
+    label: "Settings",
+    labelForContext: () => (ws().screen.kind === "settings" ? "Close Settings" : "Settings"),
+    key: ",",
+    run: () => (ws().screen.kind === "settings" ? ws().closeSettings() : ws().openSettings()),
+  },
 ];
 
 const CLOSE_TAB: Command = {
   id: "close-tab",
   label: "Close tab",
   key: "w",
+  labelForContext: () => (ws().screen.kind === "settings" ? "Close Settings" : "Close tab"),
+  available: () => ws().screen.kind === "settings" || hasWorkspaceTab(),
   run: () => {
     const { screen, active, closeSettings } = ws();
     if (screen.kind === "settings") closeSettings();
@@ -66,19 +94,40 @@ const saveActive = (mode: SaveMode) => () => {
   else void saveTab(active, mode);
 };
 
-const SAVE: Command = { id: "save", label: "Save", key: "s", run: saveActive("save") };
-const SAVE_AS: Command = { id: "save-as", label: "Save as…", key: "s", shift: true, run: saveActive("saveAs") };
+const SAVE: Command = { id: "save", label: "Save", key: "s", available: hasWorkspaceTab, run: saveActive("save") };
+const SAVE_AS: Command = { id: "save-as", label: "Save as…", key: "s", shift: true, available: hasWorkspaceTab, run: saveActive("saveAs") };
 
-const SAVE_QUERY: Command = { id: "save-query", label: "Save query", key: "e", shift: true, run: () => void saveActiveQuery() };
+const SAVE_QUERY: Command = {
+  id: "save-query",
+  label: "Save query",
+  key: "e",
+  shift: true,
+  available: () => {
+    const { active, tabs } = ws();
+    const tab = active ? tabs[active] : undefined;
+    return hasWorkspaceTab() && tab !== undefined && !isBrowsing(tab);
+  },
+  run: () => void saveActiveQuery(),
+};
 
-const KEYMAP = [...START_COMMANDS, CLOSE_TAB, SAVE, SAVE_AS, SAVE_QUERY];
+export const COMMANDS: Command[] = [
+  ...START_COMMANDS,
+  CLOSE_TAB,
+  SAVE,
+  SAVE_AS,
+  SAVE_QUERY,
+  { id: "commands", label: "Command panel", key: "p", shift: true, palette: false, run: openCommandPalette },
+];
+
+export const commandLabel = (command: Command): string => command.labelForContext?.() ?? command.label;
+export const commandAvailable = (command: Command): boolean => command.available?.() ?? true;
 
 /** On macOS a command takes ⌘ alone, because the editor owns the Ctrl chords there (Ctrl-T transposes, Ctrl-P moves up). */
 export function commandForKey(e: Pick<KeyboardEvent, "key" | "metaKey" | "ctrlKey" | "shiftKey" | "altKey">, mac = MAC): Command | undefined {
   const mod = mac ? e.metaKey && !e.ctrlKey : e.ctrlKey && !e.metaKey;
   if (!mod || e.altKey) return undefined;
   const key = e.key.toLowerCase();
-  return KEYMAP.find((c) => c.key === key && !!c.shift === e.shiftKey);
+  return COMMANDS.find((c) => c.key === key && !!c.shift === e.shiftKey);
 }
 
 /**
@@ -90,7 +139,7 @@ export function handleGlobalKey(e: KeyboardEvent): void {
   const command = commandForKey(e);
   if (!command) return;
   e.preventDefault();
-  command.run();
+  if (commandAvailable(command)) command.run();
 }
 
 export function shortcutLabel(c: Command): string {
