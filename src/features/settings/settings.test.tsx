@@ -119,15 +119,15 @@ it("returns to the workspace layout once settings close", () => {
 
 const matching = (query: string) => filterSettings(parseQuery(query)).map((s) => s.id);
 
-it("shows the running version and the engine's track in About, and locks the track while a download runs", () => {
+it("shows the running version and the engine's track in General, and locks the track while a download runs", () => {
   const updates = (status: UpdateStatus): UpdateState => ({ rev: 1, track: "Nightly", currentVersion: "0.1.1-nightly.20261023.5", status, checkedAtMs: null });
-  const idle = render(settingsOpen("about"), { updates: updates({ kind: "Idle" }) });
+  const idle = render(settingsOpen("general"), { updates: updates({ kind: "Idle" }) });
   expect(idle).toContain("L1 Data 0.1.1-nightly.20261023.5");
   expect(idle).toMatch(/<option value="Nightly" selected="">Nightly<\/option>/);
   expect(idle).toMatch(/<select[^>]*data-testid="update-track"(?![^>]*disabled="")[^>]*>/);
   expect(idle).toMatch(/<button[^>]*data-testid="update-action"[^>]*>Check for updates<\/button>/);
   expect(idle).toContain('data-testid="update-status" class="mt-1.5 text-ui-12 text-dim">Not checked yet.<');
-  const downloading = render(settingsOpen("about"), {
+  const downloading = render(settingsOpen("general"), {
     updates: updates({ kind: "Downloading", version: "0.1.1-nightly.20261024.6", downgrade: false, percent: 40, changes: [] }),
   });
   expect(downloading).toMatch(/<select[^>]*data-testid="update-track"[^>]*disabled=""/);
@@ -144,7 +144,8 @@ it("puts the update button in the sidebar footer only while this build can updat
 it.each([
   ["font", ["interfaceFont", "codeFont"]],
   ["row limit", ["maxRows"]],
-  ["results", ["codeFont", "maxRows", "tablePageSize"]],
+  ["queries", ["maxRows", "tablePageSize", "stopOnError"]],
+  ["results", ["maxRows", "tablePageSize", "codeFont"]],
   ["typography", ["interfaceFont", "codeFont"]],
   ["dark", ["colorScheme"]],
   ["dracula", ["themes"]],
@@ -163,7 +164,7 @@ it.each([
   ["quota", []],
   ["codex", ["providerList"]],
   ["nightly", ["updateTrack"]],
-  ["version", ["providerList", "providerHealthCheck", "appVersion"]],
+  ["version", ["appVersion", "providerList", "providerHealthCheck"]],
   ["updates", ["appVersion", "updateTrack"]],
   ["zzqx", []],
 ])("filters %j to %j by label, section, group, and keywords", (query, ids) => {
@@ -173,6 +174,11 @@ it.each([
 it("lists every setting in registry order for an empty query", () => {
   expect(matching(" ")).toEqual([
     "assistantAccess",
+    "maxRows",
+    "tablePageSize",
+    "stopOnError",
+    "appVersion",
+    "updateTrack",
     "colorScheme",
     "themes",
     "density",
@@ -180,13 +186,8 @@ it("lists every setting in registry order for an empty query", () => {
     "tintConnections",
     "interfaceFont",
     "codeFont",
-    "maxRows",
-    "tablePageSize",
-    "stopOnError",
     "providerList",
     "providerHealthCheck",
-    "appVersion",
-    "updateTrack",
   ]);
 });
 
@@ -206,7 +207,7 @@ const resultHeadings = (html: string) => [...html.matchAll(/<h2 id="[^"]*" class
 const settingIds = (html: string) => [...html.matchAll(/data-setting="(\w+)"/g)].map(([, id]) => id);
 
 it("lists the matching settings live in place of the section while a settings search is set", () => {
-  const html = render(settingsOpen("queries", "font"));
+  const html = render(settingsOpen("general", "font"));
   expect(breadcrumb(html)).toBe("Settings / Search results");
   expect(summary(html)).toBe("2 settings match “font” Clear search");
   expect(resultHeadings(html)).toEqual(["Appearance · Typography"]);
@@ -220,27 +221,25 @@ it("lists the matching settings live in place of the section while a settings se
 
 it("heads each run of results with its section and group, and a bare run with the section alone", () => {
   const html = render(settingsOpen("appearance", "results"));
-  expect(resultHeadings(html)).toEqual(["Appearance · Typography", "Queries · Results"]);
-  expect(settingIds(html)).toEqual(["codeFont", "maxRows", "tablePageSize"]);
+  expect(resultHeadings(html)).toEqual(["General · Results", "Appearance · Typography"]);
+  expect(settingIds(html)).toEqual(["maxRows", "tablePageSize", "codeFont"]);
   expect(navEntries(html)).toEqual([
+    ["general", "General 2", false],
     ["appearance", "Appearance 1", false],
-    ["queries", "Queries 2", false],
   ]);
   const scheme = render(settingsOpen("appearance", "scheme"));
   expect([summary(scheme), resultHeadings(scheme), settingIds(scheme)]).toEqual(["1 setting matches “scheme” Clear search", ["Appearance"], ["colorScheme"]]);
 });
 
 it("says when no setting matches, and shows the section with every nav entry once the query is blank", () => {
-  const html = render(settingsOpen("queries", "zzqx"));
+  const html = render(settingsOpen("general", "zzqx"));
   expect([summary(html), settingIds(html), navEntries(html)]).toEqual(["No settings match “zzqx”. Clear search", [], []]);
-  const blank = render(settingsOpen("queries", "  "));
-  expect(breadcrumb(blank)).toBe("Settings / Queries");
+  const blank = render(settingsOpen("general", "  "));
+  expect(breadcrumb(blank)).toBe("Settings / General");
   expect(navEntries(blank)).toEqual([
-    ["general", "General", false],
+    ["general", "General", true],
     ["appearance", "Appearance", false],
-    ["queries", "Queries", true],
     ["providers", "Providers", false],
-    ["about", "About", false],
   ]);
   expect(blank).not.toContain('data-testid="settings-search-hint"');
 });
@@ -304,8 +303,8 @@ it("puts every variant of an imported extension on one card, each orb a radio na
 });
 
 it("shows the query settings with their saved values", () => {
-  const html = render({ ...settingsOpen("queries"), settings: { ...initial.settings, maxRows: 1234, tablePageSize: 77, stopOnError: false } });
-  expect(breadcrumb(html)).toBe("Settings / Queries");
+  const html = render({ ...settingsOpen("general"), settings: { ...initial.settings, maxRows: 1234, tablePageSize: 77, stopOnError: false } });
+  expect(breadcrumb(html)).toBe("Settings / General");
   expect(html).toMatch(/data-testid="setting-maxRows"[^>]*value="1234"/);
   expect(html).toMatch(/data-testid="setting-tablePageSize"[^>]*value="77"/);
   expect(html).toMatch(/data-testid="setting-stopOnError"(?![^>]*checked)[^>]*>/);
@@ -329,7 +328,16 @@ it("draws each section's settings in registry order, a run of one group in one c
     "interfaceFont",
     "codeFont",
   ]);
-  expect(layout(render(settingsOpen("queries")))).toEqual(["# Results", "maxRows", "tablePageSize", "# Scripts", "stopOnError"]);
+  expect(layout(render(settingsOpen("general")))).toEqual([
+    "# Assistant",
+    "assistantAccess",
+    "# Results",
+    "maxRows",
+    "tablePageSize",
+    "# Scripts",
+    "stopOnError",
+    "# Updates",
+  ]);
 });
 
 function paintAndRecordSaves() {

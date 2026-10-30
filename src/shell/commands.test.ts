@@ -81,7 +81,7 @@ it("maps each shortcut to its command", () => {
 });
 
 it("toggles Saved queries on its shortcut, leaving settings for the workspace first", () => {
-  useWorkspace.getState().openSettings("queries");
+  useWorkspace.getState().openSettings("general");
   press("e")?.run();
   expect([useWorkspace.getState().screen, useWorkspace.getState().overlay]).toEqual([{ kind: "workspace" }, { kind: "saved", entry: { kind: "browse" } }]);
   press("e")?.run();
@@ -166,11 +166,11 @@ it("reveals a hidden sidebar on ⌘P so its search box can mount and take focus"
 
 it("stays on settings on ⌘P there and focuses the settings search box", () => {
   useWorkspace.getState().setLayout({ sidebar: false });
-  useWorkspace.getState().openSettings("queries");
+  useWorkspace.getState().openSettings("general");
   useWorkspace.getState().setSettingsQuery("row");
   press("p")?.run();
   expect(searchState()).toEqual({
-    screen: { kind: "settings", section: "queries", query: "row" },
+    screen: { kind: "settings", section: "general", query: "row" },
     overlay: { kind: "none" },
     sidebar: false,
     searchFocus: "settings",
@@ -185,7 +185,7 @@ it("toggles the settings screen on its shortcut, starting at General", () => {
 });
 
 it("leaves settings for the workspace before a shortcut opens an overlay there", () => {
-  useWorkspace.getState().openSettings("queries");
+  useWorkspace.getState().openSettings("general");
   press("n")?.run();
   expect([useWorkspace.getState().screen, useWorkspace.getState().overlay]).toEqual([{ kind: "workspace" }, { kind: "connection", editing: null }]);
 });
@@ -199,7 +199,7 @@ it("closes settings, not the active tab, on the close-tab shortcut", () => {
 
 it.each(["w", ",", "t"])("drops the settings search when ⌘%s leaves settings, and keeps the tree search", (key) => {
   useWorkspace.getState().setTreeQuery("order");
-  useWorkspace.getState().openSettings("queries");
+  useWorkspace.getState().openSettings("general");
   useWorkspace.getState().setSettingsQuery("row");
   press(key)?.run();
   press(",")?.run();
@@ -215,8 +215,8 @@ it("closes an open overlay when ⌘, opens settings", () => {
 it("opens a section with a blank search when its nav entry is picked from the results", () => {
   useWorkspace.getState().openSettings("appearance");
   useWorkspace.getState().setSettingsQuery("row limit");
-  useWorkspace.getState().openSettings("queries");
-  expect(useWorkspace.getState().screen).toEqual({ kind: "settings", section: "queries", query: "" });
+  useWorkspace.getState().openSettings("general");
+  expect(useWorkspace.getState().screen).toEqual({ kind: "settings", section: "general", query: "" });
 });
 
 it("keeps a settings search out of the workspace screen", () => {

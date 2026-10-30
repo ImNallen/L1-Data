@@ -20,6 +20,11 @@ export const SETTINGS_INDEX = [
         group: "Assistant",
         keywords: "ai privacy schema only full access data contents rows attachments editor context global chat",
       },
+      { id: "maxRows", label: "Row limit per result", group: "Results", keywords: "queries max rows limit results" },
+      { id: "tablePageSize", label: "Table page size", group: "Results", keywords: "queries rows per page paging browse" },
+      { id: "stopOnError", label: "Stop a script at the first error", group: "Scripts", keywords: "queries errors script abort fail skip" },
+      { id: "appVersion", label: "Version", group: "Updates", keywords: "about version update check download install restart release" },
+      { id: "updateTrack", label: "Update track", group: "Updates", keywords: "update release channel track stable nightly downgrade switch" },
     ],
   },
   {
@@ -56,15 +61,6 @@ export const SETTINGS_INDEX = [
     ],
   },
   {
-    id: "queries",
-    label: "Queries",
-    settings: [
-      { id: "maxRows", label: "Row limit per result", group: "Results", keywords: "max rows limit results" },
-      { id: "tablePageSize", label: "Table page size", group: "Results", keywords: "rows per page paging browse" },
-      { id: "stopOnError", label: "Stop a script at the first error", group: "Scripts", keywords: "errors script abort fail skip" },
-    ],
-  },
-  {
     id: "providers",
     label: "Providers",
     settings: [
@@ -75,14 +71,6 @@ export const SETTINGS_INDEX = [
         keywords: "ai assistant claude codex cli binary path config directory launch arguments sign in plan version model",
       },
       { id: "providerHealthCheck", label: "Health check interval", group: "Advanced", keywords: "refresh status version models background interval seconds" },
-    ],
-  },
-  {
-    id: "about",
-    label: "About",
-    settings: [
-      { id: "appVersion", label: "Version", group: "Updates", keywords: "about version update check download install restart release" },
-      { id: "updateTrack", label: "Update track", group: "Updates", keywords: "update release channel track stable nightly downgrade switch" },
     ],
   },
 ] as const satisfies readonly IndexedSection[];
