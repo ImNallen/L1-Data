@@ -1,7 +1,10 @@
 import { SearchIcon, XIcon } from "lucide-react";
 import { useEffect, useRef, useState, type KeyboardEvent, type ReactNode } from "react";
 import { useWorkspace, type Screen } from "../../state/workspace";
+import { START_COMMANDS, shortcutLabel } from "../../shell/commands";
 import { cx, IconButton, Kbd } from "../../ui/primitives";
+
+const SEARCH_COMMAND = START_COMMANDS.find((c) => c.id === "search");
 
 /** The sidebar's filter box. `count` is how many objects the query matches. */
 export function SidebarSearch({
@@ -52,14 +55,15 @@ export function SidebarSearch({
     <div className="mx-2 flex h-[34px] shrink-0 items-center gap-1">
       <label
         className={cx(
-          "group flex h-full min-w-0 flex-1 cursor-text items-center gap-2.5 rounded-md border pr-1.5 pl-2.5 text-muted",
-          focused ? "border-accent-border" : "border-transparent hover:bg-hover",
+          "group flex h-full min-w-0 flex-1 cursor-text items-center gap-2.5 rounded-md border bg-raised pr-1.5 pl-2.5 text-muted",
+          focused ? "border-accent-border" : "border-control",
         )}
       >
         <SearchIcon size={15} className="shrink-0" />
         <input
           ref={input}
           data-testid={testId}
+          aria-label="Search"
           type="text"
           value={query}
           placeholder="Search"
@@ -89,7 +93,7 @@ export function SidebarSearch({
             </IconButton>
           </>
         ) : (
-          !focused && <Kbd className="bg-border text-muted opacity-0 group-hover:opacity-100">⌘P</Kbd>
+          !focused && SEARCH_COMMAND && <Kbd className="shrink-0 bg-border text-muted">{shortcutLabel(SEARCH_COMMAND)}</Kbd>
         )}
       </label>
       {children}

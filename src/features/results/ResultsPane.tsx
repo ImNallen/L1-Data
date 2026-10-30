@@ -21,6 +21,7 @@ import { databaseKindFor } from "../../state/databaseKind";
 import { NO_EDITS, pendingCount, useTableEdits } from "../../state/tableEdits";
 import { isFiltered, isTableTab, useWorkspace, type TableTab } from "../../state/workspace";
 import { Button, cx, IconButton, MenuContent, MenuItem, Spinner } from "../../ui/primitives";
+import { isMac } from "../../shell/hostedWindow";
 import { useNow } from "../../ui/useNow";
 import {
   isBrowsing,
@@ -102,7 +103,9 @@ function SummaryText({ summary }: { summary: Summary }) {
       {summary.tone === "ok" && <CheckIcon size={15} className="shrink-0 text-green" />}
       {summary.tone === "error" && <CircleAlertIcon size={14} className="shrink-0" />}
       {summary.tone === "running" && <Spinner />}
-      <span className="truncate">{summary.text}</span>
+      <span title={summary.text} className="line-clamp-2 [overflow-wrap:anywhere]">
+        {summary.text}
+      </span>
     </span>
   );
 }
@@ -133,7 +136,7 @@ function ExportStatus({ progress }: { progress: NonNullable<ConsoleState["export
   return (
     <span data-testid="export-status" role="status" className="flex min-w-0 items-center gap-1.5 text-ui-13 text-dim">
       <Spinner />
-      <span className="truncate tabular-nums">Exporting {pluralRows(progress.rows)}…</span>
+      <span className="line-clamp-2 tabular-nums [overflow-wrap:anywhere]">Exporting {pluralRows(progress.rows)}…</span>
     </span>
   );
 }
@@ -166,7 +169,7 @@ function EditBar({
   const busy = useTableEdits((s) => (tabId ? s.submitting[tabId] === true : false));
   if (!editable && pending === 0) return null;
   return (
-    <div data-testid="edit-bar" className="flex items-center gap-0.5">
+    <div data-testid="edit-bar" className="flex max-w-full flex-wrap items-center gap-0.5">
       <IconButton data-testid="add-row" aria-label="Add row" title="Add row" disabled={!editable} onClick={() => actions.current?.addRow()}>
         <PlusIcon size={16} />
       </IconButton>
@@ -220,7 +223,13 @@ function failedError(run: RunState): QueryError | undefined {
 }
 
 function RunTail({ run }: { run: RunState }) {
-  if (run.kind === "Idle") return "Run a statement with ⌘↵ to see its result here.";
+  if (run.kind === "Idle")
+    return (
+      <div className="px-4 text-center">
+        <p className="text-ui-13.5 text-muted">Results appear here</p>
+        <p className="mt-1">Run a statement with {isMac(navigator.userAgent) ? "⌘↵" : "Ctrl+Enter"}.</p>
+      </div>
+    );
   if (run.kind === "Running") {
     return (
       <span className="flex items-center gap-2">
@@ -351,7 +360,7 @@ export function ResultsPane({ tabId }: { tabId: TabId | null }) {
 
   return (
     <section className="flex h-full min-h-0 flex-col bg-bg">
-      <div className="flex h-[41px] shrink-0 items-center gap-3 border-b border-grid pr-2 pl-2.5">
+      <div className="flex min-h-10 shrink-0 flex-wrap items-center gap-x-3 gap-y-1.5 border-b border-grid py-1.5 pr-2 pl-2.5">
         <EditBar
           tabId={tabId}
           editable={!busy && editing !== null && tabId !== null}
@@ -359,7 +368,7 @@ export function ResultsPane({ tabId }: { tabId: TabId | null }) {
           actions={actions}
         />
         {results.length > 1 && (
-          <div data-testid="result-selector" className="flex items-center gap-0.5 rounded-md border border-control p-0.5">
+          <div data-testid="result-selector" className="flex max-w-full items-center gap-0.5 overflow-x-auto rounded-md border border-control p-0.5">
             {results.map((r, i) => (
               <button
                 key={r.index}
@@ -368,7 +377,7 @@ export function ResultsPane({ tabId }: { tabId: TabId | null }) {
                 title={`Result ${i + 1} · ${pluralRows(r.meta.rowCount)}`}
                 onClick={() => tabId && setActiveResult(tabId, r.index)}
                 className={cx(
-                  "h-5 min-w-6 rounded px-1.5 font-mono text-ui-11.5",
+                  "h-5 min-w-6 shrink-0 rounded px-1.5 font-mono text-ui-11.5",
                   (view.kind === "rows" || view.kind === "plan") && view.result.index === r.index ? "bg-pill text-fg" : "text-dim hover:text-muted",
                 )}
               >
@@ -378,64 +387,66 @@ export function ResultsPane({ tabId }: { tabId: TabId | null }) {
           </div>
         )}
 
-        <div className="flex-1" />
-
-        {selectionText !== null && (
-          <span data-testid="result-selection" title={selectionText} className="min-w-0 truncate text-ui-13 text-dim">
-            {selectionText}
-          </span>
-        )}
-        {importing ? (
-          <span data-testid="import-status" role="status" className="flex min-w-0 items-center gap-1.5 text-ui-13 text-dim">
-            <Spinner />
-            <span className="truncate tabular-nums">
-              {importing.finishing
-                ? "Finishing import…"
-                : `Importing ${importing.rows.toLocaleString()} / ${importing.totalRows.toLocaleString()} rows · ${importing.bytes.toLocaleString()} / ${importing.totalBytes.toLocaleString()} bytes`}
+        <div className="flex min-w-0 flex-[1_1_12rem] flex-wrap items-center gap-x-3 gap-y-1">
+          {importing ? (
+            <span data-testid="import-status" role="status" className="flex min-w-0 items-center gap-1.5 text-ui-13 text-dim">
+              <Spinner />
+              <span className="line-clamp-2 tabular-nums [overflow-wrap:anywhere]">
+                {importing.finishing
+                  ? "Finishing import…"
+                  : `Importing ${importing.rows.toLocaleString()} / ${importing.totalRows.toLocaleString()} rows · ${importing.bytes.toLocaleString()} / ${importing.totalBytes.toLocaleString()} bytes`}
+              </span>
             </span>
-          </span>
-        ) : exporting ? (
-          <ExportStatus progress={exporting} />
-        ) : (
-          summary && <SummaryText summary={summary} />
-        )}
-        <RunAnnouncement key={tabId} summary={summary} />
-        {tab && <CursorPosition />}
-
-        <div className="flex items-center gap-0.5">
-          {shown?.plan && (
-            <Button data-testid="plan-rows-toggle" className="h-7 px-2" onClick={() => setRowPref({ key: shownRef, prefer: !preferRows })}>
-              {preferRows ? "Plan" : "Rows"}
-            </Button>
+          ) : exporting ? (
+            <ExportStatus progress={exporting} />
+          ) : (
+            summary && <SummaryText summary={summary} />
           )}
-          <ExportMenu
-            tab={tab}
-            result={shown}
-            table={
-              browsingTable && {
-                page: browsingTable.table.page,
-                pageSize,
-                exactRowCount: browsingTable.table.exactRowCount ?? null,
-                filtered: isFiltered(browsingTable.table.query),
+          {selectionText !== null && (
+            <span data-testid="result-selection" title={selectionText} className="line-clamp-2 min-w-0 text-ui-13 text-dim [overflow-wrap:anywhere]">
+              {selectionText}
+            </span>
+          )}
+        </div>
+        <RunAnnouncement key={tabId} summary={summary} />
+
+        <div className="ml-auto flex max-w-full flex-wrap items-center gap-2">
+          {tab && <CursorPosition />}
+          <div className="flex items-center gap-0.5">
+            {shown?.plan && (
+              <Button data-testid="plan-rows-toggle" className="h-7 px-2" onClick={() => setRowPref({ key: shownRef, prefer: !preferRows })}>
+                {preferRows ? "Plan" : "Rows"}
+              </Button>
+            )}
+            <ExportMenu
+              tab={tab}
+              result={shown}
+              table={
+                browsingTable && {
+                  page: browsingTable.table.page,
+                  pageSize,
+                  exactRowCount: browsingTable.table.exactRowCount ?? null,
+                  filtered: isFiltered(browsingTable.table.query),
+                }
               }
-            }
-            disabled={!shown || busy}
-          />
-          <IconButton
-            data-testid="output-toggle"
-            data-tone={tone}
-            aria-label="Output"
-            title="Output"
-            aria-pressed={view.kind === "output"}
-            disabled={output.entries.length === 0 || !tabId}
-            onClick={() => {
-              const pick = view.kind === "output" ? (shown?.index ?? 0) : outputPick;
-              if (tabId && pick !== undefined) setActiveResult(tabId, pick);
-            }}
-            className={cx(view.kind === "output" && "bg-pill!", tone === "warn" ? "text-amber!" : view.kind === "output" && "text-fg!")}
-          >
-            <SquareTerminalIcon size={16} />
-          </IconButton>
+              disabled={!shown || busy}
+            />
+            <IconButton
+              data-testid="output-toggle"
+              data-tone={tone}
+              aria-label="Output"
+              title="Output"
+              aria-pressed={view.kind === "output"}
+              disabled={output.entries.length === 0 || !tabId}
+              onClick={() => {
+                const pick = view.kind === "output" ? (shown?.index ?? 0) : outputPick;
+                if (tabId && pick !== undefined) setActiveResult(tabId, pick);
+              }}
+              className={cx(view.kind === "output" && "bg-pill!", tone === "warn" ? "text-amber!" : view.kind === "output" && "text-fg!")}
+            >
+              <SquareTerminalIcon size={16} />
+            </IconButton>
+          </div>
         </div>
       </div>
 

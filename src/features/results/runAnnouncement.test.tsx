@@ -18,7 +18,13 @@ const error = { severity: "ERROR", sqlstate: "42P01", message: 'relation "nope" 
 const failed: StatementRun = { index: 0, range: { from: 0, to: 1 }, status: { kind: "Failed", error }, outputs: [] };
 
 const running: RunState = { kind: "Running", runId: 1, startedAtMs: Date.now(), statements: [] };
-const finished = (statements: StatementRun[], outcome: "Ok" | "Failed" = "Ok"): RunState => ({ kind: "Finished", runId: 1, elapsedMs: 5, statements, outcome });
+const finished = (statements: StatementRun[], outcome: "Ok" | "Failed" = "Ok"): Extract<RunState, { kind: "Finished" }> => ({
+  kind: "Finished",
+  runId: 1,
+  elapsedMs: 5,
+  statements,
+  outcome,
+});
 
 function setRun(tabId: string, run: RunState) {
   const state: ConsoleState = {
@@ -66,4 +72,18 @@ it("announces a failure with its error", () => {
   render(<ResultsPane tabId="t1" />);
   setRun("t1", finished([failed], "Failed"));
   expect(announced()).toBe('Query failed: relation "nope" does not exist');
+});
+
+it("shows guidance only while idle and preserves the command, empty completion, running, and cancelled states", () => {
+  render(<ResultsPane tabId="t1" />);
+  expect(screen.getByText("Results appear here")).toBeTruthy();
+  setRun("t1", running);
+  expect(screen.queryByText("Results appear here")).toBeNull();
+  setRun("t1", finished([update]));
+  expect(screen.getByText("UPDATE 3")).toBeTruthy();
+  expect(screen.queryByText("Results appear here")).toBeNull();
+  setRun("t1", finished([]));
+  expect(screen.getByText("The statement returned no rows.")).toBeTruthy();
+  setRun("t1", { ...finished([]), outcome: "Cancelled" });
+  expect(screen.getByText("Cancelled.")).toBeTruthy();
 });

@@ -7,12 +7,14 @@ import { commandForKey } from "../../shell/commands";
 import { Overlays } from "../../shell/Overlays";
 import { useLive } from "../../state/live";
 import { confirm, useWorkspace } from "../../state/workspace";
+import { openSqlTab } from "../editor/runActions";
 import { dropEditor } from "../editor/editorStates";
 import { SavedPalette } from "../saved/SavedPalette";
 import { InstallingOverlay } from "../updates/InstallingOverlay";
 import { SettingsDialog } from "./SettingsScreen";
 
 beforeEach(() => {
+  Element.prototype.scrollIntoView = () => {};
   useWorkspace.setState((s) => ({ settings: { ...s.settings, panelMotionMs: 0 } }));
   vi.spyOn(HTMLCanvasElement.prototype, "getContext").mockReturnValue(null);
   vi.stubGlobal("matchMedia", () => ({ matches: false, addEventListener() {}, removeEventListener() {} }));
@@ -193,4 +195,36 @@ it("keeps focus in the new editor when the new-tab shortcut leaves settings", as
   expect(screen.getByTestId("sql-editor")).toBe(editor);
   await user.keyboard("{Escape}");
   await waitFor(() => expect(document.activeElement).toBe(input));
+});
+
+it("keeps keyboard focus in the tab strip when switching and closing mounts another SQL editor", async () => {
+  const user = userEvent.setup();
+  let first = "";
+  let second = "";
+  act(() => {
+    first = openSqlTab();
+    second = openSqlTab();
+  });
+  render(<AppLayout />);
+  screen.getByTestId(`tab-${second}`).focus();
+  await user.keyboard("{ArrowLeft}");
+  await waitFor(() => expect(document.activeElement).toBe(screen.getByTestId(`tab-${first}`)));
+  await user.tab();
+  expect(document.activeElement).toBe(screen.getByTestId(`tab-close-${first}`));
+  await user.keyboard("{Enter}");
+  await waitFor(() => expect(document.activeElement).toBe(screen.getByTestId(`tab-${second}`)));
+  await user.tab();
+  await user.keyboard("{Enter}");
+  await waitFor(() => expect(document.activeElement).toBe(screen.getByTestId("start-new-query")));
+});
+
+it("returns the global close-tab shortcut from the editor to the start action after the last close", async () => {
+  const user = userEvent.setup();
+  act(() => {
+    openSqlTab();
+  });
+  render(<AppLayout />);
+  await waitFor(() => expect(document.activeElement?.getAttribute("aria-label")).toBe("SQL editor"));
+  await user.keyboard("{Control>}w{/Control}");
+  await waitFor(() => expect(document.activeElement).toBe(screen.getByTestId("start-new-query")));
 });

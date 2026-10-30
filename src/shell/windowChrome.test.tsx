@@ -248,7 +248,8 @@ it("toggles the results with no tabs open", () => {
   const shown = renderToStaticMarkup(<AppLayout />);
   expect(shown).toContain('data-testid="no-tabs"');
   expect(shown).toContain('data-testid="results"');
-  expect(shown).toContain("Run a statement with ⌘↵ to see its result here.");
+  expect(shown).toContain("Results appear here");
+  expect(shown).toContain("Run a statement with");
 
   withLayout({ results: false });
   const hidden = renderToStaticMarkup(<AppLayout />);
@@ -260,12 +261,12 @@ it("lists the start commands with their shortcuts when no tab is open", () => {
   const html = renderToStaticMarkup(<AppLayout />);
   const rows = [...html.matchAll(/data-testid="start-[^"]+"[^>]*>([^<]+)<kbd[^>]*>([^<]+)<\/kbd>/g)].map((m) => [m[1], m[2]]);
   expect(rows).toEqual([
-    ["New query tab", "⌘T"],
-    ["Open file…", "⌘O"],
-    ["New connection", "⌘N"],
-    ["Search", "⌘P"],
-    ["Saved queries", "⌘E"],
-    ["Settings", "⌘,"],
+    ["New query tab", "Ctrl+T"],
+    ["Open file…", "Ctrl+O"],
+    ["New connection", "Ctrl+N"],
+    ["Search", "Ctrl+P"],
+    ["Saved queries", "Ctrl+E"],
+    ["Settings", "Ctrl+,"],
   ]);
   expect(html).not.toContain("No open tabs.");
 });
