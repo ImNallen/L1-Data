@@ -1,4 +1,5 @@
-import type { Density, Settings } from "../ipc/bindings";
+import { useSyncExternalStore } from "react";
+import type { Density, ReduceMotion, Settings } from "../ipc/bindings";
 import { useWorkspace } from "../state/workspace";
 import { fontStack } from "../themes/fonts";
 
@@ -34,9 +35,43 @@ export function paintAppearance(s: AppearanceSettings): void {
   for (const [name, value] of Object.entries(appearanceVars(s))) root.setProperty(name, value);
 }
 
+const REDUCED_QUERY = "(prefers-reduced-motion: reduce)";
+
+/** `System` follows the operating system's reduce-motion accessibility setting. */
+export const motionReduced = (setting: ReduceMotion, systemReduced: boolean) => setting === "On" || (setting === "System" && systemReduced);
+
+const systemReduced = () => window.matchMedia(REDUCED_QUERY).matches;
+const subscribeSystem = (onChange: () => void) => {
+  const media = window.matchMedia(REDUCED_QUERY);
+  media.addEventListener("change", onChange);
+  return () => media.removeEventListener("change", onChange);
+};
+
+/** Whether motion is reduced right now, for code that drives motion itself instead of through the stylesheet. */
+export function useReducedMotion(): boolean {
+  const setting = useWorkspace((s) => s.settings.reduceMotion);
+  const system = useSyncExternalStore(subscribeSystem, systemReduced, () => false);
+  return motionReduced(setting, system);
+}
+
+/** `data-motion="reduced"` on the root switches the stylesheet's reduced-motion rules on. */
+function paintMotion(setting: ReduceMotion): void {
+  const { dataset } = document.documentElement;
+  if (motionReduced(setting, systemReduced())) dataset.motion = "reduced";
+  else delete dataset.motion;
+}
+
 export function startAppearance(): () => void {
-  paintAppearance(useWorkspace.getState().settings);
-  return useWorkspace.subscribe((s, prev) => {
+  const { settings } = useWorkspace.getState();
+  paintAppearance(settings);
+  paintMotion(settings.reduceMotion);
+  const stopSystem = subscribeSystem(() => paintMotion(useWorkspace.getState().settings.reduceMotion));
+  const unsubscribe = useWorkspace.subscribe((s, prev) => {
     if (changed(s.settings, prev.settings)) paintAppearance(s.settings);
+    if (s.settings.reduceMotion !== prev.settings.reduceMotion) paintMotion(s.settings.reduceMotion);
   });
+  return () => {
+    unsubscribe();
+    stopSystem();
+  };
 }

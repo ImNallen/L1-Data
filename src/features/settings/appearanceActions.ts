@@ -1,4 +1,4 @@
-import type { Density, FontSetting } from "../../ipc/bindings";
+import type { Density, FontSetting, ReduceMotion } from "../../ipc/bindings";
 import { useWorkspace } from "../../state/workspace";
 import type { FontKind } from "../../themes/fonts";
 import { saveSettings } from "../editor/runActions";
@@ -12,6 +12,10 @@ export function chooseDensity(density: Density): Promise<void> {
 export function chooseFont(kind: FontKind, change: Partial<FontSetting>): Promise<void> {
   const field = FONT_FIELD[kind];
   return saveSettings({ [field]: { ...useWorkspace.getState().settings[field], ...change } });
+}
+
+export function chooseReduceMotion(reduceMotion: ReduceMotion): Promise<void> {
+  return saveSettings({ reduceMotion });
 }
 
 /** Paints a panel speed without saving it, so a slider drag repaints live and saves once on release. */

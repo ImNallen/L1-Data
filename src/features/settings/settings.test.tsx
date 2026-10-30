@@ -11,7 +11,7 @@ import { useLive, type LiveData } from "../../state/live";
 import { useWorkspace, type WorkspaceData } from "../../state/workspace";
 import { fakeRoot } from "../../testing/fakeRoot";
 import { BUILT_IN_FAMILIES, customFamily, familyPicks } from "../../themes/catalog";
-import { chooseDensity, chooseFont, previewPanelMotion, savePanelMotion } from "./appearanceActions";
+import { chooseDensity, chooseFont, chooseReduceMotion, previewPanelMotion, savePanelMotion } from "./appearanceActions";
 import { addCustomThemes, chooseColorScheme, chooseThemes, deleteCustomTheme } from "./themeActions";
 import { parseQuery } from "../../ui/textMatch";
 import { filterSettings, type SettingsSectionId } from "./settingsIndex";
@@ -154,7 +154,8 @@ it.each([
   ["page", ["tablePageSize"]],
   ["error", ["stopOnError"]],
   ["compact", ["density"]],
-  ["animation", ["panelMotion"]],
+  ["animation", ["reduceMotion", "panelMotion"]],
+  ["accessibility", ["reduceMotion"]],
   ["tint", ["tintConnections"]],
   ["SF Pro", ["interfaceFont"]],
   ["jetbrains", ["codeFont"]],
@@ -183,6 +184,7 @@ it("lists every setting in registry order for an empty query", () => {
     "colorScheme",
     "themes",
     "density",
+    "reduceMotion",
     "panelMotion",
     "tintConnections",
     "interfaceFont",
@@ -322,6 +324,7 @@ it("draws each section's settings in registry order, a run of one group in one c
     "# Layout",
     "density",
     "# Motion",
+    "reduceMotion",
     "panelMotion",
     "# Sidebar",
     "tintConnections",
@@ -465,6 +468,7 @@ it("shows the saved density, fonts, panel speed, and connection tint in the appe
     interfaceFont: { family: "System", size: 15 },
     codeFont: { family: "Berkeley Mono", size: 11 },
     panelMotionMs: 0,
+    reduceMotion: "On",
     tintConnections: true,
   };
   const html = render({ ...settingsOpen(), settings });
@@ -473,6 +477,13 @@ it("shows the saved density, fonts, panel speed, and connection tint in the appe
     ["Standard", false],
     ["Spacious", true],
   ]);
+  expect(radios(html, "reduceMotion")).toEqual([
+    ["System", false],
+    ["On", true],
+    ["Off", false],
+  ]);
+  expect(html).toMatch(/data-testid="setting-panelMotion"[^>]*aria-valuetext="Off"/);
+  expect(html).toContain("Motion is reduced, so panels open without sliding.");
   expect([selectValue(html, "setting-interfaceFont-family"), selectValue(html, "setting-interfaceFont-size")]).toEqual(["System", "15 px"]);
   expect([selectValue(html, "setting-codeFont-family"), selectValue(html, "setting-codeFont-size")]).toEqual(["Berkeley Mono", "11 px"]);
   expect(html).toMatch(/data-testid="setting-panelMotion"[^>]*value="0"/);
@@ -480,6 +491,9 @@ it("shows the saved density, fonts, panel speed, and connection tint in the appe
   expect(html).toMatch(/data-testid="setting-tintConnections"[^>]*checked/);
   const defaults = render({ ...settingsOpen(), settings: initial.settings });
   expect(defaults).not.toContain('data-testid="setting-panelMotion-reset"');
+  expect(radios(defaults, "reduceMotion").find(([, checked]) => checked)?.[0]).toBe("System");
+  expect(defaults).toMatch(/data-testid="setting-panelMotion"[^>]*aria-valuetext="150 milliseconds"/);
+  expect(defaults).toContain("How fast panels, dialogs, and menus open and close.");
   expect(defaults).toMatch(/data-testid="setting-tintConnections"(?![^>]*checked)[^>]*>/);
 });
 
@@ -491,6 +505,19 @@ it("saves the clicked density and repaints the spacing scale", async () => {
   stop();
   expect(saved).toEqual([{ ...initial.settings, density: "Compact" }]);
   expect(root.style.vars.get("--density")).toBe("0.85");
+});
+
+it("saves the reduce-motion choice and repaints the root, overriding the OS until it is System again", async () => {
+  const { root, saved, stop } = paintAndRecordSaves();
+  const appearance = startAppearance();
+  expect(root.dataset.motion).toBe("reduced");
+  await chooseReduceMotion("Off");
+  expect(root.dataset.motion).toBeUndefined();
+  await chooseReduceMotion("System");
+  appearance();
+  stop();
+  expect(saved.map((s) => s.reduceMotion)).toEqual(["Off", "System"]);
+  expect(root.dataset.motion).toBe("reduced");
 });
 
 it("changes only the size of the chosen font and keeps its family", async () => {

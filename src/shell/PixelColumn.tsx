@@ -1,5 +1,6 @@
 import { useEffect, useLayoutEffect, useRef, useState, type KeyboardEvent, type PointerEvent, type ReactNode } from "react";
 import { useWorkspace } from "../state/workspace";
+import { useReducedMotion } from "./appearance";
 import { handleLook } from "./ResizeHandle";
 
 const COLUMNS = {
@@ -43,11 +44,14 @@ export function PixelColumn({ column, open, children }: { column: Column; open: 
   const stored = useWorkspace((s) => s.layout[key]);
   const setLayout = useWorkspace((s) => s.setLayout);
   const motionMs = useWorkspace((s) => s.settings.panelMotionMs);
+  const reduced = useReducedMotion();
+  // Reduced motion snaps the column open and closed, so no transitionend is awaited.
+  const animate = motionMs > 0 && !reduced;
   const [phase, setPhase] = useState<Phase>(open ? "open" : "closed");
   const [wasOpen, setWasOpen] = useState(open);
   if (open !== wasOpen) {
     setWasOpen(open);
-    setPhase(nextPhase(phase, open, motionMs > 0));
+    setPhase(nextPhase(phase, open, animate));
   }
   const [dragged, setDragged] = useState<number | null>(null);
   const drag = useRef<{ x: number; from: number; px: number } | null>(null);

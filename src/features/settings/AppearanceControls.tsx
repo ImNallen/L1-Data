@@ -1,28 +1,40 @@
 import { ChevronsUpDownIcon, Undo2Icon } from "lucide-react";
 import { useCallback, useEffect, useRef, useState } from "react";
-import type { Density, FontSetting } from "../../ipc/bindings";
-import { gridRowHeight } from "../../shell/appearance";
+import type { Density, FontSetting, ReduceMotion } from "../../ipc/bindings";
+import { gridRowHeight, useReducedMotion } from "../../shell/appearance";
 import { DEFAULT_SETTINGS, useWorkspace } from "../../state/workspace";
 import { canvasFontProbe, FONT_SIZES, fontChoices, fontStack, type FontKind } from "../../themes/fonts";
 import { cx, IconButton, DatabaseBadge } from "../../ui/primitives";
 import { saveSettings } from "../editor/runActions";
-import { chooseDensity, chooseFont, previewPanelMotion, savePanelMotion } from "./appearanceActions";
+import { chooseDensity, chooseFont, chooseReduceMotion, previewPanelMotion, savePanelMotion } from "./appearanceActions";
 import { Row } from "./SettingLayout";
 import { settingLabel, type SettingId } from "./settingsIndex";
 
 const DENSITIES: Density[] = ["Compact", "Standard", "Spacious"];
+const REDUCE_MOTION: ReduceMotion[] = ["System", "On", "Off"];
 
-function DensityControl({ value }: { value: Density }) {
+/** A row of native radios drawn as one segmented control, each choice labelled with its own value. */
+function Segmented<T extends string>({
+  setting,
+  choices,
+  value,
+  onChoose,
+}: {
+  setting: SettingId;
+  choices: readonly T[];
+  value: T;
+  onChoose: (choice: T) => void;
+}) {
   return (
-    <div role="radiogroup" aria-label="Density" className="flex rounded-lg border border-control p-0.5">
-      {DENSITIES.map((d) => (
+    <div role="radiogroup" aria-label={settingLabel(setting)} data-testid={`setting-${setting}`} className="flex rounded-lg border border-control p-0.5">
+      {choices.map((c) => (
         <label
-          key={d}
-          data-testid={`setting-density-${d}`}
+          key={c}
+          data-testid={`setting-${setting}-${c}`}
           className="cursor-pointer rounded-md px-2.5 py-1 text-ui-12.5 text-muted hover:text-fg has-checked:bg-selected has-checked:text-fg has-focus-visible:outline has-focus-visible:outline-focus"
         >
-          <input type="radio" name="density" value={d} checked={d === value} onChange={() => void chooseDensity(d)} className="sr-only" />
-          {d}
+          <input type="radio" name={setting} value={c} checked={c === value} onChange={() => onChoose(c)} className="sr-only" />
+          {c}
         </label>
       ))}
     </div>
@@ -54,7 +66,7 @@ export function Select({
         value={value}
         disabled={disabled}
         onChange={(e) => onChange(e.target.value)}
-        className="h-8 w-full cursor-pointer appearance-none rounded-lg border border-control bg-bg pr-7 pl-2.5 text-ui-13 text-fg outline-none hover:bg-hover focus-visible:border-accent-border disabled:cursor-default disabled:opacity-40 disabled:hover:bg-bg"
+        className="h-8 w-full cursor-pointer appearance-none rounded-lg border border-control bg-bg pr-7 pl-2.5 text-ui-13 text-fg outline-none hover:bg-hover focus-visible:border-focus disabled:cursor-default disabled:opacity-40 disabled:hover:bg-bg"
       >
         {options.map((o) => (
           <option key={o.value} value={o.value}>
@@ -150,7 +162,7 @@ function CodeSample({ font, density }: { font: FontSetting; density: Density }) 
             <tr key={row[0]} style={{ height: rowH }} className="border-b border-grid text-fg last:border-b-0">
               {row.map((v, i) => (
                 <td key={i} className={cx("border-r border-grid px-2 last:border-r-0", NUMERIC.has(i) && "text-right")}>
-                  {v ?? <span className="text-faint">NULL</span>}
+                  {v ?? <span className="text-dim">NULL</span>}
                 </td>
               ))}
             </tr>
@@ -163,18 +175,19 @@ function CodeSample({ font, density }: { font: FontSetting; density: Density }) 
 
 const PREVIEW_HOLD_MS = 400;
 
-function MotionPreview({ ms }: { ms: number }) {
+/** Plays what the app does: a slide, or under reduced motion a panel that snaps open and shut. */
+function MotionPreview({ ms, reduced }: { ms: number; reduced: boolean }) {
   const panel = useRef<HTMLSpanElement>(null);
   const play = useCallback(() => {
     const el = panel.current;
     if (!el || ms === 0) return;
     for (const a of el.getAnimations()) a.cancel();
     const total = 2 * ms + PREVIEW_HOLD_MS;
-    el.animate([{ width: "0%" }, { width: "34%", offset: ms / total }, { width: "34%", offset: (ms + PREVIEW_HOLD_MS) / total }, { width: "0%" }], {
-      duration: total,
-      easing: "cubic-bezier(0.2, 0, 0, 1)",
-    });
-  }, [ms]);
+    const frames = reduced
+      ? [{ width: "34%" }, { width: "34%" }]
+      : [{ width: "0%" }, { width: "34%", offset: ms / total }, { width: "34%", offset: (ms + PREVIEW_HOLD_MS) / total }, { width: "0%" }];
+    el.animate(frames, { duration: total, easing: "cubic-bezier(0.2, 0, 0, 1)" });
+  }, [ms, reduced]);
   useEffect(play, [play]);
   return (
     <span
@@ -199,7 +212,7 @@ function MotionPreview({ ms }: { ms: number }) {
   );
 }
 
-function PanelMotionControl({ ms }: { ms: number }) {
+function PanelMotionControl({ ms, reduced }: { ms: number; reduced: boolean }) {
   const dragged = useRef(false);
   const commit = () => {
     if (!dragged.current) return;
@@ -208,11 +221,12 @@ function PanelMotionControl({ ms }: { ms: number }) {
   };
   return (
     <>
-      <MotionPreview ms={ms} />
+      <MotionPreview ms={ms} reduced={reduced} />
       <span className="w-14 rounded-md bg-pill py-1 text-center font-mono text-ui-11.5 text-fg tabular-nums">{ms === 0 ? "Off" : `${ms} ms`}</span>
       <input
         data-testid="setting-panelMotion"
         aria-label="Panel animation duration"
+        aria-valuetext={ms === 0 ? "Off" : `${ms} milliseconds`}
         type="range"
         min={0}
         max={500}
@@ -233,11 +247,29 @@ function PanelMotionControl({ ms }: { ms: number }) {
 
 export function DensitySetting() {
   const density = useWorkspace((s) => s.settings.density);
-  return <Row setting="density" hint="Spacing and row height across panels, lists, and result tables." control={<DensityControl value={density} />} />;
+  return (
+    <Row
+      setting="density"
+      hint="Spacing and row height across panels, lists, and result tables."
+      control={<Segmented setting="density" choices={DENSITIES} value={density} onChoose={(d) => void chooseDensity(d)} />}
+    />
+  );
+}
+
+export function ReduceMotionSetting() {
+  const reduceMotion = useWorkspace((s) => s.settings.reduceMotion);
+  return (
+    <Row
+      setting="reduceMotion"
+      hint="System follows the reduce motion setting of your OS. With motion reduced, panels open without sliding, menus and dialogs fade in place, and pulsing stops."
+      control={<Segmented setting="reduceMotion" choices={REDUCE_MOTION} value={reduceMotion} onChoose={(r) => void chooseReduceMotion(r)} />}
+    />
+  );
 }
 
 export function PanelMotionSetting() {
   const panelMotionMs = useWorkspace((s) => s.settings.panelMotionMs);
+  const reduced = useReducedMotion();
   const motionDefault = DEFAULT_SETTINGS.panelMotionMs;
   return (
     <Row
@@ -255,8 +287,12 @@ export function PanelMotionSetting() {
           </IconButton>
         )
       }
-      hint="How fast panels, dialogs, and menus open and close."
-      control={<PanelMotionControl ms={panelMotionMs} />}
+      hint={
+        reduced
+          ? "Motion is reduced, so panels open without sliding. Menus and dialogs fade for this long."
+          : "How fast panels, dialogs, and menus open and close."
+      }
+      control={<PanelMotionControl ms={panelMotionMs} reduced={reduced} />}
     />
   );
 }

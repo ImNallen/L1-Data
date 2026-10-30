@@ -2,7 +2,7 @@ import { PaletteIcon, SettingsIcon, SparklesIcon, type LucideIcon } from "lucide
 import type { ComponentType } from "react";
 import { useWorkspace } from "../../state/workspace";
 import { AppVersionSetting, UpdateTrackSetting } from "./AboutSection";
-import { CodeFontSetting, DensitySetting, InterfaceFontSetting, PanelMotionSetting, TintConnectionsSetting } from "./AppearanceControls";
+import { CodeFontSetting, DensitySetting, InterfaceFontSetting, PanelMotionSetting, ReduceMotionSetting, TintConnectionsSetting } from "./AppearanceControls";
 import { ColorSchemeSetting, ThemesSetting } from "./AppearanceSection";
 import { HealthCheckSetting, ProviderListSetting } from "./ProvidersSection";
 import { MaxRowsSetting, StopOnErrorSetting, TablePageSizeSetting } from "./QueriesSection";
@@ -21,6 +21,7 @@ const SETTING_VIEWS = {
   colorScheme: ColorSchemeSetting,
   themes: ThemesSetting,
   density: DensitySetting,
+  reduceMotion: ReduceMotionSetting,
   panelMotion: PanelMotionSetting,
   tintConnections: TintConnectionsSetting,
   interfaceFont: InterfaceFontSetting,
@@ -81,7 +82,7 @@ export function SearchResults({ query, matches }: { query: string; matches: read
             <Icon size={15} className="shrink-0 text-muted" />
             <span>
               {sectionLabel(run.section)}
-              {run.group !== null && <span className="font-normal text-faint"> · {run.group}</span>}
+              {run.group !== null && <span className="font-normal text-dim"> · {run.group}</span>}
             </span>
           </>
         );

@@ -1205,6 +1205,9 @@ export type QueryError = {
 	position: DocOffset | null,
 };
 
+/**  `System` follows the operating system's reduce-motion accessibility setting. */
+export type ReduceMotion = "System" | "On" | "Off";
+
 export type RelKind = "Table" | "PartitionedTable" | "View" | "MaterializedView" | "ForeignTable";
 
 export type Relation = {
@@ -1512,6 +1515,8 @@ export type Settings = {
 	density: Density,
 	/**  0 turns panel animation off. */
 	panelMotionMs: number,
+	/**  Reduced motion snaps panels open and closed and turns menu and dialog movement into a fade. */
+	reduceMotion: ReduceMotion,
 	/**  Shade each colored connection in the sidebar tree instead of drawing its dot. */
 	tintConnections: boolean,
 	/**  One per `ProviderKind::ALL`, in that order. */

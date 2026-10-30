@@ -40,6 +40,12 @@ export const SETTINGS_INDEX = [
       },
       { id: "density", label: "Density", group: "Layout", keywords: "compact standard spacious spacing padding row height comfortable dense layout" },
       {
+        id: "reduceMotion",
+        label: "Reduce motion",
+        group: "Motion",
+        keywords: "motion animation accessibility reduced prefers system movement slide fade pulse vestibular",
+      },
+      {
         id: "panelMotion",
         label: "Panel animations",
         group: "Motion",
