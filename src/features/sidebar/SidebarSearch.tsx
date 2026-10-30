@@ -44,8 +44,8 @@ export function SidebarSearch({
     <div className="mx-2 flex h-[34px] shrink-0 items-center gap-1">
       <label
         className={cx(
-          "group flex h-full min-w-0 flex-1 cursor-text items-center gap-2.5 rounded-md border bg-raised pr-1.5 pl-2.5 text-muted",
-          focused ? "border-accent-border" : "border-control",
+          "group flex h-full min-w-0 flex-1 cursor-text items-center gap-2.5 rounded-md border pr-1.5 pl-2.5 text-muted",
+          focused ? "border-accent-border bg-raised" : "border-transparent bg-transparent hover:bg-hover",
         )}
       >
         <SearchIcon size={15} className="shrink-0" />
