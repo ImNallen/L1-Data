@@ -1,10 +1,7 @@
 import { SearchIcon, XIcon } from "lucide-react";
-import { useEffect, useRef, useState, type KeyboardEvent, type ReactNode } from "react";
-import { useWorkspace, type Screen } from "../../state/workspace";
-import { START_COMMANDS, shortcutLabel } from "../../shell/commands";
-import { cx, IconButton, Kbd } from "../../ui/primitives";
-
-const SEARCH_COMMAND = START_COMMANDS.find((c) => c.id === "search");
+import { useRef, useState, type KeyboardEvent, type ReactNode } from "react";
+import type { Screen } from "../../state/workspace";
+import { cx, IconButton } from "../../ui/primitives";
 
 /** The sidebar's filter box. `count` is how many objects the query matches. */
 export function SidebarSearch({
@@ -28,14 +25,6 @@ export function SidebarSearch({
 }) {
   const input = useRef<HTMLInputElement>(null);
   const [focused, setFocused] = useState(false);
-  // A box that mounts after ⌘P revealed the sidebar still sees the request.
-  const wantsFocus = useWorkspace((s) => s.searchFocus === scope);
-  useEffect(() => {
-    if (!wantsFocus) return;
-    input.current?.focus({ preventScroll: true });
-    input.current?.select();
-    useWorkspace.getState().searchFocused();
-  }, [wantsFocus]);
 
   const onKeyDown = (e: KeyboardEvent<HTMLInputElement>) => {
     if (e.key === "Enter") onEnter?.();
@@ -75,7 +64,7 @@ export function SidebarSearch({
           onKeyDown={onKeyDown}
           className="h-full min-w-0 flex-1 bg-transparent text-ui-13.5 text-fg outline-none placeholder:text-muted"
         />
-        {query ? (
+        {query && (
           <>
             <span data-testid={`${testId}-count`} className="shrink-0 text-ui-11.5 text-muted tabular-nums">
               {count}
@@ -92,8 +81,6 @@ export function SidebarSearch({
               <XIcon size={13} />
             </IconButton>
           </>
-        ) : (
-          !focused && SEARCH_COMMAND && <Kbd className="shrink-0 bg-border text-muted">{shortcutLabel(SEARCH_COMMAND)}</Kbd>
         )}
       </label>
       {children}

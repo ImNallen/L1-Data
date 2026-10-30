@@ -34,7 +34,7 @@ it("answers null when the question is cancelled, replaced, or swept away by anot
   const settings = ask(q("c"));
   ws().openSettings();
   const search = ask(q("d"));
-  ws().focusSearch();
+  ws().open({ kind: "navigation" });
   const next = ask(q("e"));
   const superseded = ask(q("f"));
   expect(await Promise.all([cancelled, replaced, settings, search, next])).toEqual([null, null, null, null, null]);

@@ -75,7 +75,14 @@ it("does not save while a dialog is up", async () => {
 });
 
 it("maps each shortcut to its command", () => {
-  expect(["t", "n", "p", ",", "w", "e"].map((k) => press(k)?.id)).toEqual(["new-query", "new-connection", "search", "settings", "close-tab", "saved-queries"]);
+  expect(["t", "n", "p", ",", "w", "e"].map((k) => press(k)?.id)).toEqual([
+    "new-query",
+    "new-connection",
+    "navigation",
+    "settings",
+    "close-tab",
+    "saved-queries",
+  ]);
   expect(press("T")?.id).toBe("new-query");
   expect([press("e", { metaKey: true, shiftKey: true })?.id, pressOff("E", { ctrlKey: true, shiftKey: true })?.id]).toEqual(["save-query", "save-query"]);
 });
@@ -146,34 +153,33 @@ it("opens the overlay a command names", () => {
 });
 
 const searchState = () => {
-  const { screen, overlay, layout, searchFocus } = useWorkspace.getState();
-  return { screen, overlay, sidebar: layout.sidebar, searchFocus };
+  const { screen, overlay, layout, treeQuery } = useWorkspace.getState();
+  return { screen, overlay, sidebar: layout.sidebar, treeQuery };
 };
 
-it("asks the sidebar search box for focus on ⌘P, closing any overlay so the box can take it", () => {
+it("opens quick navigation on ⌘P, replacing the current overlay and preserving the tree filter", () => {
   useWorkspace.getState().open({ kind: "history" });
+  useWorkspace.getState().setTreeQuery("orders");
   press("p")?.run();
-  expect(searchState()).toEqual({ screen: { kind: "workspace" }, overlay: { kind: "none" }, sidebar: true, searchFocus: "workspace" });
-  useWorkspace.getState().searchFocused();
-  expect(useWorkspace.getState().searchFocus).toBeNull();
+  expect(searchState()).toEqual({ screen: { kind: "workspace" }, overlay: { kind: "navigation" }, sidebar: true, treeQuery: "orders" });
 });
 
-it("reveals a hidden sidebar on ⌘P so its search box can mount and take focus", () => {
+it("keeps a hidden sidebar hidden on ⌘P", () => {
   useWorkspace.getState().setLayout({ sidebar: false });
   press("p")?.run();
-  expect(searchState()).toEqual({ screen: { kind: "workspace" }, overlay: { kind: "none" }, sidebar: true, searchFocus: "workspace" });
+  expect(searchState()).toEqual({ screen: { kind: "workspace" }, overlay: { kind: "navigation" }, sidebar: false, treeQuery: "" });
 });
 
-it("stays on settings on ⌘P there and focuses the settings search box", () => {
+it("opens quick navigation above Settings and preserves its filter", () => {
   useWorkspace.getState().setLayout({ sidebar: false });
   useWorkspace.getState().openSettings("general");
   useWorkspace.getState().setSettingsQuery("row");
   press("p")?.run();
   expect(searchState()).toEqual({
     screen: { kind: "settings", section: "general", query: "row" },
-    overlay: { kind: "none" },
+    overlay: { kind: "navigation" },
     sidebar: false,
-    searchFocus: "settings",
+    treeQuery: "",
   });
 });
 
