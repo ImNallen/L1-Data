@@ -56,6 +56,7 @@ export type SavedEntry = { kind: "browse" } | { kind: "name"; id: SavedQueryId }
 export type Overlay =
   | { kind: "none" }
   | { kind: "history" }
+  | { kind: "navigation" }
   | { kind: "usage" }
   | { kind: "saved"; entry: SavedEntry }
   | { kind: "connection"; editing: ConnectionId | null }
@@ -94,8 +95,6 @@ export type WorkspaceData = {
   screen: Screen;
   /** Filters the connection tree in place. Not saved, and kept across a trip to settings. */
   treeQuery: string;
-  /** ⌘P targets one search box; that box clears the request once it has focus. */
-  searchFocus: Screen["kind"] | null;
   toast: { id: number; text: string } | null;
   cursor: { line: number; col: number };
 };
@@ -204,8 +203,6 @@ type WorkspaceActions = {
   closeSettings(): void;
   setTreeQuery(query: string): void;
   setSettingsQuery(query: string): void;
-  focusSearch(): void;
-  searchFocused(): void;
   notify(text: string): void;
   setCursor(cursor: { line: number; col: number }): void;
 };
@@ -224,7 +221,6 @@ export const useWorkspace = create<WorkspaceData & WorkspaceActions>()((set, get
   overlay: { kind: "none" },
   screen: { kind: "workspace" },
   treeQuery: "",
-  searchFocus: null,
   toast: null,
   cursor: { line: 1, col: 1 },
 
@@ -333,17 +329,10 @@ export const useWorkspace = create<WorkspaceData & WorkspaceActions>()((set, get
     overlay.settle(choice);
     set({ overlay: { kind: "none" } });
   },
-  openSettings: (section = "general") => set({ screen: { kind: "settings", section, query: "" }, overlay: { kind: "none" }, searchFocus: null }),
-  closeSettings: () => set({ screen: { kind: "workspace" }, overlay: { kind: "none" }, searchFocus: null }),
+  openSettings: (section = "general") => set({ screen: { kind: "settings", section, query: "" }, overlay: { kind: "none" } }),
+  closeSettings: () => set({ screen: { kind: "workspace" }, overlay: { kind: "none" } }),
   setTreeQuery: (treeQuery) => set({ treeQuery }),
   setSettingsQuery: (query) => set((s) => (s.screen.kind === "settings" ? { screen: { ...s.screen, query } } : {})),
-  focusSearch: () =>
-    set((s) => ({
-      overlay: { kind: "none" },
-      layout: s.screen.kind === "workspace" && !s.layout.sidebar ? { ...s.layout, sidebar: true } : s.layout,
-      searchFocus: s.screen.kind,
-    })),
-  searchFocused: () => set({ searchFocus: null }),
   notify: (text) => set({ toast: { id: ++toastSeq, text } }),
   setCursor: (cursor) => set({ cursor }),
 }));

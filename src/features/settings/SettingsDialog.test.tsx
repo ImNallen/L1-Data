@@ -37,7 +37,7 @@ afterEach(() => {
   vi.restoreAllMocks();
 });
 
-it("preserves the workspace nodes and directs search focus to settings without revealing the sidebar", async () => {
+it("preserves the workspace and Settings filter while quick navigation opens above Settings", async () => {
   const user = userEvent.setup();
   render(<AppLayout />);
   const main = screen.getByTestId("no-tabs");
@@ -48,13 +48,15 @@ it("preserves the workspace nodes and directs search focus to settings without r
   expect(document.activeElement).toBe(screen.getByTestId("settings-search"));
 
   await user.click(screen.getByTestId("settings-section-appearance"));
-  act(() => useWorkspace.getState().focusSearch());
-  expect(document.activeElement).toBe(screen.getByTestId("settings-search"));
-  expect(useWorkspace.getState().searchFocus).toBeNull();
+  await user.type(screen.getByTestId("settings-search"), "font");
   act(() => useWorkspace.getState().setLayout({ sidebar: false }));
-  act(() => useWorkspace.getState().focusSearch());
+  await user.keyboard("{Control>}p{/Control}");
   expect(useWorkspace.getState().layout.sidebar).toBe(false);
-  expect(document.activeElement).toBe(screen.getByTestId("settings-search"));
+  expect(document.activeElement).toBe(screen.getByTestId("navigation-input"));
+  await user.keyboard("{Escape}");
+  await waitFor(() => expect(document.activeElement).toBe(screen.getByTestId("settings-search")));
+  expect(screen.getByTestId("settings-search")).toHaveProperty("value", "font");
+  expect(useWorkspace.getState().screen).toEqual({ kind: "settings", section: "appearance", query: "font" });
 });
 
 function Dialogs() {

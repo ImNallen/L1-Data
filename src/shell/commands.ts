@@ -2,6 +2,7 @@ import { closeTab } from "../features/editor/closeTab";
 import { openFiles, saveTab, type SaveMode } from "../features/editor/fileActions";
 import { openSqlTab, submitEdits } from "../features/editor/runActions";
 import { saveActiveQuery } from "../features/saved/savedActions";
+import { openNavigation } from "../features/navigation/navigationActions";
 import { pendingCount, useTableEdits } from "../state/tableEdits";
 import { useWorkspace, type Overlay } from "../state/workspace";
 import { isMac } from "./hostedWindow";
@@ -29,7 +30,7 @@ export const START_COMMANDS: Command[] = [
   { id: "new-query", label: "New query tab", key: "t", run: inWorkspace(() => openSqlTab()) },
   { id: "open-file", label: "Open file…", key: "o", run: () => void openFiles() },
   { id: "new-connection", label: "New connection", key: "n", run: open({ kind: "connection", editing: null }) },
-  { id: "search", label: "Search", key: "p", run: () => ws().focusSearch() },
+  { id: "navigation", label: "Quick navigation", key: "p", run: openNavigation },
   { id: "saved-queries", label: "Saved queries", key: "e", run: toggleSaved },
   { id: "settings", label: "Settings", key: ",", run: () => (ws().screen.kind === "settings" ? ws().closeSettings() : ws().openSettings()) },
 ];
@@ -85,7 +86,7 @@ export function commandForKey(e: Pick<KeyboardEvent, "key" | "metaKey" | "ctrlKe
  * command then stands down, so the chord never fires twice.
  */
 export function handleGlobalKey(e: KeyboardEvent): void {
-  if (e.defaultPrevented) return;
+  if (e.defaultPrevented || e.isComposing || e.keyCode === 229) return;
   const command = commandForKey(e);
   if (!command) return;
   e.preventDefault();

@@ -264,7 +264,7 @@ it("lists the start commands with their shortcuts when no tab is open", () => {
     ["New query tab", "Ctrl+T"],
     ["Open file…", "Ctrl+O"],
     ["New connection", "Ctrl+N"],
-    ["Search", "Ctrl+P"],
+    ["Quick navigation", "Ctrl+P"],
     ["Saved queries", "Ctrl+E"],
     ["Settings", "Ctrl+,"],
   ]);

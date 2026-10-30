@@ -6,6 +6,7 @@ import { ConnectionDialog } from "../features/connections/ConnectionDialog";
 import { SqlEditor } from "../features/editor/SqlEditor";
 import { StatementChooser } from "../features/editor/StatementChooser";
 import { HistoryPalette } from "../features/history/HistoryPalette";
+import { NavigationPalette } from "../features/navigation/NavigationPalette";
 import { SavedPalette } from "../features/saved/SavedPalette";
 import { ResultsPane } from "../features/results/ResultsPane";
 import { SettingsDialog } from "../features/settings/SettingsScreen";
@@ -137,6 +138,7 @@ export function AppLayout() {
         <RightPanel hosted={hosted} />
       </PixelColumn>
       <SettingsDialog />
+      <NavigationPalette />
       <HistoryPalette />
       <SavedPalette />
       <ConnectionDialog />
