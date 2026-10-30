@@ -16,13 +16,19 @@ struct Harness {
 
 impl Harness {
     async fn open() -> Self {
-        Self::open_in(tempfile::tempdir().unwrap()).await
+        let h = Self::open_in(tempfile::tempdir().unwrap()).await;
+        h.access(AssistantAccess::Full);
+        h
     }
 
     async fn open_in(dir: tempfile::TempDir) -> Self {
         let engine = Engine::open(EngineConfig { data_dir: dir.path().join("data"), keys: Arc::new(MemoryKeyStore::default()), agent_path: AgentPath::Fixed("".into()), az_binary: None, user_known_hosts: None, updates: Arc::new(engine::ScriptedTransport::named("off").unwrap()) }).await.unwrap();
         let events = engine.subscribe();
         Self { engine, events, dir }
+    }
+
+    fn access(&self, access: AssistantAccess) {
+        self.engine.set_settings(Settings { assistant_access: access, ..self.engine.settings() });
     }
 
     fn log_path(&self) -> std::path::PathBuf {
@@ -1161,6 +1167,86 @@ mod pg {
     }
 
     #[tokio::test]
+    async fn default_schema_tools_return_structure_without_estimates_defaults_or_index_expressions() {
+        for scenario in ["describe", "search", "echo"] {
+            let mut h = Harness::open_in(tempfile::tempdir().unwrap()).await;
+            h.use_fake(scenario);
+            let config = connected(&h).await;
+            let chat = h.chat(Permission::AskFirst);
+            send_on(&h, chat, "Help with the orders schema", tab(&config, "select 'EDITOR_CANARY'")).await;
+            assert_eq!(h.wait_end(chat).await.0, TurnOutcome::Completed);
+            let entries = h.entries(chat).await;
+            let sent = h.stdin_lines().join("\n");
+            assert!(!sent.contains("EDITOR_CANARY"));
+            assert!(!sent.contains("~") && !sent.contains("WHERE") && !sent.contains("'paid'"), "{sent}");
+            if scenario == "describe" {
+                let text = text_of(&entries[2]);
+                assert!(text.contains("customer_id bigint NOT NULL FK → public.customers(id)"), "{text}");
+                assert!(text.contains("orders_open_idx"));
+                assert!(!text.contains("(status)") && !text.contains("created_at DESC"));
+            } else if scenario == "search" {
+                assert!(text_of(&entries[2]).contains("table public.orders"));
+            } else {
+                assert!(text_of(&entries[1]).contains("public.orders: id bigint PK"));
+            }
+            assert!(!entries.iter().any(|e| matches!(e, Entry::Tool { status: ToolStatus::AwaitingApproval { .. }, .. })));
+        }
+    }
+
+    #[tokio::test]
+    async fn downgrade_cancels_a_running_query_without_delivering_its_rows() {
+        let mut h = Harness::open().await;
+        h.use_fake_with("query", "--fake-sql \"select 'ROW_CANARY', pg_sleep(10)\"");
+        let config = connected(&h).await;
+        let chat = h.chat(Permission::AskFirst);
+        send_on(&h, chat, "Run the slow query", tab(&config, "")).await;
+        let (approval, _) = h.wait_approval(chat).await;
+        h.engine.assistant_approve(chat, approval, Decision::Run).unwrap();
+        let deadline = Instant::now() + WAIT;
+        loop {
+            let running = scalar(&h, &config, "select count(*) from pg_stat_activity where query like 'select ''ROW_CANARY''%' and state = 'active'").await;
+            if running != "0" { break; }
+            assert!(Instant::now() < deadline, "the assistant query never ran");
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        h.access(AssistantAccess::SchemaOnly);
+        h.access(AssistantAccess::Full);
+        assert_eq!(h.wait_end(chat).await.0, TurnOutcome::Stopped);
+        assert!(!h.stdin_lines().iter().any(|l| l.contains("mcp_response") && l.contains("ROW_CANARY")));
+        assert!(!h.entries(chat).await.iter().any(|e| matches!(e, Entry::Tool { status: ToolStatus::Done { result: ToolResult::Rows { .. } }, .. })));
+    }
+
+    #[tokio::test]
+    async fn full_access_still_attaches_rows_and_schema_only_drops_the_same_reference() {
+        let mut h = Harness::open().await;
+        h.use_fake("echo");
+        let config = connected(&h).await;
+        let mut context = tab(&config, "select 'ATTACHMENT_CANARY'");
+        let id = context.tab_id;
+        h.engine.console_configure(id, ConsoleConfig { connection_id: config.id, database: config.database.clone(), schema: None, mode: TxnMode::AutoCommit }).await.unwrap();
+        let accepted = h.engine.console_run(id, RunRequest::Script { text: context.text.clone(), target: RunTarget::All, mode: RunMode::Run, params: Vec::new() }, None).await.unwrap();
+        let deadline = Instant::now() + WAIT;
+        loop {
+            if h.engine.boot().consoles.iter().any(|c| c.tab_id == id && matches!(c.run, RunState::Finished { .. })) { break; }
+            assert!(Instant::now() < deadline);
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        context.attach = Some(ResultRef { tab_id: id, run_id: accepted.run_id, index: 0 });
+        let chat = h.chat(Permission::Auto);
+        send_on(&h, chat, "Full attachment", context.clone()).await;
+        h.wait_end(chat).await;
+        h.wait_idle(chat).await;
+        assert!(matches!(&h.entries(chat).await[0], Entry::User { attachment: Some(a), .. } if a.rows[0][0].as_deref() == Some("ATTACHMENT_CANARY")));
+        assert!(h.stdin_lines().iter().any(|l| l.contains("Attached result") && l.contains("ATTACHMENT_CANARY")));
+        h.access(AssistantAccess::SchemaOnly);
+        let before = h.stdin_lines().len();
+        send_on(&h, chat, "Schema attachment is discarded", context).await;
+        h.wait_end(chat).await;
+        assert!(matches!(&h.entries(chat).await[3], Entry::User { attachment: None, .. }));
+        assert!(!h.stdin_lines().into_iter().skip(before).any(|l| l.contains("ATTACHMENT_CANARY")));
+    }
+
+    #[tokio::test]
     async fn the_context_sends_the_outline_once_per_session_and_the_tab_sql_when_it_changes() {
         let mut h = Harness::open().await;
         h.use_fake("echo");
@@ -1204,4 +1290,142 @@ async fn sql_server_model_queries_are_refused_without_an_approval_even_without_a
         assert!(protocol.contains("Microsoft SQL Server") && protocol.contains("TOP or OFFSET/FETCH"), "{protocol}");
         assert!(!protocol.contains("Prefer aggregates and LIMIT"));
     }
+}
+
+#[tokio::test]
+async fn schema_only_is_default_and_drops_stale_attachments_before_loading_or_storing_rows() {
+    let mut h = Harness::open_in(tempfile::tempdir().unwrap()).await;
+    assert_eq!(h.engine.settings().assistant_access, AssistantAccess::SchemaOnly);
+    h.use_fake("echo");
+    let chat = h.chat(Permission::Auto);
+    let tab = TabContext { tab_id: TabId(uuid::Uuid::new_v4()), title: "TITLE_CANARY".into(), db: None, text: "select 'EDITOR_CANARY'".into(), target: RunTarget::All, attach: Some(ResultRef { tab_id: TabId(uuid::Uuid::new_v4()), run_id: RunId(999), index: 0 }) };
+    h.engine.assistant_send(chat, SendRequest { text: "USER_TEXT_ALLOWED".into(), tab: Some(tab) }).await.unwrap();
+    assert_eq!(h.wait_end(chat).await.0, TurnOutcome::Completed);
+    h.wait_idle(chat).await;
+    let entries = h.entries(chat).await;
+    assert!(matches!(&entries[0], Entry::User { attachment: None, .. }));
+    assert!(!h.stdin_lines().join("\n").contains("CANARY"));
+    assert!(text_of(&entries[1]).contains("USER_TEXT_ALLOWED"));
+    let tools = h.stdin_lines().into_iter().find(|l| l.contains("mcp_response") && l.contains("describe_tables")).unwrap();
+    assert!(!tools.contains("run_query"), "{tools}");
+    h.engine.shutdown().await;
+    let reopened = Harness::open_in(h.dir).await;
+    assert_eq!(reopened.engine.settings().assistant_access, AssistantAccess::SchemaOnly);
+}
+
+#[tokio::test]
+async fn schema_only_refuses_both_permission_requests_and_forged_direct_queries() {
+    for scenario in ["query", "query-forged"] {
+        let mut h = Harness::open_in(tempfile::tempdir().unwrap()).await;
+        h.use_fake(scenario);
+        let chat = h.chat(Permission::Auto);
+        h.send(chat, "Help me write SQL").await;
+        assert_eq!(h.wait_end(chat).await.0, TurnOutcome::Completed);
+        let entries = h.entries(chat).await;
+        assert!(entries.iter().any(|e| matches!(e, Entry::Tool { status: ToolStatus::Failed { message }, .. } if message.contains("Schema only"))), "{entries:?}");
+        assert!(!entries.iter().any(|e| matches!(e, Entry::Tool { status: ToolStatus::AwaitingApproval { .. } | ToolStatus::Done { result: ToolResult::Rows { .. } }, .. })));
+    }
+}
+
+#[tokio::test]
+async fn an_access_switch_cancels_pending_and_already_approved_calls_even_if_full_is_restored() {
+    for approved in [false, true] {
+        let mut h = Harness::open().await;
+        h.use_fake(if approved { "query-delayed" } else { "query" });
+        let chat = h.chat(Permission::AskFirst);
+        h.send(chat, "Count rows").await;
+        let (approval, _) = h.wait_approval(chat).await;
+        if approved {
+            h.engine.assistant_approve(chat, approval, Decision::Run).unwrap();
+            let deadline = Instant::now() + WAIT;
+            while !h.log().contains("approved\t") {
+                assert!(Instant::now() < deadline);
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        }
+        let before = h.stdin_lines().len();
+        let engine = h.engine.clone();
+        std::thread::spawn(move || {
+            engine.set_settings(Settings { assistant_access: AssistantAccess::SchemaOnly, ..engine.settings() });
+            engine.set_settings(Settings { assistant_access: AssistantAccess::Full, ..engine.settings() });
+        }).join().expect("settings_set works outside a runtime");
+        assert_eq!(h.engine.assistant_approve(chat, approval, Decision::Run), Err(ApproveError::NotPending));
+        assert_eq!(h.wait_end(chat).await.0, TurnOutcome::Stopped);
+        h.wait_idle(chat).await;
+        let later = h.stdin_lines().into_iter().skip(before).collect::<Vec<_>>();
+        assert!(!later.iter().any(|l| l.contains("\"behavior\"") || l.contains("\"isError\"")), "a pending permission or tool result escaped: {later:?}");
+        h.use_fake("echo");
+        h.send(chat, "Fresh context").await;
+        assert_eq!(h.wait_end(chat).await.0, TurnOutcome::Completed);
+        assert!(!h.turn_argvs().last().unwrap().iter().any(|s| s == "--resume"));
+        assert!(!h.stdin_lines().last().unwrap().contains("Count rows"));
+    }
+}
+
+#[tokio::test]
+async fn same_access_resumes_across_restart_but_legacy_provenance_and_old_recaps_fail_closed() {
+    for legacy in [false, true] {
+        let mut h = Harness::open_in(tempfile::tempdir().unwrap()).await;
+        if legacy { h.access(AssistantAccess::Full); }
+        h.use_fake("echo");
+        let chat = h.chat(Permission::Auto);
+        h.send(chat, "OLD_CONTEXT_CANARY").await;
+        h.wait_end(chat).await;
+        h.wait_idle(chat).await;
+        h.engine.shutdown().await;
+        if legacy {
+            let conn = rusqlite::Connection::open(h.engine.data_dir().join("l1-data.sqlite3")).unwrap();
+            let json: String = conn.query_row("SELECT json FROM chats WHERE id = ?1", [chat.0.to_string()], |r| r.get(0)).unwrap();
+            let mut record: serde_json::Value = serde_json::from_str(&json).unwrap();
+            record.as_object_mut().unwrap().remove("access");
+            record.as_object_mut().unwrap().remove("recapFloor");
+            record["session"].as_object_mut().unwrap().remove("access");
+            conn.execute("UPDATE chats SET json = ?1 WHERE id = ?2", [record.to_string(), chat.0.to_string()]).unwrap();
+            let settings: String = conn.query_row("SELECT json FROM kv WHERE key = 'settings'", [], |r| r.get(0)).unwrap();
+            let mut settings: serde_json::Value = serde_json::from_str(&settings).unwrap();
+            settings.as_object_mut().unwrap().remove("assistantAccess");
+            conn.execute("UPDATE kv SET json = ?1 WHERE key = 'settings'", [settings.to_string()]).unwrap();
+            conn.execute("DELETE FROM kv WHERE key = 'assistant_access'", []).unwrap();
+        }
+        let mut h = Harness::open_in(h.dir).await;
+        assert_eq!(h.engine.settings().assistant_access, AssistantAccess::SchemaOnly);
+        h.send(chat, "NEW_CONTEXT").await;
+        h.wait_end(chat).await;
+        h.wait_idle(chat).await;
+        assert_eq!(h.turn_argvs().last().unwrap().iter().any(|s| s == "--resume"), !legacy);
+        if legacy {
+            assert!(!h.stdin_lines().last().unwrap().contains("OLD_CONTEXT_CANARY"));
+        }
+        h.use_fake("resume-lost");
+        h.send(chat, "Recap safe context").await;
+        assert_eq!(h.wait_end(chat).await.0, TurnOutcome::Completed);
+        let prompt = h.stdin_lines().into_iter().filter(|l| l.contains("Recap safe context")).last().unwrap();
+        assert_eq!(prompt.contains("OLD_CONTEXT_CANARY"), !legacy, "{prompt}");
+        assert!(prompt.contains("NEW_CONTEXT"));
+        assert!(h.entries(chat).await.iter().any(|e| matches!(e, Entry::User { text, .. } if text == "OLD_CONTEXT_CANARY")), "history stays local");
+    }
+}
+
+#[tokio::test]
+async fn switching_access_while_a_chat_is_unloaded_excludes_its_old_context_and_recap() {
+    let mut h = Harness::open().await;
+    h.use_fake("echo");
+    let chat = h.chat(Permission::Auto);
+    h.send(chat, "FULL_HISTORY_CANARY").await;
+    h.wait_end(chat).await;
+    h.wait_idle(chat).await;
+    h.engine.shutdown().await;
+    let mut h = Harness::open_in(h.dir).await;
+    h.access(AssistantAccess::SchemaOnly);
+    h.access(AssistantAccess::Full);
+    h.send(chat, "SAFE_NEW_HISTORY").await;
+    h.wait_end(chat).await;
+    h.wait_idle(chat).await;
+    assert!(!h.turn_argvs().last().unwrap().iter().any(|s| s == "--resume"));
+    h.use_fake("resume-lost");
+    h.send(chat, "Summarize").await;
+    h.wait_end(chat).await;
+    let prompt = h.stdin_lines().into_iter().filter(|l| l.contains("Summarize")).last().unwrap();
+    assert!(!prompt.contains("FULL_HISTORY_CANARY"), "{prompt}");
+    assert!(prompt.contains("SAFE_NEW_HISTORY"));
 }

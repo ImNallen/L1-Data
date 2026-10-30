@@ -140,7 +140,7 @@ it("heads the right panel with Assistant, new chat, and chat history before the 
     panel.indexOf(id),
   );
   expect(order.every((at, i) => at > (order[i - 1] ?? 0))).toBe(true);
-  expect(panel).toMatch(/<textarea[^>]*data-testid="assistant-input"[^>]*placeholder="Ask about your data, send follow-ups, or attach a result"/);
+  expect(panel).toMatch(/<textarea[^>]*data-testid="assistant-input"[^>]*placeholder="Ask for SQL help using your schema"/);
   expect(panel).not.toContain("coming soon");
 });
 

@@ -1,3 +1,4 @@
+mod access;
 mod aggregate;
 mod assistant;
 mod catalog;
@@ -82,6 +83,7 @@ pub(crate) struct Shared {
     vault: Vault,
     store: Store,
     settings: RwLock<Settings>,
+    access: access::Access,
     connections: RwLock<HashMap<ConnectionId, ConnEntry>>,
     consoles: RwLock<HashMap<TabId, Arc<Console>>>,
     events: broadcast::Sender<AppEvent>,
@@ -742,6 +744,10 @@ impl Engine {
             loaded => loaded?,
         }
         .unwrap_or_default();
+        let access = store.kv_get::<access::AccessLease>("assistant_access").ok().flatten()
+            .filter(|a| a.mode == settings.assistant_access)
+            .unwrap_or_else(|| access::AccessLease::new(settings.assistant_access));
+        store.kv_set("assistant_access", &access)?;
         let (events, _) = broadcast::channel(EVENT_BUFFER);
         let tunnels = tunnel::Tunnels::new(cfg.user_known_hosts, cfg.data_dir.join("known_hosts"));
         let updates = update::Updates::open(&store, cfg.updates);
@@ -750,6 +756,7 @@ impl Engine {
             vault: Vault::new(cfg.keys),
             store,
             settings: RwLock::new(settings),
+            access: access::Access::new(access),
             connections: RwLock::new(HashMap::new()),
             consoles: RwLock::new(HashMap::new()),
             events,
@@ -1756,10 +1763,20 @@ impl Engine {
     }
 
     pub fn set_settings(&self, s: Settings) {
+        let mut access = self.shared.access.lock();
+        if access.mode != s.assistant_access {
+            *access = access::AccessLease::new(s.assistant_access);
+            if let Err(e) = self.shared.store.kv_set("assistant_access", &*access) {
+                eprintln!("assistant access save failed: {e}");
+            }
+            self.shared.access.changed(*access);
+            self.shared.revoke_assistant_access();
+        }
         if let Err(e) = self.shared.store.kv_set(KV_SETTINGS, &s) {
             eprintln!("settings save failed: {e}");
         }
         let before = std::mem::replace(&mut *self.shared.settings.write().unwrap(), s.clone());
+        drop(access);
         self.shared.reprobe_changed(&before.providers, &s.providers);
     }
 
@@ -1945,7 +1962,7 @@ mod tests {
     async fn boot_lists_stored_chats_newest_first_as_idle() {
         let (engine, _dir) = engine().await;
         let options = ChatOptions { provider: ProviderKind::Claude, model: ModelId("opus".into()), effort: None, permission: Permission::Auto };
-        let record = |title: &str, updated_at_ms| store::ChatRecord { title: title.into(), created_at_ms: 1, updated_at_ms, options: options.clone(), session: None, entry_count: 4 };
+        let record = |title: &str, updated_at_ms| store::ChatRecord { title: title.into(), created_at_ms: 1, updated_at_ms, options: options.clone(), session: None, entry_count: 4, access: None, recap_floor: 0 };
         let (old, new) = (ChatId(uuid::Uuid::from_u128(1)), ChatId(uuid::Uuid::from_u128(2)));
         engine.shared.store.put_chat(old, &record("old", 10)).unwrap();
         engine.shared.store.put_chat(new, &record("new", 20)).unwrap();

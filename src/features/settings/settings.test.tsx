@@ -172,6 +172,7 @@ it.each([
 
 it("lists every setting in registry order for an empty query", () => {
   expect(matching(" ")).toEqual([
+    "assistantAccess",
     "colorScheme",
     "themes",
     "density",
@@ -235,6 +236,7 @@ it("says when no setting matches, and shows the section with every nav entry onc
   const blank = render(settingsOpen("queries", "  "));
   expect(breadcrumb(blank)).toBe("Settings / Queries");
   expect(navEntries(blank)).toEqual([
+    ["general", "General", false],
     ["appearance", "Appearance", false],
     ["queries", "Queries", true],
     ["providers", "Providers", false],

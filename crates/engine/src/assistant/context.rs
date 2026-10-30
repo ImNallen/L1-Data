@@ -1,4 +1,4 @@
-use crate::model::{Attachment, Catalog, DatabaseKind, DatabaseRef, RelKind, Relation};
+use crate::model::{AssistantAccess, Attachment, Catalog, DatabaseKind, DatabaseRef, RelKind, Relation};
 use crate::results::ResultSet;
 use crate::sql::StmtSpan;
 
@@ -34,6 +34,7 @@ pub(crate) enum Repeat {
 }
 
 pub(crate) struct ContextInput<'a> {
+    pub access: AssistantAccess,
     pub connection: Option<ConnectionFacts<'a>>,
     pub db: Option<&'a DatabaseRef>,
     pub catalog: Option<&'a Catalog>,
@@ -52,7 +53,10 @@ pub(crate) fn build(input: &ContextInput<'_>) -> String {
             let version = c.server_version.map_or_else(|| format!(" ({dialect})"),|v| format!(" ({dialect} {v})"));
             match c.connected {
                 Ok(()) => out.push_str(&format!("Connection: {}{version}, database {}, connected.\n", c.name, db.database)),
-                Err(reason) => out.push_str(&format!("Connection: {}{version}, database {}. Not connected: {reason}\n", c.name, db.database)),
+                Err(reason) => {
+                    let reason = if input.access == AssistantAccess::Full { reason } else { "connection unavailable" };
+                    out.push_str(&format!("Connection: {}{version}, database {}. Not connected: {reason}\n", c.name, db.database));
+                }
             }
         }
         _ => out.push_str("No database is selected: the active tab has no connection, so the tools cannot run.\n"),
@@ -60,7 +64,7 @@ pub(crate) fn build(input: &ContextInput<'_>) -> String {
     if let Some(catalog) = input.catalog {
         out.push_str(&format!("Default schema: {}. Shown schemas: {}.\n", catalog.default_schema.as_deref().unwrap_or("none"), if input.shown_schemas.is_empty() { "none".to_owned() } else { input.shown_schemas.join(", ") }));
     }
-    if let Some(tab) = &input.tab {
+    if input.access == AssistantAccess::Full && let Some(tab) = &input.tab {
         out.push_str(&format!("Tab: {}\n", tab.title));
         match input.tab_sql {
             Repeat::Unchanged => out.push_str("Tab SQL: unchanged since your last message.\n"),
@@ -82,7 +86,7 @@ pub(crate) fn build(input: &ContextInput<'_>) -> String {
             out.push('\n');
         }
     }
-    if let Some(a) = input.attachment {
+    if input.access == AssistantAccess::Full && let Some(a) = input.attachment {
         out.push_str(&attachment_text(a));
     }
     if let Some(catalog) = input.catalog {
@@ -90,7 +94,7 @@ pub(crate) fn build(input: &ContextInput<'_>) -> String {
             Repeat::Unchanged => out.push_str("Schema outline: unchanged since earlier in this chat.\n"),
             Repeat::Full => {
                 out.push_str("Schema outline:\n");
-                out.push_str(&outline(catalog, input.shown_schemas, OUTLINE_MAX));
+                out.push_str(&outline(catalog, input.shown_schemas, OUTLINE_MAX, input.access));
             }
         }
     }
@@ -152,10 +156,10 @@ pub(crate) fn attachment(set: &ResultSet, tab_title: &str) -> Attachment {
     Attachment { tab_title: tab_title.to_owned(), columns: set.columns.iter().map(|c| c.name.clone()).collect(), rows, total_rows: meta.rows_seen }
 }
 
-pub(crate) fn outline(catalog: &Catalog, shown: &[String], budget: usize) -> String {
+pub(crate) fn outline(catalog: &Catalog, shown: &[String], budget: usize, access: AssistantAccess) -> String {
     let schemas: Vec<_> = catalog.schemas.iter().filter(|s| shown.contains(&s.name)).collect();
     for detail in [Detail::Types, Detail::Names, Detail::Counts] {
-        let lines: Vec<String> = schemas.iter().flat_map(|s| s.relations.iter().map(move |r| outline_line(&s.name, r, detail))).collect();
+        let lines: Vec<String> = schemas.iter().flat_map(|s| s.relations.iter().map(move |r| outline_line(&s.name, r, detail, access))).collect();
         let total: usize = lines.iter().map(|l| l.chars().count() + 1).sum();
         if total <= budget || detail == Detail::Counts {
             return fit(lines, budget);
@@ -171,14 +175,14 @@ enum Detail {
     Counts,
 }
 
-fn outline_line(schema: &str, r: &Relation, detail: Detail) -> String {
+fn outline_line(schema: &str, r: &Relation, detail: Detail, access: AssistantAccess) -> String {
     let kind = match r.kind {
         RelKind::Table | RelKind::PartitionedTable => "",
         RelKind::View => " view",
         RelKind::MaterializedView => " materialized view",
         RelKind::ForeignTable => " foreign table",
     };
-    let rows = r.row_estimate.map(|n| format!(", ~{n} rows")).unwrap_or_default();
+    let rows = if access == AssistantAccess::Full { r.row_estimate.map(|n| format!(", ~{n} rows")).unwrap_or_default() } else { String::new() };
     let columns = match detail {
         Detail::Types => r
             .columns
@@ -282,7 +286,25 @@ mod tests {
     static PUBLIC: std::sync::LazyLock<Vec<String>> = std::sync::LazyLock::new(|| vec!["public".to_owned()]);
 
     fn input<'a>(catalog: &'a Catalog, db: &'a DatabaseRef, tab: Option<TabFacts<'a>>, attachment: Option<&'a Attachment>) -> ContextInput<'a> {
-        ContextInput { connection: Some(ConnectionFacts { database_kind: DatabaseKind::Postgres, name: "dev", server_version: Some("16.4"), connected: Ok(()) }), db: Some(db), catalog: Some(catalog), shown_schemas: &PUBLIC, tab, tab_sql: Repeat::Full, attachment, outline: Repeat::Full }
+        ContextInput { access: AssistantAccess::Full, connection: Some(ConnectionFacts { database_kind: DatabaseKind::Postgres, name: "dev", server_version: Some("16.4"), connected: Ok(()) }), db: Some(db), catalog: Some(catalog), shown_schemas: &PUBLIC, tab, tab_sql: Repeat::Full, attachment, outline: Repeat::Full }
+    }
+
+    #[test]
+    fn schema_only_excludes_automatic_data_even_when_the_input_contains_it() {
+        let c = catalog(2);
+        let db = c.db.clone();
+        let a = Attachment { tab_title: "ATTACHMENT_TITLE_CANARY".into(), columns: vec!["value".into()], rows: vec![vec![Some("ROW_CANARY".into())]], total_rows: 918273 };
+        let tab = TabFacts { title: "TITLE_CANARY", text: "select 'EDITOR_CANARY'", picked: Some(StmtSpan { start: 0, end: 22 }), selected: true, last_error: Some("ERROR_CANARY") };
+        let mut i = input(&c, &db, Some(tab), Some(&a));
+        i.access = AssistantAccess::SchemaOnly;
+        i.connection.as_mut().unwrap().connected = Err("CONNECT_CANARY");
+        let built = build(&i);
+        for secret in ["CANARY", "~0 rows", "~10 rows", "918273", "Selected statement", "Tab SQL"] {
+            assert!(!built.contains(secret), "{built}");
+        }
+        for structural in ["PostgreSQL", "database shop", "public.table_0", "id bigint PK", "customer_id bigint FK"] {
+            assert!(built.contains(structural), "{built}");
+        }
     }
 
     #[test]
@@ -309,7 +331,7 @@ mod tests {
         i.outline = Repeat::Unchanged;
         let built = build(&i);
         assert!(built.contains("Tab SQL: unchanged since your last message.\n") && built.contains("Schema outline: unchanged since earlier in this chat.\n"), "{built}");
-        let none = build(&ContextInput { connection: None, db: None, catalog: None, shown_schemas: &[], tab: None, tab_sql: Repeat::Full, attachment: None, outline: Repeat::Full });
+        let none = build(&ContextInput { access: AssistantAccess::Full, connection: None, db: None, catalog: None, shown_schemas: &[], tab: None, tab_sql: Repeat::Full, attachment: None, outline: Repeat::Full });
         assert_eq!(none, "<l1_context>\nNo database is selected: the active tab has no connection, so the tools cannot run.\n</l1_context>");
         let mut disconnected = input(&c, &db, None, None);
         disconnected.connection = Some(ConnectionFacts { database_kind: DatabaseKind::Postgres, name: "dev", server_version: None, connected: Err("password missing") });
@@ -359,11 +381,11 @@ mod tests {
     fn the_outline_degrades_by_types_then_columns_then_a_more_line_and_the_block_stays_under_budget() {
         let c = catalog(3_000);
         let shown = ["public".to_owned()];
-        let full = outline(&c, &shown, usize::MAX);
+        let full = outline(&c, &shown, usize::MAX, AssistantAccess::Full);
         assert!(full.starts_with("public.table_0, ~0 rows: id bigint PK, customer_id bigint FK, total bigint\n"));
-        let names = outline(&c, &shown, 180_000);
+        let names = outline(&c, &shown, 180_000, AssistantAccess::Full);
         assert!(names.starts_with("public.table_0, ~0 rows: id, customer_id, total\n"), "{}", &names[..100]);
-        let counts = outline(&c, &shown, OUTLINE_MAX);
+        let counts = outline(&c, &shown, OUTLINE_MAX, AssistantAccess::Full);
         assert!(counts.starts_with("public.table_0, ~0 rows: 3 columns\n"), "{}", &counts[..100]);
         assert!(counts.chars().count() <= OUTLINE_MAX);
         let last = counts.lines().last().unwrap();

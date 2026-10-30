@@ -1,4 +1,4 @@
-import { InfoIcon, PaletteIcon, SparklesIcon, SquareCodeIcon, type LucideIcon } from "lucide-react";
+import { InfoIcon, PaletteIcon, SettingsIcon, SparklesIcon, SquareCodeIcon, type LucideIcon } from "lucide-react";
 import type { ComponentType } from "react";
 import { useWorkspace } from "../../state/workspace";
 import { AppVersionSetting, UpdateTrackSetting } from "./AboutSection";
@@ -6,10 +6,12 @@ import { CodeFontSetting, DensitySetting, InterfaceFontSetting, PanelMotionSetti
 import { ColorSchemeSetting, ThemesSetting } from "./AppearanceSection";
 import { HealthCheckSetting, ProviderListSetting } from "./ProvidersSection";
 import { MaxRowsSetting, StopOnErrorSetting, TablePageSizeSetting } from "./QueriesSection";
+import { AssistantAccessSetting } from "./GeneralSection";
 import { Card } from "./SettingLayout";
 import { sectionLabel, sectionSettings, settingRuns, type SettingEntry, type SettingId, type SettingsSectionId } from "./settingsIndex";
 
 export const SECTION_ICONS = {
+  general: SettingsIcon,
   appearance: PaletteIcon,
   queries: SquareCodeIcon,
   providers: SparklesIcon,
@@ -17,6 +19,7 @@ export const SECTION_ICONS = {
 } satisfies Record<SettingsSectionId, LucideIcon>;
 
 const SETTING_VIEWS = {
+  assistantAccess: AssistantAccessSetting,
   colorScheme: ColorSchemeSetting,
   themes: ThemesSetting,
   density: DensitySetting,

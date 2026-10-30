@@ -110,6 +110,7 @@ const DEFAULT_LAYOUT: Layout = {
   assistantChat: null,
 };
 export const DEFAULT_SETTINGS: Settings = {
+  assistantAccess: "SchemaOnly",
   maxRows: 200_000,
   maxResultBytes: 512 * 1024 * 1024,
   tablePageSize: 500,
@@ -332,7 +333,7 @@ export const useWorkspace = create<WorkspaceData & WorkspaceActions>()((set, get
     overlay.settle(choice);
     set({ overlay: { kind: "none" } });
   },
-  openSettings: (section = "appearance") => set({ screen: { kind: "settings", section, query: "" }, overlay: { kind: "none" }, searchFocus: null }),
+  openSettings: (section = "general") => set({ screen: { kind: "settings", section, query: "" }, overlay: { kind: "none" }, searchFocus: null }),
   closeSettings: () => set({ screen: { kind: "workspace" }, overlay: { kind: "none" }, searchFocus: null }),
   setTreeQuery: (treeQuery) => set({ treeQuery }),
   setSettingsQuery: (query) => set((s) => (s.screen.kind === "settings" ? { screen: { ...s.screen, query } } : {})),

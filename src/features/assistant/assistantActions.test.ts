@@ -57,6 +57,7 @@ const rows = (runId: number): ResultMeta => ({
 });
 
 function showTab(text: string, live?: ConsoleState) {
+  useWorkspace.setState((s) => ({ settings: { ...s.settings, assistantAccess: "Full" } }));
   seedEditor(TAB.id, "");
   insertAtCursor(TAB.id, text);
   useWorkspace.setState({ tabs: { [TAB.id]: TAB }, order: [TAB.id], active: TAB.id });
@@ -242,4 +243,50 @@ it("keeps the effort across a model switch when the model lists it, else high, e
     effortFor(model("low", "medium"), "max"),
     effortFor(model(), "high"),
   ]).toEqual(["max", "high", "high", "medium", null]);
+});
+
+it("drops a stale attachment request and editor text in schema only mode", async () => {
+  const sent = captureSend();
+  showTab("select 'EDITOR_CANARY'");
+  useWorkspace.setState((s) => ({ settings: { ...s.settings, assistantAccess: "SchemaOnly" } }));
+  expect(await sendMessage("chat-1", "My pasted text", true)).toBe(true);
+  expect(sent).toEqual([
+    {
+      chatId: "chat-1",
+      request: { text: "My pasted text", tab: { tabId: TAB.id, db: TAB.console.db, title: "", text: "", target: { kind: "all" }, attach: null } },
+    },
+  ]);
+});
+
+it("waits for every queued access change before admitting a message", async () => {
+  const { saveSettings } = await import("../editor/runActions");
+  vi.stubGlobal("window", {});
+  const modes: unknown[] = [];
+  const sent: unknown[] = [];
+  let release = () => {};
+  mockIPC((cmd, args) => {
+    if (cmd === "settings_set") {
+      modes.push(args);
+      if (modes.length === 1)
+        return new Promise<void>((resolve) => {
+          release = resolve;
+        });
+    }
+    if (cmd === "assistant_send") {
+      sent.push(args);
+      return { turn: 0 };
+    }
+  });
+  const full = saveSettings({ assistantAccess: "Full" });
+  const schema = saveSettings({ assistantAccess: "SchemaOnly" });
+  const sending = sendMessage("chat-1", "Schema help", true);
+  await vi.waitFor(() => expect(modes).toHaveLength(1));
+  expect(sent).toHaveLength(0);
+  release();
+  await Promise.all([full, schema, sending]);
+  expect(modes).toEqual([
+    { settings: expect.objectContaining({ assistantAccess: "Full" }) },
+    { settings: expect.objectContaining({ assistantAccess: "SchemaOnly" }) },
+  ]);
+  expect(sent).toEqual([{ chatId: "chat-1", request: { text: "Schema help", tab: null } }]);
 });

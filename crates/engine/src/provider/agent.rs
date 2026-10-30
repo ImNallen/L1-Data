@@ -1,14 +1,16 @@
 use std::collections::{HashSet, VecDeque};
 use std::process::Stdio;
+use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
+use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWrite, AsyncWriteExt, BufReader};
 use tokio::process::{Child, ChildStdin, Command};
 use tokio::sync::mpsc;
 
 use super::{AgentEvent, Codec, Handshake, LaunchSpec};
 use crate::Shared;
+use crate::access::{Access, AccessLease};
 use crate::model::{AgentError, TurnOutcome};
 
 const MAX_LINE: usize = 16 << 20;
@@ -195,6 +197,21 @@ impl Pipes {
         stdin.flush().await
     }
 
+    async fn flush_for(&mut self, access: &Access, lease: AccessLease) -> std::io::Result<()> {
+        let stdin = self.stdin.as_mut().expect("only close takes stdin");
+        while !self.outbox.is_empty() {
+            let written = std::future::poll_fn(|cx| {
+                access.with(lease, || Pin::new(&mut *stdin).poll_write(cx, &self.outbox))
+                    .unwrap_or_else(|| std::task::Poll::Ready(Err(std::io::ErrorKind::PermissionDenied.into())))
+            }).await?;
+            if written == 0 {
+                return Err(std::io::ErrorKind::WriteZero.into());
+            }
+            self.outbox.drain(..written);
+        }
+        Ok(())
+    }
+
     fn stderr_tail(&self) -> String {
         self.stderr.lock().unwrap().clone()
     }
@@ -304,6 +321,15 @@ impl Agent {
 
     pub(crate) async fn flush(&mut self) -> std::io::Result<()> {
         self.pipes.flush().await
+    }
+
+    pub(crate) async fn write_for(&mut self, access: &Access, lease: AccessLease, lines: Vec<String>) -> std::io::Result<()> {
+        self.pipes.queue(lines);
+        self.flush_for(access, lease).await
+    }
+
+    pub(crate) async fn flush_for(&mut self, access: &Access, lease: AccessLease) -> std::io::Result<()> {
+        self.pipes.flush_for(access, lease).await
     }
 
     pub(crate) fn stderr_tail(&self) -> String {
@@ -444,6 +470,31 @@ mod tests {
             }
         }
         out
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_downgrade_stops_a_partial_delivery_and_switching_back_does_not_restore_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let engine = Engine::open(EngineConfig { data_dir: dir.path().to_owned(), keys: Arc::new(MemoryKeyStore::default()), agent_path: AgentPath::Fixed("".into()), az_binary: None, user_known_hosts: None, updates: Arc::new(crate::ScriptedTransport::named("off").unwrap()) }).await.unwrap();
+        engine.set_settings(crate::model::Settings { assistant_access: crate::model::AssistantAccess::Full, ..engine.settings() });
+        for kind in ["initial_prompt", "tool_result"] {
+            let lease = *engine.shared.access.lock();
+            let spec = LaunchSpec { program: "sh".into(), args: vec!["-c".into(), "echo ready; sleep 1; cat".into()], env_set: Vec::new(), env_remove: Vec::new(), cwd: std::env::temp_dir() };
+            let (mut agent, _) = Agent::start(&engine.shared, spec, Box::new(LineCodec)).await.unwrap();
+            let payload = format!("{{\"{kind}\":\"{}\"}}", "private".repeat(100_000));
+            let mut write = Box::pin(agent.write_for(&engine.shared.access, lease, vec![payload]));
+            assert!(poll_once(&mut write).is_pending(), "the pipe must apply backpressure");
+            drop(write);
+            let remaining = agent.pipes.outbox.len();
+            assert!(remaining > 0);
+            engine.set_settings(crate::model::Settings { assistant_access: crate::model::AssistantAccess::SchemaOnly, ..engine.settings() });
+            engine.set_settings(crate::model::Settings { assistant_access: crate::model::AssistantAccess::Full, ..engine.settings() });
+            let error = agent.flush_for(&engine.shared.access, lease).await.unwrap_err();
+            assert_eq!(error.kind(), std::io::ErrorKind::PermissionDenied);
+            assert_eq!(agent.pipes.outbox.len(), remaining, "no further byte was delivered");
+            agent.close().await;
+        }
     }
 
     #[cfg(unix)]

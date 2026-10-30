@@ -11,6 +11,18 @@ type IndexedSection = {
 
 export const SETTINGS_INDEX = [
   {
+    id: "general",
+    label: "General",
+    settings: [
+      {
+        id: "assistantAccess",
+        label: "Assistant access",
+        group: "Assistant",
+        keywords: "ai privacy schema only full access data contents rows attachments editor context global chat",
+      },
+    ],
+  },
+  {
     id: "appearance",
     label: "Appearance",
     settings: [

@@ -154,6 +154,8 @@ export type ApproveError =
 /**  Answered already, denied by Stop, expired, or another chat's. */
 { kind: "NotPending" };
 
+export type AssistantAccess = "SchemaOnly" | "Full";
+
 export type Attachment = {
 	tabTitle: string,
 	columns: string[],
@@ -1493,6 +1495,7 @@ export type ServerInfo = {
 export type SessionState = { kind: "None" } | { kind: "Open"; backendPid: number } | { kind: "Lost"; reason: string; transaction: TransactionLoss };
 
 export type Settings = {
+	assistantAccess: AssistantAccess,
 	maxRows: number,
 	maxResultBytes: number,
 	tablePageSize: number,

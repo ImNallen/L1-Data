@@ -104,6 +104,9 @@ pub struct ChatRecord {
     pub options: ChatOptions,
     pub session: Option<ProviderSession>,
     pub entry_count: u32,
+    pub(crate) access: Option<crate::access::AccessLease>,
+    #[serde(default)]
+    pub recap_floor: u32,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -112,6 +115,7 @@ pub struct ProviderSession {
     pub provider: ProviderKind,
     pub id: String,
     pub config_dir: String,
+    pub(crate) access: Option<crate::access::AccessLease>,
 }
 
 pub struct HistoryInsert {
@@ -645,6 +649,8 @@ mod tests {
             options: ChatOptions { provider: ProviderKind::Claude, model: ModelId("opus".into()), effort: Some(EffortId("high".into())), permission: Permission::AskFirst },
             session: None,
             entry_count: 0,
+            access: None,
+            recap_floor: 0,
         }
     }
 
@@ -711,7 +717,7 @@ mod tests {
         assert_eq!(s.chats(1).unwrap(), vec![(new, record("new", 20))]);
 
         let resumed = ChatRecord {
-            session: Some(ProviderSession { provider: ProviderKind::Claude, id: "4f1c".into(), config_dir: "~/.claude".into() }),
+            session: Some(ProviderSession { provider: ProviderKind::Claude, id: "4f1c".into(), config_dir: "~/.claude".into(), access: None }),
             entry_count: 3,
             ..record("old", 30)
         };
