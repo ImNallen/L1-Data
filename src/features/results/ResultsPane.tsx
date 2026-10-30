@@ -465,7 +465,7 @@ export function ResultsPane({ tabId }: { tabId: TabId | null }) {
       <div className="relative flex min-h-0 flex-1 flex-col">
         <ResultBody run={run} view={view} output={output} query={gridQuery} editing={editing} actions={actions} onSelectionTotals={onSelectionTotals} />
       </div>
-      {pager && <TablePager tab={pager} rows={shown?.meta.rowCount ?? 0} />}
+      {pager && <TablePager tab={pager} rows={shown?.meta.rowsSeen ?? 0} />}
     </section>
   );
 }
