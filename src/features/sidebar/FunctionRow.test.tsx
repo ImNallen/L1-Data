@@ -166,7 +166,7 @@ it.each(
           { name: schema.name, relations: [], functions: [{ fn, ranges: [] }], sequences: [], types: [], synonyms: [] },
           expanded,
         );
-  const rows = nodes.filter((n) => n.key === `unrelated/display/path/schema/#functions/${fn.name}`);
+  const rows = nodes.filter((n) => n.kind === "row" && n.path === `unrelated/display/path/schema/#functions/${fn.name}`);
   expect(rows).toHaveLength(1);
   for (const row of rows) {
     if (row.kind !== "row" || !row.onDoubleClick) throw new Error("the routine's row has no double-click action");
@@ -178,4 +178,32 @@ it.each(
     expect(textOf("other")).toBe("SELECT 99");
     expect(useWorkspace.getState().tabs.active?.console.db).toEqual({ ...source, database: "reporting" });
   }
+});
+
+it.each(["normal", "filtered"])("keys overloaded routines apart in the %s tree while they share a path", (tree) => {
+  const expanded = { has: () => true, toggle: () => {} };
+  const overloads = [pgFunction, { ...pgFunction, oid: 13, args: "integer" }];
+  const schema: SchemaInfo = {
+    name: "schema",
+    quoted: "schema",
+    system: false,
+    tableCount: 0,
+    relations: [],
+    functions: overloads,
+    sequences: [],
+    types: [],
+    synonyms: [],
+  };
+  const nodes =
+    tree === "normal"
+      ? schemaNodes("conn", 2, postgres, schema, 1, expanded)
+      : filteredSchemaNodes(
+          "conn",
+          postgres,
+          { name: schema.name, relations: [], functions: overloads.map((fn) => ({ fn, ranges: [] })), sequences: [], types: [], synonyms: [] },
+          expanded,
+        );
+  const routines = nodes.filter((n) => n.kind === "row" && n.path === `conn/schema/#functions/${pgFunction.name}`);
+  expect(routines).toHaveLength(2);
+  expect(new Set(nodes.map((n) => n.key)).size).toBe(nodes.length);
 });

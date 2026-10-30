@@ -35,9 +35,11 @@ export type RowView = {
 
 type NodeBase = { key: string; depth: number; tint: TintGroup | null };
 
-/** A tree row. Its `key` is its path, which names it in `tree-node-<path>`. */
+/** A tree row. Its `key` is its path, which names it in `tree-node-<path>`, unless `path` sets that name apart from the key. */
 export type RowNode = NodeBase & {
   kind: "row";
+  /** Overloaded routines share a path, so their keys add the OID to stay unique while the test id keeps the path. */
+  path?: string;
   /** What type-ahead matches. */
   name: string;
   expandable: boolean;
@@ -121,7 +123,7 @@ function RowBody({ node, setSize, posInSet, tabStop, menuOpen, active }: RowProp
   const { onToggle } = node;
   return (
     <div
-      data-testid={`tree-node-${node.key}`}
+      data-testid={`tree-node-${node.path ?? node.key}`}
       role="treeitem"
       aria-expanded={node.expandable ? node.open : undefined}
       aria-selected={node.selected}

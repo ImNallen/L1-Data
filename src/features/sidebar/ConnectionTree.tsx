@@ -380,7 +380,8 @@ export function insertRoutine(db: DatabaseRef, fn: FunctionInfo): void {
 
 function functionRow(b: Build, path: string, depth: number, db: DatabaseRef, fn: FunctionInfo, ranges?: readonly TextRange[]) {
   row(b, {
-    key: `${path}/${fn.name}`,
+    key: `${path}/${fn.name}#${fn.oid}`,
+    path: `${path}/${fn.name}`,
     depth,
     name: fn.name,
     expandable: false,
