@@ -2,15 +2,19 @@
 import { clearMocks, mockIPC } from "@tauri-apps/api/mocks";
 import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { afterEach, beforeEach, expect, it, vi } from "vitest";
+import { afterEach, beforeAll, beforeEach, expect, it, vi } from "vitest";
 import { docOf, dropEditor, replaceDoc, seedEditor } from "../features/editor/editorStates";
 import { browseTemplate, openSqlTab } from "../features/editor/runActions";
 import { useCatalog } from "../state/catalog";
 import { useLive } from "../state/live";
 import { ask, EMPTY_QUERY, useWorkspace } from "../state/workspace";
 import { AppLayout } from "./AppLayout";
+import { preloadSurfaces } from "./lazySurfaces";
 import { CommandPalette } from "./CommandPalette";
 import { COMMANDS, openCommandPalette, shortcutLabel } from "./commands";
+
+// Settings and the connection dialog load from their own chunks; loaded, they open in the same pass.
+beforeAll(preloadSurfaces);
 
 beforeEach(() => {
   Element.prototype.scrollIntoView = vi.fn();
@@ -238,7 +242,7 @@ it("does not restore its opener over a replacement approval dialog", async () =>
   act(() => {
     approval = ask({ title: "Approve query?", body: "", choices: [{ id: "run", label: "Run", variant: "danger" }] });
   });
-  await waitFor(() => expect(document.activeElement?.closest('[role="dialog"]')?.getAttribute("data-testid")).toBe("ask-dialog"));
+  await waitFor(() => expect(document.activeElement?.closest('[role="alertdialog"]')?.getAttribute("data-testid")).toBe("ask-dialog"));
   act(openCommandPalette);
   expect(screen.queryByTestId("command-palette")).toBeNull();
   await user.click(screen.getByTestId("ask-run"));

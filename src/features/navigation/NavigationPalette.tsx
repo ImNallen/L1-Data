@@ -4,7 +4,7 @@ import { useEffect, useId, useLayoutEffect, useRef, useState } from "react";
 import { useCatalog } from "../../state/catalog";
 import { useLive } from "../../state/live";
 import { useWorkspace } from "../../state/workspace";
-import { cx, DialogSurface, Kbd } from "../../ui/primitives";
+import { ACTIVE_OPTION, cx, DialogSurface, Kbd } from "../../ui/primitives";
 import { activateDestination, focusDestination } from "./navigationActions";
 import { navigationItems, searchNavigation, type NavigationItem } from "./navigationItems";
 
@@ -62,7 +62,7 @@ function NavigationBrowser({ activate }: { activate: (item: NavigationItem) => v
           className="h-14 min-w-0 flex-1 bg-transparent text-ui-14 text-fg outline-none placeholder:text-muted"
         />
         <Dialog.Close aria-label="Close quick navigation" data-testid="navigation-close" className="rounded text-dim hover:text-fg">
-          <Kbd className="bg-pill">esc</Kbd>
+          <Kbd>esc</Kbd>
         </Dialog.Close>
       </div>
       <p id={`${listId}-scope`} data-testid="navigation-scope" className="shrink-0 px-4 py-2 text-ui-11.5 text-dim">
@@ -87,7 +87,7 @@ function NavigationBrowser({ activate }: { activate: (item: NavigationItem) => v
               onMouseMove={() => setSelectedId(item.id)}
               onMouseDown={(event) => event.preventDefault()}
               onClick={() => activate(item)}
-              className={cx("flex cursor-default items-center gap-3 rounded-lg px-3 py-2", index === selectedIndex ? "bg-selected" : "hover:bg-hover")}
+              className={cx("flex cursor-default items-center gap-3 rounded-lg px-3 py-2", index === selectedIndex ? ACTIVE_OPTION : "hover:bg-hover")}
             >
               <Icon size={17} className="shrink-0 text-muted" />
               <div className="min-w-0 flex-1">
@@ -106,17 +106,17 @@ function NavigationBrowser({ activate }: { activate: (item: NavigationItem) => v
           );
         })}
         {items.length === 0 && (
-          <p data-testid="navigation-empty" className="px-3 py-8 text-center text-ui-13 text-dim">
+          <p data-testid="navigation-empty" role="status" className="px-3 py-8 text-center text-ui-13 text-dim">
             No destinations found.
           </p>
         )}
       </div>
       <div className="flex min-h-10 shrink-0 items-center gap-3 border-t border-control px-4 text-ui-11.5 text-dim">
         <span>
-          <Kbd className="bg-pill">↑↓</Kbd> Navigate
+          <Kbd>↑↓</Kbd> Navigate
         </span>
         <span>
-          <Kbd className="bg-pill">↵</Kbd> Open
+          <Kbd>↵</Kbd> Open
         </span>
         <span data-testid="navigation-count" role="status" className="ml-auto">
           {total > items.length ? `${items.length} of ${total}` : total} destinations

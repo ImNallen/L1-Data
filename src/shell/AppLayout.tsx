@@ -1,21 +1,19 @@
 import { useEffect, useRef, useState } from "react";
 import { Group, Panel } from "react-resizable-panels";
-import { DatabaseMap } from "../features/databaseMap/DatabaseMap";
 import { useDatabaseMap } from "../features/databaseMap/controller";
-import { ConnectionDialog } from "../features/connections/ConnectionDialog";
 import { SqlEditor } from "../features/editor/SqlEditor";
 import { StatementChooser } from "../features/editor/StatementChooser";
 import { HistoryPalette } from "../features/history/HistoryPalette";
 import { NavigationPalette } from "../features/navigation/NavigationPalette";
 import { SavedPalette } from "../features/saved/SavedPalette";
 import { ResultsPane } from "../features/results/ResultsPane";
-import { SettingsDialog } from "../features/settings/SettingsScreen";
 import { Sidebar } from "../features/sidebar/Sidebar";
 import { InstallingOverlay } from "../features/updates/InstallingOverlay";
 import { isTableTab, useWorkspace } from "../state/workspace";
 import { Kbd } from "../ui/primitives";
 import { START_COMMANDS, handleGlobalKey, shortcutLabel } from "./commands";
 import { CommandPalette } from "./CommandPalette";
+import { ConnectionDialog, DatabaseMap, SettingsDialog, useMountOnce, useSurfacesReady } from "./lazySurfaces";
 import { Overlays } from "./Overlays";
 import { PixelColumn } from "./PixelColumn";
 import { ResizeHandle } from "./ResizeHandle";
@@ -47,10 +45,10 @@ function StartCommands() {
                 type="button"
                 data-testid={`start-${c.id}`}
                 onClick={c.run}
-                className={`flex min-h-8 w-full items-center justify-between gap-3 rounded-md px-2.5 py-1 text-ui-13.5 outline-none hover:bg-hover hover:text-fg focus-visible:outline-2 focus-visible:outline-focus ${i === 0 ? "text-fg" : "text-muted"}`}
+                className={`flex min-h-8 w-full items-center justify-between gap-3 rounded-md px-2.5 py-1 text-ui-13.5 hover:bg-hover hover:text-fg focus-visible:outline-2 focus-visible:outline-focus ${i === 0 ? "text-fg" : "text-muted"}`}
               >
                 {c.label}
-                <Kbd className="shrink-0 bg-border text-muted">{shortcutLabel(c)}</Kbd>
+                <Kbd className="shrink-0 text-muted">{shortcutLabel(c)}</Kbd>
               </button>
             </li>
           ))}
@@ -111,6 +109,15 @@ export function AppLayout() {
   const sidebar = useWorkspace((s) => s.layout.sidebar);
   const rightPanel = useWorkspace((s) => s.layout.rightPanel);
   const mapOpen = useDatabaseMap((s) => s.map.kind !== "closed");
+  const surfacesReady = useSurfacesReady();
+  const settingsMounted = useMountOnce(
+    useWorkspace((s) => s.screen.kind === "settings"),
+    surfacesReady,
+  );
+  const connectionMounted = useMountOnce(
+    useWorkspace((s) => s.overlay.kind === "connection"),
+    surfacesReady,
+  );
 
   return (
     <div className="relative flex h-full">
@@ -118,7 +125,7 @@ export function AppLayout() {
       <PixelColumn column="sidebar" open={sidebar}>
         <Sidebar hosted={hosted} />
       </PixelColumn>
-      <div data-testid="main" className="flex min-w-80 flex-1 flex-col bg-bg">
+      <main data-testid="main" className="flex min-w-80 flex-1 flex-col bg-bg">
         <TopBar hosted={hosted} />
         <TabBar />
         <Group orientation="horizontal" className="min-h-0 flex-1">
@@ -134,16 +141,16 @@ export function AppLayout() {
             </>
           )}
         </Group>
-      </div>
+      </main>
       <PixelColumn column="right" open={rightPanel !== null}>
         <RightPanel hosted={hosted} />
       </PixelColumn>
-      <SettingsDialog />
+      {settingsMounted && <SettingsDialog />}
       <NavigationPalette />
       <CommandPalette />
       <HistoryPalette />
       <SavedPalette />
-      <ConnectionDialog />
+      {connectionMounted && <ConnectionDialog />}
       <StatementChooser />
       <Overlays />
       <InstallingOverlay />

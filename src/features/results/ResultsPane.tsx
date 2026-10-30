@@ -69,10 +69,11 @@ function TablePager({ tab, rows }: { tab: TableTab; rows: number }) {
       <Menu.Root modal={false}>
         <Menu.Trigger
           data-testid="table-page"
-          aria-label="Rows per page"
-          className="inline-flex h-7 items-center gap-1 rounded-md pr-1.5 pl-2 whitespace-nowrap text-fg tabular-nums outline-none hover:bg-hover data-[state=open]:bg-hover"
+          className="inline-flex h-7 items-center gap-1 rounded-md pr-1.5 pl-2 whitespace-nowrap text-fg tabular-nums hover:bg-hover data-[state=open]:bg-hover"
         >
           {label}
+          {/* The name keeps the visible range first, so a voice command that says what it sees still finds it. */}
+          <span className="sr-only">, rows per page</span>
           <ChevronDownIcon size={13} className="text-muted" />
         </Menu.Trigger>
         <MenuContent align="end">

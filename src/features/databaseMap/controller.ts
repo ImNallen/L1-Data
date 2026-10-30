@@ -26,14 +26,15 @@ export type Exploring = {
   root: number;
   version: number;
   graph: Graph;
-  viewport: Viewport;
   selection: Selection;
   analysis: Analysis;
   limit: boolean;
 };
 export type MapState = { kind: "closed" } | { kind: "unavailable"; db: DatabaseRef; root: number; message: string } | Exploring;
 
-export const useDatabaseMap = create<{ map: MapState }>(() => ({ map: { kind: "closed" } }));
+// The viewport sits beside the map, not in it, so a pan or zoom re-renders only the
+// transform layer and the zoom readout, never the cards, edges, or details.
+export const useDatabaseMap = create<{ map: MapState; viewport: Viewport }>(() => ({ map: { kind: "closed" }, viewport: { x: 80, y: 100, scale: 1 } }));
 let generation = 0;
 let queryTicket = 0;
 let highlighted: string | null = null;
@@ -82,11 +83,11 @@ export function openDatabaseMap(db: DatabaseRef, root: number): void {
       root,
       version,
       graph: emptyGraph(),
-      viewport: { x: 80, y: 100, scale: 1 },
       selection: { kind: "none" },
       analysis: { kind: "off" },
       limit: false,
     },
+    viewport: { x: 80, y: 100, scale: 1 },
   });
   expandMapNode(root);
 }
@@ -180,7 +181,7 @@ function pump(): void {
 
 export function setMapViewport(viewport: Viewport): void {
   const map = useDatabaseMap.getState().map;
-  if (map.kind === "exploring") useDatabaseMap.setState({ map: { ...map, viewport } });
+  if (map.kind === "exploring") useDatabaseMap.setState({ viewport });
 }
 
 export function moveMapNode(oid: number, position: Point): void {

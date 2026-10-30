@@ -123,6 +123,7 @@ export const DEFAULT_SETTINGS: Settings = {
   codeFont: { family: "JetBrains Mono", size: 13 },
   density: "Standard",
   panelMotionMs: 150,
+  reduceMotion: "System",
   tintConnections: false,
   providers: [{ provider: "Claude", enabled: true, displayName: "Claude", binaryPath: "", configDir: "", launchArgs: "" }],
   providerHealthCheckSecs: 300,

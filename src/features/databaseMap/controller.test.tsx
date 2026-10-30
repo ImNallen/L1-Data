@@ -375,9 +375,14 @@ it("renders exploration, ordered declared key details, zoom, overlay, and close 
   const nodePosition = exploring().graph.nodes.get(2)?.position;
   fireEvent.keyDown(screen.getByTestId("map-select-2"), { key: "ArrowLeft" });
   expect(exploring().graph.nodes.get(2)?.position.x).toBe((nodePosition?.x ?? 0) - 24);
-  const before = exploring().viewport.scale;
+  expect(screen.getByTestId("map-status").textContent).toBe("Selected foreign key fk_1_2.");
+  expect(screen.getByTestId("map-details").getAttribute("aria-live")).toBeNull();
+  const before = useDatabaseMap.getState().viewport.scale;
+  const explored = exploring();
   fireEvent.click(screen.getByTestId("map-zoom-in"));
-  expect(exploring().viewport.scale).toBeGreaterThan(before);
+  expect(useDatabaseMap.getState().viewport.scale).toBeGreaterThan(before);
+  // A zoom moves only the viewport, so cards and edges keep their props and skip rendering.
+  expect(exploring()).toBe(explored);
   await act(async () => {
     fireEvent.click(screen.getByTestId("map-expand-2"));
     await flush();

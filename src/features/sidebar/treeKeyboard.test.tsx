@@ -2,7 +2,7 @@
 import { clearMocks, mockIPC } from "@tauri-apps/api/mocks";
 import { cleanup, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { afterEach, beforeAll, beforeEach, expect, it } from "vitest";
+import { afterEach, beforeAll, beforeEach, expect, it, vi } from "vitest";
 import { buildCatalogView, useCatalog } from "../../state/catalog";
 import { dbKey } from "../../state/dbKey";
 import { useLive } from "../../state/live";
@@ -14,8 +14,16 @@ import { Sidebar } from "./Sidebar";
 
 const shop = { connectionId: "p", database: "shop" };
 
+const ROW_H = 28;
+let viewport = 600;
+
+// jsdom lays nothing out. Each row measures 28px and the tree's viewport `viewport`, so the virtualized tree leaves
+// the rows past its overscan out of the DOM, as a short sidebar does.
 beforeAll(() => {
   Element.prototype.scrollIntoView = () => {};
+  vi.spyOn(HTMLElement.prototype, "offsetHeight", "get").mockImplementation(function (this: HTMLElement) {
+    return this.hasAttribute("data-index") ? ROW_H : viewport;
+  });
 });
 
 beforeEach(() => {
@@ -30,6 +38,7 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  viewport = 600;
   cleanup();
   clearMocks();
   dropEditor("t1");
@@ -89,6 +98,30 @@ it("moves with the arrows, Home and End, and opens and closes rows with Right an
   expect(focusedPath()).toBe("prod");
   await user.keyboard("{ArrowUp}");
   expect(focusedPath()).toBe("prod");
+});
+
+it("reaches rows scrolled out of the rendered window, and keeps the focused row rendered", async () => {
+  viewport = 100;
+  const user = userEvent.setup();
+  render(<Sidebar hosted={null} />);
+  expect(screen.queryByTestId("tree-node-prod/shop/public/#functions")).toBeNull();
+  row("prod").focus();
+
+  await user.keyboard("{End}");
+  expect(focusedPath()).toBe("prod/shop/public/#functions");
+  expect(tabStops()).toEqual([row("prod/shop/public/#functions")]);
+  expect(row("prod/shop/public/#functions").getAttribute("aria-posinset")).toBe("16");
+  expect(row("prod/shop/public/#functions").getAttribute("aria-setsize")).toBe("16");
+  expect(row("prod").getAttribute("aria-setsize")).toBe("1");
+
+  await user.keyboard("{Home}");
+  expect(focusedPath()).toBe("prod");
+  await user.keyboard("r");
+  expect(focusedPath()).toBe("prod/shop/public/reviews");
+  await user.keyboard("{Home}s");
+  expect(focusedPath()).toBe("prod/shop");
+  await user.keyboard("s");
+  expect(focusedPath()).toBe("prod/shop/public/shipments");
 });
 
 it("opens a table with Enter, as a double-click does", async () => {

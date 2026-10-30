@@ -41,7 +41,7 @@ function FilterChip({
       <Menu.Root modal={false}>
         <Menu.Trigger
           data-testid={`filter-op-${filter.column}`}
-          className="inline-flex h-5 items-center gap-0.5 rounded px-1 text-keyword outline-none hover:bg-hover data-[state=open]:bg-hover"
+          className="inline-flex h-5 items-center gap-0.5 rounded px-1 text-keyword hover:bg-hover data-[state=open]:bg-hover"
         >
           {FILTER_OPS.find((o) => o.op === op)?.label}
           <ChevronDownIcon size={11} className="text-dim" />
@@ -66,6 +66,7 @@ function FilterChip({
           data-testid={`filter-value-${filter.column}`}
           autoFocus={autoFocus}
           value={value}
+          aria-label={`${filter.column} filter value`}
           placeholder="value"
           spellCheck={false}
           onChange={(e) => setValue(e.target.value)}
@@ -74,7 +75,7 @@ function FilterChip({
             if (e.key === "Escape") setValue(filter.value);
           }}
           style={{ width: `${Math.max(5, Math.min(24, value.length + 1))}ch` }}
-          className="h-5 min-w-0 rounded bg-bg px-1 font-mono text-ui-12 text-fg outline-none placeholder:text-dim focus:ring-1 focus:ring-accent-border"
+          className="h-5 min-w-0 rounded bg-bg px-1 font-mono text-ui-12 text-fg outline-none placeholder:text-dim focus:ring-1 focus:ring-focus"
         />
       )}
       <IconButton aria-label={`Remove ${filter.column} filter`} className="size-5" onClick={onRemove}>
@@ -105,10 +106,7 @@ function ClauseInput({
   const dirty = text.trim() !== applied.trim();
   return (
     <label
-      className={cx(
-        "flex h-[26px] min-w-0 items-center gap-1.5 rounded-md px-1.5 focus-within:bg-bg focus-within:ring-1 focus-within:ring-accent-border",
-        className,
-      )}
+      className={cx("flex h-[26px] min-w-0 items-center gap-1.5 rounded-md px-1.5 focus-within:bg-bg focus-within:ring-1 focus-within:ring-focus", className)}
     >
       <span className="shrink-0 font-mono text-ui-11.5 font-medium text-keyword">{label}</span>
       <input

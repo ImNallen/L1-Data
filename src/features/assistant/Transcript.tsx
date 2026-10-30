@@ -1,5 +1,5 @@
-import { memo, useEffect, useLayoutEffect, useMemo, useRef } from "react";
-import type { ChatId, ChatState, DatabaseKind, DatabaseRef, EntrySnapshot } from "../../ipc/bindings";
+import { memo, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import type { ChatId, ChatState, DatabaseKind, DatabaseRef, EntrySnapshot, ReplyBlock, TurnPhase } from "../../ipc/bindings";
 import { useLive } from "../../state/live";
 import { groupTurns, type EndEntry, type TurnView, type UserEntry } from "../../state/transcript";
 import { useWorkspace } from "../../state/workspace";
@@ -16,7 +16,7 @@ function UserMessage({ seq, entry }: { seq: number; entry: UserEntry }) {
   return (
     <div data-testid={`chat-user-${seq}`} className="flex flex-col items-end gap-1 pl-8">
       <p className="selectable rounded-xl bg-pill px-3 py-2 text-ui-13 leading-relaxed break-words whitespace-pre-wrap text-fg">{entry.text}</p>
-      {chip && <p className="px-1 text-right text-ui-11.5 text-faint">{chip}</p>}
+      {chip && <p className="px-1 text-right text-ui-11.5 text-dim">{chip}</p>}
     </div>
   );
 }
@@ -139,12 +139,73 @@ function Turn({ chat, view, last, voice }: { chat: ChatState; view: TurnView; la
   );
 }
 
+/** A reply as a screen reader should hear it: the words without the markdown marks around them. */
+function spoken(blocks: readonly ReplyBlock[]): string {
+  return blocks
+    .map((b) => (b.kind === "Sql" ? b.sql : b.text.replace(/^\s*(?:#+|>)\s*/gm, "").replace(/[*`|]|-{3,}/g, " ")))
+    .join(" ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function replyText(view: TurnView): string {
+  return view.items
+    .map(({ entry }) => (entry.kind === "Text" ? spoken(entry.blocks) : ""))
+    .join(" ")
+    .trim();
+}
+
+function approvalText(view: TurnView, voice: ProviderVoice): string {
+  const waiting = view.items.find(({ entry }) => entry.kind === "Tool" && entry.status.kind === "AwaitingApproval")?.entry;
+  if (waiting?.kind !== "Tool" || waiting.tool.kind !== "RunQuery") return `${voice.name} asks to call a tool. Run or deny it in the chat.`;
+  return `${voice.name} asks to run a query${waiting.tool.purpose ? `: ${waiting.tool.purpose}` : ""}. Run or deny it in the chat.`;
+}
+
+type Announcement = { polite: string; assertive: string };
+
+/**
+ * What the transcript says to a screen reader. Streamed tokens would be read a fragment at a time, so the transcript
+ * itself is silent and this speaks whole moments instead: a turn starting, a finished reply, a question that waits on
+ * the user, and a failure. It speaks only of changes while the chat is shown, never of the history it opens with.
+ */
+function useAnnouncement(chat: ChatState, last: TurnView | undefined, voice: ProviderVoice): Announcement {
+  const [said, setSaid] = useState<Announcement>({ polite: "", assertive: "" });
+  const status = chat.status;
+  const phase: TurnPhase | null = status.kind === "Running" && status.turn === last?.turn ? status.phase : null;
+  const endSeq = last?.end?.seq ?? null;
+  const seen = useRef<{ chat: ChatId; endSeq: number | null; phase: TurnPhase | null } | null>(null);
+  useEffect(() => {
+    const before = seen.current;
+    seen.current = { chat: chat.id, endSeq, phase };
+    if (!last || !before || before.chat !== chat.id) return;
+    let next: Partial<Announcement> | null = null;
+    if (last.end && endSeq !== before.endSeq) {
+      const { outcome } = last.end.entry;
+      if (outcome.kind === "Completed") next = { polite: `${voice.name} replied. ${replyText(last)}`, assertive: "" };
+      else if (outcome.kind === "Failed") next = { polite: "", assertive: `${voice.name} failed. ${agentErrorText(outcome.error, voice).text}` };
+      else if (outcome.kind === "Stopped") next = { polite: "Stopped", assertive: "" };
+    } else if (phase !== before.phase) {
+      if (phase === "AwaitingApproval") next = { assertive: approvalText(last, voice) };
+      else if (before.phase === null && phase !== null) next = { polite: phase === "Starting" ? `Starting ${voice.name}…` : "Thinking…", assertive: "" };
+      // An answered question is cleared, so the same question asked again is heard again.
+      else if (before.phase === "AwaitingApproval") next = { assertive: "" };
+    }
+    if (next) {
+      const change = next;
+      // oxlint-disable-next-line react/set-state-in-effect -- an announcement is a change seen after the render that drew it
+      setSaid((s) => ({ ...s, ...change }));
+    }
+  }, [chat.id, endSeq, phase, last, voice]);
+  return said;
+}
+
 export function Transcript({ chat }: { chat: ChatState }) {
   const entries = useLive((s) => s.transcripts[chat.id]);
   const turns = useMemo(() => groupTurns(entries), [entries]);
   const name = useWorkspace((s) => s.settings.providers.find((p) => p.provider === chat.options.provider)?.displayName);
   const signInCommand = useLive((s) => s.providers[chat.options.provider]?.info.signInCommand);
-  const voice = { name: name ?? chat.options.provider, signInCommand: signInCommand ?? "" };
+  const voice = useMemo(() => ({ name: name ?? chat.options.provider, signInCommand: signInCommand ?? "" }), [name, chat.options.provider, signInCommand]);
+  const said = useAnnouncement(chat, turns.at(-1), voice);
 
   const scroller = useRef<HTMLDivElement>(null);
   const content = useRef<HTMLDivElement>(null);
@@ -175,7 +236,14 @@ export function Transcript({ chat }: { chat: ChatState }) {
       }}
       className="min-h-0 flex-1 overflow-y-auto"
     >
-      <div ref={content} className="flex flex-col gap-6 px-4 pt-2 pb-6">
+      <div data-testid="assistant-announcement" role="status" className="sr-only">
+        {said.polite}
+      </div>
+      <div data-testid="assistant-alert" role="alert" className="sr-only">
+        {said.assertive}
+      </div>
+      {/* A log, but a quiet one: streamed tokens would be read a fragment at a time. The regions above speak for it. */}
+      <div ref={content} role="log" aria-live="off" aria-label="Chat transcript" className="flex flex-col gap-6 px-4 pt-2 pb-6">
         {turns.length === 0 ? (
           <p className="pt-10 text-center text-ui-12.5 text-dim">Ask about your data. Each message carries the active tab's database and SQL.</p>
         ) : (

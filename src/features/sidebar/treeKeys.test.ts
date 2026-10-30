@@ -1,5 +1,5 @@
 import { expect, it } from "vitest";
-import { treeKey, type TreeItem } from "./treeKeys";
+import { treeKey, typeAhead, type TreeItem } from "./treeKeys";
 
 const open = (level: number): TreeItem => ({ level, expandable: true, expanded: true });
 const closed = (level: number): TreeItem => ({ level, expandable: true, expanded: false });
@@ -42,4 +42,16 @@ it("activates the row with Enter and ignores other keys", () => {
   expect(treeKey("Enter", tree, at.orders)).toEqual({ kind: "activate" });
   expect(treeKey("a", tree, at.orders)).toBeNull();
   expect(treeKey("ArrowDown", tree, tree.length)).toBeNull();
+});
+
+it("types ahead to the next row whose name starts with the letters typed, wrapping past the end", () => {
+  const names = ["prod", "shop", "public", "orders", "order_items", "payments"];
+  expect(typeAhead(names, 0, "o")).toBe(3);
+  expect(typeAhead(names, 3, "o")).toBe(4);
+  expect(typeAhead(names, 4, "o")).toBe(3);
+  expect(typeAhead(names, 3, "order_")).toBe(4);
+  expect(typeAhead(names, 3, "orders")).toBe(3);
+  expect(typeAhead(names, 5, "P")).toBe(0);
+  expect(typeAhead(names, 3, "oo")).toBe(4);
+  expect(typeAhead(names, 0, "z")).toBeNull();
 });

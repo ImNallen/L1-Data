@@ -1,8 +1,9 @@
 // @vitest-environment jsdom
 import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { afterEach, beforeEach, expect, it, vi } from "vitest";
+import { afterEach, beforeAll, beforeEach, expect, it, vi } from "vitest";
 import { AppLayout } from "../../shell/AppLayout";
+import { preloadSurfaces } from "../../shell/lazySurfaces";
 import { useCatalog } from "../../state/catalog";
 import { useLive } from "../../state/live";
 import { useWorkspace } from "../../state/workspace";
@@ -11,6 +12,9 @@ import { dropEditor, textOf } from "../editor/editorStates";
 import { openSqlTab } from "../editor/runActions";
 import { openNavigation } from "./navigationActions";
 import { NavigationPalette } from "./NavigationPalette";
+
+// Settings and the connection dialog load from their own chunks; loaded, they open in the same pass.
+beforeAll(preloadSurfaces);
 
 beforeEach(() => {
   Element.prototype.scrollIntoView = vi.fn();

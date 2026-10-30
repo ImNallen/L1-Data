@@ -3,7 +3,6 @@ import { beginImport } from "../results/importState";
 import {
   BracesIcon,
   CheckCheckIcon,
-  ChevronRightIcon,
   CircleSmallIcon,
   ClockIcon,
   DatabaseIcon,
@@ -23,12 +22,13 @@ import {
   ZapIcon,
   type LucideIcon,
 } from "lucide-react";
-import { Fragment, useCallback, useEffect, useState, type KeyboardEvent, type ReactNode, type RefObject } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode, type RefObject } from "react";
 import {
   commands,
   type ColumnInfo,
   type ConnectionConfig,
   type ConnectionId,
+  type ConnectionState,
   type DatabaseRef,
   type DatabaseState,
   type FunctionInfo,
@@ -41,15 +41,15 @@ import {
   type TypeCategory,
   type TypeKind,
 } from "../../ipc/bindings";
-import { isViewKind, useCatalog, viewFor } from "../../state/catalog";
+import { isViewKind, useCatalog, viewFor, type CatalogView } from "../../state/catalog";
 import { connectErrorText, detailErrorText } from "../../ipc/errors";
 import { DATABASE_LABEL, databaseKindFor } from "../../state/databaseKind";
-import { dbKey, sameDb } from "../../state/dbKey";
+import { dbKey, sameDb, type DbKey } from "../../state/dbKey";
 import { instanceOf, useLive } from "../../state/live";
-import { detailKey, useRelationDetail } from "../../state/relationDetail";
+import { detailKey, useRelationDetail, type DetailEntry } from "../../state/relationDetail";
 import { connectionTone, type Tone } from "../../state/status";
-import { tabTarget, useWorkspace } from "../../state/workspace";
-import { ContextMenuArea, ContextMenuItem, ContextMenuSeparator, ContextSubmenu, cx, Highlight, DatabaseBadge, Spinner, StatusDot } from "../../ui/primitives";
+import { tabTarget, useWorkspace, type RelationRef } from "../../state/workspace";
+import { ContextMenuItem, ContextMenuSeparator, ContextSubmenu, Highlight, DatabaseBadge, Spinner, StatusDot, cx } from "../../ui/primitives";
 import type { TextRange } from "../../ui/textMatch";
 import { connect, confirmDelete, disconnect, refreshCatalog, refreshConnection } from "../connections/connectionActions";
 import { ConnectionColorDot, EnvironmentIcon, connectionColor } from "../connections/connectionColors";
@@ -58,138 +58,35 @@ import { openSqlTab, openTableTab } from "../editor/runActions";
 import { columnType, defaultText, indexText, keyText, triggerText, type RowText } from "./detailText";
 import { databaseCount, schemaCount } from "./pickers";
 import type { FilteredRelation, FilteredSchema, TreeFilter } from "./treeFilter";
-import { focusRow, treeItem, treeRows, useRovingTabStop } from "./treeFocus";
-import { treeKey } from "./treeKeys";
-import { PickerHost, PickerPill, useIsPickerOpen, type PickerTarget } from "./VisibilityPopover";
-
-const INDENT = 12;
+import { PickerHost, PickerPill, type PickerTarget } from "./VisibilityPopover";
+import { INDENT, VirtualTree, type RowNode, type TintGroup, type TreeNode } from "./VirtualTree";
 
 type Expanded = { has(path: string): boolean; toggle(path: string, open?: boolean): void };
 
-function Row({
-  path,
-  depth,
-  expandable,
-  open,
-  selected,
-  onClick,
-  onDoubleClick,
-  onToggle,
-  icon,
-  label,
-  trailing,
-  second,
-  contextMenu,
-  quietChevron,
-  keepChevronSpace,
-  title,
-  active,
-}: {
-  quietChevron?: boolean;
-  keepChevronSpace?: boolean;
-  title?: string;
-  /** Its picker is open. */
-  active?: boolean;
-  path: string;
-  depth: number;
-  expandable: boolean;
-  open?: boolean;
-  selected?: boolean;
-  onClick?: () => void;
-  onDoubleClick?: () => void;
-  onToggle?: () => void;
-  icon?: ReactNode;
-  label: ReactNode;
-  trailing?: ReactNode;
-  /** A muted line under the label, cut with an ellipsis and whole in its title. */
-  second?: string;
-  contextMenu?: ReactNode;
-}) {
-  const twoLines = second !== undefined;
-  const toggle = expandable ? (onToggle ?? onClick) : undefined;
-  // Enter does what a double-click does, which a click starts.
-  const activate = () => {
-    if (!onDoubleClick) return toggle?.();
-    onClick?.();
-    onDoubleClick();
-  };
-  const onKeyDown = (e: KeyboardEvent<HTMLDivElement>) => {
-    if (e.target !== e.currentTarget || e.metaKey || e.ctrlKey || e.altKey || e.shiftKey) return;
-    const rows = treeRows(e.currentTarget);
-    const action = treeKey(e.key, rows.map(treeItem), rows.indexOf(e.currentTarget));
-    if (!action) return;
-    e.preventDefault();
-    switch (action.kind) {
-      case "focus":
-        return focusRow(rows[action.index]);
-      case "expand":
-      case "collapse":
-        return toggle?.();
-      case "activate":
-        return activate();
-      default: {
-        const unreachable: never = action;
-        return unreachable;
-      }
-    }
-  };
-  const row = (
-    <div
-      data-testid={`tree-node-${path}`}
-      role="treeitem"
-      aria-expanded={expandable ? open : undefined}
-      aria-selected={selected}
-      aria-level={depth + 1}
-      title={title}
-      tabIndex={-1}
-      onClick={onClick}
-      onDoubleClick={onDoubleClick}
-      onKeyDown={onKeyDown}
-      style={{ paddingLeft: 8 + depth * INDENT }}
-      className={cx(
-        "group mx-2 flex cursor-default gap-1.5 rounded-md pr-2.5",
-        twoLines ? "items-start py-1" : "h-7 items-center",
-        selected ? "bg-cell-select" : active ? "bg-selected" : "hover:bg-hover data-[state=open]:bg-hover",
-      )}
-    >
-      <span
-        onClick={
-          onToggle &&
-          ((e) => {
-            e.stopPropagation();
-            onToggle();
-          })
-        }
-        onDoubleClick={onToggle && ((e) => e.stopPropagation())}
-        className={cx("shrink-0 place-items-center self-stretch text-muted", expandable || keepChevronSpace ? "grid w-3.5" : "hidden")}
-      >
-        {expandable && (
-          <ChevronRightIcon
-            size={14}
-            className={cx("transition-transform duration-100", open && "rotate-90", quietChevron && !open && "invisible group-hover:visible")}
-          />
-        )}
-      </span>
-      {icon && <span className={cx("grid w-[18px] shrink-0 place-items-center", twoLines && "h-5")}>{icon}</span>}
-      {twoLines ? (
-        <span className="min-w-0 flex-1">
-          <span className="flex h-5 items-center">
-            <span className="min-w-0 flex-1 truncate text-ui-14 text-tree">{label}</span>
-            {trailing}
-          </span>
-          <span title={second} className="block truncate font-mono text-ui-11 leading-4 text-muted">
-            {second}
-          </span>
-        </span>
-      ) : (
-        <>
-          <span className="min-w-0 flex-1 truncate text-ui-14 text-tree">{label}</span>
-          {trailing}
-        </>
-      )}
-    </div>
-  );
-  return contextMenu ? <ContextMenuArea menu={contextMenu}>{row}</ContextMenuArea> : row;
+/**
+ * What the builders below need to flatten the tree into rows. `out` collects the rows in the order the user sees them.
+ * `details` and `idle` collect the fetches the open rows ask for, which the tree starts once the rows are built.
+ */
+type Build = {
+  out: TreeNode[];
+  expanded: Expanded;
+  tint: TintGroup | null;
+  selected: RelationRef | null;
+  entries: Record<string, DetailEntry>;
+  details: { db: DatabaseRef; version: number; oid: number }[];
+  idle: DatabaseRef[];
+};
+
+function build(expanded: Expanded, selected: RelationRef | null = null, entries: Record<string, DetailEntry> = {}): Build {
+  return { out: [], expanded, tint: null, selected, entries, details: [], idle: [] };
+}
+
+function row(b: Build, node: Omit<RowNode, "kind" | "tint">): void {
+  b.out.push({ kind: "row", tint: b.tint, ...node });
+}
+
+function note(b: Build, key: string, depth: number, size: number, render: () => ReactNode): void {
+  b.out.push({ kind: "note", key, depth, tint: b.tint, size, render });
 }
 
 function NewMenu({ db }: { db: DatabaseRef }) {
@@ -283,23 +180,30 @@ function DetailName({
   );
 }
 
-function ColumnRow({ path, depth, column, ranges }: { path: string; depth: number; column: ColumnInfo; ranges?: readonly TextRange[] }) {
-  const marks = (
-    <>
-      {column.pk && <KeyIcon size={13} className="shrink-0 text-amber" />}
-      {column.fk && <LinkIcon size={13} className="shrink-0 text-badge" />}
-    </>
-  );
-  return (
-    <Row
-      path={`${path}/${column.name}`}
-      depth={depth}
-      expandable={false}
-      keepChevronSpace
-      icon={glyph(COLUMN_GLYPHS[column.category] ?? CircleSmallIcon)}
-      label={<DetailName name={<Highlight text={column.name} ranges={ranges} />} title={column.name} marks={marks} detail={columnType(column)} />}
-    />
-  );
+function columnRow(b: Build, path: string, depth: number, column: ColumnInfo, ranges?: readonly TextRange[]) {
+  row(b, {
+    key: `${path}/${column.name}`,
+    depth,
+    name: column.name,
+    expandable: false,
+    keepChevronSpace: true,
+    view: () => ({
+      icon: glyph(COLUMN_GLYPHS[column.category] ?? CircleSmallIcon),
+      label: (
+        <DetailName
+          name={<Highlight text={column.name} ranges={ranges} />}
+          title={column.name}
+          marks={
+            <>
+              {column.pk && <KeyIcon size={13} className="shrink-0 text-amber" />}
+              {column.fk && <LinkIcon size={13} className="shrink-0 text-badge" />}
+            </>
+          }
+          detail={columnType(column)}
+        />
+      ),
+    }),
+  });
 }
 
 const KEY_GLYPHS: Record<KeyKind["kind"], ReactNode> = {
@@ -309,48 +213,51 @@ const KEY_GLYPHS: Record<KeyKind["kind"], ReactNode> = {
   Check: glyph(CheckCheckIcon),
 };
 
-function TextRow({
-  path,
-  depth,
-  icon,
-  name,
-  text,
-  contextMenu,
-}: {
-  path: string;
-  depth: number;
-  icon: ReactNode;
-  name: string;
-  text: RowText;
-  contextMenu?: ReactNode;
-}) {
-  return (
-    <Row
-      path={path}
-      depth={depth}
-      expandable={false}
-      keepChevronSpace
-      icon={icon}
-      label={<DetailName name={name} title={name} detail={text.trailing} />}
-      second={text.second}
-      contextMenu={contextMenu}
-    />
-  );
+function textRow(b: Build, key: string, depth: number, icon: ReactNode, name: string, text: RowText, menu?: () => ReactNode) {
+  row(b, {
+    key,
+    depth,
+    name,
+    expandable: false,
+    keepChevronSpace: true,
+    twoLines: text.second !== undefined,
+    menu,
+    view: () => ({ icon, label: <DetailName name={name} title={name} detail={text.trailing} />, second: text.second }),
+  });
 }
 
-type DetailGroup = { id: string; label: string; count: number | null; rows: () => ReactNode };
+/** A row that opens and closes the rows `children` adds under it. `count` is null while it loads. */
+function group(b: Build, path: string, depth: number, label: string, count: number | null, icon: ReactNode | undefined, children: () => void) {
+  const open = b.expanded.has(path);
+  row(b, {
+    key: path,
+    depth,
+    name: label,
+    expandable: true,
+    open,
+    onClick: () => b.expanded.toggle(path),
+    view: () => ({
+      icon,
+      label: icon ? label : <span className="text-ui-13 text-muted">{label}</span>,
+      trailing: <Count>{count ?? <span className="text-dim">…</span>}</Count>,
+    }),
+  });
+  if (open) children();
+}
+
+type DetailGroup = { id: string; label: string; count: number | null; rows: () => void };
 
 /** Columns come from the catalog. The other groups wait for `relation_detail` and hide when empty. */
-function detailGroups(path: string, depth: number, db: DatabaseRef, schema: string, rel: Relation, detail: RelationDetail | null): DetailGroup[] {
+function detailGroups(b: Build, path: string, depth: number, db: DatabaseRef, schema: string, rel: Relation, detail: RelationDetail | null): DetailGroup[] {
   const at = (group: string, name: string) => `${path}/#${group}/${name}`;
   const columns: DetailGroup = {
     id: "columns",
     label: "Columns",
     count: rel.columns.length,
-    rows: () => rel.columns.map((c) => <ColumnRow key={c.attnum} path={`${path}/#columns`} depth={depth} column={c} />),
+    rows: () => rel.columns.forEach((c) => columnRow(b, `${path}/#columns`, depth, c)),
   };
   if (!detail) {
-    const pending = (id: string, label: string): DetailGroup => ({ id, label, count: null, rows: () => null });
+    const pending = (id: string, label: string): DetailGroup => ({ id, label, count: null, rows: () => {} });
     return [columns, pending("defaults", "Defaults"), pending("keys", "Keys"), pending("indexes", "Indexes"), pending("triggers", "Triggers")];
   }
   const rest: DetailGroup[] = [
@@ -359,207 +266,140 @@ function detailGroups(path: string, depth: number, db: DatabaseRef, schema: stri
       label: "Defaults",
       count: detail.defaults.length,
       rows: () =>
-        detail.defaults.map((d) => (
-          <Row
-            key={d.column}
-            path={at("defaults", d.column)}
-            depth={depth}
-            expandable={false}
-            keepChevronSpace
-            icon={glyph(EqualIcon)}
-            label={<DetailName name={d.column} title={d.column} detail={defaultText(d.value)} />}
-          />
-        )),
+        detail.defaults.forEach((d) =>
+          row(b, {
+            key: at("defaults", d.column),
+            depth,
+            name: d.column,
+            expandable: false,
+            keepChevronSpace: true,
+            view: () => ({ icon: glyph(EqualIcon), label: <DetailName name={d.column} title={d.column} detail={defaultText(d.value)} /> }),
+          }),
+        ),
     },
     {
       id: "keys",
       label: "Keys",
       count: detail.keys.length,
-      rows: () =>
-        detail.keys.map((k) => (
-          <TextRow key={k.name} path={at("keys", k.name)} depth={depth} icon={KEY_GLYPHS[k.kind.kind]} name={k.name} text={keyText(k, schema)} />
-        )),
+      rows: () => detail.keys.forEach((k) => textRow(b, at("keys", k.name), depth, KEY_GLYPHS[k.kind.kind], k.name, keyText(k, schema))),
     },
     {
       id: "indexes",
       label: "Indexes",
       count: detail.indexes.length,
       rows: () =>
-        detail.indexes.map((i) => (
-          <TextRow
-            key={i.name}
-            path={at("indexes", i.name)}
-            depth={depth}
-            icon={glyph(ListFilterIcon)}
-            name={i.name}
-            text={indexText(i)}
-            contextMenu={<ScriptMenuItem db={db} target={{ kind: "Index", relationOid: rel.oid, name: i.name }} label="Open source" />}
-          />
-        )),
+        detail.indexes.forEach((i) =>
+          textRow(b, at("indexes", i.name), depth, glyph(ListFilterIcon), i.name, indexText(i), () => (
+            <ScriptMenuItem db={db} target={{ kind: "Index", relationOid: rel.oid, name: i.name }} label="Open source" />
+          )),
+        ),
     },
     {
       id: "triggers",
       label: "Triggers",
       count: detail.triggers.length,
       rows: () =>
-        detail.triggers.map((t) => (
-          <TextRow
-            key={t.name}
-            path={at("triggers", t.name)}
-            depth={depth}
-            icon={glyph(ZapIcon)}
-            name={t.name}
-            text={triggerText(t)}
-            contextMenu={<ScriptMenuItem db={db} target={{ kind: "Trigger", relationOid: rel.oid, name: t.name }} label="Open source" />}
-          />
-        )),
+        detail.triggers.forEach((t) =>
+          textRow(b, at("triggers", t.name), depth, glyph(ZapIcon), t.name, triggerText(t), () => (
+            <ScriptMenuItem db={db} target={{ kind: "Trigger", relationOid: rel.oid, name: t.name }} label="Open source" />
+          )),
+        ),
     },
   ];
   return [columns, ...rest.filter((g) => g.count !== 0)];
 }
 
-/** Fetches the relation's detail on first open and again whenever the catalog version moves. */
-function RelationGroups({
-  path,
-  depth,
-  db,
-  schema,
-  rel,
-  version,
-  expanded,
-}: {
-  path: string;
-  depth: number;
-  db: DatabaseRef;
-  schema: string;
-  rel: Relation;
-  version: number;
-  expanded: Expanded;
-}) {
-  const key = detailKey(db, rel.oid);
-  const entry = useRelationDetail((s) => s.entries[key]);
-  useEffect(() => {
-    void useRelationDetail.getState().ensure(db, version, rel.oid);
-    // oxlint-disable-next-line react-hooks/exhaustive-deps -- `key` stands in for `db`, which is a new object on every render
-  }, [key, version, rel.oid]);
-  return (
-    <>
-      {detailGroups(path, depth + 1, db, schema, rel, entry?.detail ?? null).map((g) => (
-        <Group key={g.id} path={`${path}/#${g.id}`} depth={depth} label={g.label} count={g.count} expanded={expanded}>
-          {g.rows()}
-        </Group>
-      ))}
-      {entry?.error && (
-        <div data-testid={`detail-error-${path}`} style={{ paddingLeft: 30 + depth * INDENT }} className="mx-2 mb-1 pr-2 text-ui-11.5 leading-4 text-danger/90">
-          {entry.error}
-        </div>
-      )}
-    </>
-  );
+/** An open relation's groups. The tree fetches its detail on first open and again whenever the catalog version moves. */
+function relationGroups(b: Build, path: string, depth: number, db: DatabaseRef, schema: string, rel: Relation, version: number) {
+  b.details.push({ db, version, oid: rel.oid });
+  const entry = b.entries[detailKey(db, rel.oid)];
+  for (const g of detailGroups(b, path, depth + 1, db, schema, rel, entry?.detail ?? null)) {
+    group(b, `${path}/#${g.id}`, depth, g.label, g.count, undefined, g.rows);
+  }
+  const error = entry?.error;
+  if (error) {
+    note(b, `${path}/!detail-error`, depth, 20, () => (
+      <div data-testid={`detail-error-${path}`} style={{ paddingLeft: 30 + depth * INDENT }} className="mb-1 pr-2 text-ui-11.5 leading-4 text-danger/90">
+        {error}
+      </div>
+    ));
+  }
 }
 
-function useIsSelected(db: DatabaseRef, schema: string, rel: Relation): boolean {
-  return useWorkspace((s) => sameDb(s.selected?.db, db) && s.selected?.schema === schema && s.selected.relation === rel.name);
-}
+const isSelected = (selected: RelationRef | null, db: DatabaseRef, schema: string, rel: Relation) =>
+  sameDb(selected?.db, db) && selected?.schema === schema && selected.relation === rel.name;
 
 const relationIcon = (rel: Relation) => (isViewKind(rel.kind) ? <EyeIcon size={15} className="text-muted" /> : <TableIcon size={15} className="text-muted" />);
 
-function RelationRow({
-  path,
-  depth,
-  db,
-  schema,
-  rel,
-  version,
-  expanded,
-}: {
-  path: string;
-  depth: number;
-  db: DatabaseRef;
-  schema: string;
-  rel: Relation;
-  version: number;
-  expanded: Expanded;
-}) {
+const relationActions = (db: DatabaseRef, schema: string, rel: Relation) => ({
+  onClick: () => useWorkspace.getState().select({ db, schema, relation: rel.name }),
+  onDoubleClick: () => openTableTab({ db, schema, relation: rel.name }),
+  menu: () => <RelationMenu db={db} schema={schema} rel={rel} />,
+});
+
+function relationRow(b: Build, path: string, depth: number, db: DatabaseRef, schema: string, rel: Relation, version: number) {
   const me = `${path}/${rel.name}`;
-  const open = expanded.has(me);
-  const selected = useIsSelected(db, schema, rel);
-  const select = useWorkspace((s) => s.select);
-  const toggle = () => {
-    if (!open) expanded.toggle(`${me}/#columns`, true);
-    expanded.toggle(me);
-  };
-  return (
-    <>
-      <Row
-        path={me}
-        depth={depth}
-        expandable
-        quietChevron
-        open={open}
-        selected={selected}
-        onClick={() => select({ db, schema, relation: rel.name })}
-        onToggle={toggle}
-        onDoubleClick={() => openTableTab({ db, schema, relation: rel.name })}
-        contextMenu={<RelationMenu db={db} schema={schema} rel={rel} />}
-        icon={relationIcon(rel)}
-        title={rel.name}
-        label={rel.name}
-      />
-      {open && <RelationGroups path={me} depth={depth + 1} db={db} schema={schema} rel={rel} version={version} expanded={expanded} />}
-    </>
-  );
+  const open = b.expanded.has(me);
+  row(b, {
+    key: me,
+    depth,
+    name: rel.name,
+    expandable: true,
+    quietChevron: true,
+    open,
+    selected: isSelected(b.selected, db, schema, rel),
+    ...relationActions(db, schema, rel),
+    onToggle: () => {
+      if (!open) b.expanded.toggle(`${me}/#columns`, true);
+      b.expanded.toggle(me);
+    },
+    view: () => ({ icon: relationIcon(rel), title: rel.name, label: rel.name }),
+  });
+  if (open) relationGroups(b, me, depth + 1, db, schema, rel, version);
 }
 
-export function FunctionRow({
-  path,
-  depth,
-  db,
-  fn,
-  ranges,
-}: {
-  path: string;
-  depth: number;
-  db: DatabaseRef;
-  fn: FunctionInfo;
-  ranges?: readonly TextRange[];
-}) {
-  return (
-    <Row
-      path={`${path}/${fn.name}`}
-      depth={depth}
-      expandable={false}
-      keepChevronSpace
-      icon={glyph(SquareFunctionIcon)}
-      contextMenu={<ScriptMenuItem db={db} target={{ kind: "Routine", oid: fn.oid }} label="Open source" />}
-      onDoubleClick={() => {
-        const { active, tabs, configs, notify } = useWorkspace.getState();
-        const target = tabTarget(active ? tabs[active] : undefined);
-        if (!active || !target || !configs[target.connectionId]) {
-          notify("Choose a tab with a saved connection before inserting a routine.");
-          return;
-        }
-        if (!configs[db.connectionId]) {
-          notify("The routine's connection is no longer available.");
-          return;
-        }
-        const sourceKind = databaseKindFor(db, configs);
-        if (sourceKind !== databaseKindFor(target, configs)) {
-          notify(`Choose a ${DATABASE_LABEL[sourceKind]} tab to insert this routine.`);
-          return;
-        }
-        insertAtCursor(active, fn.insertText);
-      }}
-      label={
+/** Inserts the routine's call template at the active tab's cursor, when that tab's database is of the routine's kind. */
+export function insertRoutine(db: DatabaseRef, fn: FunctionInfo): void {
+  const { active, tabs, configs, notify } = useWorkspace.getState();
+  const target = tabTarget(active ? tabs[active] : undefined);
+  if (!active || !target || !configs[target.connectionId]) {
+    notify("Choose a tab with a saved connection before inserting a routine.");
+    return;
+  }
+  if (!configs[db.connectionId]) {
+    notify("The routine's connection is no longer available.");
+    return;
+  }
+  const sourceKind = databaseKindFor(db, configs);
+  if (sourceKind !== databaseKindFor(target, configs)) {
+    notify(`Choose a ${DATABASE_LABEL[sourceKind]} tab to insert this routine.`);
+    return;
+  }
+  insertAtCursor(active, fn.insertText);
+}
+
+function functionRow(b: Build, path: string, depth: number, db: DatabaseRef, fn: FunctionInfo, ranges?: readonly TextRange[]) {
+  row(b, {
+    key: `${path}/${fn.name}#${fn.oid}`,
+    path: `${path}/${fn.name}`,
+    depth,
+    name: fn.name,
+    expandable: false,
+    keepChevronSpace: true,
+    menu: () => <ScriptMenuItem db={db} target={{ kind: "Routine", oid: fn.oid }} label="Open source" />,
+    onDoubleClick: () => insertRoutine(db, fn),
+    view: () => ({
+      icon: glyph(SquareFunctionIcon),
+      label: (
         <DetailName
           name={<Highlight text={fn.name} ranges={ranges} />}
           title={`${fn.name}(${fn.args}) → ${fn.returns}`}
           detail={fn.returns}
           nameClass="text-ui-13.5"
         />
-      }
-    />
-  );
+      ),
+    }),
+  });
 }
 
 function typeDetail(kind: TypeKind): string | undefined {
@@ -581,194 +421,86 @@ function typeDetail(kind: TypeKind): string | undefined {
   }
 }
 
-function ScriptRow({
-  path,
-  depth,
-  db,
-  target,
-  name,
-  detail,
-  icon,
-  ranges,
-}: {
-  path: string;
-  depth: number;
-  db: DatabaseRef;
-  target: ScriptTarget;
-  name: string;
-  detail?: string;
-  icon: LucideIcon;
-  ranges?: readonly TextRange[];
-}) {
-  const title = <Highlight text={name} ranges={ranges} />;
-  return (
-    <Row
-      path={`${path}/${name}`}
-      depth={depth}
-      expandable={false}
-      keepChevronSpace
-      icon={glyph(icon)}
-      contextMenu={<ScriptMenuItem db={db} target={target} label="Script as CREATE" />}
-      label={detail ? <DetailName name={title} title={`${name} ${detail}`} detail={detail} nameClass="text-ui-13.5" /> : title}
-    />
-  );
+type ObjectRow = { oid: number; name: string; detail?: string; ranges?: readonly TextRange[]; target: ScriptTarget };
+
+function objectGroup(b: Build, path: string, depth: number, db: DatabaseRef, label: string, icon: LucideIcon, rows: ObjectRow[]) {
+  if (rows.length === 0) return;
+  group(b, path, depth, label, rows.length, glyph(icon), () => {
+    for (const r of rows) {
+      const title = <Highlight text={r.name} ranges={r.ranges} />;
+      row(b, {
+        key: `${path}/${r.name}`,
+        depth: depth + 1,
+        name: r.name,
+        expandable: false,
+        keepChevronSpace: true,
+        menu: () => <ScriptMenuItem db={db} target={r.target} label="Script as CREATE" />,
+        view: () => ({
+          icon: glyph(icon),
+          label: r.detail ? <DetailName name={title} title={`${r.name} ${r.detail}`} detail={r.detail} nameClass="text-ui-13.5" /> : title,
+        }),
+      });
+    }
+  });
 }
 
-function ObjectGroup({
-  path,
-  depth,
-  db,
-  label,
-  icon,
-  rows,
-  expanded,
-}: {
-  path: string;
-  depth: number;
-  db: DatabaseRef;
-  label: string;
-  icon: LucideIcon;
-  rows: { oid: number; name: string; detail?: string; ranges?: readonly TextRange[]; target: ScriptTarget }[];
-  expanded: Expanded;
-}) {
-  if (rows.length === 0) return null;
-  return (
-    <Group path={path} depth={depth} icon={glyph(icon)} label={label} count={rows.length} expanded={expanded}>
-      {rows.map((row) => (
-        <ScriptRow
-          key={`${row.target.kind}-${row.oid}`}
-          path={path}
-          depth={depth + 1}
-          db={db}
-          target={row.target}
-          name={row.name}
-          detail={row.detail}
-          icon={icon}
-          ranges={row.ranges}
-        />
-      ))}
-    </Group>
-  );
-}
-
-/** `count` is null while it loads. */
-function Group({
-  path,
-  depth,
-  icon,
-  label,
-  count,
-  expanded,
-  children,
-}: {
-  path: string;
-  depth: number;
-  icon?: ReactNode;
-  label: string;
-  count: number | null;
-  expanded: Expanded;
-  children: ReactNode;
-}) {
-  const open = expanded.has(path);
-  return (
-    <>
-      <Row
-        path={path}
-        depth={depth}
-        expandable
-        open={open}
-        onClick={() => expanded.toggle(path)}
-        icon={icon}
-        label={icon ? label : <span className="text-ui-13 text-muted">{label}</span>}
-        trailing={<Count>{count ?? <span className="text-faint">…</span>}</Count>}
-      />
-      {open && children}
-    </>
-  );
-}
-
-export function SchemaNode({
-  path,
-  depth,
-  db,
-  schema,
-  version,
-  expanded,
-}: {
-  path: string;
-  depth: number;
-  db: DatabaseRef;
-  schema: SchemaInfo;
-  version: number;
-  expanded: Expanded;
-}) {
+function schemaRows(b: Build, path: string, depth: number, db: DatabaseRef, schema: SchemaInfo, version: number) {
   const me = `${path}/${schema.name}`;
-  const open = expanded.has(me);
+  const open = b.expanded.has(me);
+  row(b, {
+    key: me,
+    depth,
+    name: schema.name,
+    expandable: true,
+    open,
+    onClick: () => b.expanded.toggle(me),
+    menu: () => <NewMenu db={db} />,
+    view: () => ({ icon: <LayersIcon size={15} className="text-muted" />, label: schema.name, trailing: <Count>{schema.tableCount}</Count> }),
+  });
+  if (!open) return;
   const tables = schema.relations.filter((r) => !isViewKind(r.kind));
   const views = schema.relations.filter((r) => isViewKind(r.kind));
-  return (
-    <>
-      <Row
-        path={me}
-        depth={depth}
-        expandable
-        open={open}
-        onClick={() => expanded.toggle(me)}
-        icon={<LayersIcon size={15} className="text-muted" />}
-        label={schema.name}
-        contextMenu={<NewMenu db={db} />}
-        trailing={<Count>{schema.tableCount}</Count>}
-      />
-      {open && (
-        <>
-          {[...tables, ...views].map((rel) => (
-            <RelationRow key={rel.oid} path={me} depth={depth + 1} db={db} schema={schema.name} rel={rel} version={version} expanded={expanded} />
-          ))}
-          {schema.functions.length > 0 && (
-            <Group
-              path={`${me}/#functions`}
-              depth={depth + 1}
-              icon={<BracesIcon size={14} className="text-muted" />}
-              label="Functions"
-              count={schema.functions.length}
-              expanded={expanded}
-            >
-              {schema.functions.map((fn) => (
-                <FunctionRow key={fn.oid} path={`${me}/#functions`} depth={depth + 2} db={db} fn={fn} />
-              ))}
-            </Group>
-          )}
-          <ObjectGroup
-            path={`${me}/#sequences`}
-            depth={depth + 1}
-            db={db}
-            label="Sequences"
-            icon={HashIcon}
-            expanded={expanded}
-            rows={schema.sequences.map((seq) => ({ oid: seq.oid, name: seq.name, detail: seq.typeName, target: { kind: "Sequence", oid: seq.oid } }))}
-          />
-          <ObjectGroup
-            path={`${me}/#types`}
-            depth={depth + 1}
-            db={db}
-            label="Types"
-            icon={TypeIcon}
-            expanded={expanded}
-            rows={schema.types.map((type) => ({ oid: type.oid, name: type.name, detail: typeDetail(type.kind), target: { kind: "Type", oid: type.oid } }))}
-          />
-          <ObjectGroup
-            path={`${me}/#synonyms`}
-            depth={depth + 1}
-            db={db}
-            label="Synonyms"
-            icon={LinkIcon}
-            expanded={expanded}
-            rows={schema.synonyms.map((syn) => ({ oid: syn.oid, name: syn.name, detail: syn.target, target: { kind: "Synonym", oid: syn.oid } }))}
-          />
-        </>
-      )}
-    </>
+  for (const rel of [...tables, ...views]) relationRow(b, me, depth + 1, db, schema.name, rel, version);
+  if (schema.functions.length > 0) {
+    const functions = `${me}/#functions`;
+    group(b, functions, depth + 1, "Functions", schema.functions.length, <BracesIcon size={14} className="text-muted" />, () =>
+      schema.functions.forEach((fn) => functionRow(b, functions, depth + 2, db, fn)),
+    );
+  }
+  objectGroup(
+    b,
+    `${me}/#sequences`,
+    depth + 1,
+    db,
+    "Sequences",
+    HashIcon,
+    schema.sequences.map((seq) => ({ oid: seq.oid, name: seq.name, detail: seq.typeName, target: { kind: "Sequence", oid: seq.oid } })),
   );
+  objectGroup(
+    b,
+    `${me}/#types`,
+    depth + 1,
+    db,
+    "Types",
+    TypeIcon,
+    schema.types.map((type) => ({ oid: type.oid, name: type.name, detail: typeDetail(type.kind), target: { kind: "Type", oid: type.oid } })),
+  );
+  objectGroup(
+    b,
+    `${me}/#synonyms`,
+    depth + 1,
+    db,
+    "Synonyms",
+    LinkIcon,
+    schema.synonyms.map((syn) => ({ oid: syn.oid, name: syn.name, detail: syn.target, target: { kind: "Synonym", oid: syn.oid } })),
+  );
+}
+
+/** One schema's rows in the unfiltered tree. */
+export function schemaNodes(path: string, depth: number, db: DatabaseRef, schema: SchemaInfo, version: number, expanded: Expanded): TreeNode[] {
+  const b = build(expanded);
+  schemaRows(b, path, depth, db, schema, version);
+  return b.out;
 }
 
 function ConnectionMenu({ config, shown }: { config: ConnectionConfig; shown: DatabaseRef[] | null }) {
@@ -794,83 +526,84 @@ function ConnectionMenu({ config, shown }: { config: ConnectionConfig; shown: Da
   );
 }
 
+/** A catalog that is loading or failed, as the live regions outside the tree say it. */
+type CatalogNews = { loading: string[]; failed: string[] };
+
 /** One shown database of a connected instance: its row, then its schemas once the catalog is in. */
-function DatabaseNode({ path, db, state, expanded }: { path: string; db: DatabaseRef; state: DatabaseState; expanded: Expanded }) {
+function databaseRows(b: Build, news: CatalogNews, path: string, db: DatabaseRef, state: DatabaseState, views: Record<DbKey, CatalogView>) {
   const me = `${path}/${db.database}`;
-  const open = expanded.has(me);
-  const view = useCatalog((s) => viewFor(s.views, db));
-  const target: PickerTarget = { kind: "schemas", db };
-  const picking = useIsPickerOpen(target);
+  const open = b.expanded.has(me);
+  const view = viewFor(views, db);
   const count = schemaCount(state, view?.catalog);
-  const schemas = view ? state.shownSchemas.flatMap((name) => view.catalog.schemas.find((s) => s.name === name) ?? []) : [];
+  const target: PickerTarget = { kind: "schemas", db };
+  row(b, {
+    key: me,
+    depth: 1,
+    name: db.database,
+    expandable: true,
+    open,
+    picker: target,
+    onClick: () => b.expanded.toggle(me),
+    menu: () => <NewMenu db={db} />,
+    view: (active) => ({
+      icon: <DatabaseIcon size={15} className="text-muted" />,
+      label: db.database,
+      trailing: count && <PickerPill target={target} count={count} active={active} testId={`schema-pill-${me}`} />,
+    }),
+  });
+  if (!open) return;
 
   // Past the engine's cap of auto-opened databases a shown one stays Idle until its row opens. The snapshot then
   // moves it to Loading and Ready, and the catalog sync fetches it; the reply itself carries nothing new.
-  const idle = state.catalog.kind === "Idle";
-  const key = dbKey(db);
-  useEffect(() => {
-    if (open && idle) void commands.catalogGet(db);
-    // oxlint-disable-next-line react-hooks/exhaustive-deps -- `key` stands in for `db`, which is a new object on every render
-  }, [open, idle, key]);
-
-  return (
-    <>
-      <Row
-        path={me}
-        depth={1}
-        expandable
-        open={open}
-        active={picking}
-        onClick={() => expanded.toggle(me)}
-        icon={<DatabaseIcon size={15} className="text-muted" />}
-        label={db.database}
-        contextMenu={<NewMenu db={db} />}
-        trailing={count && <PickerPill target={target} count={count} active={picking} testId={`schema-pill-${me}`} />}
-      />
-      {open && state.catalog.kind === "Failed" && (
-        <div
-          data-testid={`db-error-${path}/${db.database}`}
-          className="mx-2 mb-1 flex items-baseline gap-2 pr-2 pl-[52px] text-ui-11.5 leading-4 text-danger/90"
+  if (state.catalog.kind === "Idle") b.idle.push(db);
+  const catalog = state.catalog;
+  if (catalog.kind === "Failed") {
+    news.failed.push(`${db.database}: ${view ? "Refresh failed: " : ""}${catalog.message}`);
+    note(b, `${me}/!error`, 1, 20, () => (
+      <div data-testid={`db-error-${me}`} className="mb-1 flex items-baseline gap-2 pr-2 pl-[52px] text-ui-11.5 leading-4 text-danger/90">
+        <span className="min-w-0 flex-1 truncate" title={catalog.message}>
+          {view ? "Refresh failed: " : ""}
+          {catalog.message}
+        </span>
+        <button
+          type="button"
+          data-testid={`db-retry-${me}`}
+          onClick={() => void refreshCatalog(db)}
+          className="shrink-0 rounded px-1 text-fg/80 underline-offset-2 hover:bg-control hover:underline"
         >
-          <span className="min-w-0 flex-1 truncate" title={state.catalog.message}>
-            {view ? "Refresh failed: " : ""}
-            {state.catalog.message}
-          </span>
-          <button
-            type="button"
-            data-testid={`db-retry-${path}/${db.database}`}
-            onClick={() => void refreshCatalog(db)}
-            className="shrink-0 rounded px-1 text-fg/80 underline-offset-2 hover:bg-control hover:underline"
-          >
-            Retry
-          </button>
-        </div>
-      )}
-      {open && !view && state.catalog.kind !== "Failed" && (
-        <div className="flex h-7 items-center gap-2 pl-[52px] text-ui-12 text-dim">
+          Retry
+        </button>
+      </div>
+    ));
+  }
+  if (!view) {
+    if (catalog.kind !== "Failed") {
+      news.loading.push(db.database);
+      note(b, `${me}/!loading`, 1, 28, () => (
+        <div className="flex h-7 items-center gap-2 pl-[44px] text-ui-12 text-dim">
           <Spinner /> Loading catalog
         </div>
-      )}
-      {open && view && schemas.length === 0 && view.catalog.extensions.length === 0 && (
-        <div data-testid={`db-empty-${me}`} className="flex h-7 items-center pl-[52px] text-ui-12 text-muted">
-          No schemas shown
-        </div>
-      )}
-      {open &&
-        view &&
-        schemas.map((s) => <SchemaNode key={s.name} path={me} depth={2} db={db} schema={s} version={view.catalog.version} expanded={expanded} />)}
-      {open && view && (
-        <ObjectGroup
-          path={`${me}/#extensions`}
-          depth={2}
-          db={db}
-          label="Extensions"
-          icon={ZapIcon}
-          expanded={expanded}
-          rows={view.catalog.extensions.map((ext) => ({ oid: ext.oid, name: ext.name, detail: ext.version, target: { kind: "Extension", oid: ext.oid } }))}
-        />
-      )}
-    </>
+      ));
+    }
+    return;
+  }
+  const schemas = state.shownSchemas.flatMap((name) => view.catalog.schemas.find((s) => s.name === name) ?? []);
+  if (schemas.length === 0 && view.catalog.extensions.length === 0) {
+    note(b, `${me}/!empty`, 1, 28, () => (
+      <div data-testid={`db-empty-${me}`} className="flex h-7 items-center pl-[44px] text-ui-12 text-muted">
+        No schemas shown
+      </div>
+    ));
+  }
+  for (const s of schemas) schemaRows(b, me, 2, db, s, view.catalog.version);
+  objectGroup(
+    b,
+    `${me}/#extensions`,
+    2,
+    db,
+    "Extensions",
+    ZapIcon,
+    view.catalog.extensions.map((ext) => ({ oid: ext.oid, name: ext.name, detail: ext.version, target: { kind: "Extension", oid: ext.oid } })),
   );
 }
 
@@ -927,276 +660,164 @@ function ConnectionTrailing({
 
 type Revealed = Map<ConnectionId, "database" | "schema">;
 
-function useConnectionTint(color: string | null): string | null {
-  const tint = useWorkspace((s) => s.settings.tintConnections);
-  return tint ? connectionColor(color) : null;
+/** The shading a connection's rows share, or null while tinting is off or the connection has no color. */
+function tintOf(config: ConnectionConfig, tinting: boolean): TintGroup | null {
+  const hex = tinting ? connectionColor(config.color) : null;
+  return hex ? { name: config.name, hex } : null;
 }
 
-// Rows carry their own `mx-2`. `*:mx-0` cancels it so they fill the block and keep their left edge.
-function ConnectionGroup({ name, color, children }: { name: string; color: string | null; children: ReactNode }) {
-  const hex = useConnectionTint(color);
-  if (!hex) return children;
-  return (
-    <div data-testid={`conn-tint-${name}`} className="mx-2 mb-1 rounded-lg *:mx-0" style={{ backgroundColor: `color-mix(in srgb, ${hex} 10%, transparent)` }}>
-      {children}
-    </div>
-  );
-}
-
-function ConnectionNode({ config, expanded, revealed }: { config: ConnectionConfig; expanded: Expanded; revealed: Revealed }) {
-  const state = useLive((s) => s.connections[config.id]);
+function connectionRows(b: Build, news: CatalogNews, config: ConnectionConfig, state: ConnectionState | undefined, views: Record<DbKey, CatalogView>) {
   const instance = instanceOf(state);
   const tone = connectionTone(state);
   const path = config.name;
-  const open = expanded.has(path);
+  const open = b.expanded.has(path);
   const connected = instance !== null;
   const shown = instance?.databases.filter((d) => d.shown) ?? [];
-  const home = instance?.home;
-  const homeDefault = useCatalog((s) => (home ? viewFor(s.views, { connectionId: config.id, database: home })?.catalog.defaultSchema : undefined));
   const target: PickerTarget = { kind: "databases", id: config.id };
-  const picking = useIsPickerOpen(target);
   const failure =
     state?.status.kind === "Failed" ? connectErrorText(state.status.error) : state?.status.kind === "Lost" ? `Connection lost: ${state.status.reason}` : null;
-
-  // The first connect opens the connection and its home database, then that database's default schema once its catalog says which.
-  const { toggle } = expanded;
-  useEffect(() => {
-    if (!home) return;
-    if (!revealed.has(config.id)) {
-      revealed.set(config.id, "database");
-      toggle(path, true);
-      toggle(`${path}/${home}`, true);
-    }
-    if (revealed.get(config.id) === "database" && homeDefault !== undefined) {
-      revealed.set(config.id, "schema");
-      if (homeDefault) toggle(`${path}/${home}/${homeDefault}`, true);
-    }
-  }, [home, homeDefault, toggle, path, revealed, config.id]);
-
-  const tinted = useConnectionTint(config.color) !== null;
-  const onClick = () => {
-    if (connected || state?.status.kind === "Connecting") expanded.toggle(path);
-    else void connect(config.id);
-  };
-
-  return (
-    <ConnectionGroup name={config.name} color={config.color}>
-      <Row
-        path={path}
-        depth={0}
-        expandable
-        open={open && connected}
-        active={picking}
-        onClick={onClick}
-        icon={
-          <span className={cx(tone === "off" && "opacity-50 grayscale")}>
-            <DatabaseBadge databaseKind={config.databaseKind} />
-          </span>
-        }
-        label={
-          <span className="flex min-w-0 items-center">
-            <span className={cx("truncate font-medium", tone === "off" && "text-muted")}>{config.name}</span>
-            {!tinted && <ConnectionColorDot color={config.color} className="ml-1.5" />}
-            <EnvironmentIcon environment={config.environment} size={13} testId={`env-icon-${config.name}`} className="ml-1.5" />
-          </span>
-        }
-        trailing={<ConnectionTrailing config={config} tone={tone} instance={instance} target={target} active={picking} />}
-        contextMenu={<ConnectionMenu config={config} shown={instance && shown.map((d) => ({ connectionId: config.id, database: d.name }))} />}
-      />
-      {failure && (
-        <div data-testid={`conn-error-${config.name}`} className="mx-2 mb-1 pr-2 pl-[38px] text-ui-11.5 leading-4 text-danger/90">
-          {failure}
-        </div>
-      )}
-      {open &&
-        connected &&
-        shown.map((d) => <DatabaseNode key={d.name} path={path} db={{ connectionId: config.id, database: d.name }} state={d} expanded={expanded} />)}
-    </ConnectionGroup>
-  );
+  const tinted = b.tint !== null;
+  row(b, {
+    key: path,
+    depth: 0,
+    name: config.name,
+    expandable: true,
+    open: open && connected,
+    picker: target,
+    onClick: () => {
+      if (connected || state?.status.kind === "Connecting") b.expanded.toggle(path);
+      else void connect(config.id);
+    },
+    menu: () => <ConnectionMenu config={config} shown={instance && shown.map((d) => ({ connectionId: config.id, database: d.name }))} />,
+    view: (active) => ({
+      icon: (
+        <span className={cx(tone === "off" && "opacity-50 grayscale")}>
+          <DatabaseBadge databaseKind={config.databaseKind} />
+        </span>
+      ),
+      label: (
+        <span className="flex min-w-0 items-center">
+          <span className={cx("truncate font-medium", tone === "off" && "text-muted")}>{config.name}</span>
+          {!tinted && <ConnectionColorDot color={config.color} className="ml-1.5" />}
+          <EnvironmentIcon environment={config.environment} size={13} testId={`env-icon-${config.name}`} className="ml-1.5" />
+        </span>
+      ),
+      trailing: <ConnectionTrailing config={config} tone={tone} instance={instance} target={target} active={active} />,
+    }),
+  });
+  if (failure) {
+    note(b, `${path}/!error`, 0, 20, () => (
+      <div data-testid={`conn-error-${config.name}`} className="mb-1 pr-2 pl-[38px] text-ui-11.5 leading-4 text-danger/90">
+        {failure}
+      </div>
+    ));
+  }
+  if (!open || !connected) return;
+  for (const d of shown) databaseRows(b, news, path, { connectionId: config.id, database: d.name }, d, views);
 }
 
 /** A container row while filtering: it opens and closes and matches nothing itself. */
-function FoldRow({ path, depth, icon, label, expanded }: { path: string; depth: number; icon: ReactNode; label: ReactNode; expanded: Expanded }) {
-  return <Row path={path} depth={depth} expandable open={expanded.has(path)} onClick={() => expanded.toggle(path)} icon={icon} label={label} />;
+function foldRow(b: Build, path: string, depth: number, name: string, icon: ReactNode, label: ReactNode = name) {
+  row(b, { key: path, depth, name, expandable: true, open: b.expanded.has(path), onClick: () => b.expanded.toggle(path), view: () => ({ icon, label }) });
 }
 
-function FilteredRelationNode({
-  path,
-  db,
-  schema,
-  match: { rel, ranges, columns },
-  expanded,
-}: {
-  path: string;
-  db: DatabaseRef;
-  schema: string;
-  match: FilteredRelation;
-  expanded: Expanded;
-}) {
+function filteredRelationRows(b: Build, path: string, db: DatabaseRef, schema: string, { rel, ranges, columns }: FilteredRelation) {
   const me = `${path}/${rel.name}`;
   const expandable = columns.length > 0;
-  const open = expandable && expanded.has(me);
-  const selected = useIsSelected(db, schema, rel);
-  const select = useWorkspace((s) => s.select);
-  return (
-    <>
-      <Row
-        path={me}
-        depth={3}
-        expandable={expandable}
-        keepChevronSpace
-        quietChevron
-        open={open}
-        selected={selected}
-        onClick={() => select({ db, schema, relation: rel.name })}
-        onToggle={expandable ? () => expanded.toggle(me) : undefined}
-        onDoubleClick={() => openTableTab({ db, schema, relation: rel.name })}
-        contextMenu={<RelationMenu db={db} schema={schema} rel={rel} />}
-        icon={relationIcon(rel)}
-        title={rel.name}
-        label={<Highlight text={rel.name} ranges={ranges} />}
-      />
-      {open && columns.map((c) => <ColumnRow key={c.column.attnum} path={`${me}/#columns`} depth={4} column={c.column} ranges={c.ranges} />)}
-    </>
+  const open = expandable && b.expanded.has(me);
+  row(b, {
+    key: me,
+    depth: 3,
+    name: rel.name,
+    expandable,
+    keepChevronSpace: true,
+    quietChevron: true,
+    open,
+    selected: isSelected(b.selected, db, schema, rel),
+    ...relationActions(db, schema, rel),
+    onToggle: expandable ? () => b.expanded.toggle(me) : undefined,
+    view: () => ({ icon: relationIcon(rel), title: rel.name, label: <Highlight text={rel.name} ranges={ranges} /> }),
+  });
+  if (open) for (const c of columns) columnRow(b, `${me}/#columns`, 4, c.column, c.ranges);
+}
+
+function filteredSchemaRows(b: Build, path: string, db: DatabaseRef, match: FilteredSchema) {
+  const me = `${path}/${match.name}`;
+  const functions = `${me}/#functions`;
+  foldRow(b, me, 2, match.name, <LayersIcon size={15} className="text-muted" />);
+  if (!b.expanded.has(me)) return;
+  for (const r of match.relations) filteredRelationRows(b, me, db, match.name, r);
+  if (match.functions.length > 0) foldRow(b, functions, 3, "Functions", <BracesIcon size={14} className="text-muted" />);
+  if (b.expanded.has(functions)) for (const f of match.functions) functionRow(b, functions, 4, db, f.fn, f.ranges);
+  objectGroup(
+    b,
+    `${me}/#sequences`,
+    3,
+    db,
+    "Sequences",
+    HashIcon,
+    match.sequences.map(({ seq, ranges }) => ({ oid: seq.oid, name: seq.name, detail: seq.typeName, ranges, target: { kind: "Sequence", oid: seq.oid } })),
+  );
+  objectGroup(
+    b,
+    `${me}/#types`,
+    3,
+    db,
+    "Types",
+    TypeIcon,
+    match.types.map(({ type, ranges }) => ({ oid: type.oid, name: type.name, detail: typeDetail(type.kind), ranges, target: { kind: "Type", oid: type.oid } })),
+  );
+  objectGroup(
+    b,
+    `${me}/#synonyms`,
+    3,
+    db,
+    "Synonyms",
+    LinkIcon,
+    match.synonyms.map(({ syn, ranges }) => ({ oid: syn.oid, name: syn.name, detail: syn.target, ranges, target: { kind: "Synonym", oid: syn.oid } })),
   );
 }
 
-export function FilteredSchemaNode({ path, db, match, expanded }: { path: string; db: DatabaseRef; match: FilteredSchema; expanded: Expanded }) {
-  const me = `${path}/${match.name}`;
-  const functions = `${me}/#functions`;
-  return (
-    <>
-      <FoldRow path={me} depth={2} icon={<LayersIcon size={15} className="text-muted" />} label={match.name} expanded={expanded} />
-      {expanded.has(me) && (
-        <>
-          {match.relations.map((r) => (
-            <FilteredRelationNode key={r.rel.oid} path={me} db={db} schema={match.name} match={r} expanded={expanded} />
-          ))}
-          {match.functions.length > 0 && (
-            <FoldRow path={functions} depth={3} icon={<BracesIcon size={14} className="text-muted" />} label="Functions" expanded={expanded} />
-          )}
-          {expanded.has(functions) && match.functions.map((f) => <FunctionRow key={f.fn.oid} path={functions} depth={4} db={db} fn={f.fn} ranges={f.ranges} />)}
-          <ObjectGroup
-            path={`${me}/#sequences`}
-            depth={3}
-            db={db}
-            label="Sequences"
-            icon={HashIcon}
-            expanded={expanded}
-            rows={match.sequences.map(({ seq, ranges }) => ({
-              oid: seq.oid,
-              name: seq.name,
-              detail: seq.typeName,
-              ranges,
-              target: { kind: "Sequence", oid: seq.oid },
-            }))}
-          />
-          <ObjectGroup
-            path={`${me}/#types`}
-            depth={3}
-            db={db}
-            label="Types"
-            icon={TypeIcon}
-            expanded={expanded}
-            rows={match.types.map(({ type, ranges }) => ({
-              oid: type.oid,
-              name: type.name,
-              detail: typeDetail(type.kind),
-              ranges,
-              target: { kind: "Type", oid: type.oid },
-            }))}
-          />
-          <ObjectGroup
-            path={`${me}/#synonyms`}
-            depth={3}
-            db={db}
-            label="Synonyms"
-            icon={LinkIcon}
-            expanded={expanded}
-            rows={match.synonyms.map(({ syn, ranges }) => ({
-              oid: syn.oid,
-              name: syn.name,
-              detail: syn.target,
-              ranges,
-              target: { kind: "Synonym", oid: syn.oid },
-            }))}
-          />
-        </>
-      )}
-    </>
-  );
+/** One schema's rows in the tree narrowed to a search. */
+export function filteredSchemaNodes(path: string, db: DatabaseRef, match: FilteredSchema, expanded: Expanded): TreeNode[] {
+  const b = build(expanded);
+  filteredSchemaRows(b, path, db, match);
+  return b.out;
+}
+
+/** The tree narrowed to a search, every node open until its chevron closes it. */
+function filteredTree(b: Build, filter: TreeFilter, tinting: boolean) {
+  for (const { config, databases } of filter.connections) {
+    b.tint = tintOf(config, tinting);
+    foldRow(b, config.name, 0, config.name, <DatabaseBadge databaseKind={config.databaseKind} />, <span className="font-medium">{config.name}</span>);
+    if (!b.expanded.has(config.name)) continue;
+    for (const { db, schemas, extensions } of databases) {
+      const path = `${config.name}/${db.database}`;
+      foldRow(b, path, 1, db.database, <DatabaseIcon size={15} className="text-muted" />);
+      if (!b.expanded.has(path)) continue;
+      for (const s of schemas) filteredSchemaRows(b, path, db, s);
+      objectGroup(
+        b,
+        `${path}/#extensions`,
+        2,
+        db,
+        "Extensions",
+        ZapIcon,
+        extensions.map(({ ext, ranges }) => ({ oid: ext.oid, name: ext.name, detail: ext.version, ranges, target: { kind: "Extension", oid: ext.oid } })),
+      );
+    }
+  }
 }
 
 function TreeNote({ children }: { children: ReactNode }) {
   return (
-    <p data-testid="tree-search-empty" className="px-4 py-1.5 text-ui-12.5 text-muted">
+    <p data-testid="tree-search-empty" className="px-4 pt-3.5 pb-1.5 text-ui-12.5 text-muted">
       {children}
     </p>
   );
 }
 
-/** The tree narrowed to a search, every node open until its chevron closes it. */
-function FilteredTree({ filter, query }: { filter: TreeFilter; query: string }) {
-  const [collapsed, setCollapsed] = useState<ReadonlySet<string>>(new Set());
-  const expanded: Expanded = {
-    has: (p) => !collapsed.has(p),
-    toggle: (p, open) =>
-      setCollapsed((prev) => {
-        const next = new Set(prev);
-        if (open ?? prev.has(p)) next.delete(p);
-        else next.add(p);
-        return next;
-      }),
-  };
-  if (filter.searched === 0) return <TreeNote>Connect to a database to search its catalog.</TreeNote>;
-  if (filter.connections.length === 0) return <TreeNote>No matches for “{query}”.</TreeNote>;
-  return filter.connections.map(({ config, databases }) => (
-    <ConnectionGroup key={config.id} name={config.name} color={config.color}>
-      <FoldRow
-        path={config.name}
-        depth={0}
-        icon={<DatabaseBadge databaseKind={config.databaseKind} />}
-        label={<span className="font-medium">{config.name}</span>}
-        expanded={expanded}
-      />
-      {expanded.has(config.name) &&
-        databases.map(({ db, schemas, extensions }) => {
-          const path = `${config.name}/${db.database}`;
-          return (
-            <Fragment key={db.database}>
-              <FoldRow path={path} depth={1} icon={<DatabaseIcon size={15} className="text-muted" />} label={db.database} expanded={expanded} />
-              {expanded.has(path) && (
-                <>
-                  {schemas.map((s) => (
-                    <FilteredSchemaNode key={s.name} path={path} db={db} match={s} expanded={expanded} />
-                  ))}
-                  <ObjectGroup
-                    path={`${path}/#extensions`}
-                    depth={2}
-                    db={db}
-                    label="Extensions"
-                    icon={ZapIcon}
-                    expanded={expanded}
-                    rows={extensions.map(({ ext, ranges }) => ({
-                      oid: ext.oid,
-                      name: ext.name,
-                      detail: ext.version,
-                      ranges,
-                      target: { kind: "Extension", oid: ext.oid },
-                    }))}
-                  />
-                </>
-              )}
-            </Fragment>
-          );
-        })}
-    </ConnectionGroup>
-  ));
-}
-
-/** `filter` is set while the sidebar search holds a query, and the tree then shows only its matches. */
-export function ConnectionTree({ filter, query, ref }: { filter: TreeFilter | null; query: string; ref: RefObject<HTMLDivElement | null> }) {
-  const configs = useWorkspace((s) => s.configs);
+function useOpenSet(): [ReadonlySet<string>, (path: string, force?: boolean) => void] {
   const [open, setOpen] = useState<ReadonlySet<string>>(new Set());
   const toggle = useCallback(
     (p: string, force?: boolean) =>
@@ -1208,20 +829,117 @@ export function ConnectionTree({ filter, query, ref }: { filter: TreeFilter | nu
       }),
     [],
   );
-  const expanded: Expanded = { has: (p) => open.has(p), toggle };
-  // Held here, not in each node, so a search that swaps the nodes out does not reopen what the user closed.
+  return [open, toggle];
+}
+
+/** The search's closed rows, which start over with each new query: every searched node starts open. */
+function useCollapsedSet(query: string): Expanded {
+  const [state, setState] = useState<{ query: string; closed: ReadonlySet<string> }>({ query, closed: new Set() });
+  const closed = state.query === query ? state.closed : null;
+  const toggle = useCallback(
+    (p: string, open?: boolean) =>
+      setState((prev) => {
+        const next = new Set(prev.query === query ? prev.closed : []);
+        if (open ?? next.has(p)) next.delete(p);
+        else next.add(p);
+        return { query, closed: next };
+      }),
+    [query],
+  );
+  return useMemo(() => ({ has: (p) => !closed?.has(p), toggle }), [closed, toggle]);
+}
+
+const NO_NEWS: CatalogNews = { loading: [], failed: [] };
+
+/** `filter` is set while the sidebar search holds a query, and the tree then shows only its matches. */
+export function ConnectionTree({ filter, query, ref }: { filter: TreeFilter | null; query: string; ref: RefObject<HTMLDivElement | null> }) {
+  const configs = useWorkspace((s) => s.configs);
+  const selected = useWorkspace((s) => s.selected);
+  const tinting = useWorkspace((s) => s.settings.tintConnections);
+  const connections = useLive((s) => s.connections);
+  const views = useCatalog((s) => s.views);
+  const entries = useRelationDetail((s) => s.entries);
+  // Held here, not in the rows, so a search that swaps the rows out does not reopen what the user closed.
+  const [open, toggle] = useOpenSet();
+  const expanded = useMemo<Expanded>(() => ({ has: (p) => open.has(p), toggle }), [open, toggle]);
   const [revealed] = useState<Revealed>(() => new Map());
-  const list = Object.values(configs).sort((a, b) => a.name.localeCompare(b.name));
-  useRovingTabStop(ref);
+  const searched = useCollapsedSet(query);
+  const list = useMemo(() => Object.values(configs).sort((a, b) => a.name.localeCompare(b.name)), [configs]);
+
+  const tree = useMemo(() => {
+    if (filter) {
+      const b = build(searched, selected);
+      filteredTree(b, filter, tinting);
+      return { b, news: NO_NEWS };
+    }
+    const b = build(expanded, selected, entries);
+    const news: CatalogNews = { loading: [], failed: [] };
+    for (const config of list) {
+      b.tint = tintOf(config, tinting);
+      connectionRows(b, news, config, connections[config.id], views);
+    }
+    return { b, news };
+  }, [filter, searched, expanded, selected, entries, tinting, list, connections, views]);
+
+  // The first connect opens the connection and its home database, then that database's default schema once its catalog says which.
+  useEffect(() => {
+    if (filter) return;
+    for (const config of list) {
+      const home = instanceOf(connections[config.id])?.home;
+      if (!home) continue;
+      const path = config.name;
+      if (!revealed.has(config.id)) {
+        revealed.set(config.id, "database");
+        toggle(path, true);
+        toggle(`${path}/${home}`, true);
+      }
+      const homeDefault = viewFor(views, { connectionId: config.id, database: home })?.catalog.defaultSchema;
+      if (revealed.get(config.id) === "database" && homeDefault !== undefined) {
+        revealed.set(config.id, "schema");
+        if (homeDefault) toggle(`${path}/${home}/${homeDefault}`, true);
+      }
+    }
+  }, [filter, list, connections, views, toggle, revealed]);
+
+  // Each fetch starts when its row opens, or when the catalog version moves under an open relation, and not again until then.
+  const requested = useRef(new Set<string>());
+  const ensured = useRef(new Map<string, number>());
+  useEffect(() => {
+    const idle = new Set<string>();
+    for (const db of tree.b.idle) {
+      const key = dbKey(db);
+      idle.add(key);
+      if (!requested.current.has(key)) void commands.catalogGet(db);
+    }
+    requested.current = idle;
+    const details = new Map<string, number>();
+    for (const { db, version, oid } of tree.b.details) {
+      const key = detailKey(db, oid);
+      details.set(key, version);
+      if (ensured.current.get(key) !== version) void useRelationDetail.getState().ensure(db, version, oid);
+    }
+    ensured.current = details;
+  }, [tree]);
 
   return (
-    <div ref={ref} data-testid="conn-tree" role="tree" aria-label="Connections" className="min-h-0 flex-1 overflow-y-auto pt-2 pb-3">
-      {filter ? (
-        <FilteredTree key={query} filter={filter} query={query.trim()} />
-      ) : (
-        list.map((c) => <ConnectionNode key={c.id} config={c} expanded={expanded} revealed={revealed} />)
-      )}
-      <PickerHost />
-    </div>
+    <>
+      <div ref={ref} data-testid="conn-tree" role="tree" aria-label="Connections" className="min-h-0 flex-1 overflow-y-auto">
+        {filter && filter.searched === 0 ? (
+          <TreeNote>Connect to a database to search its catalog.</TreeNote>
+        ) : filter && filter.connections.length === 0 ? (
+          <TreeNote>No matches for “{query.trim()}”.</TreeNote>
+        ) : (
+          <VirtualTree key={filter ? `search:${query}` : "tree"} nodes={tree.b.out} scrollRef={ref} />
+        )}
+        <PickerHost />
+      </div>
+      {/* The loading and failure notes are rows that scroll in and out of the DOM, so the announcements live here, outside the tree. */}
+      <div role="status" className="sr-only">
+        {tree.news.loading.length > 0 ? `Loading catalog: ${tree.news.loading.join(", ")}` : ""}
+      </div>
+      <div role="alert" className="sr-only">
+        {tree.news.failed.length > 0 ? `Catalog failed for ${tree.news.failed.join("; ")}` : ""}
+      </div>
+    </>
   );
 }

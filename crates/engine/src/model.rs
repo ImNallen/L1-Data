@@ -1777,6 +1777,15 @@ impl FontSetting {
     }
 }
 
+/// `System` follows the operating system's reduce-motion accessibility setting.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, Type)]
+pub enum ReduceMotion {
+    #[default]
+    System,
+    On,
+    Off,
+}
+
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, Type)]
 pub enum AssistantAccess {
     #[default]
@@ -1804,6 +1813,8 @@ pub struct Settings {
     pub density: Density,
     /// 0 turns panel animation off.
     pub panel_motion_ms: u16,
+    /// Reduced motion snaps panels open and closed and turns menu and dialog movement into a fade.
+    pub reduce_motion: ReduceMotion,
     /// Shade each colored connection in the sidebar tree instead of drawing its dot.
     pub tint_connections: bool,
     /// One per `ProviderKind::ALL`, in that order.
@@ -1826,7 +1837,7 @@ fn provider_configs(saved: Vec<ProviderConfig>) -> Vec<ProviderConfig> {
 }
 
 // Hand-written for the same reason as `TableQuery`: settings saved by older builds still load
-// (`theme` became `colorScheme`; the theme, font, density, motion, tint, and provider fields came later), and the TS binding keeps every field required.
+// (`theme` became `colorScheme`; the theme, font, density, motion, reduce-motion, tint, and provider fields came later), and the TS binding keeps every field required.
 impl<'de> Deserialize<'de> for Settings {
     fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
         #[derive(Deserialize)]
@@ -1850,6 +1861,8 @@ impl<'de> Deserialize<'de> for Settings {
             density: Density,
             panel_motion_ms: Option<u16>,
             #[serde(default)]
+            reduce_motion: ReduceMotion,
+            #[serde(default)]
             tint_connections: bool,
             providers: Option<Vec<ProviderConfig>>,
             provider_health_check_secs: Option<u32>,
@@ -1869,6 +1882,7 @@ impl<'de> Deserialize<'de> for Settings {
             code_font: s.code_font.unwrap_or_else(FontSetting::code_default),
             density: s.density,
             panel_motion_ms: s.panel_motion_ms.unwrap_or(DEFAULT_PANEL_MOTION_MS),
+            reduce_motion: s.reduce_motion,
             tint_connections: s.tint_connections,
             providers: provider_configs(s.providers.unwrap_or_default()),
             provider_health_check_secs: s.provider_health_check_secs.unwrap_or(DEFAULT_PROVIDER_HEALTH_CHECK_SECS),
@@ -1892,6 +1906,7 @@ impl Default for Settings {
             code_font: FontSetting::code_default(),
             density: Density::Standard,
             panel_motion_ms: DEFAULT_PANEL_MOTION_MS,
+            reduce_motion: ReduceMotion::System,
             tint_connections: false,
             providers: provider_configs(Vec::new()),
             provider_health_check_secs: DEFAULT_PROVIDER_HEALTH_CHECK_SECS,
@@ -3138,6 +3153,7 @@ mod tests {
             )
         );
         assert!(!s.tint_connections);
+        assert_eq!((s.reduce_motion, Settings::default().reduce_motion), (ReduceMotion::System, ReduceMotion::System));
         assert_eq!(s.assistant_access, AssistantAccess::SchemaOnly);
         assert_eq!(Settings::default().assistant_access, AssistantAccess::SchemaOnly);
         let full = Settings { assistant_access: AssistantAccess::Full, ..Settings::default() };
@@ -3152,16 +3168,23 @@ mod tests {
             code_font: FontSetting { family: "Menlo".into(), size: 11 },
             density: Density::Compact,
             panel_motion_ms: 0,
+            reduce_motion: ReduceMotion::On,
             tint_connections: true,
             ..Settings::default()
         };
         let value = serde_json::to_value(&s).unwrap();
         assert_eq!(value["interfaceFont"], json!({ "family": "System", "size": 15 }));
         assert_eq!((value["density"].clone(), value["panelMotionMs"].clone()), (json!("Compact"), json!(0)));
-        assert_eq!(value["tintConnections"], json!(true));
+        assert_eq!((value["reduceMotion"].clone(), value["tintConnections"].clone()), (json!("On"), json!(true)));
         let round: Settings = serde_json::from_value(value).unwrap();
         assert_eq!((round.code_font, round.density, round.panel_motion_ms), (FontSetting { family: "Menlo".into(), size: 11 }, Density::Compact, 0));
+        assert_eq!(round.reduce_motion, ReduceMotion::On);
         assert!(round.tint_connections);
+        let off: Settings = serde_json::from_value(json!({
+            "maxRows": 10, "maxResultBytes": 20, "tablePageSize": 30, "stopOnError": false, "reduceMotion": "Off"
+        }))
+        .unwrap();
+        assert_eq!(off.reduce_motion, ReduceMotion::Off);
     }
 
     #[test]

@@ -4,7 +4,7 @@ import { useEffect, useId, useLayoutEffect, useRef, useState, useSyncExternalSto
 import { docOf, focusEditor, onBuffersChanged } from "../features/editor/editorStates";
 import { useWorkspace, type Screen } from "../state/workspace";
 import type { TabId } from "../ipc/bindings";
-import { cx, DialogSurface, Kbd } from "../ui/primitives";
+import { ACTIVE_OPTION, cx, DialogSurface, Kbd } from "../ui/primitives";
 import { COMMANDS, commandAvailable, commandLabel, shortcutLabel, type Command } from "./commands";
 
 function CommandBrowser({ activate, composing }: { activate: (command: Command) => void; composing: RefObject<boolean> }) {
@@ -61,7 +61,7 @@ function CommandBrowser({ activate, composing }: { activate: (command: Command) 
           className="h-14 min-w-0 flex-1 bg-transparent text-ui-14 text-fg outline-none placeholder:text-muted"
         />
         <Dialog.Close aria-label="Close command panel" data-testid="command-close" className="rounded text-dim hover:text-fg">
-          <Kbd className="bg-pill">esc</Kbd>
+          <Kbd>esc</Kbd>
         </Dialog.Close>
       </div>
       <div id={listId} role="listbox" aria-label="Commands" className="max-h-80 min-h-0 flex-1 overflow-auto p-2">
@@ -77,25 +77,25 @@ function CommandBrowser({ activate, composing }: { activate: (command: Command) 
             onClick={() => activate(command)}
             className={cx(
               "flex cursor-default items-center justify-between gap-3 rounded-lg px-3 py-2 text-ui-13.5 text-fg",
-              index === selectedIndex ? "bg-selected" : "hover:bg-hover",
+              index === selectedIndex ? ACTIVE_OPTION : "hover:bg-hover",
             )}
           >
             <span>{commandLabel(command)}</span>
-            <Kbd className="shrink-0 bg-pill text-muted">{shortcutLabel(command)}</Kbd>
+            <Kbd className="shrink-0 text-muted">{shortcutLabel(command)}</Kbd>
           </div>
         ))}
         {items.length === 0 && (
-          <p data-testid="command-empty" className="px-3 py-8 text-center text-ui-13 text-dim">
+          <p data-testid="command-empty" role="status" className="px-3 py-8 text-center text-ui-13 text-dim">
             No commands found.
           </p>
         )}
       </div>
       <div className="flex min-h-10 shrink-0 items-center gap-3 border-t border-control px-4 text-ui-11.5 text-dim">
         <span>
-          <Kbd className="bg-pill">↑↓</Kbd> Navigate
+          <Kbd>↑↓</Kbd> Navigate
         </span>
         <span>
-          <Kbd className="bg-pill">↵</Kbd> Run command
+          <Kbd>↵</Kbd> Run command
         </span>
       </div>
     </div>
@@ -144,7 +144,7 @@ export function CommandPalette() {
             if (!activating.current) return restoreFocus();
             requestAnimationFrame(() => {
               const { overlay, screen, active } = useWorkspace.getState();
-              if (overlay.kind !== "none" || document.querySelector('[role="dialog"]')) return;
+              if (overlay.kind !== "none" || document.querySelector('[role="dialog"], [role="alertdialog"]')) return;
               if (screen.kind === opener.current?.screen && active === opener.current.active) {
                 if (document.activeElement === document.body) restoreFocus();
               } else if (screen.kind === "workspace") {

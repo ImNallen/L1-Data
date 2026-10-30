@@ -1,4 +1,5 @@
 import { useEffect, useMemo } from "react";
+import { useShallow } from "zustand/react/shallow";
 import type { RelationDetail, ResultMeta } from "../../ipc/bindings";
 import { sourceColumn, useCatalog, viewFor, type CatalogView } from "../../state/catalog";
 import { sameDb } from "../../state/dbKey";
@@ -44,6 +45,7 @@ export function useKeyLinks(meta: ResultMeta): KeyLink[] {
   useEffect(() => {
     if (version !== undefined) for (const oid of relations) void useRelationDetail.getState().ensure(meta.db, version, oid);
   }, [meta.db, version, relations]);
-  const entries = useRelationDetail((s) => s.entries);
-  return useMemo(() => keyLinks(columns, (oid) => entries[detailKey(meta.db, oid)]?.detail), [columns, entries, meta.db]);
+  // Only the details of the relations this result shows, so opening other tables' details elsewhere leaves the grid alone.
+  const details = useRelationDetail(useShallow((s) => relations.map((oid) => s.entries[detailKey(meta.db, oid)]?.detail)));
+  return useMemo(() => keyLinks(columns, (oid) => details[relations.indexOf(oid)]), [columns, relations, details]);
 }

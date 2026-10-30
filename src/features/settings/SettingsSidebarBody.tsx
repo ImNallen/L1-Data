@@ -22,7 +22,7 @@ export function SettingsSidebarBody({ section, query }: { section: SettingsSecti
       <SidebarSearch testId="settings-search" scope="settings" query={query} count={matches?.length ?? 0} onQueryChange={setSettingsQuery} />
       {matches && (
         <p data-testid="settings-search-hint" className="mx-2 flex items-start gap-2 px-2 pt-1 pb-1.5 text-ui-11.5 leading-4 text-dim">
-          <Kbd className="shrink-0 bg-border text-muted">esc</Kbd>
+          <Kbd className="shrink-0 text-muted">esc</Kbd>
           clear and go back to the section you were on
         </p>
       )}

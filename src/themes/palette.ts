@@ -85,10 +85,21 @@ const fixed = (hex: string): Recipe => {
   const color = parseHex(hex) ?? BLACK;
   return () => color;
 };
+// Labels on the accent are 12-13px, so they need body-text contrast; white wins ties to keep the usual look.
 const onAccent: Recipe = (s) => {
   const dark = mix(s.accent, BLACK, 0.85);
-  return contrast(WHITE, s.accent) >= 3 ? WHITE : dark;
+  const white = contrast(WHITE, s.accent);
+  return white >= 4.5 || white >= contrast(dark, s.accent) ? WHITE : dark;
 };
+// The focus ring must stay visible (3:1) against the background whatever the seeds, so a pale result is pulled toward the foreground.
+const visible =
+  (recipe: Recipe): Recipe =>
+  (s) => {
+    const base = recipe(s);
+    let color = base;
+    for (let t = 0.1; t <= 1 && contrast(color, s.background) < 3; t += 0.1) color = mix(base, s.foreground, t);
+    return color;
+  };
 
 const seed =
   (key: keyof Seeds): Recipe =>
@@ -130,7 +141,7 @@ const RECIPES: Record<Appearance, Record<Token, Recipe>> = {
     accentForeground: onAccent,
     cellSelect: tint(0.243),
     runIcon: onAccent,
-    focus: lift(0.15),
+    focus: visible(lift(0.15)),
     accentBorder: tint(0.557),
     handle: ink(0.17),
     handleHover: ink(0.32),
@@ -175,7 +186,7 @@ const RECIPES: Record<Appearance, Record<Token, Recipe>> = {
     accentForeground: onAccent,
     cellSelect: tint(0.165),
     runIcon: onAccent,
-    focus: tint(0.8),
+    focus: visible(tint(0.8)),
     accentBorder: tint(0.652),
     handle: ink(0.158),
     handleHover: ink(0.363),

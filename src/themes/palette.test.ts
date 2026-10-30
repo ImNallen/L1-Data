@@ -29,7 +29,8 @@ it.each(derived.map((v) => [v.id, v.palette] as const))("keeps %s text readable 
   expect(ratio(p.foreground, p.background)).toBeGreaterThanOrEqual(7);
   expect(ratio(p.muted, p.background)).toBeGreaterThanOrEqual(4.5);
   expect(ratio(p.dim, p.background)).toBeGreaterThanOrEqual(3);
-  expect(ratio(p.accentForeground, p.accent)).toBeGreaterThanOrEqual(3);
+  expect(ratio(p.accentForeground, p.accent)).toBeGreaterThanOrEqual(4.5);
+  expect(ratio(p.focus, p.background)).toBeGreaterThanOrEqual(3);
 });
 
 it("derives every token as hex, keeping the seeds verbatim", () => {

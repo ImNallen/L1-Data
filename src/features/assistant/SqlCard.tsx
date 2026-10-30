@@ -72,7 +72,7 @@ export function SqlCard({
           </Button>
         ) : (
           <Button data-testid="sql-run-new-tab" className={ACTION} disabled={!complete} onClick={() => runInNewTab(sql, db)}>
-            <PlayIcon fill="currentColor" size={11} className="text-run-icon" />
+            <PlayIcon fill="currentColor" size={11} className="text-green" />
             Run in new tab
           </Button>
         )}

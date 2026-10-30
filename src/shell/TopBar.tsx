@@ -17,7 +17,7 @@ import { homeDb } from "../state/dbKey";
 import { instanceOf, useLive } from "../state/live";
 import { canCancel, connectionTone, hasUncommittedWork, isBusy } from "../state/status";
 import { tabTarget, useWorkspace, type Tab } from "../state/workspace";
-import { Button, Kbd, MenuContent, MenuItem, MenuLabel, StatusDot, cx } from "../ui/primitives";
+import { Button, CONNECTION_TONE_LABEL, Kbd, MenuContent, MenuItem, MenuLabel, StatusDot, cx } from "../ui/primitives";
 import { SidebarToggle, WindowEdgeActions, windowEdgeInset, windowLeadingInset } from "./WindowEdgeActions";
 import type { HostedWindow } from "./hostedWindow";
 
@@ -77,12 +77,12 @@ function RunButton({ busy, environment, explainable }: { busy: boolean; environm
         disabled={busy}
         variant="primary"
         title={`Run the selection or the marked statement (⌘↵). On a blank line, or with ⌘⇧↵, choose which statement to run.${environment === "Production" ? " This tab targets Production, so a run that writes asks first." : ""}`}
-        className={cx("w-[104px] justify-center pr-2 pl-2.5 font-medium", explainable && "rounded-r-none")}
+        className={cx("min-w-[104px] justify-center pr-2 pl-2.5 font-medium", explainable && "rounded-r-none")}
         onClick={() => void runOrChoose()}
       >
-        <PlayIcon fill="currentColor" size={13} className="text-run-icon" />
+        <PlayIcon fill="currentColor" size={13} className="shrink-0 text-run-icon" />
         Run
-        <Kbd className="bg-run-fg/15 text-run-fg/85">⌘↵</Kbd>
+        <Kbd tone="accent">⌘↵</Kbd>
       </Button>
       {explainable && (
         <Menu.Root modal={false}>
@@ -90,18 +90,18 @@ function RunButton({ busy, environment, explainable }: { busy: boolean; environm
             data-testid="explain-menu"
             disabled={busy}
             aria-label="Explain"
-            className="inline-flex h-8 items-center rounded-r-lg border-l border-run-fg/25 bg-run px-1.5 text-run-fg outline-none hover:bg-run-hover disabled:pointer-events-none disabled:opacity-40"
+            className="inline-flex h-8 items-center rounded-r-lg border-l border-run-fg/25 bg-run px-1.5 text-run-fg hover:bg-run-hover focus-visible:outline-run-fg disabled:pointer-events-none disabled:opacity-40"
           >
             <ChevronDownIcon size={14} />
           </Menu.Trigger>
           <MenuContent align="end">
             <MenuItem testId="explain-item" onSelect={() => explainActive("Explain")}>
               <span className="flex-1">Explain</span>
-              <Kbd className="bg-control text-muted">⌘⌥↵</Kbd>
+              <Kbd tone="menu">⌘⌥↵</Kbd>
             </MenuItem>
             <MenuItem testId="explain-analyze-item" onSelect={() => explainActive("ExplainAnalyze")}>
               <span className="flex-1">Explain Analyze</span>
-              <Kbd className="bg-control text-muted">⌘⌥⇧↵</Kbd>
+              <Kbd tone="menu">⌘⌥⇧↵</Kbd>
             </MenuItem>
           </MenuContent>
         </Menu.Root>
@@ -154,14 +154,17 @@ export function TopBar({ hosted }: { hosted: HostedWindow | null }) {
             </Menu.Trigger>
             <MenuContent>
               <MenuLabel>Connection for this tab</MenuLabel>
-              {Object.values(configs).map((c) => (
-                <MenuItem key={c.id} checked={c.id === connectionId} onSelect={() => void setTabTarget(tab.id, homeDb(c))}>
-                  <StatusDot tone={connectionTone(connections[c.id])} />
-                  <ConnectionColorDot color={c.color} />
-                  <EnvironmentIcon environment={c.environment} size={13} testId={`env-icon-${c.id}`} />
-                  {c.name}
-                </MenuItem>
-              ))}
+              {Object.values(configs).map((c) => {
+                const tone = connectionTone(connections[c.id]);
+                return (
+                  <MenuItem key={c.id} checked={c.id === connectionId} onSelect={() => void setTabTarget(tab.id, homeDb(c))}>
+                    <StatusDot tone={tone} label={CONNECTION_TONE_LABEL[tone]} />
+                    <ConnectionColorDot color={c.color} />
+                    <EnvironmentIcon environment={c.environment} size={13} testId={`env-icon-${c.id}`} />
+                    {c.name}
+                  </MenuItem>
+                );
+              })}
             </MenuContent>
           </Menu.Root>
         ) : (
@@ -185,7 +188,7 @@ export function TopBar({ hosted }: { hosted: HostedWindow | null }) {
             title={
               loss?.title ?? (txn === "Open" ? "Transaction open. SQL Server does not report nesting depth or committability through the protocol." : undefined)
             }
-            className="inline-flex h-7 items-center gap-1 rounded-md pr-1.5 pl-2 text-ui-12.5 text-muted outline-none hover:bg-hover hover:text-fg data-[state=open]:bg-hover data-[state=open]:text-fg"
+            className="inline-flex h-7 items-center gap-1 rounded-md pr-1.5 pl-2 text-ui-12.5 text-muted hover:bg-hover hover:text-fg data-[state=open]:bg-hover data-[state=open]:text-fg"
           >
             {MODE_LABEL[tab.console.mode]}
             {txn && txn !== "Idle" && (
@@ -261,7 +264,7 @@ export function TopBar({ hosted }: { hosted: HostedWindow | null }) {
           >
             <SquareIcon fill="currentColor" size={10} className="text-muted" />
             Cancel
-            <Kbd className="bg-control text-muted">Esc</Kbd>
+            <Kbd tone="menu">Esc</Kbd>
           </Button>
         ) : (
           <RunButton busy={busy} environment={environment} explainable={!!config && explainSupported(config.databaseKind) && !isBrowsing(tab)} />

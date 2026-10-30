@@ -20,6 +20,7 @@ function HistoryItem({ chat, current, now }: { chat: ChatState; current: boolean
   return (
     <Menu.Item
       data-testid={`chat-history-item-${chat.id}`}
+      aria-keyshortcuts="Delete"
       onSelect={() => void showChat(chat.id)}
       onKeyDown={(e) => {
         if (e.key !== "Delete" && e.key !== "Backspace") return;
@@ -36,17 +37,19 @@ function HistoryItem({ chat, current, now }: { chat: ChatState; current: boolean
       <span className={cx("shrink-0 text-ui-11.5 group-hover:hidden group-data-[highlighted]:hidden", awaitsApproval(chat) ? "text-amber" : "text-dim")}>
         {note ?? timeAgo(now, chat.updatedAtMs)}
       </span>
-      <IconButton
-        aria-label={`Delete ${chat.title || "chat"}`}
+      {/* A pointer shortcut for the Delete key, so not a button: a control inside a menu item is one a menu cannot reach. */}
+      <span
+        aria-hidden
+        data-testid={`chat-history-delete-${chat.id}`}
         title="Delete chat"
-        className="hidden size-6 group-hover:inline-grid group-data-[highlighted]:inline-grid"
+        className="hidden size-6 place-items-center rounded-md text-muted transition-colors group-hover:inline-grid group-data-[highlighted]:inline-grid hover:bg-hover hover:text-fg"
         onClick={(e) => {
           e.stopPropagation();
           void confirmDeleteChat(chat);
         }}
       >
         <Trash2Icon size={13} />
-      </IconButton>
+      </span>
     </Menu.Item>
   );
 }

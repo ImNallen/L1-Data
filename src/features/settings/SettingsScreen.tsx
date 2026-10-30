@@ -44,7 +44,10 @@ export function SettingsDialog() {
             if (element instanceof HTMLElement && element.isConnected) element.focus();
           }}
         >
-          <Dialog.Title className="sr-only">Settings</Dialog.Title>
+          {/* Names the dialog without a heading, so the page's breadcrumb is its first heading, an h1 above the h2 sections. */}
+          <Dialog.Title asChild>
+            <span className="sr-only">Settings</span>
+          </Dialog.Title>
           {screen.kind === "settings" && <SettingsPage screen={screen} />}
           <AskOverlay />
         </DialogSurface>
@@ -65,7 +68,9 @@ export function SettingsPage({ screen }: { screen: SettingsScreen }) {
         <header className="flex min-h-14 shrink-0 items-center gap-2 border-b border-control px-5">
           <h1 data-testid="settings-breadcrumb" className="flex min-w-0 flex-1 items-center gap-2 text-ui-14">
             <span className="truncate px-0.5 text-dim">Settings</span>
-            <span className="text-faint">/</span>
+            <span aria-hidden className="text-faint">
+              /
+            </span>
             <span className="truncate font-medium text-fg">{matches ? "Search results" : sectionLabel(screen.section)}</span>
           </h1>
           <Dialog.Close asChild>

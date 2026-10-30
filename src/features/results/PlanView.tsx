@@ -1,5 +1,5 @@
 import { ChevronRightIcon } from "lucide-react";
-import { Fragment, useEffect, useRef, useState, type KeyboardEvent } from "react";
+import { Fragment, useEffect, useId, useRef, useState, type KeyboardEvent } from "react";
 import { commands, type Plan, type PlanBuffers, type PlanNode, type ResultRef } from "../../ipc/bindings";
 import type { RowResult } from "../../state/status";
 import { treeKey, type TreeItem } from "../sidebar/treeKeys";
@@ -54,6 +54,7 @@ export function PlanView({ result }: { result: RowResult }) {
   const [tree, setTree] = useState<TreeState>({ key: "", collapsed: new Set(), focusId: "0" });
   const marked = useRef("");
   const treeRef = useRef<HTMLDivElement>(null);
+  const nodeIds = useId();
 
   const active: TreeState = tree.key === refKey ? tree : { key: refKey, collapsed: new Set(), focusId: "0" };
   if (tree.key !== refKey) setTree(active);
@@ -140,7 +141,16 @@ export function PlanView({ result }: { result: RowResult }) {
           {statement?.planningTimeMs != null && <span>Planning {msText(statement.planningTimeMs)}</span>}
           {statement?.executionTimeMs != null && <span>Execution {msText(statement.executionTimeMs)}</span>}
         </div>
-        <div ref={treeRef} role="tree" tabIndex={0} aria-label="Query plan" onKeyDown={onKeyDown} className="min-h-0 flex-1 overflow-auto py-1 outline-none">
+        {/* Focus stays on the tree. The focused row is its active descendant and shows the focus ring in its place. */}
+        <div
+          ref={treeRef}
+          role="tree"
+          tabIndex={0}
+          aria-label="Query plan"
+          aria-activedescendant={focused ? `${nodeIds}-${at}` : undefined}
+          onKeyDown={onKeyDown}
+          className="group min-h-0 flex-1 overflow-auto py-1 outline-none"
+        >
           {rows.map((row, index) => {
             const expandable = row.node.children.length > 0;
             const expanded = expandable && !active.collapsed.has(row.id);
@@ -155,8 +165,9 @@ export function PlanView({ result }: { result: RowResult }) {
                   </p>
                 )}
                 <div
-                  id={`plan-node-${index}`}
+                  id={`${nodeIds}-${index}`}
                   role="treeitem"
+                  aria-selected={index === at}
                   aria-level={row.level}
                   aria-expanded={expandable ? expanded : undefined}
                   data-testid={`plan-node-${index}`}
@@ -166,7 +177,10 @@ export function PlanView({ result }: { result: RowResult }) {
                     setTree({ key: refKey, collapsed: active.collapsed, focusId: row.id });
                     treeRef.current?.focus();
                   }}
-                  className={cx("flex h-7 cursor-default items-center gap-2 pr-3 text-ui-13", index === at ? "bg-selected" : "hover:bg-hover")}
+                  className={cx(
+                    "flex h-7 cursor-default items-center gap-2 pr-3 text-ui-13",
+                    index === at ? "bg-selected group-focus-visible:ring-1 group-focus-visible:ring-focus group-focus-visible:ring-inset" : "hover:bg-hover",
+                  )}
                 >
                   <span className="grid w-3.5 shrink-0 place-items-center text-muted">
                     {expandable && <ChevronRightIcon size={14} className={cx("transition-transform duration-100", expanded && "rotate-90")} />}

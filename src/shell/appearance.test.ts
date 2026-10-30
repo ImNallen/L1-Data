@@ -2,13 +2,24 @@ import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import type { Settings } from "../ipc/bindings";
 import { useWorkspace } from "../state/workspace";
 import { fakeRoot, type FakeRoot } from "../testing/fakeRoot";
-import { appearanceVars, gridRowHeight, startAppearance } from "./appearance";
+import { appearanceVars, gridRowHeight, motionReduced, startAppearance } from "./appearance";
 
 let root: FakeRoot;
+let system: { matches: boolean; listeners: (() => void)[] };
 
 beforeEach(() => {
   root = fakeRoot();
+  system = { matches: false, listeners: [] };
   vi.stubGlobal("document", { documentElement: root });
+  vi.stubGlobal("window", {
+    matchMedia: (query: string) => ({
+      get matches() {
+        return query === "(prefers-reduced-motion: reduce)" && system.matches;
+      },
+      addEventListener: (_: string, fn: () => void) => system.listeners.push(fn),
+      removeEventListener: (_: string, fn: () => void) => system.listeners.splice(system.listeners.indexOf(fn), 1),
+    }),
+  });
 });
 
 afterEach(() => {
@@ -62,4 +73,35 @@ it("paints the vars on the document and repaints when an appearance setting chan
 it("derives the grid row height from the code size and density, 24 px at the defaults", () => {
   expect([gridRowHeight(13, "Compact"), gridRowHeight(13, "Standard"), gridRowHeight(13, "Spacious")]).toEqual([20, 24, 28]);
   expect([gridRowHeight(10, "Standard"), gridRowHeight(20, "Spacious")]).toEqual([21, 36]);
+});
+
+it("reduces motion when the setting is On, or System while the OS asks for it", () => {
+  expect([motionReduced("On", false), motionReduced("Off", true), motionReduced("System", true), motionReduced("System", false)]).toEqual([
+    true,
+    false,
+    true,
+    false,
+  ]);
+});
+
+it("marks the root while motion is reduced and follows the OS only while the choice is System", () => {
+  const setSystemReduced = (reduced: boolean) => {
+    system.matches = reduced;
+    for (const fn of system.listeners) fn();
+  };
+  const stop = startAppearance();
+  expect(root.dataset.motion).toBeUndefined();
+  setSystemReduced(true);
+  expect(root.dataset.motion).toBe("reduced");
+  setSettings({ reduceMotion: "Off" });
+  expect(root.dataset.motion).toBeUndefined();
+  setSystemReduced(false);
+  setSettings({ reduceMotion: "On" });
+  expect(root.dataset.motion).toBe("reduced");
+  setSettings({ reduceMotion: "System" });
+  expect(root.dataset.motion).toBeUndefined();
+  stop();
+  expect(system.listeners).toEqual([]);
+  setSystemReduced(true);
+  expect(root.dataset.motion).toBeUndefined();
 });

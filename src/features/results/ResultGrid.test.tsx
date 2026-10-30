@@ -659,3 +659,87 @@ it("publishes the header once when a drag ends, not on each cell entered", async
   expect(publishes).toBe(before + 2);
   expect(resolvers).toHaveLength(1);
 });
+
+const sortingQuery = (onSort: (column: string, additive: boolean) => void) => ({
+  sort: [],
+  filtered: new Set<string>(),
+  onSort,
+  onFilterColumn: () => {},
+  onFilterValue: () => {},
+});
+
+it("sorts by the selected cell's column with ⌥S and adds it to the sort with ⇧⌥S", async () => {
+  const user = userEvent.setup();
+  const onSort = vi.fn();
+  render(<ResultGrid meta={queryResult([["1", "42"]])} done query={sortingQuery(onSort)} editing={null} />);
+  await user.click(await screen.findByText("42"));
+  await user.keyboard("{Alt>}s{/Alt}");
+  await user.keyboard("{Shift>}{Alt>}s{/Alt}{/Shift}");
+  expect(onSort.mock.calls).toEqual([
+    ["customer_id", false],
+    ["customer_id", true],
+  ]);
+});
+
+it("calls the latest sort when the pane renders the same sort with new callbacks", async () => {
+  const user = userEvent.setup();
+  const meta = queryResult([["1", "42"]]);
+  const first = vi.fn();
+  const second = vi.fn();
+  const { rerender } = render(<ResultGrid meta={meta} done query={sortingQuery(first)} editing={null} />);
+  await screen.findByText("42");
+  rerender(<ResultGrid meta={meta} done query={sortingQuery(second)} editing={null} />);
+  await user.click(screen.getByTestId("grid-header-0"));
+  expect([first.mock.calls.length, second.mock.calls]).toEqual([0, [["id", false]]]);
+});
+
+it("widens and narrows the selected cell's column with ⌥→ and ⌥←, and from the menu", async () => {
+  const user = userEvent.setup();
+  render(<ResultGrid meta={queryResult([["1", "42"]])} done query={null} editing={null} />);
+  await user.click(await screen.findByText("42"));
+  const width = () => parseFloat(screen.getByTestId("grid-header-1").style.width);
+  const start = width();
+  await user.keyboard("{Alt>}{ArrowRight}{ArrowRight}{/Alt}");
+  expect(width()).toBe(start + 32);
+  await user.keyboard("{Alt>}{ArrowLeft}{/Alt}");
+  expect(width()).toBe(start + 16);
+  expect(screen.getByTestId("grid-cell-0-1").getAttribute("aria-selected")).toBe("true");
+
+  await user.pointer({ keys: "[MouseRight]", target: screen.getByText("42") });
+  expect((await screen.findByTestId("grid-menu-widen")).getAttribute("aria-keyshortcuts")).toBe("Alt+ArrowRight");
+  await user.click(screen.getByTestId("grid-menu-reset-width"));
+  expect(width()).toBe(start);
+});
+
+it("stops following the pointer when it unmounts mid resize", async () => {
+  const meta = queryResult([["1", "42"]]);
+  const removed = vi.spyOn(window, "removeEventListener");
+  const { unmount } = render(<ResultGrid meta={meta} done query={null} editing={null} />);
+  await screen.findByText("42");
+  fireEvent.mouseDown(screen.getByTestId("grid-resize-1"), { clientX: 100 });
+  unmount();
+  expect(removed.mock.calls.map(([type]) => type)).toEqual(expect.arrayContaining(["mousemove", "mouseup"]));
+});
+
+it("names the editor, the full-value button, and each row's staged state for assistive tech", async () => {
+  const user = userEvent.setup();
+  const meta = queryResult(
+    [
+      ["1", "4200"],
+      ["2", "4300"],
+      ["3", "4400"],
+    ],
+    { cut: [[2, 1]], cell: () => "44000000" },
+  );
+  useTableEdits
+    .getState()
+    .edit("q1", (e) => setCell(markDeleted(e, [[{ column: "id", value: "2" }]], true), [{ column: "id", value: "1" }], "customer_id", "7", "4200"));
+  useTableEdits.getState().addRow("q1");
+  render(<ResultGrid meta={meta} done query={null} editing={EDITING} />);
+  await screen.findByText("7");
+  expect([0, 1, 3].map((row) => screen.getByTestId(`grid-rownum-${row}`).textContent)).toEqual(["1, changed", "2, marked for deletion", "+New row"]);
+  expect(screen.getByTestId("grid-cell-1-1").className).toContain("text-dim line-through");
+  expect(screen.getByRole("button", { name: "Show the full value" })).toBe(screen.getByTestId("grid-cut-2-1"));
+  await user.dblClick(screen.getByText("7"));
+  expect(screen.getByRole("textbox", { name: "customer_id" })).toBe(screen.getByTestId("grid-editor"));
+});

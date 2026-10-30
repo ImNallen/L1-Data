@@ -54,7 +54,7 @@ export function AddThemeDialog({ open, onOpenChange }: { open: boolean; onOpenCh
     <Modal open={open} onOpenChange={(next) => (next ? onOpenChange(true) : close())} title="Add a theme" width={560} testId="add-theme-dialog">
       <div className="flex flex-col gap-4">
         <ThemeSearch onImported={close} />
-        <div className="flex items-center gap-3 text-ui-11 tracking-wide text-faint uppercase">
+        <div className="flex items-center gap-3 text-ui-11 tracking-wide text-dim uppercase">
           <span className="h-px flex-1 bg-border" />
           or import a file
           <span className="h-px flex-1 bg-border" />
