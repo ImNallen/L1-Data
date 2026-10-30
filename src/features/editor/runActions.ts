@@ -484,15 +484,23 @@ export async function loadTableOnce(tabId: TabId): Promise<void> {
 }
 
 // The store updates before the IPC so a second change made meanwhile builds on this one.
-// Writes run one at a time, each sending the settings as they are when it runs, so the last write holds every change.
-let settingsWrites: Promise<unknown> = Promise.resolve();
+// Writes run in order, including every access change that must revoke an older turn.
+let settingsWrites: Promise<void> = Promise.resolve();
+
+export async function flushSettings(): Promise<void> {
+  let pending: Promise<void>;
+  do {
+    pending = settingsWrites;
+    await pending;
+  } while (pending !== settingsWrites);
+}
 
 export async function saveSettings(patch: Partial<Settings>): Promise<void> {
   const prev = ws().settings;
   const next = { ...prev, ...patch };
   ws().setSettings(next);
-  const write = settingsWrites.then(() => commands.settingsSet(ws().settings));
-  settingsWrites = write.catch(() => {});
+  const write = settingsWrites.catch(() => {}).then(() => commands.settingsSet(next));
+  settingsWrites = write;
   await write;
   if (next.tablePageSize === prev.tablePageSize) return;
   for (const tab of Object.values(ws().tabs)) if (isTableTab(tab)) setTablePage(tab.id, 0);

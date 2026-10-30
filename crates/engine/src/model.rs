@@ -1777,9 +1777,17 @@ impl FontSetting {
     }
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, Type)]
+pub enum AssistantAccess {
+    #[default]
+    SchemaOnly,
+    Full,
+}
+
 #[derive(Debug, Clone, Serialize, Type)]
 #[serde(rename_all = "camelCase")]
 pub struct Settings {
+    pub assistant_access: AssistantAccess,
     pub max_rows: u32,
     pub max_result_bytes: u64,
     pub table_page_size: u32,
@@ -1824,6 +1832,8 @@ impl<'de> Deserialize<'de> for Settings {
         #[derive(Deserialize)]
         #[serde(rename_all = "camelCase")]
         struct Stored {
+            #[serde(default)]
+            assistant_access: AssistantAccess,
             max_rows: u32,
             max_result_bytes: u64,
             table_page_size: u32,
@@ -1846,6 +1856,7 @@ impl<'de> Deserialize<'de> for Settings {
         }
         let s = Stored::deserialize(d)?;
         Ok(Settings {
+            assistant_access: s.assistant_access,
             max_rows: s.max_rows,
             max_result_bytes: s.max_result_bytes,
             table_page_size: s.table_page_size,
@@ -1868,6 +1879,7 @@ impl<'de> Deserialize<'de> for Settings {
 impl Default for Settings {
     fn default() -> Self {
         Self {
+            assistant_access: AssistantAccess::SchemaOnly,
             max_rows: 200_000,
             max_result_bytes: 512 * 1024 * 1024,
             table_page_size: 500,
@@ -3126,6 +3138,11 @@ mod tests {
             )
         );
         assert!(!s.tint_connections);
+        assert_eq!(s.assistant_access, AssistantAccess::SchemaOnly);
+        assert_eq!(Settings::default().assistant_access, AssistantAccess::SchemaOnly);
+        let full = Settings { assistant_access: AssistantAccess::Full, ..Settings::default() };
+        let round: Settings = serde_json::from_value(serde_json::to_value(full).unwrap()).unwrap();
+        assert_eq!(round.assistant_access, AssistantAccess::Full);
     }
 
     #[test]

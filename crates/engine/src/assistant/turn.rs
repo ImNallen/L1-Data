@@ -11,6 +11,7 @@ use super::chat::{Chat, Closed, Closing, Gated, LastContext, Refusal, TurnContro
 use super::tools::{self, Ask, Executed, ParsedCall};
 use super::{context, reply};
 use crate::Shared;
+use crate::access::AccessLease;
 use crate::console::now_ms;
 use crate::model::*;
 use crate::provider::agent::{Agent, Next, StartError};
@@ -35,6 +36,7 @@ pub(crate) struct TurnPlan {
     pub user_text: String,
     pub tab: Option<TabContext>,
     pub closing: Option<Closing>,
+    pub access: AccessLease,
 }
 
 pub(crate) async fn run_turn(shared: Arc<Shared>, plan: TurnPlan, control: mpsc::Receiver<TurnControl>) {
@@ -43,6 +45,7 @@ pub(crate) async fn run_turn(shared: Arc<Shared>, plan: TurnPlan, control: mpsc:
         chat: plan.chat,
         turn: plan.turn,
         options: plan.options,
+        access: plan.access,
         user_text: plan.user_text,
         db: plan.tab.as_ref().and_then(|t| t.db.clone()),
         tab: plan.tab,
@@ -55,7 +58,13 @@ pub(crate) async fn run_turn(shared: Arc<Shared>, plan: TurnPlan, control: mpsc:
         session_id: None,
         agent: None,
     };
-    let outcome = turn.run(control).await;
+    let access = turn.shared.clone();
+    let outcome = tokio::select! {
+        biased;
+        _ = access.access.revoked(plan.access) => TurnOutcome::Stopped,
+        outcome = turn.run(control) => outcome,
+    };
+    let outcome = if access.access.with(plan.access, || ()).is_none() { TurnOutcome::Stopped } else { outcome };
     turn.finish(outcome).await;
 }
 
@@ -64,6 +73,7 @@ struct Turn {
     chat: Arc<Chat>,
     turn: u32,
     options: ChatOptions,
+    access: AccessLease,
     user_text: String,
     tab: Option<TabContext>,
     db: Option<DatabaseRef>,
@@ -137,7 +147,7 @@ impl Turn {
         }
         let cfg = self.provider_config();
         let stored = self.chat.inner.lock().unwrap().record.session.clone();
-        let mut resume = stored.as_ref().filter(|s| s.provider == self.options.provider && s.config_dir == cfg.config_dir).map(|s| s.id.clone());
+        let mut resume = stored.as_ref().filter(|s| s.access == Some(self.access) && s.provider == self.options.provider && s.config_dir == cfg.config_dir).map(|s| s.id.clone());
         // The provider keeps its transcript under the config dir the session was made in, so a
         // changed one cannot resume and the chat restarts with a recap.
         let mut recap = if stored.is_some() && resume.is_none() { Some(self.recap()) } else { None };
@@ -170,7 +180,7 @@ impl Turn {
         let prompt = self.prompt(!resumed, recap);
         self.set_phase(TurnPhase::Working);
         let lines = agent.codec.user_turn(&prompt);
-        if let Err(e) = agent.write(lines).await {
+        if let Err(e) = agent.write_for(&self.shared.access, self.access, lines).await {
             self.agent = Some(agent);
             return Attempt::Done(TurnOutcome::Failed { error: AgentError::Exited { code: None, detail: e.to_string() } });
         }
@@ -214,7 +224,7 @@ impl Turn {
                 }
                 _ = tokio::time::sleep_until(deadline.into()), if self.stop_deadline.is_some() => Some(Attempt::Done(TurnOutcome::Stopped)),
             };
-            if let Err(e) = agent.flush().await {
+            if let Err(e) = agent.flush_for(&self.shared.access, self.access).await {
                 eprintln!("chat {} write failed: {e}", self.chat.id.0);
             }
             if let Some(outcome) = ended {
@@ -247,8 +257,8 @@ impl Turn {
             AgentError::NotFound { binary } => StartError::NotFound { binary },
             other => StartError::Reported(other),
         })?;
-        let prompt = system_prompt(self.database_kind().unwrap_or(DatabaseKind::Postgres));
-        let codec = p.codec(cfg, Open { system_prompt: prompt, tools: &tools::TOOLS });
+        let prompt = system_prompt(self.database_kind().unwrap_or(DatabaseKind::Postgres), self.access.mode);
+        let codec = p.codec(cfg, Open { system_prompt: prompt, tools: tools::offered(self.access.mode) });
         let shared = self.shared.clone();
         tokio::select! {
             started = Agent::start(&shared, spec, codec) => started.map(|(agent, _)| Started::Agent(agent)),
@@ -272,7 +282,7 @@ impl Turn {
             Some(sql::StmtSpan { start: spans.first()?.start, end: spans.last()?.end })
         });
         let selected = matches!(self.tab.as_ref().map(|t| t.target), Some(RunTarget::Selection { from, to }) if from.0 < to.0);
-        let last_error = self.tab.as_ref().and_then(|t| self.last_run_error(t));
+        let last_error = (self.access.mode == AssistantAccess::Full).then(|| self.tab.as_ref().and_then(|t| self.last_run_error(t))).flatten();
         let attachment = self.attachment();
         let sql_hash = {
             let mut hasher = std::collections::hash_map::DefaultHasher::new();
@@ -291,7 +301,7 @@ impl Turn {
             _ => context::Repeat::Full,
         };
         let tab = self.tab.as_ref().map(|t| context::TabFacts { title: &t.title, text: tab_text, picked, selected, last_error: last_error.as_deref() });
-        let block = context::build(&context::ContextInput { connection, db: self.db.as_ref(), catalog: self.catalog.as_deref(), shown_schemas: &shown, tab, tab_sql, attachment: attachment.as_ref(), outline });
+        let block = context::build(&context::ContextInput { access: self.access.mode, connection, db: self.db.as_ref(), catalog: self.catalog.as_deref(), shown_schemas: &shown, tab, tab_sql, attachment: attachment.as_ref(), outline });
         if let (Some(db), Some(catalog)) = (&self.db, &self.catalog) {
             self.chat.inner.lock().unwrap().last_context = Some(LastContext { session: session.unwrap_or_default(), db: db.clone(), catalog_version: catalog.version, sql_hash });
         }
@@ -360,9 +370,9 @@ impl Turn {
 
     fn set_session(&mut self, session_id: String) {
         let cfg = self.provider_config();
-        let changed = {
+        let changed = self.shared.access.with(self.access, || {
             let mut inner = self.chat.inner.lock().unwrap();
-            let next = ProviderSession { provider: self.options.provider, id: session_id.clone(), config_dir: cfg.config_dir };
+            let next = ProviderSession { provider: self.options.provider, id: session_id.clone(), config_dir: cfg.config_dir, access: Some(self.access) };
             let changed = inner.record.session.as_ref() != Some(&next);
             if changed {
                 inner.record.session = Some(next);
@@ -373,7 +383,7 @@ impl Turn {
                 last.session = session_id.clone();
             }
             changed
-        };
+        }).unwrap_or(false);
         if changed {
             self.chat.store_record(&self.shared);
         }
@@ -471,8 +481,10 @@ impl Turn {
 
     async fn on_gate(&mut self, agent: &mut Agent, site: Site, call: ToolCallId, name: &str, input: Value, waits: &mut Waits, execs: &mut Execs) {
         let parsed = tools::parse_call(name, &input);
-        let ask = tools::policy(&parsed, self.chat.permission(), self.database_kind());
-        let gated = if self.stop_deadline.is_some() { Gated::Deny(Refusal::Stopped) } else { self.chat.gate(&self.shared.assistant, &call, &input, &ask) };
+        let ask = tools::policy(&parsed, self.chat.permission(), self.database_kind(), self.access.mode);
+        let gated = if self.stop_deadline.is_some() { Gated::Deny(Refusal::Stopped) } else {
+            self.shared.access.with(self.access, || self.chat.gate(&self.shared.assistant, &call, &input, &ask)).unwrap_or(Gated::Deny(Refusal::Stopped))
+        };
         // The card and the allow reply hold the input the ledger holds, never one it refused.
         if !matches!(gated, Gated::Deny(Refusal::Mismatch)) {
             self.ensure_tool(&call, name, &input);
@@ -491,24 +503,25 @@ impl Turn {
     }
 
     async fn settle(&mut self, agent: &mut Agent, site: Site, call: ToolCallId, parsed: ParsedCall, verdict: Result<(), Refusal>, execs: &mut Execs) {
+        let verdict = if self.shared.access.with(self.access, || ()).is_none() { Err(Refusal::Stopped) } else { verdict };
         match (site, verdict) {
             (Site::Permission(reply), Ok(())) => {
                 let input = self.tool_mut(&call).expect("on_gate made the card").input.clone();
                 let lines = agent.codec.permission(&reply, Decision::Run, &input, "");
-                agent.write(lines).await.ok();
+                agent.write_for(&self.shared.access, self.access, lines).await.ok();
                 if matches!(self.tool_mut(&call).map(|t| &t.status), Some(ToolStatus::AwaitingApproval { .. })) {
                     self.set_tool_status(&call, ToolStatus::Running);
                 }
             }
             (Site::Permission(reply), Err(why)) => {
                 let lines = agent.codec.permission(&reply, Decision::Deny, &Value::Null, &refusal_text(&why));
-                agent.write(lines).await.ok();
+                agent.write_for(&self.shared.access, self.access, lines).await.ok();
                 self.set_tool_status(&call, refusal_status(why));
             }
             (Site::Call(reply), Ok(())) => self.start_tool(reply, call, parsed, execs),
             (Site::Call(reply), Err(why)) => {
                 let lines = agent.codec.tool_result(&reply, &ModelResult { text: refusal_text(&why), is_error: true });
-                agent.write(lines).await.ok();
+                agent.write_for(&self.shared.access, self.access, lines).await.ok();
                 // A refused call leaves a card whose ask the user can still answer.
                 if !self.chat.is_pending(&call) && matches!(self.tool_mut(&call).map(|t| &t.status), Some(ToolStatus::Running | ToolStatus::AwaitingApproval { .. })) {
                     self.set_tool_status(&call, refusal_status(why));
@@ -523,9 +536,10 @@ impl Turn {
             self.set_tool_status(&call, ToolStatus::Running);
         }
         let (shared, db, id) = (self.shared.clone(), self.db.clone(), call.clone());
+        let access = self.access;
         let reply_for_work = reply.clone();
         let (future, abort) = futures_util::future::abortable(Box::pin(async move {
-            let executed = match tokio::time::timeout(EXECUTION_TIMEOUT, tools::execute(&shared, db.as_ref(), parsed)).await {
+            let executed = match tokio::time::timeout(EXECUTION_TIMEOUT, tools::execute(&shared, db.as_ref(), parsed, access)).await {
                 Ok(executed) => executed,
                 Err(_) => Executed::failed(format!("The tool did not finish within {} s.", EXECUTION_TIMEOUT.as_secs())),
             };
@@ -542,7 +556,7 @@ impl Turn {
             Work::Gated { site, call, parsed, verdict } => self.settle(agent, site, call, parsed, verdict, execs).await,
             Work::Tool { reply, call, executed } => {
                 let lines = agent.codec.tool_result(&reply, &executed.for_model);
-                agent.write(lines).await.ok();
+                agent.write_for(&self.shared.access, self.access, lines).await.ok();
                 if let Some(state) = self.tool_mut(&call) {
                     state.running = None;
                 }
@@ -558,16 +572,17 @@ impl Turn {
         for (call, reply, abort) in running {
             abort.abort();
             let lines = agent.codec.tool_result(&reply, &ModelResult { text: STOPPED_TOOL.into(), is_error: true });
-            agent.write(lines).await.ok();
+            agent.write_for(&self.shared.access, self.access, lines).await.ok();
             self.set_tool_status(&call, ToolStatus::Failed { message: STOPPED_TOOL.into() });
         }
         let lines = agent.codec.interrupt();
-        agent.write(lines).await.ok();
+        agent.write_for(&self.shared.access, self.access, lines).await.ok();
         self.refresh_phase();
     }
 
     fn recap(&self) -> String {
-        let earlier: Vec<(u32, u32, Entry)> = self.shared.store.chat_entries(self.chat.id).unwrap_or_default().into_iter().filter(|(_, turn, _)| *turn != self.turn).collect();
+        let floor = self.chat.inner.lock().unwrap().record.recap_floor;
+        let earlier: Vec<(u32, u32, Entry)> = self.shared.store.chat_entries(self.chat.id).unwrap_or_default().into_iter().filter(|(seq, turn, _)| *seq >= floor && *turn != self.turn).collect();
         reply::recap(&earlier, super::RECAP_MAX_CHARS)
     }
 
@@ -671,7 +686,13 @@ fn resolve_blocks(blocks: Vec<ReplyBlock>, catalog: Option<&Catalog>, kind: Data
         .collect()
 }
 
-fn system_prompt(kind: DatabaseKind) -> &'static str {
+fn system_prompt(kind: DatabaseKind, access: AssistantAccess) -> &'static str {
+    if access == AssistantAccess::SchemaOnly {
+        return match kind {
+            DatabaseKind::Postgres => include_str!("system_prompt_schema.md"),
+            DatabaseKind::SqlServer => include_str!("system_prompt_schema_mssql.md"),
+        };
+    }
     match kind {
         DatabaseKind::Postgres => include_str!("system_prompt.md"),
         DatabaseKind::SqlServer => include_str!("system_prompt_mssql.md"),
@@ -685,7 +706,7 @@ mod tests {
     #[test]
     fn both_system_prompts_keep_the_tools_and_shared_instructions() {
         for kind in [DatabaseKind::Postgres, DatabaseKind::SqlServer] {
-            let prompt = system_prompt(kind);
+            let prompt = system_prompt(kind, AssistantAccess::Full);
             for tool in &tools::TOOLS {
                 assert!(prompt.contains(tool.name), "{kind:?} prompt does not mention {}", tool.name);
             }
@@ -705,7 +726,7 @@ mod tests {
 
     #[test]
     fn postgres_system_prompt_keeps_read_only_statement_execution() {
-        let prompt = system_prompt(DatabaseKind::Postgres);
+        let prompt = system_prompt(DatabaseKind::Postgres, AssistantAccess::Full);
         assert_eq!(prompt, include_str!("system_prompt.md"));
         for instruction in [
             "for PostgreSQL",
@@ -723,7 +744,7 @@ mod tests {
 
     #[test]
     fn sql_server_system_prompt_disables_queries_and_preserves_tsql_batches() {
-        let prompt = system_prompt(DatabaseKind::SqlServer);
+        let prompt = system_prompt(DatabaseKind::SqlServer, AssistantAccess::Full);
         for instruction in [
             "for Microsoft SQL Server",
             "run_query is disabled on SQL Server",

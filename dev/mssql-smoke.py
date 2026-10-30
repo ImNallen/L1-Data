@@ -95,6 +95,7 @@ def check_assistant(bridge, db, tab):
     assert binary.is_file(), "build fake-claude with cargo build -p engine before this smoke"
     saved = bridge.invoke("app_boot")["settings"]
     settings = copy.deepcopy(saved)
+    settings["assistantAccess"] = "Full"
     provider = next(p for p in settings["providers"] if p["provider"] == "Claude")
     provider.update(binaryPath=str(binary), launchArgs="--fake-scenario query --fake-sql 'SELECT 999 AS assistant_probe'")
     chats = []

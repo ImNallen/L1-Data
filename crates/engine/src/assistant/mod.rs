@@ -102,7 +102,7 @@ impl Shared {
 
     fn draft_record(&self) -> ChatRecord {
         let now = now_ms();
-        ChatRecord { title: String::new(), created_at_ms: now, updated_at_ms: now, options: self.default_options(), session: None, entry_count: 0 }
+        ChatRecord { title: String::new(), created_at_ms: now, updated_at_ms: now, options: self.default_options(), session: None, entry_count: 0, access: None, recap_floor: 0 }
     }
 
     fn default_options(&self) -> ChatOptions {
@@ -167,12 +167,20 @@ impl Shared {
         Ok(chat.publish_state(self))
     }
 
-    pub(crate) async fn assistant_send(self: &Arc<Self>, id: ChatId, request: SendRequest) -> Result<TurnAccepted, SendError> {
+    pub(crate) async fn assistant_send(self: &Arc<Self>, id: ChatId, mut request: SendRequest) -> Result<TurnAccepted, SendError> {
         let text = request.text.trim().to_owned();
         if text.is_empty() {
             return Err(SendError::EmptyMessage);
         }
         let chat = self.chat(id).map_err(|e| SendError::Store { message: e.to_string() })?;
+        let access_guard = self.access.lock();
+        let access = *access_guard;
+        if access.mode == AssistantAccess::SchemaOnly && let Some(tab) = &mut request.tab {
+            tab.attach = None;
+            tab.text.clear();
+            tab.title.clear();
+            tab.target = RunTarget::All;
+        }
         let options = chat.inner.lock().unwrap().record.options.clone();
         let enabled = self.settings().providers.iter().any(|c| c.provider == options.provider && c.enabled);
         if !enabled {
@@ -193,6 +201,12 @@ impl Shared {
             if inner.turn.is_some() {
                 return Err(SendError::Busy);
             }
+            if inner.record.access != Some(access) || inner.record.session.as_ref().is_some_and(|s| s.access != Some(access)) {
+                inner.record.session = None;
+                inner.record.recap_floor = inner.record.entry_count;
+                inner.record.access = Some(access);
+                inner.last_context = None;
+            }
             if inner.status == ChatStatus::Draft {
                 inner.record.title = text.lines().next().unwrap_or_default().chars().take(TITLE_CHARS).collect();
                 inner.record.created_at_ms = now_ms();
@@ -210,7 +224,7 @@ impl Shared {
         chat.store_entry(self, seq, seq, &entry);
         chat.publish_entry(self, seq, seq, entry);
         chat.publish_state(self);
-        let plan = TurnPlan { chat: chat.clone(), turn: seq, options, user_text: text, tab: request.tab, closing };
+        let plan = TurnPlan { chat: chat.clone(), turn: seq, options, user_text: text, tab: request.tab, closing, access };
         let turn = self.spawn(turn::run_turn(self.clone(), plan, control_rx));
         let abort = turn.abort_handle();
         let supervisor = self.spawn(supervise(self.clone(), chat.clone(), turn));
@@ -219,6 +233,23 @@ impl Shared {
             active.abort = Some(abort);
         }
         Ok(TurnAccepted { turn: seq })
+    }
+
+    pub(crate) fn revoke_assistant_access(&self) {
+        for chat in self.assistant.all() {
+            chat.deny_pending(chat::Refusal::Stopped);
+            {
+                let mut inner = chat.inner.lock().unwrap();
+                inner.record.session = None;
+                inner.record.access = None;
+                inner.record.recap_floor = inner.record.entry_count;
+                inner.last_context = None;
+                if let Some(active) = &inner.turn {
+                    let _ = active.control.try_send(TurnControl::Stop { grace: Duration::ZERO });
+                }
+            }
+            chat.store_record(self);
+        }
     }
 
     pub(crate) fn assistant_stop(&self, id: ChatId) {

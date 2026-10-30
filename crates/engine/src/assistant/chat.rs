@@ -167,8 +167,12 @@ impl Chat {
     /// The one answer to "may this call run?". Idempotent per call id: the provider asks before
     /// the call and the engine asks again at execution; the second ask returns what the first
     /// recorded, and a call whose input differs from the approved or pending one is denied.
+    /// A current policy refusal takes precedence over any recorded decision.
     pub(crate) fn gate(&self, assistant: &Assistant, call: &ToolCallId, input: &Value, ask: &Ask) -> Gated {
         let mut inner = self.inner.lock().unwrap();
+        if let Ask::Refuse(message) = ask {
+            return Gated::Deny(Refusal::Policy(message.clone()));
+        }
         match inner.ledger.calls.get(call) {
             Some(Gate::Run { input: approved }) => return if approved == input { Gated::Run } else { Gated::Deny(Refusal::Mismatch) },
             Some(Gate::Denied { why }) => return Gated::Deny(why.clone()),
@@ -286,5 +290,21 @@ pub(crate) async fn wait(mut answer: watch::Receiver<Option<Verdict>>) -> Verdic
     match answer.wait_for(Option::is_some).await {
         Ok(verdict) => verdict.clone().expect("wait_for returns a Some"),
         Err(_) => Err(Refusal::Expired),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn policy_refusal_precedes_a_cached_approval() {
+        let record = ChatRecord { title: String::new(), created_at_ms: 0, updated_at_ms: 0, options: crate::model::ChatOptions { provider: crate::model::ProviderKind::ALL[0], model: crate::model::ModelId("test".into()), effort: None, permission: Permission::Auto }, session: None, entry_count: 0, access: None, recap_floor: 0 };
+        let chat = Chat::new(ChatId(uuid::Uuid::new_v4()), record, ChatStatus::Idle);
+        let assistant = Assistant::new();
+        let call = ToolCallId("approved".into());
+        let input = serde_json::json!({ "sql": "select 1" });
+        assert!(matches!(chat.gate(&assistant, &call, &input, &Ask::Allow), Gated::Run));
+        assert!(matches!(chat.gate(&assistant, &call, &input, &Ask::Refuse("schema only".into())), Gated::Deny(Refusal::Policy(_))));
     }
 }

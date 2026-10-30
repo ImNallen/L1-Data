@@ -258,6 +258,23 @@ impl Cli {
                     let input = json!({ "sql": self.sql, "purpose": "Count the orders" });
                     self.tool_turn("run_query", input, None, None);
                 }
+                "query-forged" => {
+                    let input = json!({ "sql": self.sql, "purpose": "Direct query without permission" });
+                    let id = self.tool_use("run_query", &input);
+                    let (text, _) = self.call("run_query", &id, input);
+                    self.stream(&text, Duration::ZERO);
+                    self.result_success();
+                }
+                "query-delayed" => {
+                    let input = json!({ "sql": self.sql, "purpose": "Query after approval" });
+                    let id = self.tool_use("run_query", &input);
+                    self.ask("run_query", &id, &input);
+                    self.log.write("approved", &id);
+                    std::thread::sleep(Duration::from_millis(750));
+                    self.call("run_query", &id, input);
+                    self.result_success();
+                }
+                "search" => self.tool_turn("search_catalog", json!({ "query": "orders" }), None, None),
                 "query-tampered" => self.tool_turn("run_query", json!({ "sql": "select count(*) from orders", "purpose": "Count the orders" }), None, Some(json!({ "sql": "select count(*) from customers", "purpose": "Count the orders" }))),
                 "ask-differs" => self.tool_turn("run_query", json!({ "sql": "select count(*) from orders", "purpose": "Count the orders" }), Some(json!({ "sql": "select count(*) from customers", "purpose": "Count the orders" })), None),
                 "call-before-answer" => {

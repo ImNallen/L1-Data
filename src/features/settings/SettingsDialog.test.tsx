@@ -228,3 +228,26 @@ it("returns the global close-tab shortcut from the editor to the start action af
   await user.keyboard("{Control>}w{/Control}");
   await waitFor(() => expect(document.activeElement).toBe(screen.getByTestId("start-new-query")));
 });
+
+it("opens General first and persists assistant access through its searchable control", async () => {
+  const { mockIPC, clearMocks } = await import("@tauri-apps/api/mocks");
+  const writes: unknown[] = [];
+  mockIPC((cmd, args) => {
+    if (cmd === "settings_set") writes.push(args);
+  });
+  const user = userEvent.setup();
+  render(<Dialogs />);
+  act(() => useWorkspace.getState().openSettings());
+  expect(screen.getByTestId("settings-breadcrumb").textContent).toBe("Settings/General");
+  expect(screen.getByTestId("setting-assistantAccess")).toHaveProperty("value", "SchemaOnly");
+  expect(screen.getByText(/Everything you type or paste into chat/)).toBeTruthy();
+  await user.selectOptions(screen.getByTestId("setting-assistantAccess"), "Full");
+  await waitFor(() => expect(writes).toHaveLength(1));
+  expect(writes[0]).toMatchObject({ settings: { assistantAccess: "Full" } });
+  await user.type(screen.getByTestId("settings-search"), "privacy");
+  expect(screen.getByTestId("setting-assistantAccess")).toHaveProperty("value", "Full");
+  await user.selectOptions(screen.getByTestId("setting-assistantAccess"), "SchemaOnly");
+  await waitFor(() => expect(writes).toHaveLength(2));
+  expect(writes[1]).toMatchObject({ settings: { assistantAccess: "SchemaOnly" } });
+  clearMocks();
+});

@@ -6,7 +6,8 @@ use serde_json::{Value, json};
 
 use super::reply;
 use crate::connection::{ConnectParams, connect_error_text};
-use crate::model::{ApprovalReason, Catalog, ConnStatus, DatabaseKind, DatabaseRef, KeyKind, Permission, RelKind, Relation, SchemaInfo, ToolResult, ToolStatus, ToolUse};
+use crate::model::{AssistantAccess, ApprovalReason, Catalog, ConnStatus, DatabaseKind, DatabaseRef, KeyKind, Permission, RelKind, Relation, SchemaInfo, ToolResult, ToolStatus, ToolUse};
+use crate::access::AccessLease;
 use crate::provider::{ModelResult, ToolSpec};
 use crate::session::{CancelHandle, Session, QueryEvent};
 use crate::{Shared, sql};
@@ -30,6 +31,11 @@ pub(crate) static TOOLS: [ToolSpec; 3] = [
 ];
 
 pub(crate) const TOOL_ROWS: usize = 50;
+pub(crate) const SCHEMA_REFUSAL: &str = "Schema only access does not allow queries. Use the schema tools and suggest SQL for the user to run.";
+
+pub(crate) fn offered(access: AssistantAccess) -> &'static [ToolSpec] {
+    if access == AssistantAccess::SchemaOnly { &TOOLS[..2] } else { &TOOLS }
+}
 pub(crate) const TOOL_CELL_CHARS: usize = 200;
 pub(crate) const TOOL_BYTES: usize = 8 << 10;
 pub(crate) const QUERY_TIMEOUT: Duration = Duration::from_secs(30);
@@ -76,7 +82,10 @@ pub(crate) enum Ask {
 
 pub(crate) const MSSQL_REFUSAL: &str = "SQL Server model queries are disabled because server-enforced read-only transactions are unavailable. Use the schema tools and suggest T-SQL for the user to run.";
 
-pub(crate) fn policy(call: &ParsedCall, permission: Permission, database_kind: Option<DatabaseKind>) -> Ask {
+pub(crate) fn policy(call: &ParsedCall, permission: Permission, database_kind: Option<DatabaseKind>, access: AssistantAccess) -> Ask {
+    if access == AssistantAccess::SchemaOnly && matches!(call, ParsedCall::RunQuery { .. }) {
+        return Ask::Refuse(SCHEMA_REFUSAL.into());
+    }
     if matches!(call,ParsedCall::RunQuery { .. }) && database_kind == Some(DatabaseKind::SqlServer) {
         return Ask::Refuse(MSSQL_REFUSAL.into());
     }
@@ -118,16 +127,30 @@ impl Executed {
     }
 }
 
-pub(crate) async fn execute(shared: &Arc<Shared>, db: Option<&DatabaseRef>, call: ParsedCall) -> Executed {
+pub(crate) async fn execute(shared: &Arc<Shared>, db: Option<&DatabaseRef>, call: ParsedCall, access: AccessLease) -> Executed {
+    if shared.access.with(access, || ()).is_none() {
+        return Executed::failed("Assistant access changed. Start a new turn.");
+    }
+    if access.mode == AssistantAccess::SchemaOnly && matches!(call, ParsedCall::RunQuery { .. }) {
+        return Executed::failed(SCHEMA_REFUSAL);
+    }
+    let executed = execute_allowed(shared, db, call, access.mode).await;
+    if access.mode == AssistantAccess::SchemaOnly && executed.for_model.is_error {
+        return Executed::failed("Schema information is unavailable. Ask the user to check the connection and table names.");
+    }
+    executed
+}
+
+async fn execute_allowed(shared: &Arc<Shared>, db: Option<&DatabaseRef>, call: ParsedCall, access: AssistantAccess) -> Executed {
     let Some(db) = db else { return Executed::failed("No database is selected. Ask the user to open a tab on a connection.") };
     let Some(instance) = shared.instance(db.connection_id) else { return Executed::failed(not_connected(shared, db)) };
     match call {
         ParsedCall::Invalid { message, .. } => Executed::failed(message),
         ParsedCall::SearchCatalog { query } => match shared.catalog(db).await {
-            Ok(catalog) => search_catalog(&catalog, &query),
+            Ok(catalog) => search_catalog(&catalog, &query, access),
             Err(e) => Executed::failed(format!("The catalog of {} is not loaded: {e:?}", db.database)),
         },
-        ParsedCall::DescribeTables { tables } => match describe_tables(shared, db, &tables).await {
+        ParsedCall::DescribeTables { tables } => match describe_tables(shared, db, &tables, access).await {
             Ok(executed) => executed,
             Err(message) => Executed::failed(message),
         },
@@ -156,7 +179,7 @@ fn not_connected(shared: &Shared, db: &DatabaseRef) -> String {
     format!("{name} is not connected: {reason}. Ask the user to connect from the sidebar.")
 }
 
-fn search_catalog(catalog: &Catalog, query: &str) -> Executed {
+fn search_catalog(catalog: &Catalog, query: &str, access: AssistantAccess) -> Executed {
     let needle = query.to_lowercase();
     let hit = |name: &str| name.to_lowercase().contains(&needle);
     let mut lines = Vec::new();
@@ -173,7 +196,11 @@ fn search_catalog(catalog: &Catalog, query: &str) -> Executed {
         }
         for f in &schema.functions {
             if hit(&f.name) {
-                lines.push(format!("function {}.{}({}) → {}", schema.name, f.name, f.args, f.returns));
+                if access == AssistantAccess::Full {
+                    lines.push(format!("function {}.{}({}) → {}", schema.name, f.name, f.args, f.returns));
+                } else {
+                    lines.push(format!("function {}.{} → {}", schema.name, f.name, f.returns));
+                }
             }
         }
     }
@@ -194,7 +221,7 @@ fn kind_word(kind: RelKind) -> &'static str {
     }
 }
 
-async fn describe_tables(shared: &Arc<Shared>, db: &DatabaseRef, tables: &[String]) -> Result<Executed, String> {
+async fn describe_tables(shared: &Arc<Shared>, db: &DatabaseRef, tables: &[String], access: AssistantAccess) -> Result<Executed, String> {
     let catalog = shared.catalog(db).await.map_err(|e| format!("The catalog of {} is not loaded: {e:?}", db.database))?;
     let (instance, slot) = shared.slot(db).map_err(|e| format!("The catalog of {} is not loaded: {e:?}", db.database))?;
     let mut meta = slot.meta.lock().await;
@@ -209,7 +236,7 @@ async fn describe_tables(shared: &Arc<Shared>, db: &DatabaseRef, tables: &[Strin
         };
         let detail = session.detail(db.clone(), relation.oid, catalog.version).await.map_err(|e| e.message)?;
         let qualified = format!("{schema}.{}", relation.name);
-        let rows = relation.row_estimate.map(|n| format!(", ~{n} rows")).unwrap_or_default();
+        let rows = if access == AssistantAccess::Full { relation.row_estimate.map(|n| format!(", ~{n} rows")).unwrap_or_default() } else { String::new() };
         text.push_str(&format!("{qualified} ({}{rows})\n", kind_word(relation.kind)));
         let fks: Vec<(String, String)> = detail
             .iter()
@@ -241,11 +268,11 @@ async fn describe_tables(shared: &Arc<Shared>, db: &DatabaseRef, tables: &[Strin
                 .indexes
                 .iter()
                 .map(|i| {
-                    let mut s = format!("{} {}", i.name, i.keys);
+                    let mut s = if access == AssistantAccess::Full { format!("{} {}", i.name, i.keys) } else { i.name.clone() };
                     if i.unique && !i.primary {
                         s.push_str(" unique");
                     }
-                    if let Some(p) = &i.predicate {
+                    if access == AssistantAccess::Full && let Some(p) = &i.predicate {
                         s.push_str(&format!(" WHERE {p}"));
                     }
                     s
@@ -388,14 +415,41 @@ fn cut_bytes(text: &str, max: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    fn policy(call: &ParsedCall, permission: Permission) -> Ask { super::policy(call,permission,Some(DatabaseKind::Postgres)) }
+    fn policy(call: &ParsedCall, permission: Permission) -> Ask { super::policy(call,permission,Some(DatabaseKind::Postgres), AssistantAccess::Full) }
+    #[test]
+    fn schema_search_omits_free_form_function_arguments() {
+        let catalog = Catalog {
+            database_kind: DatabaseKind::Postgres,
+            db: DatabaseRef { connection_id: crate::model::ConnectionId(uuid::Uuid::nil()), database: "shop".into() },
+            version: 1, default_schema: Some("public".into()), extensions: Vec::new(),
+            schemas: vec![SchemaInfo { name: "public".into(), quoted: "public".into(), system: false, table_count: 0, relations: Vec::new(), sequences: Vec::new(), types: Vec::new(), synonyms: Vec::new(), functions: vec![crate::model::FunctionInfo { oid: 1, name: "lookup".into(), quoted: "lookup".into(), args: "secret text DEFAULT 'DEFAULT_CANARY'".into(), returns: "bigint".into(), kind: crate::model::FnKind::Function, insert_text: "lookup()".into() }] }],
+        };
+        let schema = search_catalog(&catalog, "lookup", AssistantAccess::SchemaOnly).for_model.text;
+        assert_eq!(schema, "function public.lookup → bigint");
+        assert!(search_catalog(&catalog, "lookup", AssistantAccess::Full).for_model.text.contains("DEFAULT_CANARY"));
+    }
+    #[tokio::test]
+    async fn schema_only_refuses_query_at_policy_and_execution_without_a_database() {
+        let dir = tempfile::tempdir().unwrap();
+        let engine = crate::Engine::open(crate::EngineConfig { data_dir: dir.path().into(), keys: Arc::new(crate::MemoryKeyStore::default()), agent_path: crate::AgentPath::Fixed("".into()), az_binary: None, user_known_hosts: None, updates: Arc::new(crate::ScriptedTransport::named("off").unwrap()) }).await.unwrap();
+        let access = *engine.shared.access.lock();
+        let call = parse_call("run_query", &json!({ "sql": "select 'DATA_CANARY'" }));
+        for permission in [Permission::Auto, Permission::AskFirst] {
+            assert_eq!(super::policy(&call, permission, None, AssistantAccess::SchemaOnly), Ask::Refuse(SCHEMA_REFUSAL.into()));
+        }
+        assert_eq!(offered(AssistantAccess::SchemaOnly).iter().map(|s| s.name).collect::<Vec<_>>(), ["describe_tables", "search_catalog"]);
+        assert_eq!(execute(&engine.shared, None, call.clone(), access).await.for_model.text, SCHEMA_REFUSAL);
+        engine.set_settings(crate::model::Settings { assistant_access: AssistantAccess::Full, ..engine.settings() });
+        let stale = execute(&engine.shared, None, call, access).await;
+        assert!(stale.for_model.is_error && stale.for_model.text.contains("access changed"));
+    }
     #[test]
     fn sql_server_queries_are_refused_before_approval_in_every_permission_mode() {
         let call = parse_call("run_query", &json!({"sql":"SELECT 1"}));
         for permission in [Permission::Auto,Permission::AskFirst] {
-            assert_eq!(super::policy(&call,permission,Some(DatabaseKind::SqlServer)),Ask::Refuse(MSSQL_REFUSAL.into()));
+            assert_eq!(super::policy(&call,permission,Some(DatabaseKind::SqlServer), AssistantAccess::Full),Ask::Refuse(MSSQL_REFUSAL.into()));
         }
-        assert_eq!(super::policy(&parse_call("search_catalog",&json!({"query":"orders"})),Permission::Auto,Some(DatabaseKind::SqlServer)),Ask::Allow);
+        assert_eq!(super::policy(&parse_call("search_catalog",&json!({"query":"orders"})),Permission::Auto,Some(DatabaseKind::SqlServer), AssistantAccess::Full),Ask::Allow);
     }
 
     #[cfg(feature = "mssql-tests")]
@@ -410,11 +464,13 @@ mod tests {
         let config = engine.save_connection(draft).await.unwrap();
         engine.connect(config.id).await.unwrap();
         let db = DatabaseRef { connection_id: config.id, database: "shop".into() };
-        let refused = execute(&engine.shared, Some(&db), parse_call("run_query", &json!({"sql":"SELECT 1"}))).await;
+        engine.set_settings(crate::model::Settings { assistant_access: AssistantAccess::Full, ..engine.settings() });
+        let access = *engine.shared.access.lock();
+        let refused = execute(&engine.shared, Some(&db), parse_call("run_query", &json!({"sql":"SELECT 1"})), access).await;
         assert_eq!(refused.for_model.text, MSSQL_REFUSAL);
         assert!(refused.for_model.is_error);
         for (name, input) in [("search_catalog",json!({"query":"orders"})),("describe_tables",json!({"tables":["dbo.orders"]}))] {
-            let result = execute(&engine.shared, Some(&db), parse_call(name, &input)).await;
+            let result = execute(&engine.shared, Some(&db), parse_call(name, &input), access).await;
             assert!(!result.for_model.is_error, "{}", result.for_model.text);
             assert!(matches!(result.status, ToolStatus::Done { .. }));
             assert!(result.for_model.text.contains("orders"));

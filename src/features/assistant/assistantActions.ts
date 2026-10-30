@@ -20,7 +20,7 @@ import { resultView, type ResultPick, type RowResult } from "../../state/status"
 import { needsResync } from "../../state/transcript";
 import { confirm, useWorkspace, type Tab } from "../../state/workspace";
 import { editorStateOf, focusEditor, insertAtCursor, replaceDoc } from "../editor/editorStates";
-import { openSqlTab, runActive } from "../editor/runActions";
+import { flushSettings, openSqlTab, runActive } from "../editor/runActions";
 
 const ws = () => useWorkspace.getState();
 const notify = (text: string) => ws().notify(text);
@@ -75,9 +75,21 @@ export function tabContext(tab: Tab, editor: EditorState, attach: ResultRef | nu
 }
 
 export async function sendMessage(chatId: ChatId, text: string, attach: boolean): Promise<boolean> {
-  const { active, tabs } = ws();
+  try {
+    await flushSettings();
+  } catch {
+    notify("Could not save settings. Save assistant access again before sending.");
+    return false;
+  }
+  const { active, tabs, settings } = ws();
   const tab = active ? tabs[active] : undefined;
-  const context = tab ? tabContext(tab, editorStateOf(tab.id), attach ? shownResultRef(tab.id) : null) : null;
+  const full = settings.assistantAccess === "Full";
+  const context = tab ? tabContext(tab, editorStateOf(tab.id), full && attach ? shownResultRef(tab.id) : null) : null;
+  if (context && !full) {
+    context.text = "";
+    context.title = "";
+    context.target = { kind: "all" };
+  }
   const res = await commands.assistantSend(chatId, { text, tab: context });
   if (res.status === "error") {
     notify(sendErrorText(res.error));

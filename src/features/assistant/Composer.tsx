@@ -1,6 +1,6 @@
 import * as Menu from "@radix-ui/react-dropdown-menu";
 import { ArrowUpIcon, BrainIcon, ChevronDownIcon, LockIcon, LockOpenIcon, PaperclipIcon, SquareIcon, TableIcon, TriangleAlertIcon, XIcon } from "lucide-react";
-import { useLayoutEffect, useRef, useState, type ReactNode } from "react";
+import { useEffect, useLayoutEffect, useRef, useState, type ReactNode } from "react";
 import { commands, type ChatOptions, type ChatState, type ModelOption, type Permission } from "../../ipc/bindings";
 import { useLive } from "../../state/live";
 import { databaseKindFor } from "../../state/databaseKind";
@@ -38,6 +38,7 @@ function Picker({ testId, label, icon, disabled, children }: { testId: string; l
 const Divider = () => <span aria-hidden className="mx-0.5 h-4 w-px shrink-0 bg-border" />;
 
 function Pickers({ chat, models }: { chat: ChatState; models: ModelOption[] }) {
+  const full = useWorkspace((s) => s.settings.assistantAccess === "Full");
   const { options } = chat;
   const Icon = PROVIDER_ICONS[options.provider];
   const model = models.find((m) => m.id === options.model);
@@ -71,15 +72,17 @@ function Pickers({ chat, models }: { chat: ChatState; models: ModelOption[] }) {
           </Picker>
         </>
       )}
-      <Divider />
-      <Picker testId="assistant-permission" label={permission.label} icon={<permission.Icon size={13} className="shrink-0" />}>
-        {(Object.keys(PERMISSIONS) as Permission[]).map((p) => (
-          <MenuItem key={p} checked={p === options.permission} onSelect={() => configure({ permission: p })}>
-            {PERMISSIONS[p].label}
-            <span className="ml-auto pl-4 text-ui-11.5 text-dim">{PERMISSIONS[p].hint}</span>
-          </MenuItem>
-        ))}
-      </Picker>
+      {full && <Divider />}
+      {full && (
+        <Picker testId="assistant-permission" label={permission.label} icon={<permission.Icon size={13} className="shrink-0" />}>
+          {(Object.keys(PERMISSIONS) as Permission[]).map((p) => (
+            <MenuItem key={p} checked={p === options.permission} onSelect={() => configure({ permission: p })}>
+              {PERMISSIONS[p].label}
+              <span className="ml-auto pl-4 text-ui-11.5 text-dim">{PERMISSIONS[p].hint}</span>
+            </MenuItem>
+          ))}
+        </Picker>
+      )}
     </div>
   );
 }
@@ -132,13 +135,21 @@ export function Composer({ chat }: { chat: ChatState | undefined }) {
   const input = useRef<HTMLTextAreaElement>(null);
 
   const active = useWorkspace((s) => s.active);
+  const full = useWorkspace((s) => s.settings.assistantAccess === "Full");
   const tabTitle = useWorkspace((s) => (s.active ? s.tabs[s.active]?.title : undefined));
   const sqlServer = useWorkspace((s) => databaseKindFor(tabTarget(s.active ? s.tabs[s.active] : undefined), s.configs) === "SqlServer");
   const picked = useWorkspace((s) => (s.active ? s.activeResult[s.active] : undefined));
   const run = useLive((s) => (active ? s.consoles[active]?.run : undefined));
   const hasOutput = useLive((s) => (active ? (s.output[active]?.entries.length ?? 0) : 0) > 0);
   const shown = gridResult(run, picked, hasOutput);
-  const attaching = attach && shown !== null;
+  const attaching = full && attach && shown !== null;
+  useEffect(
+    () =>
+      useWorkspace.subscribe((s, previous) => {
+        if (s.settings.assistantAccess !== previous.settings.assistantAccess) setAttach(false);
+      }),
+    [],
+  );
 
   const provider = chat?.options.provider;
   const config = useWorkspace((s) => s.settings.providers.find((p) => p.provider === provider));
@@ -169,6 +180,14 @@ export function Composer({ chat }: { chat: ChatState | undefined }) {
   return (
     <div className="shrink-0 px-3 pb-3">
       {banner && <Banner banner={banner} />}
+      <p data-testid="assistant-access" className="mb-2 text-ui-12 leading-relaxed text-dim">
+        <button type="button" className="text-muted underline-offset-2 hover:underline" onClick={() => useWorkspace.getState().openSettings("general")}>
+          {full ? "Full access" : "Schema only"}
+        </button>
+        {full
+          ? " · Editor SQL and errors are sent. Chat text is sent as written."
+          : " · Schema structure and your chat text are sent, including anything you paste."}
+      </p>
       {sqlServer && (
         <p data-testid="assistant-sqlserver-limit" className="mb-2 text-ui-12 leading-relaxed text-dim">
           The assistant can inspect SQL Server schema and suggest SQL. Its run_query tool is unavailable for SQL Server. Open suggested SQL in a tab to run it.
@@ -201,7 +220,7 @@ export function Composer({ chat }: { chat: ChatState | undefined }) {
           data-testid="assistant-input"
           rows={2}
           value={text}
-          placeholder="Ask about your data, send follow-ups, or attach a result"
+          placeholder={full ? "Ask about your data, send follow-ups, or attach a result" : "Ask for SQL help using your schema"}
           onChange={(e) => setText(e.target.value)}
           onKeyDown={(e) => {
             if (e.key !== "Enter" || e.shiftKey || e.nativeEvent.isComposing) return;
@@ -213,17 +232,19 @@ export function Composer({ chat }: { chat: ChatState | undefined }) {
         <div className="flex items-center gap-1 px-1.5 pb-1.5">
           {chat && <Pickers chat={chat} models={models} />}
           <div className="flex-1" />
-          <IconButton
-            data-testid="assistant-attach"
-            aria-label="Attach the result this tab shows"
-            aria-pressed={attaching}
-            title={shown ? "Attach the result this tab shows" : "Run a query to attach its result"}
-            disabled={!shown}
-            onClick={() => setAttach((a) => !a)}
-            className={cx(attaching && "bg-pill text-fg")}
-          >
-            <PaperclipIcon size={15} />
-          </IconButton>
+          {full && (
+            <IconButton
+              data-testid="assistant-attach"
+              aria-label="Attach the result this tab shows"
+              aria-pressed={attaching}
+              title={shown ? "Attach the result this tab shows" : "Run a query to attach its result"}
+              disabled={!shown}
+              onClick={() => setAttach((a) => !a)}
+              className={cx(attaching && "bg-pill text-fg")}
+            >
+              <PaperclipIcon size={15} />
+            </IconButton>
+          )}
           {running ? (
             <button
               type="button"

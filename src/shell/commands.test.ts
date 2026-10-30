@@ -177,9 +177,9 @@ it("stays on settings on ⌘P there and focuses the settings search box", () => 
   });
 });
 
-it("toggles the settings screen on its shortcut, starting at Appearance", () => {
+it("toggles the settings screen on its shortcut, starting at General", () => {
   press(",")?.run();
-  expect(useWorkspace.getState().screen).toEqual({ kind: "settings", section: "appearance", query: "" });
+  expect(useWorkspace.getState().screen).toEqual({ kind: "settings", section: "general", query: "" });
   press(",")?.run();
   expect(useWorkspace.getState().screen).toEqual({ kind: "workspace" });
 });
@@ -203,13 +203,13 @@ it.each(["w", ",", "t"])("drops the settings search when ⌘%s leaves settings, 
   useWorkspace.getState().setSettingsQuery("row");
   press(key)?.run();
   press(",")?.run();
-  expect([useWorkspace.getState().screen, useWorkspace.getState().treeQuery]).toEqual([{ kind: "settings", section: "appearance", query: "" }, "order"]);
+  expect([useWorkspace.getState().screen, useWorkspace.getState().treeQuery]).toEqual([{ kind: "settings", section: "general", query: "" }, "order"]);
 });
 
 it("closes an open overlay when ⌘, opens settings", () => {
   useWorkspace.getState().open({ kind: "history" });
   press(",")?.run();
-  expect([useWorkspace.getState().screen, useWorkspace.getState().overlay]).toEqual([{ kind: "settings", section: "appearance", query: "" }, { kind: "none" }]);
+  expect([useWorkspace.getState().screen, useWorkspace.getState().overlay]).toEqual([{ kind: "settings", section: "general", query: "" }, { kind: "none" }]);
 });
 
 it("opens a section with a blank search when its nav entry is picked from the results", () => {

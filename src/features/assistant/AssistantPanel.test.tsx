@@ -8,6 +8,7 @@ import { ChatHistory } from "./ChatHistory";
 
 const initialLive = { ...useLive.getInitialState() };
 const initialWorkspace = { ...useWorkspace.getInitialState() };
+const fullSettings = { ...initialWorkspace.settings, assistantAccess: "Full" } as const;
 
 afterEach(() => {
   Object.assign(useLive.getInitialState(), initialLive);
@@ -116,7 +117,7 @@ function render(status: ChatStatus, entries: EntrySnapshot[], outcome: ProbeOutc
     providers: { Claude: { ...CLAUDE, outcome } },
   };
   Object.assign(useLive.getInitialState(), live);
-  Object.assign(useWorkspace.getInitialState(), { layout: { ...initialWorkspace.layout, assistantChat: ID } });
+  Object.assign(useWorkspace.getInitialState(), { settings: fullSettings, layout: { ...initialWorkspace.layout, assistantChat: ID } });
   return renderToStaticMarkup(<AssistantPanel />);
 }
 
