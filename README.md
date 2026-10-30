@@ -214,8 +214,8 @@ To measure CSV import in a production frontend against a release engine, build `
 | `L1_DATA_BRIDGE_PORT` | The port the dev-bridge listens on, and the port vite gives the page for it. `dev/bridge-smoke.sh` and `dev/mssql-smoke.py` use it too. Default `7077`. |
 | `L1_DATA_VITE_PORT` | The port vite serves the UI on, and the only port the dev-bridge accepts requests from. Default `5173`. `pnpm tauri dev` needs the default. |
 | `L1_DATA_AZ_BINARY` | The program the dev-bridge's engine runs instead of `az` on the PATH for Entra ID sign-in, such as `target/debug/fake-az`. A relative path is relative to the working directory. Only the dev-bridge reads it. The app ignores it. |
-| `L1_FAKE_AZ_SCENARIO`, `L1_FAKE_AZ_LOG` | The scenario and call log of `fake-az`. AGENTS.md describes them. |
-| `L1_DATA_UPDATE_SCENARIO` | The scripted update feed the dev-bridge serves: `current` (the default), `available`, `nightly-build`, `offline`, `bad-signature`, `install-fails`, or `off`. AGENTS.md describes each. |
+| `L1_FAKE_AZ_SCENARIO`, `L1_FAKE_AZ_LOG` | The scenario and call log of `fake-az`. The header of `crates/engine/src/bin/fake_az.rs` describes them. |
+| `L1_DATA_UPDATE_SCENARIO` | The scripted update feed the dev-bridge serves: `current` (the default), `available`, `nightly-build`, `offline`, `bad-signature`, `install-fails`, or `off`. `crates/engine/src/update/scripted.rs` defines each. |
 | `UPDATE_BINDINGS=1` | Makes the bindings drift test rewrite `src/ipc/bindings.ts` instead of failing. |
 
 ## Layout
