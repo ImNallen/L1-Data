@@ -229,6 +229,8 @@ export function ProviderListSetting() {
           className="inline-flex h-6 items-center gap-1.5 rounded-md px-1.5 text-ui-12 text-dim transition-colors hover:bg-hover hover:text-fg"
         >
           <RefreshCwIcon size={13} className={cx(checking && "animate-spin")} />
+          {/* The visible text is when the last check ran, so the name leads with what the button does and keeps that text. */}
+          <span className="sr-only">Check every provider now. </span>
           <span data-testid="providers-checked">{checkedAgo(known, now)}</span>
         </button>
       </div>
@@ -274,7 +276,7 @@ function SecondsStepper({ id, value }: { id: string; value: number }) {
           id={id}
           data-testid="setting-providerHealthCheck"
           inputMode="numeric"
-          className="w-14 border-x border-control bg-bg text-center text-ui-13 text-fg tabular-nums outline-none focus:bg-hover"
+          className="w-14 border-x border-control bg-bg text-center text-ui-13 text-fg tabular-nums outline-none focus:bg-hover focus:ring-1 focus:ring-focus focus:ring-inset"
           value={draft}
           onChange={(e) => setDraft(e.target.value)}
           onBlur={commit}
@@ -302,7 +304,7 @@ export function HealthCheckSetting() {
       setting="providerHealthCheck"
       labelFor="setting-provider-health-check"
       extra={
-        <span title="Each check asks the CLI for its version and sign-in. It never starts a chat." className="text-faint">
+        <span title="Each check asks the CLI for its version and sign-in. It never starts a chat." className="text-dim">
           <InfoIcon size={13} />
         </span>
       }

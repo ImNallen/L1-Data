@@ -101,7 +101,7 @@ export function RecordView({ meta, row: first, onClose }: { meta: ResultMeta; ro
           role="region"
           aria-label="Fields"
           tabIndex={0}
-          className="selectable grid max-h-[calc(72vh-8rem)] grid-cols-[minmax(140px,max-content)_1fr] overflow-auto rounded-lg border border-control bg-bg outline-none focus-visible:border-accent-border"
+          className="selectable grid max-h-[calc(72vh-8rem)] grid-cols-[minmax(140px,max-content)_1fr] overflow-auto rounded-lg border border-control bg-bg outline-none focus-visible:border-focus"
         >
           {meta.columns.map((c, col) => {
             const cut = !(col in loaded) && cache.isCut(row, col);

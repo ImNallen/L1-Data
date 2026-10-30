@@ -15,7 +15,19 @@ import { DATABASE_LABEL } from "../../state/databaseKind";
 import { useLive } from "../../state/live";
 import { connectionTone } from "../../state/status";
 import { useWorkspace } from "../../state/workspace";
-import { Button, cx, DatabaseBadge, DialogSurface, IconButton, inputClass, Modal, Spinner, StatusDot, Switch } from "../../ui/primitives";
+import {
+  Button,
+  CONNECTION_TONE_LABEL,
+  cx,
+  DatabaseBadge,
+  DialogSurface,
+  IconButton,
+  inputClass,
+  Modal,
+  Spinner,
+  StatusDot,
+  Switch,
+} from "../../ui/primitives";
 import { connect, unknownHostKey, type UnknownHostKey } from "./connectionActions";
 import { CONNECTION_COLORS, ConnectionColorDot, connectionColorId, type ConnectionColorId } from "./connectionColors";
 import {
@@ -156,7 +168,7 @@ function ConnectionList({ selected, onSelect }: { selected: ConnectionId | null;
               mark={connectionColorId(c.color) ? <ConnectionColorDot color={c.color} /> : <HollowMark />}
               name={c.name}
               detail={serverText(c)}
-              trailing={tone !== "off" && <StatusDot tone={tone} />}
+              trailing={tone !== "off" && <StatusDot tone={tone} label={CONNECTION_TONE_LABEL[tone]} />}
               onClick={() => onSelect(c.id)}
             />
           );
@@ -170,7 +182,25 @@ function ConnectionList({ selected, onSelect }: { selected: ConnectionId | null;
   );
 }
 
-function FormRow({ label, htmlFor, labelId, hint, children }: { label: string; htmlFor?: string; labelId?: string; hint?: ReactNode; children: ReactNode }) {
+/** The id of the hint a `FormRow` draws for the field `htmlFor` names. The field points `aria-describedby` at it. */
+const hintOf = (htmlFor: string) => `${htmlFor}-hint`;
+
+/** `live` reads the hint aloud when it changes, for a hint that turns into the field's error. */
+function FormRow({
+  label,
+  htmlFor,
+  labelId,
+  hint,
+  live,
+  children,
+}: {
+  label: string;
+  htmlFor?: string;
+  labelId?: string;
+  hint?: ReactNode;
+  live?: boolean;
+  children: ReactNode;
+}) {
   return (
     <div className="grid grid-cols-[110px_minmax(0,1fr)] gap-x-4 border-b border-border py-3.5 last:border-b-0">
       <label id={labelId} htmlFor={htmlFor} className="pt-1.5 text-ui-13 text-muted">
@@ -178,7 +208,11 @@ function FormRow({ label, htmlFor, labelId, hint, children }: { label: string; h
       </label>
       <div>
         {children}
-        {hint && <div className="mt-1.5 text-ui-12 text-dim">{hint}</div>}
+        {hint && (
+          <div id={htmlFor && hintOf(htmlFor)} aria-live={live ? "polite" : undefined} className="mt-1.5 text-ui-12 text-dim">
+            {hint}
+          </div>
+        )}
       </div>
     </div>
   );
@@ -273,10 +307,7 @@ function ColorPicker({ value, onChange, labelledBy }: { value: ColorChoice; onCh
             tabIndex={checked ? 0 : -1}
             data-testid={`conn-color-${id ?? "none"}`}
             onClick={() => onChange(id)}
-            className={cx(
-              "grid size-6 place-items-center rounded-md outline-none focus-visible:ring-2 focus-visible:ring-accent-border",
-              checked && "ring-2 ring-run ring-offset-2 ring-offset-raised",
-            )}
+            className={cx("grid size-6 place-items-center rounded-md", checked && "ring-2 ring-run ring-offset-2 ring-offset-raised")}
           >
             {color ? (
               <span className="size-4 rounded-[4px]" style={{ backgroundColor: color.hex }} />
@@ -477,6 +508,7 @@ function ConnectionForm({
         <FormRow label="Database kind" htmlFor={`${ids}-kind`} hint={existing ? "Create a new connection to use another database kind." : undefined}>
           <select
             id={`${ids}-kind`}
+            aria-describedby={existing ? hintOf(`${ids}-kind`) : undefined}
             data-testid="conn-kind"
             className={inputClass}
             value={fields.databaseKind}
@@ -507,6 +539,7 @@ function ConnectionForm({
           <div className="relative">
             <select
               id={`${ids}-environment`}
+              aria-describedby={hintOf(`${ids}-environment`)}
               data-testid="conn-environment"
               className={cx(inputClass, "appearance-none pr-8")}
               value={fields.environment ?? ""}
@@ -530,9 +563,12 @@ function ConnectionForm({
             label="URL"
             htmlFor={`${ids}-url`}
             hint={shownUrlError ? <span className="text-danger">{shownUrlError}</span> : "Optional. Paste one to fill in the fields below."}
+            live
           >
             <input
               id={`${ids}-url`}
+              aria-describedby={hintOf(`${ids}-url`)}
+              aria-invalid={shownUrlError !== null || undefined}
               data-testid="conn-url"
               autoFocus
               spellCheck={false}
@@ -550,7 +586,14 @@ function ConnectionForm({
         <FormRow label="Server" htmlFor={`${ids}-host`} hint={fields.sshEnabled ? "Resolved and dialed by the SSH server." : undefined}>
           <div className="flex gap-2">
             <div className="min-w-0 flex-1">
-              <input id={`${ids}-host`} data-testid="conn-host" className={inputClass} value={fields.host} onChange={set("host")} />
+              <input
+                id={`${ids}-host`}
+                aria-describedby={fields.sshEnabled ? hintOf(`${ids}-host`) : undefined}
+                data-testid="conn-host"
+                className={inputClass}
+                value={fields.host}
+                onChange={set("host")}
+              />
             </div>
             <div className="w-24 shrink-0">
               <input data-testid="conn-port" aria-label="Port" className={inputClass} value={fields.port} onChange={set("port")} inputMode="numeric" />
@@ -558,7 +601,14 @@ function ConnectionForm({
           </div>
         </FormRow>
         <FormRow label="Database" htmlFor={`${ids}-database`} hint="Opens first in the tree. You can show the server's other databases later.">
-          <input id={`${ids}-database`} data-testid="conn-database" className={inputClass} value={fields.database} onChange={set("database")} />
+          <input
+            id={`${ids}-database`}
+            aria-describedby={hintOf(`${ids}-database`)}
+            data-testid="conn-database"
+            className={inputClass}
+            value={fields.database}
+            onChange={set("database")}
+          />
         </FormRow>
         {fields.databaseKind === "SqlServer" && (
           <FormRow
@@ -574,6 +624,7 @@ function ConnectionForm({
             <div className="relative">
               <select
                 id={`${ids}-auth`}
+                aria-describedby={hintOf(`${ids}-auth`)}
                 data-testid="conn-auth"
                 className={cx(inputClass, "appearance-none pr-8")}
                 value={fields.sqlServerAuth}
@@ -629,6 +680,8 @@ function ConnectionForm({
           <div className="relative">
             <select
               id={`${ids}-ssl`}
+              aria-describedby={hintOf(`${ids}-ssl`)}
+              aria-invalid={entraNeedsVerifiedTls(fields) || undefined}
               data-testid="conn-ssl"
               className={cx(inputClass, "appearance-none pr-8")}
               value={fields.sslMode}
@@ -650,6 +703,7 @@ function ConnectionForm({
           <FormRow label="CA certificate" htmlFor={`${ids}-ca`} hint="Optional path to a PEM certificate file.">
             <input
               id={`${ids}-ca`}
+              aria-describedby={hintOf(`${ids}-ca`)}
               data-testid="conn-ca-cert"
               className={inputClass}
               value={fields.caCertPath}
@@ -669,6 +723,7 @@ function ConnectionForm({
                 <div className="ml-1 min-w-0 flex-1">
                   <input
                     id={`${ids}-ssh-host`}
+                    aria-describedby={hintOf(`${ids}-ssh-host`)}
                     data-testid="conn-ssh-host"
                     className={inputClass}
                     value={fields.sshHost}
@@ -747,6 +802,7 @@ function ConnectionForm({
                   <div className="min-w-0 flex-1">
                     <input
                       id={`${ids}-ssh-key`}
+                      aria-describedby={hintOf(`${ids}-ssh-key`)}
                       data-testid="conn-ssh-key"
                       className={inputClass}
                       value={fields.sshKeyPath}
@@ -762,6 +818,7 @@ function ConnectionForm({
               <FormRow label="Agent socket" htmlFor={`${ids}-ssh-agent`} hint="Optional. Leave empty to use the agent at SSH_AUTH_SOCK.">
                 <input
                   id={`${ids}-ssh-agent`}
+                  aria-describedby={hintOf(`${ids}-ssh-agent`)}
                   data-testid="conn-ssh-agent-socket"
                   className={inputClass}
                   value={fields.sshAgentSocket}
@@ -775,6 +832,7 @@ function ConnectionForm({
         <FormRow label="Name" htmlFor={`${ids}-name`} hint="Leave empty to use the host and database.">
           <input
             id={`${ids}-name`}
+            aria-describedby={hintOf(`${ids}-name`)}
             data-testid="conn-name"
             autoFocus={existing !== undefined}
             className={inputClass}
@@ -795,7 +853,7 @@ function ConnectionForm({
         <Button data-testid="conn-test" disabled={!valid || probe.kind === "testing"} onClick={() => void test()}>
           Test
         </Button>
-        <div data-testid="conn-test-result" data-state={probe.kind} className="min-w-0 flex-1 text-ui-12.5 leading-4">
+        <div data-testid="conn-test-result" data-state={probe.kind} role="status" className="min-w-0 flex-1 text-ui-12.5 leading-4">
           {probe.kind === "testing" && (
             <span className="flex items-center gap-2 text-dim">
               <Spinner /> Connecting
@@ -843,6 +901,7 @@ function ErrorRow({ testId, message }: { testId: string; message: string }) {
   return (
     <div
       data-testid={testId}
+      role="alert"
       className="flex max-h-40 shrink-0 items-start gap-2 overflow-y-auto border-t border-border px-5 py-3 text-ui-12.5 leading-4 text-danger"
     >
       <CircleAlertIcon size={14} className="shrink-0" />
@@ -889,6 +948,7 @@ export function ConnectionDialog() {
             description={existing ? `Your edits to ${existing.name} are lost.` : "This connection is not saved yet."}
             width={400}
             testId="discard-dialog"
+            role="alertdialog"
             initialFocus={keepEditing}
           >
             <div className="flex justify-end gap-2">

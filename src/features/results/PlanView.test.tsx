@@ -100,6 +100,10 @@ it("renders the plan tree, moves focus from the keyboard, and keeps the detail o
   screen.getByRole("tree").focus();
   await user.keyboard("{ArrowDown}");
   expect(focused()).toBe(screen.getByTestId("plan-node-1"));
+  expect([screen.getByRole("tree").getAttribute("aria-activedescendant"), screen.getByRole("treeitem", { selected: true })]).toEqual([
+    screen.getByTestId("plan-node-1").id,
+    screen.getByTestId("plan-node-1"),
+  ]);
   expect(screen.getByTestId("plan-detail").textContent).toContain("(n > 1)");
   expect(screen.getByTestId("plan-detail").textContent).not.toContain("(o.id = c.id)");
 

@@ -5,8 +5,8 @@ import { cx } from "../../ui/primitives";
 /** `ConnectionConfig.color` stores an `id`. The hues are fixed so they read on light and dark themes alike. */
 export const CONNECTION_COLORS = [
   { id: "red", label: "Red", hex: "#ef4444" },
-  { id: "amber", label: "Amber", hex: "#f59e0b" },
-  { id: "green", label: "Green", hex: "#10b981" },
+  { id: "amber", label: "Amber", hex: "#d97706" },
+  { id: "green", label: "Green", hex: "#059669" },
   { id: "blue", label: "Blue", hex: "#3b82f6" },
   { id: "purple", label: "Purple", hex: "#a855f7" },
 ] as const satisfies readonly { id: string; label: string; hex: string }[];

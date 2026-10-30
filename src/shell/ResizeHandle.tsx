@@ -1,7 +1,9 @@
 import { Separator } from "react-resizable-panels";
 import { cx } from "../ui/primitives";
 
-// The line runs vertically between side-by-side panels and horizontally between stacked ones.
+// The line runs vertically between side-by-side panels and horizontally between stacked ones. A keyboard focus turns the
+// pill the focus colour, the only sign of focus the handle has. The library's own `focus` state also follows a click, so
+// it is not used.
 const LINE = {
   vertical: {
     line: "w-px after:inset-y-0 after:-inset-x-1",
@@ -16,7 +18,7 @@ const LINE = {
 export const handleLook = (line: keyof typeof LINE, lineColor: string) => ({
   root: cx("group relative z-10 outline-none after:absolute", LINE[line].line, lineColor),
   pill: cx(
-    "pointer-events-none absolute rounded-full bg-handle transition-colors group-hover:bg-handle-hover group-focus-visible:bg-handle-hover group-data-[separator=focus]:bg-handle-hover group-data-[separator=hover]:bg-handle-hover group-data-[separator=active]:bg-run",
+    "pointer-events-none absolute rounded-full bg-handle transition-colors group-hover:bg-handle-hover group-data-[separator=hover]:bg-handle-hover group-focus-visible:bg-focus group-data-[separator=active]:bg-run",
     LINE[line].pill,
   ),
 });

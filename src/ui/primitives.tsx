@@ -21,7 +21,10 @@ export function cx(...parts: (string | false | null | undefined)[]): string {
 }
 
 export const MENU_PANEL = "motion-pop z-50 min-w-[180px] rounded-lg border border-control bg-raised p-1 shadow-[var(--shadow-popover)]";
-export const MENU_ITEM = "flex h-7 cursor-default items-center gap-2 rounded-md px-2 text-ui-13 outline-none data-[highlighted]:bg-selected";
+/** The option a listbox or tree acts on. `bg-selected` alone is too close to `bg-raised` to see, so a focus-colour ring marks it. */
+export const ACTIVE_OPTION = "bg-selected ring-1 ring-inset ring-focus";
+export const MENU_ITEM =
+  "flex h-7 cursor-default items-center gap-2 rounded-md px-2 text-ui-13 outline-none data-[highlighted]:bg-selected focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-focus";
 
 export function DatabaseBadge({ databaseKind }: { databaseKind: DatabaseKind }) {
   return (
@@ -35,9 +38,18 @@ export function DatabaseBadge({ databaseKind }: { databaseKind: DatabaseKind }) 
   );
 }
 
-export function Kbd({ children, className }: { children: ReactNode; className?: string }) {
+const KBD_TONE = {
+  surface: "bg-pill",
+  menu: "bg-control text-muted",
+  accent: "bg-run-fg/15 text-run-fg/85",
+};
+
+/** `surface` sits on a panel, `menu` on a raised menu, `accent` inside a primary button. */
+export function Kbd({ children, tone = "surface", className }: { children: ReactNode; tone?: keyof typeof KBD_TONE; className?: string }) {
   return (
-    <kbd className={cx("inline-flex h-[18px] items-center rounded-[4px] px-1.5 font-sans text-ui-10.5 font-medium leading-none", className)}>{children}</kbd>
+    <kbd className={cx("inline-flex h-[18px] items-center rounded-[4px] px-1.5 font-sans text-ui-10.5 font-medium leading-none", KBD_TONE[tone], className)}>
+      {children}
+    </kbd>
   );
 }
 
@@ -59,9 +71,23 @@ export function Highlight({ text, ranges }: { text: string; ranges: readonly Tex
   return parts;
 }
 
-export function StatusDot({ tone }: { tone: "live" | "pending" | "off" | "error" }) {
+type Tone = "live" | "pending" | "off" | "error";
+
+/** What a connection's dot means, for the places where the dot alone shows its health. */
+export const CONNECTION_TONE_LABEL: Record<Tone, string> = { live: "Connected", pending: "Connecting", off: "Disconnected", error: "Connection failed" };
+
+/** Colour alone is not a status, so a dot that stands for one takes a `label`. Without one it is decoration. */
+export function StatusDot({ tone, label }: { tone: Tone; label?: string }) {
   const color = { live: "bg-live", pending: "bg-amber animate-pulse", off: "bg-faint", error: "bg-danger" }[tone];
-  return <span className={cx("inline-block size-1.5 shrink-0 rounded-full", color)} />;
+  return (
+    <span
+      role={label ? "img" : undefined}
+      aria-label={label}
+      aria-hidden={label ? undefined : true}
+      title={label}
+      className={cx("inline-block size-1.5 shrink-0 rounded-full", color)}
+    />
+  );
 }
 
 export function Spinner() {
@@ -76,7 +102,7 @@ export function Button({ variant = "outline", className, ...rest }: ButtonProps)
   const look = {
     ghost: "text-muted hover:bg-hover hover:text-fg",
     outline: "border border-control text-fg hover:bg-hover",
-    primary: "bg-run text-run-fg hover:bg-run-hover",
+    primary: "bg-run text-run-fg hover:bg-run-hover focus-visible:outline-run-fg",
     danger: "border border-control text-danger hover:bg-hover",
   }[variant];
   return (
@@ -259,6 +285,7 @@ export function Modal({
   testId,
   initialFocus,
   onKeyDown,
+  role,
 }: {
   open: boolean;
   onOpenChange: (open: boolean) => void;
@@ -270,6 +297,8 @@ export function Modal({
   /** Radix focuses the first control (the close button) unless this names another. */
   initialFocus?: RefObject<HTMLElement | null>;
   onKeyDown?: (e: KeyboardEvent) => void;
+  /** `alertdialog` for a question that interrupts work and must be answered, such as a destructive confirm. */
+  role?: "dialog" | "alertdialog";
 }) {
   // Radix returns focus to a Dialog.Trigger on close. A Modal has none, so it returns focus to whatever had it at open.
   const opener = useRef<Element | null>(null);
@@ -281,6 +310,8 @@ export function Modal({
       <Dialog.Portal>
         <DialogSurface
           data-testid={testId}
+          // Radix spreads these props over its own role, so an undefined role would erase "dialog".
+          {...(role && { role })}
           style={{ width }}
           onKeyDown={onKeyDown}
           onOpenAutoFocus={
@@ -321,5 +352,4 @@ export function Modal({
   );
 }
 
-export const inputClass =
-  "h-8 w-full rounded-lg border border-control bg-bg px-2.5 text-ui-13 text-fg outline-none placeholder:text-faint focus:border-accent-border";
+export const inputClass = "h-8 w-full rounded-lg border border-control bg-bg px-2.5 text-ui-13 text-fg outline-none placeholder:text-dim focus:border-focus";

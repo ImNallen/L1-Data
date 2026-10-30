@@ -7,7 +7,7 @@ import { sameDb } from "../../state/dbKey";
 import { useLive } from "../../state/live";
 import { confirm, tabTarget, useWorkspace } from "../../state/workspace";
 import { day } from "../../ui/day";
-import { Button, cx, DialogSurface, Kbd, DatabaseBadge, StatusDot } from "../../ui/primitives";
+import { ACTIVE_OPTION, Button, cx, DialogSurface, Kbd, DatabaseBadge, StatusDot } from "../../ui/primitives";
 import { focusEditor } from "../editor/editorStates";
 import { SqlText } from "../editor/SqlText";
 import { formatElapsed, pluralRows } from "../results/format";
@@ -33,9 +33,22 @@ function outcomeText(o: HistoryOutcome): string {
   }
 }
 
-function OutcomeDot({ outcome }: { outcome: HistoryOutcome }) {
-  if (outcome.kind === "Cancelled") return <span className="inline-block size-1.5 shrink-0 rounded-full border border-faint" />;
-  return <StatusDot tone={outcome.kind === "Error" ? "error" : "live"} />;
+const OUTCOME_LABEL = { Rows: "Succeeded", Command: "Succeeded", Error: "Failed", Cancelled: "Cancelled" } satisfies Record<HistoryOutcome["kind"], string>;
+
+/** `labelled` names the outcome where the dot is its only sign; beside the outcome's text it is decoration. */
+function OutcomeDot({ outcome, labelled }: { outcome: HistoryOutcome; labelled?: boolean }) {
+  const label = labelled ? OUTCOME_LABEL[outcome.kind] : undefined;
+  if (outcome.kind === "Cancelled")
+    return (
+      <span
+        role={label ? "img" : undefined}
+        aria-label={label}
+        aria-hidden={label ? undefined : true}
+        title={label}
+        className="inline-block size-1.5 shrink-0 rounded-full border border-faint"
+      />
+    );
+  return <StatusDot tone={outcome.kind === "Error" ? "error" : "live"} label={label} />;
 }
 
 const time = (at: number) => new Date(at).toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit" });
@@ -157,7 +170,7 @@ function HistoryBrowser({ close, restoreEditorFocus }: { close: () => void; rest
           aria-controls="history-list"
           aria-activedescendant={selected ? `history-group-${selected.id}` : undefined}
           placeholder="Search SQL, tables, errors or connections"
-          className="h-12 min-w-0 flex-1 bg-transparent text-ui-14 text-fg outline-none placeholder:text-faint"
+          className="h-12 min-w-0 flex-1 bg-transparent text-ui-14 text-fg outline-none placeholder:text-dim"
         />
         <div role="group" aria-label="Filter history" className="flex shrink-0 gap-1">
           {(["All", "Failed", "Writes"] satisfies HistoryFilter[]).map((value) => (
@@ -186,7 +199,7 @@ function HistoryBrowser({ close, restoreEditorFocus }: { close: () => void; rest
             aria-label="Close history"
             className="ml-1 border-l border-control pl-3 text-dim outline-none hover:text-fg focus-visible:ring-1 focus-visible:ring-focus"
           >
-            <Kbd className="bg-pill">esc</Kbd>
+            <Kbd>esc</Kbd>
           </button>
         </Dialog.Close>
       </div>
@@ -249,11 +262,11 @@ function HistoryBrowser({ close, restoreEditorFocus }: { close: () => void; rest
                   }}
                   className={cx(
                     "block w-full min-w-0 cursor-default rounded-lg px-2.5 py-2.5 text-left outline-none",
-                    selected?.id === group.id ? "bg-selected" : "hover:bg-hover",
+                    selected?.id === group.id ? ACTIVE_OPTION : "hover:bg-hover",
                   )}
                 >
                   <div className="flex min-w-0 items-center gap-2">
-                    <OutcomeDot outcome={group.representative.outcome} />
+                    <OutcomeDot outcome={group.representative.outcome} labelled />
                     <span className="min-w-0 flex-1 truncate text-ui-13 font-medium text-fg" title={group.title}>
                       {group.title}
                     </span>
@@ -294,7 +307,7 @@ function HistoryBrowser({ close, restoreEditorFocus }: { close: () => void; rest
         </div>
         <section aria-label="Query preview" data-testid="history-preview" className="flex min-h-0 min-w-0 flex-col gap-4 p-6">
           {!selected ? (
-            <div className="grid flex-1 place-items-center text-ui-13 text-faint">Select a query to preview</div>
+            <div className="grid flex-1 place-items-center text-ui-13 text-dim">Select a query to preview</div>
           ) : (
             <>
               <div className="min-w-0 shrink-0">
@@ -338,7 +351,7 @@ function HistoryBrowser({ close, restoreEditorFocus }: { close: () => void; rest
                 >
                   {copied ? <CheckIcon size={13} /> : <CopyIcon size={13} />}
                   {copied ? "Copied" : "Copy"}
-                  <Kbd className="bg-pill text-dim">{mod}C</Kbd>
+                  <Kbd className="text-dim">{mod}C</Kbd>
                 </button>
               </div>
               <span className="sr-only" role="status">
@@ -388,11 +401,11 @@ function HistoryBrowser({ close, restoreEditorFocus }: { close: () => void; rest
               </div>
               <div className="flex shrink-0 flex-wrap items-center gap-2">
                 <Button variant="primary" data-testid="history-open" disabled={!detail} onClick={() => act("open")}>
-                  Open in new tab<Kbd className="bg-white/15">↵</Kbd>
+                  Open in new tab<Kbd tone="accent">↵</Kbd>
                 </Button>
                 <Button data-testid="history-run-again" disabled={!detail} onClick={() => act("run")}>
-                  <PlayIcon fill="currentColor" size={12} className="text-run-icon" />
-                  Run again<Kbd className="bg-pill text-dim">{mod}↵</Kbd>
+                  <PlayIcon fill="currentColor" size={12} className="text-green" />
+                  Run again<Kbd className="text-dim">{mod}↵</Kbd>
                 </Button>
                 <Button
                   variant="ghost"
@@ -401,7 +414,7 @@ function HistoryBrowser({ close, restoreEditorFocus }: { close: () => void; rest
                   title={insertEnabled ? "Insert into the active tab" : "Open a tab to insert this query"}
                   onClick={() => act("insert")}
                 >
-                  Insert at cursor<Kbd className="bg-pill text-dim">Alt+↵</Kbd>
+                  Insert at cursor<Kbd className="text-dim">Alt+↵</Kbd>
                 </Button>
                 <Button
                   variant="ghost"
@@ -420,16 +433,16 @@ function HistoryBrowser({ close, restoreEditorFocus }: { close: () => void; rest
       </div>
       <div className="flex min-h-10 shrink-0 items-center gap-3 border-t border-control px-4 text-ui-11.5 text-dim">
         <span>
-          <Kbd className="bg-pill">↑↓</Kbd> Navigate
+          <Kbd>↑↓</Kbd> Navigate
         </span>
         <span>
-          <Kbd className="bg-pill">↵</Kbd> Open
+          <Kbd>↵</Kbd> Open
         </span>
         <span>
-          <Kbd className="bg-pill">{mod}↵</Kbd> Run
+          <Kbd>{mod}↵</Kbd> Run
         </span>
         <span>
-          <Kbd className="bg-pill">esc</Kbd> Close
+          <Kbd>esc</Kbd> Close
         </span>
         <span data-testid="history-count" role="status" className="ml-auto shrink-0">
           {count === null ? "…" : count.toLocaleString()} {count === 1 ? "query" : "queries"}

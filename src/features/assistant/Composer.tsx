@@ -24,7 +24,7 @@ function Picker({ testId, label, icon, disabled, children }: { testId: string; l
       <Menu.Trigger
         data-testid={testId}
         disabled={disabled}
-        className="inline-flex h-7 min-w-0 items-center gap-1.5 rounded-md px-1.5 text-ui-12.5 text-muted outline-none hover:bg-hover hover:text-fg disabled:pointer-events-none disabled:opacity-40 data-[state=open]:bg-hover data-[state=open]:text-fg"
+        className="inline-flex h-7 min-w-0 items-center gap-1.5 rounded-md px-1.5 text-ui-12.5 text-muted hover:bg-hover hover:text-fg disabled:pointer-events-none disabled:opacity-40 data-[state=open]:bg-hover data-[state=open]:text-fg"
       >
         {icon}
         <span className="truncate">{label}</span>
@@ -193,7 +193,7 @@ export function Composer({ chat }: { chat: ChatState | undefined }) {
           The assistant can inspect SQL Server schema and suggest SQL. Its run_query tool is unavailable for SQL Server. Open suggested SQL in a tab to run it.
         </p>
       )}
-      <div className="rounded-xl border border-control bg-raised focus-within:border-accent-border">
+      <div className="rounded-xl border border-control bg-raised focus-within:border-focus">
         {attaching && (
           <div className="flex px-3 pt-2.5">
             <span
@@ -218,6 +218,7 @@ export function Composer({ chat }: { chat: ChatState | undefined }) {
         <textarea
           ref={input}
           data-testid="assistant-input"
+          aria-label="Message the assistant"
           rows={2}
           value={text}
           placeholder={full ? "Ask about your data, send follow-ups, or attach a result" : "Ask for SQL help using your schema"}
@@ -227,7 +228,7 @@ export function Composer({ chat }: { chat: ChatState | undefined }) {
             e.preventDefault();
             void send();
           }}
-          className="block w-full resize-none bg-transparent px-3 pt-2.5 pb-1 text-ui-13 leading-relaxed text-fg outline-none placeholder:text-faint"
+          className="block w-full resize-none bg-transparent px-3 pt-2.5 pb-1 text-ui-13 leading-relaxed text-fg outline-none placeholder:text-dim"
         />
         <div className="flex items-center gap-1 px-1.5 pb-1.5">
           {chat && <Pickers chat={chat} models={models} />}

@@ -1,5 +1,5 @@
 import { ChevronRightIcon, CircleOffIcon, DatabaseSearchIcon, PlayIcon, TableIcon, WrenchIcon } from "lucide-react";
-import { memo, useState, type ReactNode } from "react";
+import { memo, useId, useState, type ReactNode } from "react";
 import type { ApprovalId, ApprovalReason, ChatId, DatabaseKind, DatabaseRef, Decision, ToolResult, ToolStatus, ToolUse } from "../../ipc/bindings";
 import { toolLine } from "../../state/transcript";
 import { Button, cx, Spinner } from "../../ui/primitives";
@@ -36,7 +36,7 @@ function RowsPreview({ rows, sql, db }: { rows: RowsResult; sql: string | null; 
               <tr key={r} className="border-t border-grid first:border-t-0">
                 {row.map((cell, c) => (
                   <td key={c} className="max-w-[220px] truncate px-2 py-1 text-(color:--code)">
-                    {cell ?? <span className="text-faint">NULL</span>}
+                    {cell ?? <span className="text-dim">NULL</span>}
                   </td>
                 ))}
               </tr>
@@ -74,13 +74,16 @@ function ApprovalCard({
   databaseKind: DatabaseKind;
 }) {
   const [answered, setAnswered] = useState(false);
+  const question = useId();
   const answer = (decision: Decision) => {
     setAnswered(true);
     void answerApproval(chatId, approval, decision);
   };
   return (
-    <div data-testid={testId} className="flex flex-col gap-2 rounded-lg border border-accent-border px-3 py-2.5">
-      <p className="text-ui-12.5 font-medium text-fg">{tool.kind === "RunQuery" ? "Run this query?" : "Allow this tool call?"}</p>
+    <div data-testid={testId} role="group" aria-labelledby={question} className="flex flex-col gap-2 rounded-lg border border-accent-border px-3 py-2.5">
+      <p id={question} className="text-ui-12.5 font-medium text-fg">
+        {tool.kind === "RunQuery" ? "Run this query?" : "Allow this tool call?"}
+      </p>
       {tool.kind === "RunQuery" && (
         <>
           {tool.purpose && <p className="text-ui-12.5 text-muted">{tool.purpose}</p>}

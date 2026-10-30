@@ -68,10 +68,7 @@ function TabItem({ id, onClose }: { id: TabId; onClose: (id: TabId, trigger: HTM
         tabIndex={active ? 0 : -1}
         onClick={() => setActive(id)}
         onDoubleClick={() => !tab.file && setEditing(true)}
-        className={cx(
-          "flex h-full min-w-0 items-center gap-2 rounded px-2 outline-none focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-focus",
-          editing && "invisible",
-        )}
+        className={cx("flex h-full min-w-0 items-center gap-2 rounded px-2", editing && "invisible")}
       >
         {tab.table ? (
           <TableIcon size={14} className="shrink-0 text-muted" />
@@ -83,7 +80,12 @@ function TabItem({ id, onClose }: { id: TabId; onClose: (id: TabId, trigger: HTM
         <span className={cx("truncate text-ui-13.5", missing && "line-through")}>{tab.title}</span>
         {missing && <FileXIcon data-testid={`tab-file-missing-${id}`} aria-label="File missing" size={13} className="-ml-1 shrink-0 text-amber" />}
         {unsaved && (
-          <span data-testid={`tab-unsaved-${id}`} aria-label="Unsaved changes" className="-ml-1 size-2 shrink-0 rounded-full border-[1.5px] border-focus" />
+          <span
+            data-testid={`tab-unsaved-${id}`}
+            role="img"
+            aria-label="Unsaved changes"
+            className="-ml-1 size-2 shrink-0 rounded-full border-[1.5px] border-focus"
+          />
         )}
         {dirty && (
           <span
@@ -112,7 +114,7 @@ function TabItem({ id, onClose }: { id: TabId; onClose: (id: TabId, trigger: HTM
             else setEditing(false);
             requestAnimationFrame(() => activation.current?.focus());
           }}
-          className="absolute inset-y-0 left-2 w-[calc(100%-2.5rem)] bg-pill text-ui-13.5 text-fg outline-none"
+          className="absolute inset-y-0 left-2 w-[calc(100%-2.5rem)] rounded bg-pill text-ui-13.5 text-fg outline-none focus:ring-1 focus:ring-focus"
         />
       )}
       <button
@@ -122,7 +124,7 @@ function TabItem({ id, onClose }: { id: TabId; onClose: (id: TabId, trigger: HTM
         tabIndex={active ? 0 : -1}
         onClick={(e) => onClose(id, e.currentTarget, e.detail === 0)}
         className={cx(
-          "grid size-5 shrink-0 place-items-center rounded text-dim outline-none hover:bg-hover hover:text-fg focus-visible:outline-2 focus-visible:outline-focus",
+          "grid size-5 shrink-0 place-items-center rounded text-dim hover:bg-hover hover:text-fg",
           !active && "opacity-0 group-hover:opacity-100 group-focus-within:opacity-100",
         )}
       >

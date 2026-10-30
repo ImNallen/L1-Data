@@ -63,6 +63,7 @@ export function CreateThemePanel({ initial, onClose }: { initial: ThemeDraft; on
   const [draft, setDraft] = useState(initial);
   const [advanced, setAdvanced] = useState(false);
   const nameInput = useRef<HTMLInputElement>(null);
+  const appearances = useRef<HTMLDivElement>(null);
   const palette = completePalette(draft.appearance, draft.colors);
   const name = draft.name.trim();
 
@@ -125,13 +126,29 @@ export function CreateThemePanel({ initial, onClose }: { initial: ThemeDraft; on
           <span id="theme-appearance" className="text-ui-13 text-fg">
             Appearance
           </span>
-          <div role="radiogroup" aria-labelledby="theme-appearance" className="flex rounded-lg bg-pill p-0.5">
+          {/* One tab stop, and the arrow keys move the choice, as a native radio group does. */}
+          <div
+            ref={appearances}
+            role="radiogroup"
+            aria-labelledby="theme-appearance"
+            className="flex rounded-lg bg-pill p-0.5"
+            onKeyDown={(e) => {
+              const delta = { ArrowRight: 1, ArrowDown: 1, ArrowLeft: -1, ArrowUp: -1 }[e.key];
+              if (delta === undefined) return;
+              e.preventDefault();
+              const next = APPEARANCES[(APPEARANCES.indexOf(draft.appearance) + delta + APPEARANCES.length) % APPEARANCES.length];
+              if (!next) return;
+              setAppearance(next);
+              appearances.current?.querySelector<HTMLElement>(`[data-testid="theme-appearance-${next}"]`)?.focus();
+            }}
+          >
             {APPEARANCES.map((a) => (
               <button
                 key={a}
                 type="button"
                 role="radio"
                 aria-checked={draft.appearance === a}
+                tabIndex={draft.appearance === a ? 0 : -1}
                 data-testid={`theme-appearance-${a}`}
                 onClick={() => setAppearance(a)}
                 className={cx("h-7 rounded-md px-3 text-ui-12.5 transition-colors", draft.appearance === a ? "bg-control text-fg" : "text-muted hover:text-fg")}

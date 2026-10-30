@@ -32,7 +32,7 @@ function Prompt({ prompt }: { prompt: ParamPrompt }) {
                 ref={index === 0 && param.value !== null ? first : undefined}
                 id={`param-${index}`}
                 data-testid={`param-value-${param.name}`}
-                className="min-w-0 flex-1 rounded-md border border-control bg-bg px-2.5 py-1.5 font-mono text-ui-12.5 text-fg outline-none focus:border-accent disabled:opacity-40"
+                className="min-w-0 flex-1 rounded-md border border-control bg-bg px-2.5 py-1.5 font-mono text-ui-12.5 text-fg outline-none focus:border-focus disabled:opacity-40"
                 value={param.value ?? ""}
                 disabled={param.value === null}
                 onChange={(event) => setValues(values.map((p, i) => (i === index ? { ...p, value: event.target.value } : p)))}
@@ -42,6 +42,7 @@ function Prompt({ prompt }: { prompt: ParamPrompt }) {
                   ref={index === 0 && param.value === null ? first : undefined}
                   type="checkbox"
                   data-testid={`param-null-${param.name}`}
+                  aria-label={`${param.name} is NULL`}
                   checked={param.value === null}
                   onChange={(event) => setValues(values.map((p, i) => (i === index ? { ...p, value: event.target.checked ? null : "" } : p)))}
                 />

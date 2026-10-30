@@ -124,7 +124,9 @@ function SourceBody({ limits, now }: { limits: SourceLimits; now: number }) {
     case "Failed":
       return (
         <div data-testid={`usage-failed-${source}`} className="flex items-center gap-3 rounded-xl border border-control px-4 py-3.5 text-ui-12">
-          <span className="min-w-0 flex-1 text-danger selectable">{outcome.message}</span>
+          <span role="alert" className="min-w-0 flex-1 text-danger selectable">
+            {outcome.message}
+          </span>
           <button type="button" onClick={refreshLimits} className="shrink-0 text-fg underline underline-offset-2 hover:text-fg/80">
             Try again
           </button>

@@ -16,15 +16,23 @@ function Toast() {
     const t = setTimeout(() => setVisible(null), 4_000);
     return () => clearTimeout(t);
   }, [toast]);
-  if (!toast || visible !== toast.id) return null;
+  const shown = toast && visible === toast.id ? toast.text : null;
+  // The live region stays mounted and only its text changes: many screen readers skip a region that mounts with its text.
   return (
-    <div
-      role="status"
-      data-testid="toast"
-      className="fixed bottom-10 left-1/2 z-50 max-w-[520px] -translate-x-1/2 rounded-lg border border-control bg-raised px-3.5 py-2 text-ui-13 text-fg shadow-[var(--shadow-popover)]"
-    >
-      {toast.text}
-    </div>
+    <>
+      <div role="status" data-testid="toast-announcement" className="sr-only">
+        {shown}
+      </div>
+      {shown !== null && (
+        <div
+          data-testid="toast"
+          aria-hidden
+          className="fixed bottom-10 left-1/2 z-50 max-w-[520px] -translate-x-1/2 rounded-lg border border-control bg-raised px-3.5 py-2 text-ui-13 text-fg shadow-[var(--shadow-popover)]"
+        >
+          {shown}
+        </div>
+      )}
+    </>
   );
 }
 
@@ -46,6 +54,7 @@ function AskDialog({ question }: { question: Extract<Overlay, { kind: "ask" }> }
       description={question.body}
       width={440}
       testId={`${question.testId}-dialog`}
+      role="alertdialog"
       initialFocus={has("primary") ? primary : has("danger") ? cancel : undefined}
     >
       {question.statements.length > 0 && (

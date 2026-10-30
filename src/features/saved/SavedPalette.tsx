@@ -9,7 +9,7 @@ import { databaseKindFor } from "../../state/databaseKind";
 import { useLive } from "../../state/live";
 import { tabTarget, useWorkspace, type SavedEntry } from "../../state/workspace";
 import { day } from "../../ui/day";
-import { Button, cx, DatabaseBadge, DialogSurface, Highlight, inputClass, Kbd } from "../../ui/primitives";
+import { ACTIVE_OPTION, Button, cx, DatabaseBadge, DialogSurface, Highlight, inputClass, Kbd } from "../../ui/primitives";
 import { focusEditor } from "../editor/editorStates";
 import { SqlText } from "../editor/SqlText";
 import { canInsert, copySaved, deleteSaved, insertSaved, openSaved, saveActiveQuery, updateSaved } from "./savedActions";
@@ -181,7 +181,7 @@ function SavedDialog({ entry, close, ref }: { entry: SavedEntry; close: () => vo
           aria-controls="saved-list"
           aria-activedescendant={selectedId !== null ? `saved-item-${selectedId}` : undefined}
           placeholder="Search saved queries by name or SQL"
-          className="h-12 min-w-0 flex-1 bg-transparent text-ui-14 text-fg outline-none placeholder:text-faint"
+          className="h-12 min-w-0 flex-1 bg-transparent text-ui-14 text-fg outline-none placeholder:text-dim"
         />
         <button
           type="button"
@@ -190,7 +190,7 @@ function SavedDialog({ entry, close, ref }: { entry: SavedEntry; close: () => vo
           onClick={leave}
           className="ml-1 border-l border-control pl-3 text-dim outline-none hover:text-fg focus-visible:ring-1 focus-visible:ring-focus"
         >
-          <Kbd className="bg-pill">esc</Kbd>
+          <Kbd>esc</Kbd>
         </button>
       </div>
       {items.length === 0 ? (
@@ -237,7 +237,7 @@ function SavedDialog({ entry, close, ref }: { entry: SavedEntry; close: () => vo
                 onDoubleClick={() => query.id === selectedId && act("primary")}
                 className={cx(
                   "block w-full min-w-0 cursor-default rounded-lg px-2.5 py-2.5 text-left outline-none",
-                  query.id === selectedId ? "bg-selected" : "hover:bg-hover",
+                  query.id === selectedId ? ACTIVE_OPTION : "hover:bg-hover",
                 )}
               >
                 <div className="flex min-w-0 items-center gap-2">
@@ -261,7 +261,7 @@ function SavedDialog({ entry, close, ref }: { entry: SavedEntry; close: () => vo
               submit={submit}
             />
           ) : !selected ? (
-            <div className="grid place-items-center text-ui-13 text-faint">Select a query to preview</div>
+            <div className="grid place-items-center text-ui-13 text-dim">Select a query to preview</div>
           ) : (
             <section aria-label="Saved query" data-testid="saved-preview" className="flex min-h-0 min-w-0 flex-col gap-4 p-6">
               <div className="min-w-0 shrink-0">
@@ -317,14 +317,17 @@ function SavedDialog({ entry, close, ref }: { entry: SavedEntry; close: () => vo
                     title={insertable ? "Insert into the active tab" : "Open a query tab to insert this query"}
                     onClick={() => act("primary")}
                   >
-                    Insert at cursor{insertable && <Kbd className="bg-white/15">↵</Kbd>}
+                    Insert at cursor{insertable && <Kbd tone="accent">↵</Kbd>}
                   </Button>
                   <Button variant={insertable ? "outline" : "primary"} data-testid="saved-open" onClick={() => act("open")}>
-                    Open in new tab<Kbd className={insertable ? "bg-pill text-dim" : "bg-white/15"}>{insertable ? `${mod}↵` : "↵"}</Kbd>
+                    Open in new tab
+                    <Kbd tone={insertable ? "surface" : "accent"} className={insertable ? "text-dim" : undefined}>
+                      {insertable ? `${mod}↵` : "↵"}
+                    </Kbd>
                   </Button>
                   <Button data-testid="saved-copy" onClick={() => act("copy")}>
                     <CopyIcon size={13} />
-                    Copy<Kbd className="bg-pill text-dim">{mod}C</Kbd>
+                    Copy<Kbd className="text-dim">{mod}C</Kbd>
                   </Button>
                   <span className="ml-auto flex gap-1">
                     <Button variant="ghost" data-testid="saved-edit" onClick={() => dispatch({ type: "edit", query: selected, focus: "sql" })}>
@@ -344,16 +347,16 @@ function SavedDialog({ entry, close, ref }: { entry: SavedEntry; close: () => vo
       )}
       <div className="flex min-h-10 shrink-0 items-center gap-3 border-t border-control px-4 text-ui-11.5 text-dim">
         <span>
-          <Kbd className="bg-pill">↑↓</Kbd> Navigate
+          <Kbd>↑↓</Kbd> Navigate
         </span>
         <span>
-          <Kbd className="bg-pill">↵</Kbd> {insertable ? "Insert" : "Open"}
+          <Kbd>↵</Kbd> {insertable ? "Insert" : "Open"}
         </span>
         <span>
-          <Kbd className="bg-pill">{mod}↵</Kbd> New tab
+          <Kbd>{mod}↵</Kbd> New tab
         </span>
         <span>
-          <Kbd className="bg-pill">{mod}C</Kbd> Copy
+          <Kbd>{mod}C</Kbd> Copy
         </span>
         <span data-testid="saved-count" role="status" className="ml-auto shrink-0">
           {count}
@@ -370,7 +373,7 @@ function SavedDialog({ entry, close, ref }: { entry: SavedEntry; close: () => vo
           className="flex shrink-0 items-center gap-1.5 rounded px-1 py-1 text-dim outline-none hover:text-fg focus-visible:ring-1 focus-visible:ring-focus disabled:opacity-40"
         >
           <BookmarkPlusIcon size={13} />
-          Save current query<Kbd className="bg-pill">{mac ? "⌘⇧E" : "Ctrl+Shift+E"}</Kbd>
+          Save current query<Kbd>{mac ? "⌘⇧E" : "Ctrl+Shift+E"}</Kbd>
         </button>
       </div>
     </DialogSurface>
@@ -450,10 +453,10 @@ function EditForm({
       ) : (
         <div className="flex shrink-0 items-center gap-2">
           <Button variant="primary" data-testid="saved-edit-save" disabled={edit.saving} onClick={submit}>
-            Save<Kbd className="bg-white/15">{mod}S</Kbd>
+            Save<Kbd tone="accent">{mod}S</Kbd>
           </Button>
           <Button variant="ghost" data-testid="saved-edit-cancel" disabled={edit.saving} onClick={() => dispatch({ type: "escape" })}>
-            Cancel<Kbd className="bg-pill text-dim">esc</Kbd>
+            Cancel<Kbd className="text-dim">esc</Kbd>
           </Button>
         </div>
       )}

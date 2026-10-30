@@ -17,7 +17,7 @@ it("opens a destructive confirm on Cancel, so Enter keeps the data", async () =>
   act(() => {
     answer = confirm({ title: "Delete connection?", body: "This removes prod.", confirmLabel: "Delete" });
   });
-  expect(await screen.findByTestId("confirm-dialog")).toBeTruthy();
+  expect(await screen.findByRole("alertdialog", { name: "Delete connection?" })).toBe(screen.getByTestId("confirm-dialog"));
   expect(document.activeElement).toBe(screen.getByTestId("confirm-cancel"));
 
   await user.keyboard("{Enter}");
@@ -40,4 +40,12 @@ it("still opens on the primary choice when a question has one beside a danger ch
   });
   expect(await screen.findByTestId("ask-dialog")).toBeTruthy();
   expect(document.activeElement).toBe(screen.getByTestId("ask-save"));
+});
+
+it("says a toast through a live region that is mounted before the toast and stays after it", () => {
+  render(<Overlays />);
+  const region = screen.getByRole("status");
+  expect(region.textContent).toBe("");
+  act(() => useWorkspace.getState().notify("Query copied"));
+  expect([screen.getByRole("status"), region.textContent, screen.getByTestId("toast").textContent]).toEqual([region, "Query copied", "Query copied"]);
 });
