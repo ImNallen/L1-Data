@@ -1,6 +1,6 @@
 import * as Dialog from "@radix-ui/react-dialog";
 import { DatabaseIcon, FileTextIcon, SearchIcon, Table2Icon } from "lucide-react";
-import { useEffect, useId, useRef, useState } from "react";
+import { useEffect, useId, useLayoutEffect, useRef, useState } from "react";
 import { useCatalog } from "../../state/catalog";
 import { useLive } from "../../state/live";
 import { useWorkspace } from "../../state/workspace";
@@ -68,7 +68,13 @@ function NavigationBrowser({ activate }: { activate: (item: NavigationItem) => v
       <p id={`${listId}-scope`} data-testid="navigation-scope" className="shrink-0 px-4 py-2 text-ui-11.5 text-dim">
         Open tabs and discovered databases, including hidden databases. Tables and views from loaded catalogs only.
       </p>
-      <div id={listId} role="listbox" aria-label="Destinations" aria-describedby={`${listId}-scope`} className="min-h-0 flex-1 overflow-auto px-2 pb-2">
+      <div
+        id={listId}
+        role="listbox"
+        aria-label="Destinations"
+        aria-describedby={`${listId}-scope`}
+        className="max-h-80 min-h-0 flex-1 overflow-auto px-2 pb-2"
+      >
         {items.map((item, index) => {
           const Icon = item.destination.kind === "database" ? DatabaseIcon : item.destination.kind === "tab" ? FileTextIcon : Table2Icon;
           return (
@@ -125,6 +131,9 @@ export function NavigationPalette() {
   const close = useWorkspace((s) => s.close);
   const opener = useRef<Element | null>(null);
   const activating = useRef(false);
+  useLayoutEffect(() => {
+    if (open) activating.current = false;
+  }, [open]);
   const restoreFocus = () => {
     if (useWorkspace.getState().overlay.kind === "none" && opener.current instanceof HTMLElement && opener.current.isConnected) opener.current.focus();
   };
@@ -134,10 +143,9 @@ export function NavigationPalette() {
         <DialogSurface
           data-testid="navigation-palette"
           aria-describedby={undefined}
-          className="flex h-[560px] w-[760px] flex-col overflow-hidden"
+          className="flex w-[640px] flex-col overflow-hidden"
           onOpenAutoFocus={() => {
             opener.current = document.activeElement;
-            activating.current = false;
           }}
           onEscapeKeyDown={(event) => {
             if (event.isComposing || event.keyCode === 229) event.preventDefault();
