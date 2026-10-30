@@ -54,17 +54,16 @@ test("the first nightly builds on the checked-in version", () => {
   assert.equal(plan.release.previousTag, "");
 });
 
-test("a scheduled run skips when main has no new commits or the last nightly is recent", () => {
-  assert.equal(planRelease(facts({ sha: "c3" }), git()).action, "skip");
-  const recent = facts({ now: new Date("2026-10-22T14:59:00Z") });
-  assert.deepEqual(planRelease(recent, git()), {
+test("a scheduled run skips only when main has no new commits", () => {
+  assert.deepEqual(planRelease(facts({ sha: "c3" }), git()), {
     action: "skip",
-    reason: "v0.1.5-nightly.20261022.9 was published 5.9 h ago, less than 6 h.",
+    reason: "main has no commits since v0.1.5-nightly.20261022.9.",
   });
-  assert.equal(planRelease(facts({ now: new Date("2026-10-22T15:00:00Z") }), git()).action, "publish");
+  const recent = facts({ now: new Date("2026-10-22T10:00:00Z") });
+  assert.equal(planRelease(recent, git()).reason, "main has new commits since v0.1.5-nightly.20261022.9, published 1.0 h ago.");
 });
 
-test("a manual nightly ignores the schedule gate but only runs from main", () => {
+test("a manual nightly ignores the new-commit check but only runs from main", () => {
   const manual = facts({ event: "workflow_dispatch", channel: "nightly", sha: "c3", now: new Date("2026-10-22T10:00:00Z") });
   assert.equal(planRelease(manual, git()).action, "publish");
   assert.throws(() => planRelease({ ...manual, ref: "refs/heads/feature" }, git()), {
