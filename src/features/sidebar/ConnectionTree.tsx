@@ -49,7 +49,7 @@ import { instanceOf, useLive } from "../../state/live";
 import { detailKey, useRelationDetail, type DetailEntry } from "../../state/relationDetail";
 import { connectionTone, type Tone } from "../../state/status";
 import { tabTarget, useWorkspace, type RelationRef } from "../../state/workspace";
-import { ContextMenuItem, ContextMenuSeparator, ContextSubmenu, Highlight, DatabaseBadge, Spinner, StatusDot, cx } from "../../ui/primitives";
+import { ContextMenuItem, ContextMenuSeparator, ContextSubmenu, Highlight, Spinner, StatusDot, cx } from "../../ui/primitives";
 import type { TextRange } from "../../ui/textMatch";
 import { connect, confirmDelete, disconnect, refreshCatalog, refreshConnection } from "../connections/connectionActions";
 import { ConnectionColorDot, EnvironmentIcon, connectionColor } from "../connections/connectionColors";
@@ -690,16 +690,11 @@ function connectionRows(b: Build, news: CatalogNews, config: ConnectionConfig, s
     },
     menu: () => <ConnectionMenu config={config} shown={instance && shown.map((d) => ({ connectionId: config.id, database: d.name }))} />,
     view: (active) => ({
-      icon: (
-        <span className={cx(tone === "off" && "opacity-50 grayscale")}>
-          <DatabaseBadge databaseKind={config.databaseKind} />
-        </span>
-      ),
+      icon: <EnvironmentIcon environment={config.environment} size={15} testId={`env-icon-${config.name}`} />,
       label: (
         <span className="flex min-w-0 items-center">
           <span className={cx("truncate font-medium", tone === "off" && "text-muted")}>{config.name}</span>
           {!tinted && <ConnectionColorDot color={config.color} className="ml-1.5" />}
-          <EnvironmentIcon environment={config.environment} size={13} testId={`env-icon-${config.name}`} className="ml-1.5" />
         </span>
       ),
       trailing: <ConnectionTrailing config={config} tone={tone} instance={instance} target={target} active={active} />,
@@ -789,7 +784,14 @@ export function filteredSchemaNodes(path: string, db: DatabaseRef, match: Filter
 function filteredTree(b: Build, filter: TreeFilter, tinting: boolean) {
   for (const { config, databases } of filter.connections) {
     b.tint = tintOf(config, tinting);
-    foldRow(b, config.name, 0, config.name, <DatabaseBadge databaseKind={config.databaseKind} />, <span className="font-medium">{config.name}</span>);
+    foldRow(
+      b,
+      config.name,
+      0,
+      config.name,
+      <EnvironmentIcon environment={config.environment} size={15} testId={`env-icon-${config.name}`} />,
+      <span className="font-medium">{config.name}</span>,
+    );
     if (!b.expanded.has(config.name)) continue;
     for (const { db, schemas, extensions } of databases) {
       const path = `${config.name}/${db.database}`;
