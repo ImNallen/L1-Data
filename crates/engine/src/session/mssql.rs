@@ -1,3 +1,4 @@
+pub(super) mod import;
 mod catalog;
 mod detail;
 mod map;

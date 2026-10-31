@@ -1,6 +1,7 @@
 mod mssql;
 mod postgres;
 mod stream;
+pub(crate) use mssql::import::{ImportRows, ImportTargetShape, InsertPlan};
 
 use crate::connection::{ConnectParams, DatabaseInfo};
 use crate::model::*;
@@ -63,6 +64,12 @@ pub fn parse_postgres_url(url: &str, name: &str) -> Result<ConnectionDraft, Stri
 }
 
 impl Session {
+    pub async fn import_target(&mut self, target: &ImportTarget) -> Result<ImportTargetShape, QueryError> {
+        match &mut self.driver { Driver::SqlServer(s) => s.import_target(target).await, _ => unreachable!() }
+    }
+    pub async fn import_rows(&mut self, plan: &InsertPlan, chunks: tokio::sync::mpsc::Receiver<Result<ImportRows, ImportError>>, producer: tokio::task::JoinHandle<Result<(), ImportError>>, stop: &std::sync::Arc<std::sync::atomic::AtomicBool>, progress: watch::Sender<(u64, u64)>) -> Result<u64, ImportError> {
+        match &mut self.driver { Driver::SqlServer(s) => s.import_rows(plan, chunks, producer, stop, progress).await, _ => unreachable!() }
+    }
     pub fn database_kind(&self) -> DatabaseKind {
         match &self.driver {
             Driver::Postgres(_) => DatabaseKind::Postgres,
