@@ -2422,6 +2422,7 @@ async fn unicode_escaped_cte_write_requires_production_approval() {
         format!(r#"WITH U&"changed" AS (DELETE FROM public.{table} RETURNING *) SELECT * FROM changed"#),
         format!(r#"WITH U&"ch\0061nged" (n) AS (DELETE FROM public.{table} RETURNING *) SELECT * FROM changed"#),
         format!(r#"WITH U&"ch!0061nged" UESCAPE '!' AS (DELETE FROM public.{table} RETURNING *) SELECT * FROM changed"#),
+        format!("WITH U&\"changed\" UESCAPE '!'\n'' AS (DELETE FROM public.{table} RETURNING *) SELECT * FROM changed"),
         format!(r#"WITH RECURSIVE seed AS (SELECT 1), U&"ch!0061nged" UESCAPE E'!' (n) AS (DELETE FROM public.{table} RETURNING *) SELECT * FROM changed"#),
         format!(r#"WITH U&"source" AS (SELECT 1), later AS (SELECT * FROM source) DELETE FROM public.{table}"#),
         format!("WITH changed AS (DELETE FROM public.{table} RETURNING *) SELECT * FROM changed"),

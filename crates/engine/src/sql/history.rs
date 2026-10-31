@@ -308,7 +308,7 @@ mod tests {
 
     #[test]
     fn escaped_cte_names_preserve_write_classification() {
-        for name in [r#"U&"ch\0061nged""#, r#"u&"ch!0061nged" UESCAPE '!'"#, r#"U&"changed" UESCAPE E'!'"#] {
+        for name in [r#"U&"ch\0061nged""#, r#"u&"ch!0061nged" UESCAPE '!'"#, r#"U&"changed" UESCAPE E'!'"#, "U&\"changed\" UESCAPE '!'\n''"] {
             for columns in ["", "(n)"] {
                 for sql in [
                     format!("WITH {name}{columns} AS (DELETE FROM orders RETURNING n) SELECT * FROM changed"),
