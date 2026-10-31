@@ -3,6 +3,8 @@ mod detail;
 mod map;
 mod source;
 mod values;
+#[cfg(all(test, feature = "mssql-tests"))]
+mod import_tests;
 
 use super::{QueryEvent, QueryStream, error};
 use crate::connection::{CONNECT_TIMEOUT, ConnectParams};
@@ -489,7 +491,7 @@ mod login_tests {
 mod tests {
     use super::*;
 
-    fn params() -> ConnectParams {
+    pub(super) fn params() -> ConnectParams {
         ConnectParams {
             database_kind: DatabaseKind::SqlServer,
             host: std::env::var("L1_DATA_TEST_MSSQL_HOST").unwrap_or_else(|_| "localhost".into()),
