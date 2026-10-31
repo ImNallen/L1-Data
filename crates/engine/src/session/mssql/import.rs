@@ -159,7 +159,7 @@ IF EXISTS (SELECT 1 FROM sys.tables WHERE object_id=@id AND (is_memory_optimized
     THROW 50000, 'CSV import supports ordinary disk-based tables only', 1;
 IF EXISTS (SELECT 1 FROM sys.triggers WHERE parent_id=@id AND is_disabled=0)
     THROW 50000, 'CSV import does not support enabled DML triggers', 1;
-IF EXISTS (SELECT 1 FROM sys.security_predicates p JOIN sys.security_policies s ON s.object_id=p.object_id WHERE p.target_object_id=@id AND s.is_enabled=1)
+IF EXISTS (SELECT 1 FROM sys.security_predicates WHERE target_object_id=@id)
     THROW 50000, 'CSV import does not support row-level security policies', 1;
 IF EXISTS (SELECT 1 FROM sys.indexes WHERE object_id=@id AND ignore_dup_key=1)
     THROW 50000, 'CSV import does not support IGNORE_DUP_KEY indexes', 1;
