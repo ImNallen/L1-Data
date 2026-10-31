@@ -2412,6 +2412,25 @@ async fn count(oracle: &tokio_postgres::Client, table: &str) -> i64 {
 }
 
 #[tokio::test]
+async fn unicode_escaped_cte_write_requires_production_approval() {
+    let mut h = Harness::start().await;
+    let oracle = h.oracle().await;
+    let table = unique("t_unicode_guard");
+    oracle.batch_execute(&format!("create table public.{table} (n int); insert into public.{table} values (7)")).await.unwrap();
+    set_environment(&h, Some(Environment::Production)).await;
+    let tab = h.sql_tab(TxnMode::AutoCommit).await;
+    let sql = format!(r#"WITH U&"changed" AS (DELETE FROM public.{table} RETURNING *) SELECT * FROM changed"#);
+    let result = h.engine.console_run(tab, script(&sql), None).await;
+    if let Ok(accepted) = &result {
+        h.wait_finished(tab, accepted.run_id).await;
+    }
+    let rows = count(&oracle, &table).await;
+    oracle.batch_execute(&format!("drop table public.{table}")).await.unwrap();
+    assert!(matches!(result, Err(RunError::ConfirmWrites { .. })), "expected ConfirmWrites, got {result:?}; stored rows: {rows}");
+    assert_eq!(rows, 1, "unconfirmed work must not delete rows");
+}
+
+#[tokio::test]
 async fn copy_from_on_production_requires_the_exact_statement_digest() {
     let mut h = Harness::start().await;
     let oracle = h.oracle().await;
