@@ -307,6 +307,34 @@ mod tests {
     }
 
     #[test]
+    fn tsql_format_edit_keeps_dml_cursor_and_selection_scope_with_utf16_offsets() {
+        let text = "-- 😀\nSELECT  1;\nGO -- boundary\ninsert dbo.t(id) select id from s; update dbo.t set n=@n where id=1;\nGO\nDELETE FROM t WHERE id=2;\n";
+        let map = OffsetMap::new(text);
+        let start = text.find("insert").unwrap();
+        let end = text.find(";\nGO\n").unwrap() + 1;
+        let expected = "insert dbo.t(id)\nselect id\nfrom s;\nupdate dbo.t\nset n = @n\nwhere id = 1;";
+        for target in [
+            cursor_at(text, "set"),
+            RunTarget::Selection { from: map.to_utf16(start), to: map.to_utf16(end) },
+        ] {
+            let edit = format_edit(text, target, DatabaseKind::SqlServer).unwrap();
+            assert_eq!(edit.from, map.to_utf16(start));
+            assert_eq!(edit.to, map.to_utf16(end));
+            assert_eq!(edit.insert, expected);
+        }
+        let selection = RunTarget::Selection { from: map.to_utf16(start), to: map.to_utf16(text.trim_end().len()) };
+        let edit = format_edit(text, selection, DatabaseKind::SqlServer).unwrap();
+        assert_eq!(edit.from, map.to_utf16(start));
+        assert_eq!(edit.insert, format!("{expected}\nGO\nDELETE FROM t\nWHERE id = 2;"));
+        let edit = format_edit(text, RunTarget::All, DatabaseKind::SqlServer).unwrap();
+        assert_eq!(edit.insert, format!("-- 😀\nSELECT 1;\nGO -- boundary\n{expected}\nGO\nDELETE FROM t\nWHERE id = 2;"));
+        let fragment = RunTarget::Selection { from: map.to_utf16(start + 3), to: map.to_utf16(start + 8) };
+        assert!(matches!(format_edit(text, fragment, DatabaseKind::SqlServer), Err(FormatError::Unsupported)));
+        let unsafe_batch = "UPDATE t SET n=1; SET NOCOUNT ON";
+        assert!(matches!(format_edit(unsafe_batch, cursor_at(unsafe_batch, "UPDATE"), DatabaseKind::SqlServer), Err(FormatError::Unsupported)));
+    }
+
+    #[test]
     fn a_name_is_quoted_only_where_the_bare_word_would_read_differently() {
         let pg = |name| quote_if_needed(DatabaseKind::Postgres, name);
         assert_eq!(
