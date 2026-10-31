@@ -1,4 +1,4 @@
-import { FlaskConicalIcon, MonitorIcon, ShieldAlertIcon, type LucideIcon } from "lucide-react";
+import { DatabaseIcon } from "lucide-react";
 import type { Environment } from "../../ipc/bindings";
 import { cx } from "../../ui/primitives";
 
@@ -28,10 +28,10 @@ export function ConnectionColorDot({ color, className }: { color: string | null;
   return <span aria-hidden className={cx("inline-block size-2 shrink-0 rounded-[2px]", className)} style={{ backgroundColor: hex }} />;
 }
 
-const ENVIRONMENT_ICON: Record<Environment, { Icon: LucideIcon; tone: string } | null> = {
-  Local: { Icon: MonitorIcon, tone: "text-dim" },
-  Staging: { Icon: FlaskConicalIcon, tone: "text-amber" },
-  Production: { Icon: ShieldAlertIcon, tone: "text-danger" },
+const ENVIRONMENT_ICON: Record<Environment, { label: string; tone: string }> = {
+  Local: { label: "Develop", tone: "text-badge" },
+  Staging: { label: "Staging", tone: "text-amber" },
+  Production: { label: "Production", tone: "text-danger" },
 };
 
 export function EnvironmentIcon({
@@ -45,17 +45,16 @@ export function EnvironmentIcon({
   testId?: string;
   className?: string;
 }) {
-  const icon = environment && ENVIRONMENT_ICON[environment];
-  if (!icon) return null;
+  const icon = environment ? ENVIRONMENT_ICON[environment] : { label: "Not set", tone: "text-muted" };
   return (
     <span
       data-testid={testId}
       role="img"
-      aria-label={environment === "Local" ? "Develop" : environment}
-      title={environment === "Local" ? "Develop" : environment}
+      aria-label={icon.label}
+      title={icon.label}
       className={cx("inline-grid shrink-0 place-items-center", icon.tone, className)}
     >
-      <icon.Icon size={size} aria-hidden />
+      <DatabaseIcon size={size} aria-hidden />
     </span>
   );
 }

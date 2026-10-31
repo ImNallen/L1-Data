@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { clearMocks, mockIPC } from "@tauri-apps/api/mocks";
-import { cleanup, render, screen, waitFor } from "@testing-library/react";
+import { cleanup, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeAll, beforeEach, expect, it, vi } from "vitest";
 import { buildCatalogView, useCatalog } from "../../state/catalog";
@@ -171,16 +171,39 @@ it("walks the search results the same way, entered from the search box with Down
   expect(row("prod/shop/public").getAttribute("aria-expanded")).toBe("false");
 });
 
-it("marks Production, Staging and Develop connections in the sidebar", () => {
+it("shows environment-colored database icons for connected, disconnected and filtered connections", async () => {
   useWorkspace.setState({
     configs: {
       p: { ...connectionConfig("p", "prod"), environment: "Production" },
       s: { ...connectionConfig("s", "stage"), environment: "Staging" },
       l: { ...connectionConfig("l", "local"), environment: "Local" },
+      n: connectionConfig("n", "unset"),
     },
   });
   render(<Sidebar hosted={null} />);
-  expect(screen.getByTestId("env-icon-prod").getAttribute("aria-label")).toBe("Production");
-  expect(screen.getByTestId("env-icon-stage").getAttribute("aria-label")).toBe("Staging");
-  expect(screen.getByTestId("env-icon-local").getAttribute("aria-label")).toBe("Develop");
+  for (const { name, label, tone } of [
+    { name: "prod", label: "Production", tone: "text-danger" },
+    { name: "stage", label: "Staging", tone: "text-amber" },
+    { name: "local", label: "Develop", tone: "text-badge" },
+    { name: "unset", label: "Not set", tone: "text-muted" },
+  ]) {
+    const connection = within(row(name));
+    const icon = connection.getByRole("img", { name: label });
+    expect(connection.getAllByRole("img")).toHaveLength(1);
+    expect(icon.title).toBe(label);
+    expect(icon.classList.contains(tone)).toBe(true);
+    expect(icon.querySelector("svg.lucide-database")).not.toBeNull();
+    expect(icon.closest(".grayscale")).toBeNull();
+    expect(connection.queryByText(/^(PG|MS)$/)).toBeNull();
+  }
+
+  const user = userEvent.setup();
+  await user.type(screen.getByTestId("sidebar-search"), "orders");
+  const filtered = within(row("prod"));
+  const icon = filtered.getByRole("img", { name: "Production" });
+  expect(icon.title).toBe("Production");
+  expect(icon.classList.contains("text-danger")).toBe(true);
+  expect(icon.querySelector("svg.lucide-database")).not.toBeNull();
+  expect(filtered.getAllByRole("img")).toHaveLength(1);
+  expect(filtered.queryByText(/^(PG|MS)$/)).toBeNull();
 });
