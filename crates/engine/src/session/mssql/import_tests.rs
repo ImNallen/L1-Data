@@ -107,7 +107,10 @@ async fn import_metadata_refuses_rls_and_indexed_views() {
     let oid = session.count(&format!("SELECT CAST(OBJECT_ID(N'dbo.{table}') AS bigint)")).await.unwrap() as u32;
     let target = ImportTarget { db: DatabaseRef { connection_id: ConnectionId(uuid::Uuid::new_v4()), database: "shop".into() }, schema: "dbo".into(), table: table.clone(), oid };
     session.batch(&format!("CREATE FUNCTION {function}(@n int) RETURNS TABLE WITH SCHEMABINDING AS RETURN SELECT 1 AS allowed WHERE @n>0")).await.unwrap();
-    session.batch(&format!("CREATE SECURITY POLICY {policy} ADD FILTER PREDICATE {function}(n) ON dbo.[{table}] WITH (STATE=ON)")).await.unwrap();
+    session.batch(&format!("CREATE SECURITY POLICY {policy} ADD FILTER PREDICATE {function}(n) ON dbo.[{table}] WITH (STATE=OFF)")).await.unwrap();
+    let disabled = session.import_target(&target).await.err().map(|e| e.message);
+    assert!(disabled.as_ref().is_some_and(|e| e.contains("row-level security")), "expected a row-level security refusal for a disabled policy, got {disabled:?}");
+    session.batch(&format!("ALTER SECURITY POLICY {policy} WITH (STATE=ON)")).await.unwrap();
     assert!(session.import_target(&target).await.err().unwrap().message.contains("row-level security"));
     session.batch(&format!("DROP SECURITY POLICY {policy}; DROP FUNCTION {function}; SET ANSI_NULLS ON; SET QUOTED_IDENTIFIER ON; SET ANSI_PADDING ON; SET ANSI_WARNINGS ON; SET ARITHABORT ON; SET CONCAT_NULL_YIELDS_NULL ON; SET NUMERIC_ROUNDABORT OFF")).await.unwrap();
     session.batch(&format!("CREATE VIEW {view} WITH SCHEMABINDING AS SELECT n FROM dbo.[{table}]")).await.unwrap();
