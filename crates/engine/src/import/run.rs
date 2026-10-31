@@ -6,7 +6,7 @@ use std::sync::{
 
 use tokio::sync::{mpsc, watch};
 
-use super::{Prepared, csv};
+use super::{Prepared, ImportPlan, Execution, csv};
 use crate::{
     Shared,
     console::{Console, STREAM_EMIT_INTERVAL, SessionSlot, Work},
@@ -100,20 +100,20 @@ pub(super) async fn run(
     run_id: RunId,
     mut session: Session,
     stop: Arc<AtomicBool>,
-    prepared: Arc<Prepared>,
-    request: ImportRequest,
-    sql: String,
-    lock: String,
-    identity: String,
-    fence: Fence,
+    plan: Arc<ImportPlan>,
     unasked: bool,
 ) -> Result<ImportSummary, ImportError> {
+    if let Execution::SqlServer(insert) = &plan.execution {
+        return run_mssql(s, console, run_id, session, stop, &plan, insert).await;
+    }
+    let Execution::Postgres { sql, lock, identity, fence } = &plan.execution else { unreachable!() };
+    let prepared = &plan.prepared;
     let backend_pid = session.backend_pid;
     let (tx, rx) = mpsc::channel(4);
     let producer_stop = stop.clone();
-    let source = prepared.clone();
+    let source = plan.clone();
     let producer = s.runtime.spawn_blocking(move || {
-        let result = produce(&source, &request, &producer_stop, &tx);
+        let result = produce(&source.prepared, &source.request, &producer_stop, &tx);
         if let Err(error) = &result {
             let _ = tx.blocking_send(Err(error.clone()));
         }
@@ -298,4 +298,85 @@ pub(super) async fn run(
         rows,
         committed: after == TxnState::Idle,
     })
+}
+
+fn produce_rows(plan: &ImportPlan, max_rows: usize, stop: &AtomicBool, tx: &mpsc::Sender<Result<crate::session::ImportRows, ImportError>>) -> Result<(), ImportError> {
+    let Execution::SqlServer(insert) = &plan.execution else { unreachable!() };
+    let mut parser = csv::Parser::new(File::open(&plan.prepared.snapshot.path).map_err(csv::io)?)?;
+    if plan.request.header { parser.next(stop)?; }
+    let mut chunk = crate::session::ImportRows { rows: Vec::new(), bytes: 0, records: 0, first_record: 0 };
+    let mut size = 0;
+    while let Some(record) = parser.next(stop)? {
+        let row = record.fields.into_iter().zip(&plan.request.mapping).filter_map(|(value, column)| column.as_ref().map(|_| value)).collect::<Vec<_>>();
+        insert.validate_row(&row, record.line, record.number)?;
+        let bytes = row.iter().flatten().map(String::len).sum::<usize>();
+        if !chunk.rows.is_empty() && (chunk.rows.len() == max_rows || size + bytes > 256 * 1024) {
+            let next = crate::session::ImportRows { rows: Vec::new(), bytes: chunk.bytes, records: chunk.records, first_record: 0 };
+            tx.blocking_send(Ok(std::mem::replace(&mut chunk, next))).map_err(|_| ImportError::Cancelled)?;
+            size = 0;
+        }
+        if chunk.rows.is_empty() { chunk.first_record = record.number; }
+        chunk.rows.push(row);
+        chunk.records += 1;
+        chunk.bytes = record.bytes;
+        size += bytes;
+    }
+    tx.blocking_send(Ok(chunk)).map_err(|_| ImportError::Cancelled)?;
+    Ok(())
+}
+
+async fn run_mssql(s: &Arc<Shared>, console: Arc<Console>, run_id: RunId, mut session: Session, stop: Arc<AtomicBool>, plan: &Arc<ImportPlan>, insert: &crate::session::InsertPlan) -> Result<ImportSummary, ImportError> {
+    let backend_pid = session.backend_pid;
+    let (tx, rx) = mpsc::channel(4);
+    let source = plan.clone();
+    let producer_stop = stop.clone();
+    let max_rows = insert.max_rows();
+    let producer = s.runtime.spawn_blocking(move || {
+        let result = produce_rows(&source, max_rows, &producer_stop, &tx);
+        if let Err(error) = &result { let _ = tx.blocking_send(Err(error.clone())); }
+        result
+    });
+    let (progress, changes) = watch::channel((0, 0));
+    let result = {
+        let work = session.import_rows(insert, rx, producer, &stop, progress);
+        tokio::pin!(work);
+        let mut tick = tokio::time::interval(STREAM_EMIT_INTERVAL);
+        loop {
+            tokio::select! {
+                result = &mut work => break result,
+                _ = tick.tick() => {
+                    let (bytes, rows) = *changes.borrow();
+                    if console.edit(s, run_id, |inner| {
+                        if let SessionSlot::Busy { work: Work::Import { progress, .. }, .. } = &mut inner.session {
+                            progress.bytes = bytes; progress.rows = rows;
+                            progress.finishing = rows == progress.total_rows || stop.load(Ordering::Relaxed);
+                        }
+                    }).await.is_err() { stop.store(true, Ordering::Relaxed); }
+                }
+            }
+        }
+    };
+    let lost = session.closed_reason_settled(None).await;
+    let txn = session.observed_txn().unwrap_or(TxnState::Idle);
+    let outcome_unknown = matches!(result, Err(ImportError::OutcomeUnknown { .. }));
+    let returned = console.edit(s, run_id, |inner| {
+        let due = Console::return_session(inner, session, txn, lost);
+        if let SessionSlot::Lost { transaction, .. } = &mut inner.session {
+            *transaction = if outcome_unknown { TransactionLoss::Unknown } else { TransactionLoss::None };
+        }
+        due
+    }).await;
+    let body = match &result {
+        Ok(rows) => OutputBody::Notice { severity: "INFO".into(), message: format!("{rows} rows imported into {}.{} (committed)", plan.prepared.target.schema, plan.prepared.target.table), detail: None },
+        Err(e) => OutputBody::Error { statement: None, error: match e {
+            ImportError::Query { error } | ImportError::OutcomeUnknown { error } => error.clone(),
+            ImportError::Cancelled => crate::session::error("CSV import cancelled; no import rows kept"),
+            _ => crate::session::error(format!("CSV import failed: {e:?}")),
+        } },
+    };
+    if let Ok(due) = returned {
+        console.output(s, run_id, body);
+        if let Some((db, owed)) = due { s.schedule_refreshes(db, owed); }
+    }
+    result.map(|rows| ImportSummary { backend_pid, rows, committed: true })
 }

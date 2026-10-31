@@ -386,7 +386,7 @@ export function importErrorText(error: ImportError): string {
     case "NotConfigured":
       return "Choose a connection for the table tab.";
     case "Unsupported":
-      return "CSV import is available for PostgreSQL tables.";
+      return "CSV import is available for supported PostgreSQL and SQL Server tables.";
     case "Busy":
       return "The table tab is busy. Wait for its current work to finish.";
     case "Gone":

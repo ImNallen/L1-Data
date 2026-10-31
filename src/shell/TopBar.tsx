@@ -255,7 +255,13 @@ export function TopBar({ hosted }: { hosted: HostedWindow | null }) {
         (cancellable ? (
           <Button
             data-testid="cancel-btn"
-            title={sqlServer ? "Cancel resets the SQL Server session. Earlier commits remain committed." : undefined}
+            title={
+              sqlServer
+                ? liveConsole?.work === "Import"
+                  ? "Cancel waits for the active import batch, then rolls back."
+                  : "Cancel resets the SQL Server session. Earlier commits remain committed."
+                : undefined
+            }
             className="w-[104px] justify-center bg-hover"
             onClick={() => cancelActive()}
           >

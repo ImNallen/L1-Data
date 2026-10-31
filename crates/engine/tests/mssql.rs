@@ -1397,3 +1397,6 @@ async fn database_map_pages_declared_neighborhoods() {
     database_map_cases::verify(&h.engine,h.db(),"dbo",&stem,DatabaseKind::SqlServer).await;
     h.ok(&format!("DROP TABLE dbo.{stem}_fan,dbo.{stem}_child; ALTER TABLE dbo.{stem}_root DROP CONSTRAINT {stem}_self_pair; DROP TABLE dbo.{stem}_root,dbo.{stem}_anchor,dbo.{stem}_alone")).await;
 }
+
+#[path = "mssql/import.rs"]
+mod import_tests;

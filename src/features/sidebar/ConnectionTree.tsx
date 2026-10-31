@@ -118,14 +118,13 @@ function ScriptMenuItem({ db, target, label }: { db: DatabaseRef; target: Script
 }
 
 function RelationMenu({ db, schema, rel }: { db: DatabaseRef; schema: string; rel: Relation }) {
-  const kind = useWorkspace((s) => databaseKindFor(db, s.configs));
   return (
     <>
       <ScriptMenuItem db={db} target={{ kind: "Relation", oid: rel.oid }} label="Script as CREATE" />
       <ContextMenuItem testId="tree-menu-database-map" onSelect={() => openDatabaseMap(db, rel.oid)}>
         Explore database map
       </ContextMenuItem>
-      {kind === "Postgres" && (rel.kind === "Table" || rel.kind === "PartitionedTable") && (
+      {(rel.kind === "Table" || rel.kind === "PartitionedTable") && (
         <ContextMenuItem testId="tree-menu-import" onSelect={() => void beginImport({ db, schema, table: rel.name, oid: rel.oid })}>
           Import CSV…
         </ContextMenuItem>

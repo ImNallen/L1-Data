@@ -338,7 +338,7 @@ export function cancelActive(): boolean {
   const id = ws().active;
   if (!id || !canCancel(useLive.getState().consoles[id])) return false;
   queuedPages.delete(id);
-  if (databaseKindFor(tabTarget(ws().tabs[id]), ws().configs) === "SqlServer")
+  if (databaseKindFor(tabTarget(ws().tabs[id]), ws().configs) === "SqlServer" && useLive.getState().consoles[id]?.work !== "Import")
     notify("Cancelling SQL Server resets this session. Earlier commits remain committed; the last transaction outcome may be unknown.");
   void commands.consoleCancel(id);
   return true;

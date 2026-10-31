@@ -206,7 +206,7 @@ pub enum SessionSlot {
         run_id: RunId,
         work: Work,
         backend_pid: i32,
-        cancel: CancelHandle,
+        cancel: Option<CancelHandle>,
         stop: Arc<AtomicBool>,
         session_release: watch::Receiver<Option<String>>,
     },
@@ -319,12 +319,13 @@ impl Console {
             checked.mark_held_writes_asked(&mut inner.unasked);
         }
         let stop = Arc::new(AtomicBool::new(false));
+        let cancel = (!(matches!(work, Work::Import { .. }) && session.database_kind() == DatabaseKind::SqlServer)).then(|| session.cancel_handle());
         inner.session = SessionSlot::Busy {
             opened,
             run_id,
             work,
             backend_pid: session.backend_pid,
-            cancel: session.cancel_handle(),
+            cancel,
             stop: stop.clone(),
             session_release: session.closed_watch(),
         };
@@ -397,7 +398,7 @@ impl Console {
             SessionSlot::Busy { cancel, mut session_release, .. } => {
                 let worker = shared.clone();
                 shared.spawn(async move {
-                    cancel.cancel().await;
+                    if let Some(cancel) = cancel { cancel.cancel().await; }
                     if let Some((db, owed)) = due {
                         while session_release.changed().await.is_ok() {}
                         worker.schedule_refreshes(db, owed);

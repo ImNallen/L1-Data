@@ -1464,7 +1464,7 @@ impl Engine {
             match &inner.session {
                 SessionSlot::Busy { cancel, stop, .. } => {
                     stop.store(true, Ordering::Relaxed);
-                    Some(cancel.clone())
+                    cancel.clone()
                 }
                 _ => None,
             }

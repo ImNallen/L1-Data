@@ -56,6 +56,7 @@ struct Prepared {
     target: ImportTarget,
     columns: Vec<ColumnInfo>,
     relation: String,
+    mssql: Option<crate::session::ImportTargetShape>,
     config: ConsoleConfigView,
     saved: ConnectionConfig,
 }
@@ -220,9 +221,6 @@ pub async fn prepare(
     let saved = s
         .config(config.connection_id)
         .ok_or(ImportError::NotConfigured)?;
-    if saved.database_kind != DatabaseKind::Postgres {
-        return Err(ImportError::Unsupported);
-    }
     if config.db() != target.db {
         return Err(ImportError::TargetChanged);
     }
@@ -269,7 +267,15 @@ pub async fn prepare(
             if !matches!(relation.kind, RelKind::Table | RelKind::PartitionedTable) {
                 return Err(ImportError::Unsupported);
             }
+            let mssql = if saved.database_kind == DatabaseKind::SqlServer {
+                let instance = shared.instance(config.connection_id).ok_or(ImportError::TargetChanged)?;
+                let slot = instance.slot(&target.db.database).ok_or(ImportError::TargetChanged)?;
+                let mut meta = slot.meta.lock().await;
+                let session = shared.session_in(&instance, &slot, &mut meta).await.map_err(|error| ImportError::Connect { error })?;
+                Some(session.import_target(&target).await.map_err(|error| ImportError::Query { error })?)
+            } else { None };
             Ok(Prepared {
+                mssql,
                 snapshot,
                 target,
                 columns: relation
@@ -479,37 +485,48 @@ pub async fn import(
     let SessionSlot::Idle(idle) = &inner.session else {
         return Err(ImportError::Busy);
     };
-    if idle.database_kind() != DatabaseKind::Postgres || !same_server(idle.opened(), &current) {
+    if idle.database_kind() != current.database_kind || !same_server(idle.opened(), &current) {
         return Err(ImportError::TargetChanged);
+    }
+    if current.database_kind == DatabaseKind::SqlServer && (inner.txn != TxnState::Idle || inner.config.mode != TxnMode::AutoCommit) {
+        return Err(ImportError::Query { error: crate::session::error("SQL Server CSV import requires Auto-commit and no open transaction") });
     }
     if !matches!(inner.txn, TxnState::Idle | TxnState::Active) {
         return Err(ImportError::TransactionAborted);
     }
-    let fence = run::Fence::new(inner.txn, inner.config.mode);
-    let names = request
-        .mapping
-        .iter()
-        .flatten()
-        .map(|name| identifier(name))
-        .collect::<Vec<_>>()
-        .join(", ");
-    let sql = format!(
-        "COPY {}.{} ({names}) FROM STDIN WITH (FORMAT csv, ENCODING 'UTF8')",
-        identifier(&prepared.target.schema),
-        identifier(&prepared.target.table)
-    );
-    let qualified = format!(
-        "{}.{}",
-        identifier(&prepared.target.schema),
-        identifier(&prepared.target.table)
-    );
-    let lock = format!("LOCK TABLE {qualified} IN ROW EXCLUSIVE MODE");
-    let relation_name = format!(
-        "{}.{}",
-        crate::text::quote_ident(&prepared.target.schema),
-        crate::text::quote_ident(&prepared.target.table)
-    );
-    let identity = format!("SELECT {}::regclass::oid::bigint", literal(&relation_name));
+    let execution = if let Some(shape) = &prepared.mssql {
+        Execution::SqlServer(crate::session::InsertPlan::new(prepared.target.clone(), shape.clone(), &request.mapping.iter().flatten().map(String::as_str).collect::<Vec<_>>())?)
+    } else {
+        let fence = run::Fence::new(inner.txn, inner.config.mode);
+        let names = request
+            .mapping
+            .iter()
+            .flatten()
+            .map(|name| identifier(name))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let sql = format!(
+            "COPY {}.{} ({names}) FROM STDIN WITH (FORMAT csv, ENCODING 'UTF8')",
+            identifier(&prepared.target.schema),
+            identifier(&prepared.target.table)
+        );
+        let qualified = format!(
+            "{}.{}",
+            identifier(&prepared.target.schema),
+            identifier(&prepared.target.table)
+        );
+        let lock = format!("LOCK TABLE {qualified} IN ROW EXCLUSIVE MODE");
+        let relation_name = format!(
+            "{}.{}",
+            crate::text::quote_ident(&prepared.target.schema),
+            crate::text::quote_ident(&prepared.target.table)
+        );
+        let identity = format!("SELECT {}::regclass::oid::bigint", literal(&relation_name));
+        Execution::Postgres { sql, lock, identity, fence }
+    };
+    let plan = Arc::new(ImportPlan { prepared, request, execution });
+    let prepared = &plan.prepared;
+    let request = &plan.request;
     let bound = serde_json::to_string(&(
         csv::VERSION,
         &request,
@@ -527,10 +544,11 @@ pub async fn import(
         txn: inner.txn,
         unasked: &inner.unasked,
     };
+    let descriptor = plan.descriptor();
     let checked = crate::writes::check_import(
         &target,
-        &sql,
-        &fence.statements(&lock, &identity, &sql),
+        plan.display(),
+        &descriptor.iter().map(String::as_str).collect::<Vec<_>>(),
         &bound,
         confirmed.as_ref(),
     )
@@ -563,11 +581,31 @@ pub async fn import(
     let shared = s.clone();
     s.spawn(async move {
         let result = run::run(
-            &shared, console, run_id, session, stop, prepared, request, sql, lock, identity, fence,
-            unasked,
+            &shared, console, run_id, session, stop, plan, unasked,
         )
         .await;
         let _ = tx.send(result);
     });
     rx.await.unwrap_or(Err(ImportError::Gone))
+}
+
+struct ImportPlan {
+    prepared: Arc<Prepared>,
+    request: ImportRequest,
+    execution: Execution,
+}
+enum Execution {
+    Postgres { sql: String, lock: String, identity: String, fence: run::Fence },
+    SqlServer(crate::session::InsertPlan),
+}
+impl ImportPlan {
+    fn display(&self) -> &str {
+        match &self.execution { Execution::Postgres { sql, .. } => sql, Execution::SqlServer(plan) => plan.display() }
+    }
+    fn descriptor(&self) -> Vec<String> {
+        match &self.execution {
+            Execution::Postgres { sql, lock, identity, fence } => fence.statements(lock, identity, sql).into_iter().map(str::to_owned).collect(),
+            Execution::SqlServer(plan) => vec![plan.descriptor()],
+        }
+    }
 }
