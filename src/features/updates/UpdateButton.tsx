@@ -100,7 +100,7 @@ export function UpdateButton() {
           aria-label={view.label}
           aria-disabled={action === null}
           title={card ? undefined : view.tooltip}
-          className="relative ml-auto rounded-full aria-disabled:cursor-default aria-disabled:hover:bg-transparent"
+          className="size-[34px] shrink-0 relative ml-auto rounded-full aria-disabled:cursor-default aria-disabled:hover:bg-transparent"
           onClick={() => action && runUpdateAction(action)}
         >
           <Glyph view={view} />
