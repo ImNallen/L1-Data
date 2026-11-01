@@ -1,11 +1,15 @@
+use std::collections::VecDeque;
+
 use serde::Serialize;
 use sha2::{Digest, Sha256};
 
 use crate::model::{ConnectionConfig, ConsoleConfigView, DatabaseKind, Environment, ExecutionUnitKind, TxnState, WriteConfirmation, WriteDigest, WriteList};
+use crate::sql::{self, StmtKind};
 use crate::text;
 
 const SHOWN: usize = 3;
 const SHOWN_CHARS: usize = 2000;
+const PROVEN: usize = 32;
 
 #[derive(Serialize)]
 pub struct Target<'a> {
@@ -34,6 +38,37 @@ impl WritesChecked {
     }
 }
 
+/// Which statements of a run go inside a server-enforced read-only fence. Only `check_run` builds one.
+#[derive(Debug)]
+pub struct ReadOnly(Box<[bool]>);
+
+impl ReadOnly {
+    pub fn covers(&self, index: usize) -> bool {
+        self.0.get(index).copied().unwrap_or(false)
+    }
+}
+
+/// Statement texts a read-only fence on this tab refused as writes, newest last.
+#[derive(Debug, Default)]
+pub struct Proven(VecDeque<String>);
+
+impl Proven {
+    pub fn add(&mut self, sql: &str) {
+        if self.contains(sql) {
+            return;
+        }
+        if self.0.len() == PROVEN {
+            self.0.pop_front();
+        }
+        self.0.push_back(sql.trim().to_owned());
+    }
+
+    pub fn contains(&self, sql: &str) -> bool {
+        let sql = sql.trim();
+        self.0.iter().any(|proven| proven == sql)
+    }
+}
+
 impl WriteList {
     pub fn add(&mut self, sql: &str) {
         if self.statements.len() < SHOWN {
@@ -48,7 +83,7 @@ impl Target<'_> {
         [self.saved, self.opened].iter().any(|c| c.environment == Some(Environment::Production))
     }
 
-    fn digest(&self, work: &[&str]) -> WriteDigest {
+    fn digest(&self, work: impl Serialize) -> WriteDigest {
         let mut hasher = Sha256::new();
         serde_json::to_writer(&mut hasher, &(self, work)).expect("model types serialize to JSON");
         WriteDigest::new(format!("{:x}", hasher.finalize()))
@@ -73,23 +108,46 @@ pub(crate) fn ask(target: &Target, shown: &[&str], bound: &[&str], confirmed: Op
     Err(confirmation(target, sends, digest))
 }
 
+pub fn check(target: &Target, statements: &[&str], confirmed: Option<&WriteDigest>) -> Result<WritesChecked, WriteConfirmation> {
+    check_run(target, statements, &Proven::default(), confirmed).map(|(checked, _)| checked)
+}
+
 /// Held writes make any work ask, because a batch can commit them in forms the classifier cannot see, such as
 /// `IF @@TRANCOUNT > 0 COMMIT` or `PREPARE TRANSACTION` followed by `COMMIT PREPARED` from another session.
-pub fn check(target: &Target, statements: &[&str], confirmed: Option<&WriteDigest>) -> Result<WritesChecked, WriteConfirmation> {
-    if !target.on_production() {
-        return Ok(admit(target, true));
-    }
+///
+/// On Production PostgreSQL every other query runs read-only, so a write the classifier misses, such as a
+/// function with side effects, fails instead of writing. The digest binds which statements count as writes,
+/// so a digest issued before a statement was proven a write cannot run it unasked.
+pub fn check_run(target: &Target, statements: &[&str], proven: &Proven, confirmed: Option<&WriteDigest>) -> Result<(WritesChecked, ReadOnly), WriteConfirmation> {
     let kind = target.saved.database_kind;
-    let mut sends = WriteList::default();
-    statements.iter().filter(|sql| text::is_write(sql, kind)).for_each(|sql| sends.add(sql));
-    if sends.count == 0 && target.unasked.count == 0 {
-        return Ok(WritesChecked { on_production: true, consumes_hold: true });
+    let on_production = target.on_production();
+    let writes: Vec<bool> = statements.iter().map(|sql| text::is_write(sql, kind) || proven.contains(sql)).collect();
+    let fenced = statements.iter().zip(&writes).map(|(sql, &write)| on_production && kind == DatabaseKind::Postgres && !write && reads(sql)).collect();
+    let read_only = ReadOnly(fenced);
+    if !on_production {
+        return Ok((admit(target, true), read_only));
     }
-    let digest = target.digest(statements);
+    let mut sends = WriteList::default();
+    statements.iter().zip(&writes).filter(|(_, write)| **write).for_each(|(sql, _)| sends.add(sql));
+    let asked = WritesChecked { on_production: true, consumes_hold: true };
+    if sends.count == 0 && target.unasked.count == 0 {
+        return Ok((asked, read_only));
+    }
+    let digest = target.digest((statements, &writes));
     if confirmed == Some(&digest) {
-        return Ok(WritesChecked { on_production: true, consumes_hold: true });
+        return Ok((asked, read_only));
     }
     Err(confirmation(target, sends, digest))
+}
+
+/// A query, or the `COPY ... TO` form, since `COPY ... FROM` already counts as a write. Other statements change
+/// session state that the fence's `ROLLBACK TO` would silently undo.
+fn reads(statement: &str) -> bool {
+    match sql::classify(statement) {
+        StmtKind::Query => true,
+        StmtKind::Other(verb) => verb == "COPY",
+        _ => false,
+    }
 }
 
 pub fn check_import(target: &Target, copy: &str, statements: &[&str], descriptor: &str, confirmed: Option<&WriteDigest>) -> Result<WritesChecked, WriteConfirmation> {
@@ -263,6 +321,63 @@ mod tests {
         assert_eq!(unasked.count, 1);
         admit(&target, true).mark_held_writes_asked(&mut unasked);
         assert_eq!(unasked.count, 0);
+    }
+
+    fn fenced(target: &Target, statements: &[&str]) -> Vec<bool> {
+        let (_, read_only) = check_run(target, statements, &Proven::default(), None).unwrap();
+        (0..statements.len()).map(|i| read_only.covers(i)).collect()
+    }
+
+    #[test]
+    fn only_reads_on_production_postgres_run_read_only() {
+        let production = connection(Some(Environment::Production));
+        let auto = console(TxnMode::AutoCommit);
+        let reads = ["select f()", "with x as (select 1) select * from x", "show work_mem", "copy t to '/tmp/t.csv'", "copy (select f()) to program 'cat'"];
+        assert_eq!(fenced(&on(&production, &auto), &reads), [true; 5]);
+        let others = [
+            "begin", "commit", "rollback to s", "savepoint s", "release s", "set work_mem = '7MB'", "reset all", "declare c cursor for select 1",
+            "close c", "move c", "listen x", "notify x", "prepare p as select 1", "deallocate p", "lock table t", "discard plans",
+        ];
+        assert_eq!(fenced(&on(&production, &auto), &others), [false; 16]);
+        let asked = check(&on(&production, &auto), WORK, None).unwrap_err();
+        let (_, read_only) = check_run(&on(&production, &auto), WORK, &Proven::default(), Some(&asked.digest)).unwrap();
+        assert_eq!((0..3).map(|i| read_only.covers(i)).collect::<Vec<_>>(), [true, false, false], "confirmed writes run as they are");
+
+        for environment in [None, Some(Environment::Local), Some(Environment::Staging)] {
+            assert_eq!(fenced(&on(&connection(environment), &auto), &reads), [false; 5], "{environment:?}");
+        }
+        let sql_server = ConnectionConfig { database_kind: DatabaseKind::SqlServer, ..production.clone() };
+        assert_eq!(fenced(&on(&sql_server, &auto), &["SELECT 1", "SELECT dbo.f()"]), [false; 2]);
+    }
+
+    #[test]
+    fn a_proven_read_asks_and_its_old_digest_stops_working() {
+        let production = connection(Some(Environment::Production));
+        let auto = console(TxnMode::AutoCommit);
+        let work = ["insert into t values (1)", "select purge()"];
+        let mut proven = Proven::default();
+        let before = check_run(&on(&production, &auto), &work, &proven, None).unwrap_err();
+        assert_eq!(shape(&before.sends), (1, vec!["insert into t values (1)"]));
+
+        proven.add("  select purge()\n");
+        let after = check_run(&on(&production, &auto), &work, &proven, Some(&before.digest)).unwrap_err();
+        assert_eq!(shape(&after.sends), (2, vec!["insert into t values (1)", "select purge()"]), "the proven read is listed");
+        assert_ne!(after.digest, before.digest);
+        let (_, read_only) = check_run(&on(&production, &auto), &work, &proven, Some(&after.digest)).unwrap();
+        assert!(!read_only.covers(1), "a confirmed proven write runs unfenced");
+        assert!(check_run(&on(&production, &auto), &["select purge()"], &proven, None).is_err(), "it asks on its own too");
+        assert!(check_run(&on(&connection(Some(Environment::Local)), &auto), &["select purge()"], &proven, None).is_ok(), "off Production nothing asks");
+    }
+
+    #[test]
+    fn proven_keeps_the_newest_distinct_texts() {
+        let mut proven = Proven::default();
+        proven.add("select f(0)");
+        proven.add(" select f(0)\n");
+        assert_eq!(proven.0.len(), 1, "a repeat adds nothing");
+        (1..=PROVEN).for_each(|i| proven.add(&format!("select f({i})")));
+        assert!(!proven.contains("select f(0)"), "the oldest fell out");
+        assert!(proven.contains(" select f(1) ") && proven.contains(&format!("select f({PROVEN})")));
     }
 
     #[test]

@@ -1428,7 +1428,8 @@ impl Engine {
             s.spawn(explain::run(console.clone(), s.clone(), launch));
             return Ok(RunAccepted { run_id, statements: ranges });
         }
-        let checked = match writes::check(&target, &sent, confirmed.as_ref()) {
+        debug_assert_eq!(sent.len(), statements.len(), "the fence bits index the planned statements");
+        let (checked, read_only) = match writes::check_run(&target, &sent, &inner.proven, confirmed.as_ref()) {
             Ok(checked) => checked,
             Err(confirmation) => {
                 console.publish(&mut inner, s);
@@ -1452,7 +1453,7 @@ impl Engine {
         console.publish(&mut inner, s);
         drop(inner);
 
-        let plan = RunPlan { run_id, text, statements, txn, schema: config.schema.clone(), database: config.database.clone(), connection, page, writes_stay_unasked };
+        let plan = RunPlan { run_id, text, statements, txn, schema: config.schema.clone(), database: config.database.clone(), connection, page, writes_stay_unasked, read_only };
         s.spawn(console::run_task(console.clone(), s.clone(), session, plan, stop));
         Ok(RunAccepted { run_id, statements: ranges })
     }
