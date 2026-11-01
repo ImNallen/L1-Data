@@ -2464,6 +2464,266 @@ async fn unicode_escaped_cte_write_requires_production_approval() {
 }
 
 #[tokio::test]
+async fn recursive_cte_search_and_cycle_writes_require_production_approval() {
+    let mut h = Harness::start().await;
+    let oracle = h.oracle().await;
+    let table = unique("t_search_cycle_guard");
+    oracle.batch_execute(&format!("create table public.{table} (n int); insert into public.{table} values (7)")).await.unwrap();
+    set_environment(&h, Some(Environment::Production)).await;
+    let source = r#"WITH RECURSIVE U&"source"(n) AS (SELECT 1 UNION ALL SELECT n + 1 FROM source WHERE n < 2)"#;
+    let queries = [
+        format!("{source} SEARCH DEPTH FIRST BY n SET seq DELETE FROM public.{table}"),
+        format!("{source} SEARCH BREADTH FIRST BY n SET seq DELETE FROM public.{table}"),
+        format!("{source} CYCLE n SET cyc USING path DELETE FROM public.{table}"),
+        format!("{source} CYCLE n SET cyc TO true DEFAULT false USING path DELETE FROM public.{table}"),
+        format!("{source} SEARCH DEPTH FIRST BY n SET seq CYCLE n SET cyc USING path DELETE FROM public.{table}"),
+        format!("{source} SEARCH DEPTH FIRST BY n SET seq, later AS (SELECT 1) DELETE FROM public.{table}"),
+        format!("COPY ({source} SEARCH DEPTH FIRST BY n SET seq DELETE FROM public.{table} RETURNING *) TO PROGRAM 'cat > /dev/null'"),
+    ];
+    for sql in queries {
+        for mode in [TxnMode::AutoCommit, TxnMode::Manual] {
+            let tab = h.sql_tab(mode).await;
+            let history = h.history_len();
+            let asked = match h.engine.console_run(tab, script(&sql), None).await {
+                Err(RunError::ConfirmWrites { confirmation }) => confirmation,
+                other => {
+                    if let Ok(accepted) = &other {
+                        h.wait_finished(tab, accepted.run_id).await;
+                    }
+                    let rows = count(&oracle, &table).await;
+                    oracle.batch_execute(&format!("drop table public.{table}")).await.unwrap();
+                    panic!("{mode:?} {sql}: expected ConfirmWrites, got {other:?}; stored rows: {rows}");
+                }
+            };
+            assert_eq!((asked.sends.count, asked.sends.statements.as_slice()), (1, [sql.clone()].as_slice()));
+            assert_eq!(count(&oracle, &table).await, 1, "unconfirmed SQL must not delete rows");
+            assert_eq!(h.history_len(), history, "unconfirmed SQL records no history");
+
+            let accepted = h.engine.console_run(tab, script(&sql), Some(asked.digest)).await.unwrap();
+            let state = h.wait_finished(tab, accepted.run_id).await;
+            assert!(matches!(state.run, RunState::Finished { outcome: RunOutcome::Ok, .. }), "{mode:?} {sql}: {:?}", state.run);
+            if mode == TxnMode::Manual {
+                h.engine.console_commit(tab, None).await.expect("a confirmed write commits without a second question");
+            }
+            assert_eq!(count(&oracle, &table).await, 0, "{mode:?} {sql}: exact confirmed SQL deletes the row");
+            oracle.batch_execute(&format!("insert into public.{table} values (7)")).await.unwrap();
+        }
+    }
+    let tab = h.sql_tab(TxnMode::AutoCommit).await;
+    for sql in [
+        format!("{source} SEARCH DEPTH FIRST BY n SET seq SELECT * FROM source"),
+        format!("{source} CYCLE n SET cyc USING path SELECT * FROM source"),
+        format!(r#"{source} SEARCH DEPTH FIRST BY n SET "DELETE" SELECT 'UPDATE', $$INSERT INTO t$$ FROM source"#),
+    ] {
+        h.run_ok(tab, &sql).await;
+    }
+    assert_eq!(count(&oracle, &table).await, 1);
+    oracle.batch_execute(&format!("drop table public.{table}")).await.unwrap();
+}
+
+#[tokio::test]
+async fn a_read_that_writes_through_a_function_changes_nothing_on_production() {
+    let mut h = Harness::start().await;
+    let oracle = h.oracle().await;
+    let table = unique("t_fenced");
+    let purge = unique("purge");
+    oracle
+        .batch_execute(&format!(
+            "create table public.{table} (n int); insert into public.{table} values (7);
+             create function public.{purge}() returns bigint language sql as $$ with gone as (delete from public.{table} returning 1) select count(*) from gone $$"
+        ))
+        .await
+        .unwrap();
+    set_environment(&h, Some(Environment::Production)).await;
+    let sql = format!("select public.{purge}()");
+    for mode in [TxnMode::AutoCommit, TxnMode::Manual] {
+        let tab = h.sql_tab(mode).await;
+        if mode == TxnMode::Manual {
+            h.run_ok(tab, "select 1").await;
+        }
+        let accepted = h.engine.console_run(tab, script(&sql), None).await.expect("the classifier reads a function call as a read");
+        let state = h.wait_finished(tab, accepted.run_id).await;
+        assert!(matches!(state.run, RunState::Finished { outcome: RunOutcome::Failed, .. }), "{mode:?}: {:?}", state.run);
+        assert_eq!(count(&oracle, &table).await, 1, "{mode:?}: a read on Production cannot write");
+        assert_eq!(h.scalar(tab, "select 2").await, "2", "{mode:?}: the session stays usable");
+        if mode == TxnMode::Manual {
+            h.engine.console_rollback(tab).await.unwrap();
+        }
+    }
+    oracle.batch_execute(&format!("drop function public.{purge}(); drop table public.{table}")).await.unwrap();
+}
+
+const REFUSED_READ: &str = "Production: this statement tried to write, so it ran read-only and nothing changed. Run it again to confirm the write.";
+
+/// A table holding one row and a function that deletes every row of it, which the classifier reads as a query.
+async fn purge_fixture(oracle: &tokio_postgres::Client, name: &str) -> (String, String) {
+    let table = unique(&format!("t_{name}"));
+    let purge = unique("purge");
+    oracle
+        .batch_execute(&format!(
+            "create table public.{table} (n int); insert into public.{table} values (7);
+             create function public.{purge}() returns bigint language sql as $$ with gone as (delete from public.{table} returning 1) select count(*) from gone $$"
+        ))
+        .await
+        .unwrap();
+    (table, purge)
+}
+
+async fn run_confirmed(h: &mut Harness, tab: TabId, sql: &str, digest: &WriteDigest) -> ConsoleState {
+    let accepted = h.engine.console_run(tab, script(sql), Some(digest.clone())).await.unwrap();
+    h.wait_finished(tab, accepted.run_id).await
+}
+
+fn outcome(state: &ConsoleState) -> RunOutcome {
+    match &state.run {
+        RunState::Finished { outcome, .. } => *outcome,
+        other => panic!("not finished: {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn a_read_refused_as_a_write_asks_before_it_runs_again() {
+    let mut h = Harness::start().await;
+    let oracle = h.oracle().await;
+    let (table, purge) = purge_fixture(&oracle, "proven").await;
+    set_environment(&h, Some(Environment::Production)).await;
+    let tab = h.sql_tab(TxnMode::AutoCommit).await;
+    let insert = format!("insert into public.{table} values (8)");
+    let read = format!("select public.{purge}()");
+    let batch = format!("{insert};\n{read}");
+
+    let before = asked_to_run(&h, tab, script(&batch), None).await;
+    assert_eq!(before.sends.statements, [insert.as_str()], "the classifier lists only the insert");
+    let state = run_confirmed(&mut h, tab, &batch, &before.digest).await;
+    assert_eq!(outcome(&state), RunOutcome::Failed);
+    assert_eq!(count(&oracle, &table).await, 2, "the confirmed insert committed and the function deleted nothing");
+    let log = h.log(tab);
+    let refused = log.iter().position(|line| line == REFUSED_READ).unwrap_or_else(|| panic!("{log:?}"));
+    assert!(log[refused - 1].starts_with("Some(1) ERROR: "), "the explanation follows the error: {log:?}");
+    assert_eq!(h.console(tab).txn, TxnState::Idle);
+
+    let stale = asked_to_run(&h, tab, script(&batch), Some(&before.digest)).await;
+    assert_eq!(stale.sends.statements, [insert.as_str(), read.as_str()], "the refused read now counts as a write");
+    assert_ne!(stale.digest, before.digest);
+    let alone = asked_to_run(&h, tab, script(&read), None).await;
+    assert_eq!(alone.sends.statements, [read.as_str()]);
+    assert_eq!(count(&oracle, &table).await, 2, "neither question sent anything");
+
+    let state = run_confirmed(&mut h, tab, &read, &alone.digest).await;
+    assert_eq!(outcome(&state), RunOutcome::Ok, "{:?}", state.run);
+    assert_eq!(count(&oracle, &table).await, 0, "the confirmed function call deleted the rows");
+    oracle.batch_execute(&format!("drop function public.{purge}(); drop table public.{table}")).await.unwrap();
+}
+
+#[tokio::test]
+async fn nextval_on_production_fails_read_only_then_advances_once_when_confirmed() {
+    let mut h = Harness::start().await;
+    let oracle = h.oracle().await;
+    let seq = unique("s_fenced");
+    oracle.batch_execute(&format!("create sequence public.{seq}")).await.unwrap();
+    let position = async |oracle: &tokio_postgres::Client| -> (i64, bool) {
+        let row = oracle.query_one(&format!("select last_value, is_called from public.{seq}"), &[]).await.unwrap();
+        (row.get(0), row.get(1))
+    };
+    set_environment(&h, Some(Environment::Production)).await;
+    let tab = h.sql_tab(TxnMode::AutoCommit).await;
+    let sql = format!("select nextval('public.{seq}')");
+
+    let state = h.run(tab, &sql).await;
+    assert_eq!(outcome(&state), RunOutcome::Failed);
+    assert_eq!(position(&oracle).await, (1, false), "the sequence did not advance");
+    let asked = asked_to_run(&h, tab, script(&sql), None).await;
+    assert_eq!(asked.sends.statements, [sql.as_str()]);
+    let state = run_confirmed(&mut h, tab, &sql, &asked.digest).await;
+    assert_eq!(h.page(&Harness::result(&state, 0), 0, 1)[0][0].as_deref(), Some("1"));
+    assert_eq!(position(&oracle).await, (1, true), "the confirmed run advanced it once");
+    oracle.batch_execute(&format!("drop sequence public.{seq}")).await.unwrap();
+}
+
+#[tokio::test]
+async fn a_refused_read_in_a_manual_transaction_keeps_the_transaction_and_its_writes() {
+    let mut h = Harness::start().await;
+    let oracle = h.oracle().await;
+    let (table, purge) = purge_fixture(&oracle, "manual_fence").await;
+    set_environment(&h, Some(Environment::Production)).await;
+    let tab = h.sql_tab(TxnMode::Manual).await;
+    let insert = format!("insert into public.{table} values (8)");
+    let asked = asked_to_run(&h, tab, script(&insert), None).await;
+    assert_eq!(outcome(&run_confirmed(&mut h, tab, &insert, &asked.digest).await), RunOutcome::Ok);
+
+    let state = h.run(tab, &format!("select public.{purge}()")).await;
+    assert_eq!(outcome(&state), RunOutcome::Failed);
+    assert_eq!(state.txn, TxnState::Active, "the refused read did not abort the transaction");
+    assert!(h.log(tab).iter().any(|line| line == REFUSED_READ));
+    assert_eq!(h.scalar(tab, &format!("select count(*) from public.{table}")).await, "2", "the transaction still sees its insert");
+
+    h.engine.console_commit(tab, None).await.expect("the confirmed insert commits without another question");
+    let rows: Vec<i32> = oracle.query(&format!("select n from public.{table} order by n"), &[]).await.unwrap().iter().map(|r| r.get(0)).collect();
+    assert_eq!(rows, [7, 8], "the commit kept the insert and the function's delete never happened");
+    oracle.batch_execute(&format!("drop function public.{purge}(); drop table public.{table}")).await.unwrap();
+}
+
+#[tokio::test]
+async fn fenced_reads_on_production_keep_session_settings_and_return_rows() {
+    let mut h = Harness::start().await;
+    set_environment(&h, Some(Environment::Production)).await;
+
+    let manual = h.sql_tab(TxnMode::Manual).await;
+    h.run_ok(manual, "SET work_mem = '7MB'").await;
+    assert_eq!(h.scalar(manual, "SHOW work_mem").await, "7MB");
+    assert_ne!(h.scalar(manual, "select count(*) from customers").await, "0");
+    assert_eq!(h.console(manual).txn, TxnState::Active);
+    h.engine.console_rollback(manual).await.unwrap();
+
+    let auto = h.sql_tab(TxnMode::AutoCommit).await;
+    let name = unique("fenced_app");
+    h.run_ok(auto, &format!("select set_config('application_name', '{name}', false)")).await;
+    assert_eq!(h.scalar(auto, "show application_name").await, name, "a setting the read changed persists to the next run");
+    assert_ne!(h.scalar(auto, "select count(*) from customers").await, "0");
+    assert_eq!(h.console(auto).txn, TxnState::Idle);
+
+    let page = h.engine.console_run(auto, RunRequest::TablePage { schema: "public".into(), table: "customers".into(), page: 0, query: TableQuery::default() }, None).await.unwrap();
+    let state = h.wait_finished(auto, page.run_id).await;
+    assert!(Harness::result(&state, 0).row_count > 0, "a Production table page still returns rows");
+}
+
+#[tokio::test]
+async fn cancelling_a_fenced_read_leaves_the_transaction_as_it_was() {
+    let mut h = Harness::start().await;
+    let oracle = h.oracle().await;
+    set_environment(&h, Some(Environment::Production)).await;
+    for (mode, entered, server) in [(TxnMode::AutoCommit, TxnState::Idle, "idle"), (TxnMode::Manual, TxnState::Active, "idle in transaction")] {
+        let tab = h.sql_tab(mode).await;
+        h.run_ok(tab, "select 1").await;
+        let accepted = h.start_run(tab, "select pg_sleep(30)").await;
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        h.engine.console_cancel(tab).await;
+        let state = h.wait_finished(tab, accepted.run_id).await;
+        assert_eq!(outcome(&state), RunOutcome::Cancelled, "{mode:?}");
+        assert_eq!(state.txn, entered, "{mode:?}");
+        let SessionState::Open { backend_pid } = state.session else { panic!("{mode:?}: {:?}", state.session) };
+        let row = oracle.query_one("select state from pg_stat_activity where pid = $1", &[&backend_pid]).await.unwrap();
+        assert_eq!(row.get::<_, String>(0), server, "{mode:?}: the fence closed");
+        assert_eq!(h.scalar(tab, "select 2").await, "2", "{mode:?}: the next run works");
+        if mode == TxnMode::Manual {
+            h.engine.console_rollback(tab).await.unwrap();
+        }
+    }
+}
+
+#[tokio::test]
+async fn off_production_a_function_read_still_writes() {
+    let mut h = Harness::start().await;
+    let oracle = h.oracle().await;
+    let (table, purge) = purge_fixture(&oracle, "unfenced").await;
+    set_environment(&h, Some(Environment::Local)).await;
+    let tab = h.sql_tab(TxnMode::AutoCommit).await;
+    assert_eq!(h.scalar(tab, &format!("select public.{purge}()")).await, "1");
+    assert_eq!(count(&oracle, &table).await, 0, "only Production runs reads read-only");
+    oracle.batch_execute(&format!("drop function public.{purge}(); drop table public.{table}")).await.unwrap();
+}
+
+#[tokio::test]
 async fn copy_from_on_production_requires_the_exact_statement_digest() {
     let mut h = Harness::start().await;
     let oracle = h.oracle().await;

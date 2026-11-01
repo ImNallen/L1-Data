@@ -13,7 +13,7 @@ use crate::sql::{Invalidates, StmtKind, StmtSpan};
 use crate::store::HistoryInsert;
 use crate::text::synthesize_tag;
 use crate::txn::{StmtOutcome, TransactionPlan, txn_after};
-use crate::writes::WritesChecked;
+use crate::writes::{self, ReadOnly, WritesChecked};
 
 pub(crate) const STREAM_EMIT_INTERVAL: Duration = Duration::from_millis(100);
 const OUTPUT_COALESCE: Duration = Duration::from_millis(5);
@@ -68,6 +68,8 @@ pub struct ConsoleInner {
     pub txn: TxnState,
     pub txn_depth: Option<u32>,
     pub unasked: WriteList,
+    /// Outlives the session, so a statement a fence refused keeps asking on this tab.
+    pub proven: writes::Proven,
     pub run: RunState,
     pub rev: u64,
     refreshes: Option<PendingRefreshes>,
@@ -229,6 +231,7 @@ impl Console {
             txn: TxnState::Idle,
             txn_depth: None,
             unasked: WriteList::default(),
+            proven: writes::Proven::default(),
             run: RunState::Idle,
             rev: 0,
             refreshes: None,
@@ -431,6 +434,7 @@ pub struct RunPlan {
     pub connection: ConnectionConfig,
     pub page: Option<TablePage>,
     pub writes_stay_unasked: bool,
+    pub read_only: ReadOnly,
 }
 
 pub struct TablePage {
@@ -568,6 +572,7 @@ pub async fn run_task(console: Arc<Console>, shared: Arc<Shared>, mut session: S
                 }
             }
         }
+        let fence = if plan.read_only.covers(index) { ReadFence::of(txn) } else { None };
         console.output(&shared, run_id, statement_line(i, sql));
         console.edit(&shared, run_id, |inner| {
             if plan.connection.database_kind == DatabaseKind::SqlServer {
@@ -576,7 +581,14 @@ pub async fn run_task(console: Arc<Console>, shared: Arc<Shared>, mut session: S
             Console::statements_mut(inner)[index].status = StmtStatus::Preparing;
         }).await?;
         let unit_started = Instant::now();
-        let ran = run_outputs(&console, &shared, &mut session, &plan, index, &caps, &stop).await?;
+        let opened = match fence {
+            Some(fence) => session.batch(fence.open()).await.map(|()| Some(fence)),
+            None => Ok(None),
+        };
+        let (fence, ran) = match opened {
+            Ok(fence) => (fence, run_outputs(&console, &shared, &mut session, &plan, index, &caps, &stop).await?),
+            Err(error) => (None, Err(Failed { error, logged: false })),
+        };
         let logged = matches!(ran, Err(Failed { logged: true, .. }));
         let result = ran.map_err(|failed| failed.error);
         let cancelled = stop.load(Ordering::Relaxed) && result.is_err();
@@ -586,7 +598,16 @@ pub async fn run_task(console: Arc<Console>, shared: Arc<Shared>, mut session: S
         });
         if let Err(e) = &result { if e.severity == "FATAL" { fatal = Some(e.message.clone()); } }
         let finished = if result.is_ok() { StmtOutcome::Ok } else { StmtOutcome::Err };
-        txn = session.observed_txn().unwrap_or_else(|| txn_after(txn, &stmt.kind, finished));
+        // A cancel still closes the fence, or the session would stay inside it.
+        if let Some(fence) = fence && fatal.is_none() && session.closed_reason().is_none()
+            && let Err(error) = session.batch(fence.close(result.is_ok())).await
+        {
+            session.retire(format!("The run could not end its read-only transaction: {}", error.message));
+        }
+        let refused = fence.is_some() && matches!(&result, Err(error) if error.sqlstate.as_deref() == Some(READ_ONLY_VIOLATION));
+        if fence.is_none() {
+            txn = session.observed_txn().unwrap_or_else(|| txn_after(txn, &stmt.kind, finished));
+        }
         let (status, history) = match &result {
             Ok((rows, tags)) => (StmtStatus::Finished, if let Some(rows) = rows { HistoryOutcome::Rows { rows: *rows } } else { HistoryOutcome::Command { tag: tags.join("; ") } }),
             Err(_) if cancelled => (StmtStatus::Cancelled, HistoryOutcome::Cancelled),
@@ -602,6 +623,9 @@ pub async fn run_task(console: Arc<Console>, shared: Arc<Shared>, mut session: S
             if unasked_write {
                 inner.unasked.add(sql);
             }
+            if refused {
+                inner.proven.add(sql);
+            }
             if ended {
                 inner.unasked = WriteList::default();
             }
@@ -614,6 +638,9 @@ pub async fn run_task(console: Arc<Console>, shared: Arc<Shared>, mut session: S
         if let Some((db, owed)) = due { shared.schedule_refreshes(db, owed); }
         let mut lines = notice_lines(&mut session);
         if let Err(error) = &result && !logged { lines.push(OutputBody::Error { statement: Some(i), error: error.clone() }); }
+        if refused {
+            lines.push(OutputBody::Info { message: "Production: this statement tried to write, so it ran read-only and nothing changed. Run it again to confirm the write.".into() });
+        }
         console.output_all(&shared, run_id, lines);
         shared.record_history(HistoryInsert {
             database_kind: plan.connection.database_kind,
@@ -639,6 +666,44 @@ pub async fn run_task(console: Arc<Console>, shared: Arc<Shared>, mut session: S
     }).await?;
     if let Some((db, owed)) = due { shared.schedule_refreshes(db, owed); }
     Ok(())
+}
+
+const READ_ONLY_VIOLATION: &str = "25006";
+
+/// How a run keeps a Production read from writing. The close undoes whatever the statement did, so a fenced
+/// read never ends, begins, or aborts the user's transaction.
+#[derive(Clone, Copy)]
+enum ReadFence {
+    /// `COMMIT` on success keeps a session setting the read changed, as auto-commit would.
+    Txn,
+    /// Read-only cannot be switched off once the statement has read, and a `RELEASE` would leave the user's
+    /// transaction read-only, so the close rolls back to the savepoint.
+    Savepoint,
+}
+
+impl ReadFence {
+    fn of(txn: TxnState) -> Option<Self> {
+        match txn {
+            TxnState::Idle => Some(ReadFence::Txn),
+            TxnState::Active | TxnState::Aborted => Some(ReadFence::Savepoint),
+            TxnState::Open => None,
+        }
+    }
+
+    fn open(self) -> &'static str {
+        match self {
+            ReadFence::Txn => "BEGIN READ ONLY",
+            ReadFence::Savepoint => "SAVEPOINT l1_read; SET LOCAL transaction_read_only = on",
+        }
+    }
+
+    fn close(self, succeeded: bool) -> &'static str {
+        match (self, succeeded) {
+            (ReadFence::Txn, true) => "COMMIT",
+            (ReadFence::Txn, false) => "ROLLBACK",
+            (ReadFence::Savepoint, _) => "ROLLBACK TO SAVEPOINT l1_read; RELEASE SAVEPOINT l1_read",
+        }
+    }
 }
 
 pub async fn count_task(console: Arc<Console>, shared: Arc<Shared>, mut session: Session, run_id: RunId, sql: String, stop: Arc<AtomicBool>, mut reply: tokio::sync::oneshot::Sender<Result<u64, CountError>>) {
