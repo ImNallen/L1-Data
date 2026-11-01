@@ -2522,6 +2522,38 @@ async fn recursive_cte_search_and_cycle_writes_require_production_approval() {
 }
 
 #[tokio::test]
+async fn a_read_that_writes_through_a_function_changes_nothing_on_production() {
+    let mut h = Harness::start().await;
+    let oracle = h.oracle().await;
+    let table = unique("t_fenced");
+    let purge = unique("purge");
+    oracle
+        .batch_execute(&format!(
+            "create table public.{table} (n int); insert into public.{table} values (7);
+             create function public.{purge}() returns bigint language sql as $$ with gone as (delete from public.{table} returning 1) select count(*) from gone $$"
+        ))
+        .await
+        .unwrap();
+    set_environment(&h, Some(Environment::Production)).await;
+    let sql = format!("select public.{purge}()");
+    for mode in [TxnMode::AutoCommit, TxnMode::Manual] {
+        let tab = h.sql_tab(mode).await;
+        if mode == TxnMode::Manual {
+            h.run_ok(tab, "select 1").await;
+        }
+        let accepted = h.engine.console_run(tab, script(&sql), None).await.expect("the classifier reads a function call as a read");
+        let state = h.wait_finished(tab, accepted.run_id).await;
+        assert!(matches!(state.run, RunState::Finished { outcome: RunOutcome::Failed, .. }), "{mode:?}: {:?}", state.run);
+        assert_eq!(count(&oracle, &table).await, 1, "{mode:?}: a read on Production cannot write");
+        assert_eq!(h.scalar(tab, "select 2").await, "2", "{mode:?}: the session stays usable");
+        if mode == TxnMode::Manual {
+            h.engine.console_rollback(tab).await.unwrap();
+        }
+    }
+    oracle.batch_execute(&format!("drop function public.{purge}(); drop table public.{table}")).await.unwrap();
+}
+
+#[tokio::test]
 async fn copy_from_on_production_requires_the_exact_statement_digest() {
     let mut h = Harness::start().await;
     let oracle = h.oracle().await;
