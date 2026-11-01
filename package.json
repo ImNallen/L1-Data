@@ -4,8 +4,7 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "db:up": "docker compose -f dev/docker-compose.yml up -d --wait",
-    "db:mssql:up": "bash dev/mssql-up.sh",
+    "db:up": "bash dev/db-up.sh",
     "db:ssh:up": "docker compose -f dev/docker-compose.yml --profile ssh up -d --wait --build sshd",
     "db:down": "docker compose -f dev/docker-compose.yml --profile mssql --profile ssh down -v",
     "dev": "vite",

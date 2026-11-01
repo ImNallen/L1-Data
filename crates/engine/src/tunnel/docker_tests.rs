@@ -189,7 +189,7 @@ async fn a_destination_the_bastion_does_not_permit_is_a_forward_error() {
     assert!(message.contains("postgres:5433"), "{message}");
 }
 
-/// Needs `pnpm db:mssql:up` as well. It runs when the `mssql-tests` feature is on or SQL Server
+/// Needs the SQL Server container from `pnpm db:up` as well. It runs when the `mssql-tests` feature is on or SQL Server
 /// answers on its published port, and says so when it skips.
 #[tokio::test]
 async fn sql_server_speaks_tds_through_the_tunnel() {

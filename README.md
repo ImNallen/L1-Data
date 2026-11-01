@@ -30,12 +30,26 @@ You need Rust 1.93, Node 26, pnpm 11, and Docker.
 
 ```sh
 pnpm install
-pnpm db:up          # Postgres 16 on localhost:5433 with a seeded `shop` database
+pnpm db:up          # Postgres 16 and SQL Server 2022, each with a seeded `shop` database
 pnpm tauri dev      # the desktop app
 pnpm bridge         # the real engine behind a browser UI on localhost:5173
 ```
 
-Connect to `postgres://l1data:l1data@localhost:5433/shop`.
+## Connect to the dev databases
+
+`pnpm db:up` starts two databases. Create a connection for each in the app.
+
+| Field | PostgreSQL | SQL Server |
+|---|---|---|
+| Database kind | PostgreSQL | SQL Server |
+| Server | `localhost` | `localhost` |
+| Port | `5433` | `1434` |
+| Database | `shop` | `shop` |
+| User | `l1data` | `sa` |
+| Password | `l1data` | `L1Data_dev_Str0ng` |
+| TLS | Prefer (the default) | Require |
+
+The SQL Server certificate is self-signed, so change **TLS** from **Verify full** to **Require**. To fill in the PostgreSQL form, paste `postgres://l1data:l1data@localhost:5433/shop` into **URL**.
 
 ## Checks
 
