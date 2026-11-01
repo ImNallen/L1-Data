@@ -26,7 +26,7 @@ Verified constraints the design honors:
 
 ```sh
 pnpm install
-pnpm db:up              # docker compose -f dev/docker-compose.yml: postgres:16 on :5433, seeded `shop` db + lab.type_zoo
+pnpm db:up              # dev/db-up.sh: postgres:16 on :5433 (seeded `shop` db + lab.type_zoo) and SQL Server 2022 on :1434 (seeded `shop` and `reporting`)
 pnpm tauri dev          # app; bindings regenerate on every debug build
 pnpm bridge             # dev-bridge on :7077 + vite on :5173 (L1_DATA_BRIDGE_PORT, L1_DATA_VITE_PORT): the real Engine from a plain browser
 cargo test -p engine                       # pure unit tests, no DB

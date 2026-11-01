@@ -48,6 +48,7 @@ pnpm bridge         # the real engine behind a browser UI on localhost:5173
 | User | `l1data` | `sa` |
 | Password | `l1data` | `L1Data_dev_Str0ng` |
 | TLS | Prefer (the default) | Require |
+| Name | `Dev Postgres` | `Dev SQL Server` |
 
 The SQL Server certificate is self-signed, so change **TLS** from **Verify full** to **Require**. To fill in the PostgreSQL form, paste `postgres://l1data:l1data@localhost:5433/shop` into **URL**.
 
