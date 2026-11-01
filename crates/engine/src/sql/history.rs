@@ -103,6 +103,69 @@ fn closing(tokens: &[Token<'_>], open: usize) -> Option<usize> {
     None
 }
 
+/// The index after a name: a word, a quoted name, or a Unicode-escaped quoted name with its optional `UESCAPE`.
+fn name(tokens: &[Token<'_>], mut i: usize) -> Option<usize> {
+    let unicode = tokens.get(i) == Some(&Token::UnicodeEscape);
+    if unicode {
+        i += 1;
+    }
+    if !matches!(tokens.get(i), Some(Token::Word(_) | Token::Quoted(_))) {
+        return None;
+    }
+    i += 1;
+    if unicode && word(tokens.get(i), "UESCAPE") {
+        i += 1;
+        if word(tokens.get(i), "E") {
+            i += 1;
+        }
+        if tokens.get(i) != Some(&Token::Other) {
+            return None;
+        }
+        i += 1;
+    }
+    Some(i)
+}
+
+fn names(tokens: &[Token<'_>], mut i: usize) -> Option<usize> {
+    loop {
+        i = name(tokens, i)?;
+        if tokens.get(i) != Some(&Token::Comma) {
+            return Some(i);
+        }
+        i += 1;
+    }
+}
+
+/// The index after a recursive CTE's optional `SEARCH ... SET col` and `CYCLE ... USING col` clauses.
+fn search_and_cycle(tokens: &[Token<'_>], mut i: usize) -> Option<usize> {
+    if word(tokens.get(i), "SEARCH") {
+        if !(word(tokens.get(i + 1), "DEPTH") || word(tokens.get(i + 1), "BREADTH")) || !word(tokens.get(i + 2), "FIRST") || !word(tokens.get(i + 3), "BY") {
+            return None;
+        }
+        i = names(tokens, i + 4)?;
+        if !word(tokens.get(i), "SET") {
+            return None;
+        }
+        i = name(tokens, i + 1)?;
+    }
+    if word(tokens.get(i), "CYCLE") {
+        i = names(tokens, i + 1)?;
+        if !word(tokens.get(i), "SET") {
+            return None;
+        }
+        i = name(tokens, i + 1)?;
+        if word(tokens.get(i), "TO") {
+            i += tokens[i..].iter().position(|t| word(Some(t), "DEFAULT"))?;
+            i += tokens[i..].iter().position(|t| word(Some(t), "USING"))?;
+        }
+        if !word(tokens.get(i), "USING") {
+            return None;
+        }
+        i = name(tokens, i + 1)?;
+    }
+    Some(i)
+}
+
 fn writes(tokens: &[Token<'_>]) -> bool {
     let Some(Token::Word(first)) = tokens.first() else {
         return false;
@@ -144,24 +207,10 @@ fn writes(tokens: &[Token<'_>]) -> bool {
                 i += 1;
             }
             loop {
-                let unicode = tokens.get(i) == Some(&Token::UnicodeEscape);
-                if unicode {
-                    i += 1;
-                }
-                if !matches!(tokens.get(i), Some(Token::Word(_) | Token::Quoted(_))) {
+                let Some(next) = name(tokens, i) else {
                     return false;
-                }
-                i += 1;
-                if unicode && word(tokens.get(i), "UESCAPE") {
-                    i += 1;
-                    if word(tokens.get(i), "E") {
-                        i += 1;
-                    }
-                    if tokens.get(i) != Some(&Token::Other) {
-                        return false;
-                    }
-                    i += 1;
-                }
+                };
+                i = next;
                 if tokens.get(i) == Some(&Token::Open) {
                     let Some(end) = closing(tokens, i) else {
                         return false;
@@ -187,7 +236,10 @@ fn writes(tokens: &[Token<'_>]) -> bool {
                 if writes(&tokens[i + 1..end]) {
                     return true;
                 }
-                i = end + 1;
+                let Some(next) = search_and_cycle(tokens, end + 1) else {
+                    return false;
+                };
+                i = next;
                 if tokens.get(i) != Some(&Token::Comma) {
                     return writes(&tokens[i..]);
                 }
@@ -328,6 +380,32 @@ mod tests {
             assert!(!history_is_write(sql), "{sql}");
             assert!(!history_is_write(&format!("COPY ({sql}) TO PROGRAM 'cat'")), "{sql}");
         }
+    }
+
+    #[test]
+    fn recursive_cte_search_and_cycle_clauses_keep_the_main_statement_recognizable() {
+        let source = r#"WITH RECURSIVE U&"source"(n) AS (SELECT 1 UNION ALL SELECT n + 1 FROM source WHERE n < 2)"#;
+        for clauses in [
+            "SEARCH DEPTH FIRST BY n SET seq",
+            "SEARCH BREADTH FIRST BY n, \"m\" SET U&\"s!0065q\" UESCAPE '!'",
+            "CYCLE n SET cyc USING path",
+            "CYCLE n, m SET cyc TO 'Y' DEFAULT 'N' USING path",
+            "CYCLE n SET cyc TO true DEFAULT false USING path",
+            "SEARCH DEPTH FIRST BY n SET seq CYCLE n SET cyc USING path",
+        ] {
+            for sql in [
+                format!("{source} {clauses} DELETE FROM orders"),
+                format!("{source} {clauses}, later AS (SELECT 1) UPDATE orders SET n = 2"),
+                format!("{source} {clauses}, later AS (DELETE FROM orders RETURNING *) SELECT * FROM later"),
+            ] {
+                assert!(history_is_write(&sql), "{sql}");
+                assert!(history_is_write(&format!("COPY ({sql} RETURNING *) TO PROGRAM 'cat'")), "{sql}");
+            }
+            for sql in [format!("{source} {clauses} SELECT * FROM source"), format!(r#"{source} {clauses} SELECT 'DELETE', $$UPDATE t$$ FROM source"#)] {
+                assert!(!history_is_write(&sql), "{sql}");
+            }
+        }
+        assert!(!history_is_write(r#"WITH RECURSIVE s(n) AS (SELECT 1) CYCLE n SET "DELETE" TO 'UPDATE' DEFAULT 'INSERT' USING p SELECT * FROM s"#));
     }
 
     #[test]
