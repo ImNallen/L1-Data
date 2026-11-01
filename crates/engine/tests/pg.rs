@@ -2464,6 +2464,64 @@ async fn unicode_escaped_cte_write_requires_production_approval() {
 }
 
 #[tokio::test]
+async fn recursive_cte_search_and_cycle_writes_require_production_approval() {
+    let mut h = Harness::start().await;
+    let oracle = h.oracle().await;
+    let table = unique("t_search_cycle_guard");
+    oracle.batch_execute(&format!("create table public.{table} (n int); insert into public.{table} values (7)")).await.unwrap();
+    set_environment(&h, Some(Environment::Production)).await;
+    let source = r#"WITH RECURSIVE U&"source"(n) AS (SELECT 1 UNION ALL SELECT n + 1 FROM source WHERE n < 2)"#;
+    let queries = [
+        format!("{source} SEARCH DEPTH FIRST BY n SET seq DELETE FROM public.{table}"),
+        format!("{source} SEARCH BREADTH FIRST BY n SET seq DELETE FROM public.{table}"),
+        format!("{source} CYCLE n SET cyc USING path DELETE FROM public.{table}"),
+        format!("{source} CYCLE n SET cyc TO true DEFAULT false USING path DELETE FROM public.{table}"),
+        format!("{source} SEARCH DEPTH FIRST BY n SET seq CYCLE n SET cyc USING path DELETE FROM public.{table}"),
+        format!("{source} SEARCH DEPTH FIRST BY n SET seq, later AS (SELECT 1) DELETE FROM public.{table}"),
+        format!("COPY ({source} SEARCH DEPTH FIRST BY n SET seq DELETE FROM public.{table} RETURNING *) TO PROGRAM 'cat > /dev/null'"),
+    ];
+    for sql in queries {
+        for mode in [TxnMode::AutoCommit, TxnMode::Manual] {
+            let tab = h.sql_tab(mode).await;
+            let history = h.history_len();
+            let asked = match h.engine.console_run(tab, script(&sql), None).await {
+                Err(RunError::ConfirmWrites { confirmation }) => confirmation,
+                other => {
+                    if let Ok(accepted) = &other {
+                        h.wait_finished(tab, accepted.run_id).await;
+                    }
+                    let rows = count(&oracle, &table).await;
+                    oracle.batch_execute(&format!("drop table public.{table}")).await.unwrap();
+                    panic!("{mode:?} {sql}: expected ConfirmWrites, got {other:?}; stored rows: {rows}");
+                }
+            };
+            assert_eq!((asked.sends.count, asked.sends.statements.as_slice()), (1, [sql.clone()].as_slice()));
+            assert_eq!(count(&oracle, &table).await, 1, "unconfirmed SQL must not delete rows");
+            assert_eq!(h.history_len(), history, "unconfirmed SQL records no history");
+
+            let accepted = h.engine.console_run(tab, script(&sql), Some(asked.digest)).await.unwrap();
+            let state = h.wait_finished(tab, accepted.run_id).await;
+            assert!(matches!(state.run, RunState::Finished { outcome: RunOutcome::Ok, .. }), "{mode:?} {sql}: {:?}", state.run);
+            if mode == TxnMode::Manual {
+                h.engine.console_commit(tab, None).await.expect("a confirmed write commits without a second question");
+            }
+            assert_eq!(count(&oracle, &table).await, 0, "{mode:?} {sql}: exact confirmed SQL deletes the row");
+            oracle.batch_execute(&format!("insert into public.{table} values (7)")).await.unwrap();
+        }
+    }
+    let tab = h.sql_tab(TxnMode::AutoCommit).await;
+    for sql in [
+        format!("{source} SEARCH DEPTH FIRST BY n SET seq SELECT * FROM source"),
+        format!("{source} CYCLE n SET cyc USING path SELECT * FROM source"),
+        format!(r#"{source} SEARCH DEPTH FIRST BY n SET "DELETE" SELECT 'UPDATE', $$INSERT INTO t$$ FROM source"#),
+    ] {
+        h.run_ok(tab, &sql).await;
+    }
+    assert_eq!(count(&oracle, &table).await, 1);
+    oracle.batch_execute(&format!("drop table public.{table}")).await.unwrap();
+}
+
+#[tokio::test]
 async fn copy_from_on_production_requires_the_exact_statement_digest() {
     let mut h = Harness::start().await;
     let oracle = h.oracle().await;
