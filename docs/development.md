@@ -4,6 +4,8 @@ Start with the [README quickstart](../README.md#quickstart). This page covers th
 
 The `pnpm db:up` seed also creates `lab.type_zoo`, a table with one column for each hard-to-render type.
 
+`pnpm db:down` stops every dev container and deletes their data, so the next `pnpm db:up` starts from a fresh seed.
+
 ## SQL Server
 
 For SQL Server development, run `pnpm db:mssql:up`. It starts SQL Server 2022 Developer on `localhost:1434` and seeds `shop` and `reporting`. Choose **SQL Server**, database `shop`, user `sa`, password `L1Data_dev_Str0ng`, and **Require** encryption for this self-signed test server. The container uses an amd64 image. The setup script can run again without duplicating seed data.
