@@ -940,11 +940,8 @@ export type Layout = {
 
 export type LimitLevel = "Normal" | "Low" | "Exhausted";
 
-/**  Where a set of subscription limits comes from. */
-export type LimitSource = "Claude" | "Codex";
-
 export type LimitWindow = {
-	/**  Stable within a source: "session", "weekly_all", "weekly_scoped:Opus", "primary". */
+	/**  Stable within a source: "session", "weekly_all", "weekly_scoped:Opus". */
 	id: string,
 	/**  "Session", "Weekly", "Weekly · Opus". */
 	label: string,
@@ -955,7 +952,7 @@ export type LimitWindow = {
 };
 
 export type LimitsOutcome = 
-/**  `plan` is the short tier the header shows after the name: "Max", "ChatGPT Pro". */
+/**  `plan` is the short tier the header shows after the name: "Max". */
 { kind: "Ready"; plan: string | null; windows: LimitWindow[] } | 
 /**  Signed in with no subscription limits: an API key, Bedrock, Vertex. */
 { kind: "NoLimits"; plan: string | null } | { kind: "SignedOut"; signInCommand: string } | { kind: "NotFound"; binary: string } | 
@@ -963,9 +960,9 @@ export type LimitsOutcome =
 { kind: "Failed"; message: string };
 
 export type LimitsReport = {
-	/**  When the slower read finished. */
+	/**  When the last read finished. */
 	checkedAtMs: number,
-	/**  One per `LimitSource::ALL`, in that order. */
+	/**  One per `ProviderKind::ALL`, in that order. */
 	sources: SourceLimits[],
 };
 
@@ -1526,8 +1523,8 @@ export type Settings = {
 };
 
 export type SourceLimits = {
-	source: LimitSource,
-	/**  The Claude provider's display name, or "Codex". */
+	source: ProviderKind,
+	/**  The provider's display name. */
 	name: string,
 	outcome: LimitsOutcome,
 };

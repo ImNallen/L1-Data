@@ -4,7 +4,7 @@ use std::time::Duration;
 
 use serde_json::{Value, json};
 
-use super::agent::{Exchange, Exchanged};
+use super::agent::Exchange;
 use super::{AgentEvent, BlockKey, BoxFuture, Codec, Handshake, HostEnv, LaunchSpec, ModelResult, Open, Provider, Quick, ReplyTo, SessionStart, Step, agent, capitalize, limits};
 use crate::Shared;
 use crate::model::{AgentError, Decision, EffortId, EffortOption, LimitWindow, LimitsOutcome, ModelId, ModelOption, ProbeOutcome, ProviderConfig, ProviderInfo, ToolCallId, TurnOutcome};
@@ -560,13 +560,13 @@ impl Exchange for UsageExchange {
         vec![json!({ "type": "control_request", "request_id": USAGE_REQUEST_ID, "request": { "subtype": "get_usage", "skip_behaviors": true } }).to_string()]
     }
 
-    fn read(&mut self, line: &str) -> Exchanged<Self::Output> {
-        let Ok(v) = serde_json::from_str::<Value>(line) else { return Exchanged::Skip };
+    fn read(&mut self, line: &str) -> Option<Self::Output> {
+        let v = serde_json::from_str::<Value>(line).ok()?;
         let response = &v["response"];
         if v["type"] != "control_response" || response["request_id"] != USAGE_REQUEST_ID {
-            return Exchanged::Skip;
+            return None;
         }
-        Exchanged::Done(if response["subtype"] == "success" { parse_usage(&response["response"]) } else { Err(response["error"].as_str().unwrap_or("get_usage failed").to_owned()) })
+        Some(if response["subtype"] == "success" { parse_usage(&response["response"]) } else { Err(response["error"].as_str().unwrap_or("get_usage failed").to_owned()) })
     }
 }
 
@@ -904,7 +904,7 @@ mod tests {
 
     #[test]
     fn the_captured_usage_reads_three_windows_from_the_limits_list_alone() {
-        let Exchanged::Done(Ok(usage)) = UsageExchange.read(USAGE.trim()) else { panic!("the captured reply is the answer") };
+        let Some(Ok(usage)) = UsageExchange.read(USAGE.trim()) else { panic!("the captured reply is the answer") };
         let window = |id: &str, label: &str, left_percent: u8, resets_at_ms: i64| LimitWindow { id: id.into(), label: label.into(), left_percent, resets_at_ms: Some(resets_at_ms), level: LimitLevel::Normal };
         assert_eq!(
             usage,
@@ -921,7 +921,7 @@ mod tests {
 
     #[test]
     fn signed_out_the_reply_succeeds_with_no_rate_limits() {
-        assert_eq!(UsageExchange.read(USAGE_SIGNED_OUT.trim()), Exchanged::Done(Ok(ClaudeUsage::NoRateLimits { plan: None })));
+        assert_eq!(UsageExchange.read(USAGE_SIGNED_OUT.trim()), Some(Ok(ClaudeUsage::NoRateLimits { plan: None })));
         let unavailable = json!({ "subscription_type": "pro", "rate_limits_available": false, "rate_limits": { "limits": [] } });
         assert_eq!(parse_usage(&unavailable), Ok(ClaudeUsage::NoRateLimits { plan: Some("Pro".into()) }));
         assert_eq!(parse_usage(&json!({ "rate_limits_available": true, "rate_limits": {} })), Err("get_usage answered with no rate_limits.limits list".into()));
@@ -956,10 +956,10 @@ mod tests {
 
     #[test]
     fn the_usage_exchange_skips_other_frames_and_reports_an_error_reply() {
-        assert_eq!(UsageExchange.read(r#"{"type":"system","subtype":"init"}"#), Exchanged::Skip);
-        assert_eq!(UsageExchange.read(r#"{"type":"control_response","response":{"subtype":"success","request_id":"req_1","response":{}}}"#), Exchanged::Skip);
-        assert_eq!(UsageExchange.read("not json"), Exchanged::Skip);
-        assert_eq!(UsageExchange.read(r#"{"type":"control_response","response":{"subtype":"error","request_id":"l1-usage","error":"Unknown subtype"}}"#), Exchanged::Done(Err("Unknown subtype".into())));
+        assert_eq!(UsageExchange.read(r#"{"type":"system","subtype":"init"}"#), None);
+        assert_eq!(UsageExchange.read(r#"{"type":"control_response","response":{"subtype":"success","request_id":"req_1","response":{}}}"#), None);
+        assert_eq!(UsageExchange.read("not json"), None);
+        assert_eq!(UsageExchange.read(r#"{"type":"control_response","response":{"subtype":"error","request_id":"l1-usage","error":"Unknown subtype"}}"#), Some(Err("Unknown subtype".into())));
     }
 
     #[test]

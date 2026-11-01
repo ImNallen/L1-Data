@@ -344,29 +344,20 @@ impl Agent {
 pub(crate) trait Exchange: Send {
     type Output: Send;
     fn open(&mut self) -> Vec<String>;
-    fn read(&mut self, line: &str) -> Exchanged<Self::Output>;
-}
-
-#[derive(Debug, PartialEq)]
-pub(crate) enum Exchanged<T> {
-    Skip,
-    Send(Vec<String>),
-    Done(T),
+    /// `None` skips the line.
+    fn read(&mut self, line: &str) -> Option<Self::Output>;
 }
 
 pub(crate) async fn exchange<E: Exchange>(shared: &Shared, spec: &LaunchSpec, mut script: E) -> Result<E::Output, StartError> {
     let mut pipes = Pipes::spawn(shared, spec)?;
-    let mut send = script.open();
-    let out = loop {
-        if let Err(e) = pipes.write(std::mem::take(&mut send)).await {
-            break Err(pipes.exited(&e.to_string()).await);
-        }
-        let Some(line) = pipes.line().await else { break Err(pipes.exited("").await) };
-        match script.read(&line) {
-            Exchanged::Skip => {}
-            Exchanged::Send(lines) => send = lines,
-            Exchanged::Done(out) => break Ok(out),
-        }
+    let out = match pipes.write(script.open()).await {
+        Err(e) => Err(pipes.exited(&e.to_string()).await),
+        Ok(()) => loop {
+            let Some(line) = pipes.line().await else { break Err(pipes.exited("").await) };
+            if let Some(out) = script.read(&line) {
+                break Ok(out);
+            }
+        },
     };
     shared.spawn(pipes.close());
     out

@@ -74,7 +74,7 @@ export const SETTINGS_INDEX = [
         id: "providerList",
         label: "Providers",
         group: null,
-        keywords: "ai assistant claude codex cli binary path config directory launch arguments sign in plan version model",
+        keywords: "ai assistant claude cli binary path config directory launch arguments sign in plan version model",
       },
       { id: "providerHealthCheck", label: "Health check interval", group: "Advanced", keywords: "refresh status version models background interval seconds" },
     ],

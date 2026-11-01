@@ -1,14 +1,14 @@
 import { RefreshCwIcon, RotateCcwIcon, TriangleAlertIcon } from "lucide-react";
 import type { ReactNode } from "react";
-import type { LimitLevel, LimitSource, LimitWindow, SourceLimits } from "../../ipc/bindings";
+import type { LimitLevel, LimitWindow, ProviderKind, SourceLimits } from "../../ipc/bindings";
 import { useWorkspace } from "../../state/workspace";
 import { cx, IconButton, Modal } from "../../ui/primitives";
 import { useNow } from "../../ui/useNow";
-import { SOURCE_ICONS } from "../assistant/providerIcons";
+import { PROVIDER_ICONS } from "../assistant/providerIcons";
 import { refreshLimits, useLimits, useLimitsReads } from "./useLimits";
 import { checkedText, formatReset } from "./usageText";
 
-const SOURCE_BAR = { Claude: "bg-claude/35", Codex: "bg-codex/35" } satisfies Record<LimitSource, string>;
+const SOURCE_BAR = { Claude: "bg-claude/35" } satisfies Record<ProviderKind, string>;
 
 const LABEL_INSIDE_AT = 12;
 
@@ -83,7 +83,7 @@ export function UsageLimits() {
 
 function SourceBlock({ limits, now }: { limits: SourceLimits; now: number }) {
   const { source, name, outcome } = limits;
-  const Mark = SOURCE_ICONS[source];
+  const Mark = PROVIDER_ICONS[source];
   const plan = outcome.kind === "Ready" || outcome.kind === "NoLimits" ? outcome.plan : null;
   return (
     <section data-testid={`usage-source-${source}`} aria-label={name} className="flex flex-col gap-2">
@@ -147,7 +147,7 @@ function Note({ testId, children }: { testId: string; children: ReactNode }) {
   );
 }
 
-function LimitCard({ source, window: w, now }: { source: LimitSource; window: LimitWindow; now: number }) {
+function LimitCard({ source, window: w, now }: { source: ProviderKind; window: LimitWindow; now: number }) {
   return (
     <div data-testid={`limit-${source}-${w.id}`} className="flex items-center gap-6 rounded-xl border border-control px-4 py-3.5">
       <div className="w-[150px] shrink-0">
@@ -163,7 +163,7 @@ function LimitCard({ source, window: w, now }: { source: LimitSource; window: Li
   );
 }
 
-function LimitBar({ source, left, reset, label }: { source: LimitSource; left: number; reset: string | null; label: string }) {
+function LimitBar({ source, left, reset, label }: { source: ProviderKind; left: number; reset: string | null; label: string }) {
   return (
     <div
       role="meter"

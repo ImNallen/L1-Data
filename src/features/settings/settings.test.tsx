@@ -164,7 +164,6 @@ it.each([
   ["health", ["providerHealthCheck"]],
   ["advanced", ["providerHealthCheck"]],
   ["quota", []],
-  ["codex", ["providerList"]],
   ["nightly", ["updateTrack"]],
   ["version", ["appVersion", "providerList", "providerHealthCheck"]],
   ["updates", ["appVersion", "updateTrack"]],

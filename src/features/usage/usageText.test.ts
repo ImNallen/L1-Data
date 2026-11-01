@@ -21,23 +21,22 @@ it.each([
 
 const window = (id: string, resetsAtMs: number | null): LimitWindow => ({ id, label: id, leftPercent: 50, resetsAtMs, level: "Normal" });
 
-const report = (claude: LimitWindow[], codex: LimitWindow[]): LimitsReport => ({
+const report = (windows: LimitWindow[]): LimitsReport => ({
   checkedAtMs: NOW,
-  sources: [
-    { source: "Claude", name: "Claude", outcome: { kind: "Ready", plan: "Max", windows: claude } },
-    { source: "Codex", name: "Codex", outcome: { kind: "Ready", plan: "ChatGPT Pro", windows: codex } },
-  ],
+  sources: [{ source: "Claude", name: "Claude", outcome: { kind: "Ready", plan: "Max", windows } }],
 });
 
-it("rereads at the first reset still ahead of the read, across every source", () => {
-  expect(nextReset(report([window("session", NOW + 86 * MIN), window("weekly", NOW + 5000 * MIN)], [window("primary", NOW + 30 * MIN)]))).toBe(NOW + 30 * MIN);
-  expect(nextReset(report([window("session", NOW - MIN), window("weekly", null)], []))).toBeNull();
-  const missing: LimitsReport = { checkedAtMs: NOW, sources: [{ source: "Codex", name: "Codex", outcome: { kind: "NotFound", binary: "codex on PATH" } }] };
+it("rereads at the first reset still ahead of the read", () => {
+  expect(nextReset(report([window("session", NOW + 86 * MIN), window("weekly_all", NOW + 5000 * MIN), window("weekly_scoped:Opus", NOW + 30 * MIN)]))).toBe(
+    NOW + 30 * MIN,
+  );
+  expect(nextReset(report([window("session", NOW - MIN), window("weekly_all", null)]))).toBeNull();
+  const missing: LimitsReport = { checkedAtMs: NOW, sources: [{ source: "Claude", name: "Claude", outcome: { kind: "NotFound", binary: "claude on PATH" } }] };
   expect(nextReset(missing)).toBeNull();
 });
 
 it("says Checking during a read, then how long ago the last read finished", () => {
   expect(checkedText(null, false, NOW)).toBe("");
-  expect(checkedText(report([], []), true, NOW)).toBe("Checking…");
-  expect(checkedText(report([], []), false, NOW + 2 * MIN)).toBe("Checked 2m ago");
+  expect(checkedText(report([]), true, NOW)).toBe("Checking…");
+  expect(checkedText(report([]), false, NOW + 2 * MIN)).toBe("Checked 2m ago");
 });
