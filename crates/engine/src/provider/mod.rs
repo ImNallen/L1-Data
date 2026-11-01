@@ -1,6 +1,5 @@
 pub(crate) mod agent;
 pub(crate) mod claude;
-pub(crate) mod codex;
 pub(crate) mod limits;
 
 use std::collections::HashMap;

@@ -1813,8 +1813,8 @@ impl Engine {
         self.shared.probe_all(ProbeDepth::Full);
     }
 
-    /// Asks the Claude and Codex CLIs for the subscription limits left, each bounded by 8 s.
-    /// The children sit in the process groups that quit kills.
+    /// Asks the Claude CLI for the subscription limits left, bounded by 8 s.
+    /// The child sits in a process group that quit kills.
     pub async fn usage_limits(&self) -> LimitsReport {
         self.shared.read_limits().await
     }

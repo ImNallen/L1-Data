@@ -1,6 +1,6 @@
 import { renderToStaticMarkup } from "react-dom/server";
 import { afterEach, expect, it, vi } from "vitest";
-import type { LimitsReport } from "../../ipc/bindings";
+import type { LimitsOutcome, LimitsReport } from "../../ipc/bindings";
 import { UsageLimits, UsageRefresh } from "./UsageDialog";
 import { useLimits } from "./useLimits";
 
@@ -35,7 +35,6 @@ const LIMITS: LimitsReport = {
         ],
       },
     },
-    { source: "Codex", name: "Codex", outcome: { kind: "NotFound", binary: "codex on PATH (/usr/bin)" } },
   ],
 };
 
@@ -58,33 +57,31 @@ const between = (html: string, from: string, to: string) => {
   return text(html.slice(start, end).replace(/^[^>]*>/, ""));
 };
 
-it("draws a card per window with what is left, the warning, and the countdown, and a missing CLI as one quiet header", () => {
+it("draws a card per window with what is left, the warning, and the countdown", () => {
   const html = renderUsage({ report: LIMITS });
   expect(byTestId(html, "usage-checked")).toBe("Checked 2m ago");
   expect(html).toMatch(/data-testid="usage-refresh"(?![^>]*disabled)/);
   expect(testIds(html, "limit-")).toEqual(["limit-Claude-session", "limit-Claude-weekly_all", "limit-Claude-weekly_scoped:Opus"]);
   expect(between(html, "limit-Claude-session", "limit-Claude-weekly_all")).toBe("Session 10% left Running low 10% 1h 26m");
   expect(between(html, "limit-Claude-weekly_all", "limit-Claude-weekly_scoped:Opus")).toBe("Weekly 40% left 40% 3d 4h");
-  expect(between(html, "limit-Claude-weekly_scoped:Opus", "usage-source-Codex")).toBe("Weekly · Opus 0% left Limit reached 0%");
+  expect(text(html)).toContain("Weekly · Opus 0% left Limit reached 0%");
   expect(html).toMatch(/role="meter" aria-label="Session left" aria-valuenow="10" aria-valuemin="0" aria-valuemax="100"/);
   expect(text(html)).toContain("Claude · Max");
-  expect(byTestId(html, "usage-missing-Codex")).toBe("· not installed");
   expect(text(html)).toContain("Limits come from each provider&#x27;s own account and reset on its schedule.");
 });
 
-it("says how to sign in, that a sign-in has no limits, and a failed read with a retry", () => {
-  const report: LimitsReport = {
-    checkedAtMs: NOW,
-    sources: [
-      { source: "Claude", name: "Work Claude", outcome: { kind: "SignedOut", signInCommand: "claude auth login" } },
-      { source: "Codex", name: "Codex", outcome: { kind: "Failed", message: "exited with code 1: boom" } },
-    ],
-  };
-  const html = renderUsage({ report });
-  expect(byTestId(html, "usage-note-Claude")).toBe("Signed out. Run claude auth login in a terminal.");
-  expect(text(/data-testid="usage-failed-Codex"[^>]*>(.*?)<\/div>/.exec(html)?.[1])).toBe("exited with code 1: boom Try again");
-  const noLimits = renderUsage({ report: { checkedAtMs: NOW, sources: [{ source: "Claude", name: "Claude", outcome: { kind: "NoLimits", plan: null } }] } });
-  expect(byTestId(noLimits, "usage-note-Claude")).toBe("No subscription limits on this sign-in.");
+it("says how to sign in, that a sign-in has no limits, a failed read with a retry, and a missing CLI as one quiet header", () => {
+  const renderOutcome = (outcome: LimitsOutcome, name = "Claude") =>
+    renderUsage({ report: { checkedAtMs: NOW, sources: [{ source: "Claude", name, outcome }] } });
+  const signedOut = renderOutcome({ kind: "SignedOut", signInCommand: "claude auth login" }, "Work Claude");
+  expect(text(signedOut)).toContain("Work Claude");
+  expect(byTestId(signedOut, "usage-note-Claude")).toBe("Signed out. Run claude auth login in a terminal.");
+  expect(byTestId(renderOutcome({ kind: "NoLimits", plan: null }), "usage-note-Claude")).toBe("No subscription limits on this sign-in.");
+  const failed = renderOutcome({ kind: "Failed", message: "exited with code 1: boom" });
+  expect(text(/data-testid="usage-failed-Claude"[^>]*>(.*?)<\/div>/.exec(failed)?.[1])).toBe("exited with code 1: boom Try again");
+  const missing = renderOutcome({ kind: "NotFound", binary: "claude on PATH (/usr/bin)" });
+  expect(byTestId(missing, "usage-missing-Claude")).toBe("· not installed");
+  expect([testIds(missing, "limit-"), testIds(missing, "usage-note-")]).toEqual([[], []]);
 });
 
 it("shows a skeleton and Checking before the first report, and keeps the last report on screen during a refresh", () => {

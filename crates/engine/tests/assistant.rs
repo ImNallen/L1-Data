@@ -246,16 +246,15 @@ async fn the_probe_reads_version_plan_and_models_and_boot_carries_them() {
 }
 
 #[tokio::test]
-async fn usage_limits_ask_claude_without_an_initialize_and_find_no_codex_on_an_empty_path() {
+async fn usage_limits_ask_claude_without_an_initialize() {
     let mut h = Harness::open().await;
     h.use_fake("none");
     h.wait_outcome(ready).await;
     std::fs::write(h.log_path(), "").unwrap();
     let report = h.engine.usage_limits().await;
-    let [claude, codex] = report.sources.as_slice() else { panic!("{report:?}") };
-    assert_eq!(*codex, SourceLimits { source: LimitSource::Codex, name: "Codex".into(), outcome: LimitsOutcome::NotFound { binary: "codex on PATH ()".into() } });
+    let [claude] = report.sources.as_slice() else { panic!("{report:?}") };
     let LimitsOutcome::Ready { plan, windows } = &claude.outcome else { panic!("{claude:?}") };
-    assert_eq!((claude.source, claude.name.as_str(), plan.as_deref()), (LimitSource::Claude, "Claude", Some("Max")));
+    assert_eq!((claude.source, claude.name.as_str(), plan.as_deref()), (ProviderKind::Claude, "Claude", Some("Max")));
     let shown: Vec<_> = windows.iter().map(|w| (w.id.as_str(), w.label.as_str(), w.left_percent, w.level)).collect();
     assert_eq!(shown, [("session", "Session", 10, LimitLevel::Low), ("weekly_all", "Weekly", 40, LimitLevel::Normal), ("weekly_scoped:Opus", "Weekly · Opus", 38, LimitLevel::Normal)]);
     let until_reset = windows[0].resets_at_ms.unwrap() - report.checked_at_ms;
